@@ -138,6 +138,10 @@ describe('readDesktopSource: what a channel moves with', () => {
   it('will not read the typesafe.ai key or a local server\'s key as a channel token', () => {
     const root = channelProfile();
     const open = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), decrypt: (enc) => enc.replace('ENC-', 'plain-'), secrets: 'included' });
+    for (const key of ['__typesafe_api_key', '__local_workstation', '__telegram_bot_token', '__anything_else']) {
+      assert.strictEqual(open.getValue('providerToken', key), null, `a node asking for ${key} as a provider key gets nothing`);
+    }
+    assert.strictEqual(open.getValue('providerToken', '__elevenlabs_api_key'), 'plain-eleven');
     assert.strictEqual(open.getValue('channelToken', '__typesafe_api_key'), null);
     assert.strictEqual(open.getValue('channelToken', '__local_workstation'), null);
     assert.strictEqual(open.getValue('channelToken', 'anthropic'), null);

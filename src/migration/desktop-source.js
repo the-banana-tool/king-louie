@@ -58,6 +58,8 @@ function settingDigests(settings, hosting) {
   return Object.fromEntries(importedSettingsKeys(hosting).filter((key) => settings[key] !== undefined).map((key) => [key, settingDigest(key, merged[key], { profiles })]));
 }
 
+// What the providers' own keys are named, of everything in apiTokens.
+const isProviderTokenName = (key) => !String(key).startsWith('__') || key === '__elevenlabs_api_key';
 const VAULT_UNREAD_NOTE = 'this stored vault entry is not in a form the move can read; it stays on this computer and in the backup';
 
 // Windows residual (fix round 1, I3): there is no owner check on win32. The
@@ -382,7 +384,7 @@ function readDesktopSource({ hosting = 'service', userDataDir, reader, decrypt =
     ...(chatData.userProfile ? { userProfileDigest: userProfileDigest(chatData.userProfile) } : {}),
     permissionRules: arr(toolApprovals.permissionRules).filter((r) => r && r.tool && r.action).map((r) => ({ tool: r.tool, pattern: r.pattern || '*', action: r.action })),
     alwaysApprove: Object.keys(alwaysApprove).filter((k) => alwaysApprove[k] === true),
-    providerTokens: Object.keys(tokens).filter((k) => tokens[k] && (!k.startsWith('__') || k === '__elevenlabs_api_key')),
+    providerTokens: Object.keys(tokens).filter((k) => tokens[k] && isProviderTokenName(k)),
     searchKeys: Object.keys(settings.webSearch || {}).filter((p) => settings.webSearch[p] && settings.webSearch[p].apiKey),
     imageKeys: Object.keys(settings.imageGeneration || {}).filter((p) => settings.imageGeneration[p] && settings.imageGeneration[p].apiKey),
     vault: [...vaultEntries.keys()],
@@ -417,7 +419,9 @@ function readDesktopSource({ hosting = 'service', userDataDir, reader, decrypt =
       case 'chat': return chats.find((c) => c.id === key) || null;
       case 'memory': return memoryEntries.find((e) => e.id === key) || null;
       case 'cron': return cronJobs.find((j) => j.id === key) || null;
-      case 'providerToken': return secret(tokens[key]);
+      // Only these names, whatever a plan asks for: the typesafe.ai key and a local
+      // server's key sit in the same object and never move.
+      case 'providerToken': return isProviderTokenName(key) ? secret(tokens[key]) : null;
       case 'searchKey': return secret(settings.webSearch && settings.webSearch[key] && settings.webSearch[key].apiKey);
       case 'imageKey': return secret(settings.imageGeneration && settings.imageGeneration[key] && settings.imageGeneration[key].apiKey);
       // Only what may move, whatever a plan asks for: a node's plan is not trusted to
