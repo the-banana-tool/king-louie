@@ -301,3 +301,37 @@ describe('a prototype part is no name to write', () => {
     assert.strictEqual(vault.get('plain'), 'one');
   });
 });
+
+describe('a rename never overwrites another secret', () => {
+  const { JsonFileStore } = require('../src/platform/json-file-store');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const cipher = { encryptString: (s) => `E:${s}`, decryptString: (s) => s.slice(2) };
+  const tmpDir = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-vault-'));
+    after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    return dir;
+  };
+  function setup() {
+    const dir = tmpDir();
+    const store = new JsonFileStore({ dir, name: 'config' });
+    const vault = createVault({ store, cipher });
+    const handlers = new Map();
+    require('../src/ipc/settings-handlers').registerSettingsHandlers({ handle: (c, fn) => handlers.set(c, fn) }, { vaultStore: store, encryptToken: cipher.encryptString, decryptToken: cipher.decryptString });
+    const call = async (channel, arg) => { const a = await handlers.get(channel)({}, arg); return a.data && a.ok !== false ? { ok: a.ok, ...a.data } : a; };
+    return { dir, store, vault, call };
+  }
+
+  it('is refused, by rename or with a new value, and both stay', async () => {
+    const { vault, call } = setup();
+    vault.set('one', 'first');
+    vault.set('two', 'second');
+    const byName = await call('settings:vaultUpdate', { oldKey: 'one', newKey: 'two' });
+    assert.strictEqual(byName.ok, false);
+    assert.match(byName.error, /two/);
+    assert.strictEqual((await call('settings:vaultUpdate', { oldKey: 'one', newKey: 'two', value: 'third' })).ok, false);
+    assert.strictEqual(vault.get('one'), 'first');
+    assert.strictEqual(vault.get('two'), 'second');
+  });
+});

@@ -528,6 +528,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     const vault = paneVault();
     if (!vault.holds(oldKey)) return { ok: false, error: `No secret found for "${oldKey}".` };
     if (hasPrototypePart(newKey.trim())) return { ok: false, error: `"${newKey.trim()}" cannot be used as a name.` };
+    if (oldStoreKey !== newStoreKey && vault.holds(newKey.trim())) return { ok: false, error: `A secret named "${newKey.trim()}" already exists.` };
     const blocker = vault.blockedBy(newKey.trim());
     if (blocker) return { ok: false, error: blockedText(newKey.trim(), blocker) };
 
