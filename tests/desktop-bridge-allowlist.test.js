@@ -195,8 +195,9 @@ describe('desktop:* handlers', () => {
     assert.deepStrictEqual(Object.keys(DESKTOP_METHODS).sort(), [
       'desktop:attach', 'desktop:detach', 'desktop:dismissServiceCommand', 'desktop:importApply', 'desktop:importPlan',
       'desktop:migrationApply', 'desktop:migrationPlan',
-      'desktop:nodeInstall', 'desktop:nodeInstallPreview', 'desktop:nodeStart',
+      'desktop:nodeInstall', 'desktop:nodeInstallPreview', 'desktop:nodeRestart', 'desktop:nodeStart',
       'desktop:pairCancel', 'desktop:pairConfirm', 'desktop:pairRestartConfirm', 'desktop:pairStart', 'desktop:retry',
+      'desktop:setupFinish', 'desktop:setupLater', 'desktop:setupStep',
       'desktop:standaloneOnce', 'desktop:status', 'desktop:unpair'
     ]);
   });
@@ -208,7 +209,11 @@ describe('desktop:* handlers', () => {
       DESKTOP_NODE_INSTALL: ['desktop:nodeInstall', 'nodeInstall'],
       DESKTOP_PAIR_RESTART_CONFIRM: ['desktop:pairRestartConfirm', 'pairRestartConfirm'],
       DESKTOP_MIGRATION_PLAN: ['desktop:migrationPlan', 'migrationPlan'],
-      DESKTOP_MIGRATION_APPLY: ['desktop:migrationApply', 'migrationApply']
+      DESKTOP_MIGRATION_APPLY: ['desktop:migrationApply', 'migrationApply'],
+      DESKTOP_SETUP_STEP: ['desktop:setupStep', 'setupStep'],
+      DESKTOP_SETUP_LATER: ['desktop:setupLater', 'setupLater'],
+      DESKTOP_SETUP_FINISH: ['desktop:setupFinish', 'setupFinish'],
+      DESKTOP_NODE_RESTART: ['desktop:nodeRestart', 'nodeRestart']
     };
     const inv = listIpcChannels();
     const served = servedChannels(inv).handle;

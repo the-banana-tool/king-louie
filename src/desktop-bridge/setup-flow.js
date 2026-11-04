@@ -320,6 +320,22 @@ function categoryLines(items) {
   return [...byCategory].map(([category, row]) => `${own(CATEGORY_WORDS, category) || plain(category)}: ${countWords(row)}`);
 }
 
+// What a planned item says that is on screen no other way: each different note
+// once, with how many items it is about, and a long list cut saying so.
+const NOTE_LINES = 20;
+const NOTE_ELSEWHERE = new Set(['needs-attention', 'needs-desktop', 'skip-excluded']);
+function itemNoteLines(items) {
+  const counts = new Map();
+  for (const item of list(items)) {
+    if (!item || !item.note || NOTE_ELSEWHERE.has(item.action)) continue;
+    const note = long(item.note);
+    counts.set(note, (counts.get(note) || 0) + 1);
+  }
+  const lines = [...counts].slice(0, NOTE_LINES).map(([note, n]) => `Note: ${note}${n > 1 ? ` (${n} items)` : ''}`);
+  if (counts.size > NOTE_LINES) lines.push(`Note: and ${counts.size - NOTE_LINES} more.`);
+  return lines;
+}
+
 // Cases kept outside the profile are never carried, so the move cannot be pressed
 // while the folder holds any, or while nobody can tell.
 function customRootRefusal(source, pressWord, profileDir) {
@@ -332,7 +348,7 @@ function customRootRefusal(source, pressWord, profileDir) {
   const into = profileDir ? `${long(profileDir)}\\cases` : 'the "cases" folder inside this app\'s own folder';
   return {
     code: 'MIGRATION_SOURCE',
-    message: `${said} Move those case folders into ${into}, or somewhere else if you no longer need them here, then press ${pressWord}.`
+    message: `${said} Move those case folders into ${into}, or somewhere else if you no longer need them here, then press ${pressWord}. The old standalone mode keeps looking in the first folder, so it will not show them after that.`
   };
 }
 
@@ -362,6 +378,7 @@ function planScreen(answer, profileDir, old) {
   const all = countWords(plan.counts);
   if (all) lines.push(`What will happen: ${all}.`);
   lines.push(...categoryLines(plan.items));
+  lines.push(...itemNoteLines(plan.items));
   if (plan.private && plan.private.note) lines.push(long(plan.private.note));
   for (const d of list(plan.dirtyCases)) lines.push(`Case ${plain(d.key)}: ${long(d.note)}`);
   if (isCount(answer.refusedFiles) && answer.refusedFiles > 0) lines.push(refusedFilesLine(answer.refusedFiles));

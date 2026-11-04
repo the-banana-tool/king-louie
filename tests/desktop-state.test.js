@@ -242,4 +242,16 @@ describe('desktop state: the migration marker and the setup (attach stage 2 §6.
     assert.deepStrictEqual(state.setup, { completedAt: '2026-11-04T10:05:00.000Z' });
     assert.throws(() => openState().setSetup({}), /completedAt/);
   });
+
+  it('noteSetup keeps what the walk has shown, and setSetup keeps it', () => {
+    const state = openState();
+    assert.strictEqual(state.setup, null);
+    state.noteSetup({ phoneOffered: true });
+    state.noteSetup({ phoneSeen: true, stray: 'x' });
+    assert.deepStrictEqual(state.setup, { phoneOffered: true, phoneSeen: true });
+    state.setSetup({ completedAt: '2026-11-04T10:05:00.000Z' });
+    assert.deepStrictEqual(state.setup, { phoneOffered: true, phoneSeen: true, completedAt: '2026-11-04T10:05:00.000Z' });
+    state.noteSetup({ phoneOffered: false });
+    assert.strictEqual(state.setup.phoneOffered, true, 'once shown it stays shown');
+  });
 });

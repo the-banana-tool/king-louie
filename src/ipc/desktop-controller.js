@@ -13,10 +13,12 @@ const { encodePairRequest, defaultDeviceLabel, bridgeFilePath, readTrustedBridge
 const { rawFromPublicKeyObject, fingerprintGroups } = require('../desktop-bridge/keys');
 const { MESSAGES } = require('../desktop-bridge/protocol');
 const { unavailableTabsFor } = require('../desktop-bridge/allowlist');
-const { PERSONAL_CLI_FILE } = require('../platform/paths');
+const { PERSONAL_CLI_FILE, defaultServiceDataDir } = require('../platform/paths');
 const { nodeHosting, nodeVersion } = require('../desktop-bridge/pane-model');
+const { describeSetup, nextSetupStep, setupFacts } = require('../desktop-bridge/setup-flow');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
-const { detectOldProfile, backupProfile, backupDirFor, readBackupManifest } = require('../migration/profile-backup');
+const { backupProfile, backupDirFor, readBackupManifest } = require('../migration/profile-backup');
+const { detectOldProfileApart } = require('../migration/old-profile-read');
 const { verifyMigration, withSourceFacts } = require('../migration/migration-verify');
 const { SECRET_CATEGORIES } = require('../migration/desktop-import');
 const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
@@ -66,6 +68,16 @@ const STAYS_BEHIND_FIXED = Object.freeze([
 ]);
 const MIGRATION_STORE_FILES = new Set(['history.sqlite', 'chat-data.json']);
 const MOVE_RUNNING = { ok: false, code: 'MIGRATION_BUSY', error: 'The move of this profile is running; wait for it to finish.' };
+// §6.3: how long a step waits for the old profile before it answers with a line,
+// so a big profile does not leave the window blank. The read goes on.
+const OLD_PROFILE_WAIT_MS = 1500;
+const READING_OLD_PROFILE = 'Looking for your earlier King Louie on this computer…';
+// Until the read answers, the walk stops at the move rather than go past it.
+const OLD_PROFILE_UNKNOWN = Object.freeze({ found: true });
+// The steps a Finish cannot jump: after them, the wizard's form takes over.
+const BEFORE_THE_FORM = new Set(['install', 'pair', 'start', 'migrate']);
+const INSTALL_ELEVATED = /runs as you, not elevated/;
+const RESTARTING_AFTER_MOVE = 'Restarting King Louie Node, so what moved starts…';
 
 // A data dir as the disk names it and as the pairing recorded it: Windows
 // paths compare without case and without a trailing separator.
@@ -137,9 +149,10 @@ function createDesktopController({
   nodeRunner = platform === 'win32' ? createPersonalNodeRunner({ env, platform }) : null,
   clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
   nodeStartWaitMs = NODE_START_WAIT_MS, nodeRetryMs = NODE_RETRY_MS, nodeRefreshMs = NODE_REFRESH_MS,
+  oldProfileWaitMs = OLD_PROFILE_WAIT_MS,
   migrationDeps = {}
 }) {
-  const move = { detectOldProfile, backupProfile, loadDesktopSource, ...migrationDeps };
+  const move = { detectOldProfile: detectOldProfileApart, backupProfile, loadDesktopSource, ...migrationDeps };
   const emitter = new EventEmitter();
   const bridgeFile = () => bridgeFilePath({ env, platform });
   // Async (final review I2): on Windows the trust read is a ~1.5 s
@@ -195,6 +208,21 @@ function createDesktopController({
   // running now, so a second press joins it and nothing drops its session.
   let backupMade = null;
   let moveRun = null;
+  // The setup (§6.3). What the last press answered, for describeSetup, and the
+  // line of a step under way; both in memory, so a relaunch reads the facts anew.
+  let answers = {};
+  let setupProgress = null;
+  let moveAnswer = null;
+  let restartedAfterMove = false;
+  let elevated = false;
+  let migrateSkipped = false;
+  let profileDefault = false;
+  // The old profile, read once per launch and again when asked (§6.5). The read
+  // takes a while on a big profile, so it has one run, and a run overtaken by a
+  // Check again answers nobody.
+  const oldRead = { known: false, value: null, run: null, generation: 0 };
+  // A press arriving twice joins the run in flight.
+  const pressRuns = new Map();
 
   const send = (channel, payload) => {
     const win = getWindow();
@@ -333,8 +361,20 @@ function createDesktopController({
       hosting: 'personal', name: base.name || null, dataDir: base.dataDir || null,
       task: nodeState.task, running: nodeState.running, pid: nodeState.pid,
       starting: nodeState.starting, startError: nodeState.startError,
+      defaultDataDir: cliDefaultDataDir(),
       ...(cli && cliExists(cli) ? { serviceCli: shown(cli, 400) } : {})
     };
+  }
+
+  // Where the CLI looks with no --data-dir, so the phone step's commands name it
+  // only when they must.
+  function cliDefaultDataDir() {
+    if (platform !== 'win32') return null;
+    try {
+      return shown(defaultServiceDataDir({ platform, env }), 400);
+    } catch {
+      return null;
+    }
   }
 
   const setRunning = (r) => { nodeState = { ...nodeState, ...runningFields(r) }; };
@@ -400,13 +440,18 @@ function createDesktopController({
       hosting: nodeHosting(summary.hosting) || nodeHosting(record && record.hosting) || 'service',
       version: nodeVersion(summary.version)
     } : null;
-    return {
+    return withSetupStep({
       ok: true,
       mode,
+      platform,
       view: current,
       standaloneOnce: mode === 'standalone' && argv.includes(STANDALONE_ONCE),
       migration: state.migration ? { ...state.migration, backupDir: shown(state.migration.backupDir, 400) } : null,
       launch: { ...launch },
+      oldProfile: oldRead.known ? oldRead.value : null,
+      elevated,
+      userProfileDefault: profileDefault,
+      setup: setupRecord(),
       profileDir: userDataDir ? shown(userDataDir, 400) : null,
       bridgeFile: bridgeFile(),
       bridge,
@@ -441,7 +486,211 @@ function createDesktopController({
       unavailableTabs: mode === 'attached' ? [...unavailableTabsFor(record && record.hosting)] : [],
       detachWarning: detachWarning(),
       pendingServiceCommand: state.pendingServiceCommand
+    });
+  }
+
+  // --- §6.3: the setup's own state. ---
+
+  function setupRecord() {
+    const stored = state.setup || {};
+    return {
+      completedAt: stored.completedAt || null,
+      phoneOffered: stored.phoneOffered === true,
+      phoneSeen: stored.phoneSeen === true,
+      migrateSkipped
     };
+  }
+
+  // The step, from the status it goes with. describeSetup reads the same facts.
+  function stepOf(s, oldProfile) {
+    return nextSetupStep(setupFacts({ ...s, oldProfile }));
+  }
+  function withSetupStep(s) {
+    s.setup.step = stepOf(s, oldRead.known ? oldRead.value : OLD_PROFILE_UNKNOWN);
+    return s;
+  }
+
+  function invalidateOldProfile() {
+    oldRead.known = false;
+    oldRead.value = null;
+    oldRead.run = null;
+    oldRead.generation += 1;
+  }
+
+  function setOldProfile(value) {
+    oldRead.generation += 1;
+    oldRead.run = null;
+    oldRead.known = true;
+    oldRead.value = value;
+  }
+
+  // One read per launch. Never rejects: a failure is a problem on screen, never
+  // nothing to move.
+  function readOldProfile() {
+    if (oldRead.known) return Promise.resolve(oldRead.value);
+    if (oldRead.run) return oldRead.run;
+    const generation = ++oldRead.generation;
+    const failed = (err) => ({
+      found: true, chats: 0, messages: 0, cases: 0, bytes: 0, customCasesRoot: null, customCases: 0,
+      schemaProblem: shown(`The old profile could not be read: ${err.message}`, 400)
+    });
+    const run = (async () => {
+      let value;
+      try {
+        value = await move.detectOldProfile(userDataDir, { env });
+      } catch (err) {
+        value = failed(err);
+      }
+      if (generation !== oldRead.generation) return readOldProfile();
+      setOldProfile(value);
+      if (!disposed) notify();
+      return value;
+    })();
+    oldRead.run = run;
+    return run;
+  }
+
+  // What only the node can say, read now, since the wizard's form saves over the
+  // proxied channels and says nothing here. A node that cannot say is not asked
+  // for a name: this reads only to skip a question.
+  async function readNodeFacts() {
+    if (mode !== 'attached' || !client || !client.connected || moveRun) return;
+    if (!personalPairingDir() || (state.setup && state.setup.completedAt)) return;
+    if (client.service && client.service.providersConfigured === false) {
+      try { client.service = await client.call('bridge.status'); } catch { /* keep the old summary */ }
+    }
+    try {
+      const loaded = await client.invoke('settings:load', []);
+      const profile = loaded && (loaded.userProfile || (loaded.data && loaded.data.userProfile));
+      profileDefault = Boolean(profile) && !profile.name && !profile.role && !profile.projectContext
+        && !(Array.isArray(profile.goals) && profile.goals.length);
+    } catch {
+      profileDefault = false;
+    }
+  }
+
+  function setProgress(line) {
+    setupProgress = line;
+    notify();
+  }
+
+  function clearAnswers() {
+    answers = {};
+  }
+
+  // The answer for the window: what the last press said, beside the status.
+  function describeNow(s, extra = {}) {
+    const restarting = restartedAfterMove && (startRun || nodeState.starting);
+    const facts = { ...s, ...answers, setupProgress: setupProgress || (restarting ? RESTARTING_AFTER_MOVE : null), ...extra };
+    // The move is done either way, and the owner is told what is not up yet.
+    const failed = restartedAfterMove && !restarting && nodeState.startError;
+    if (failed && !facts.setupError) {
+      facts.setupError = {
+        code: failed.code,
+        error: `King Louie Node did not restart after the move (${failed.message || failed.code}). Bots and MCP servers that moved start the next time it starts.`
+      };
+    }
+    return { ok: true, ...describeSetup(facts) };
+  }
+
+  // The status with the old profile as far as it is known; `wait` is how long to
+  // wait for it (Infinity for a decision the read must make).
+  async function setupStatus(wait) {
+    await readNodeFacts();
+    const s = await status();
+    // No setup to show, whatever the old profile holds: nothing is read for it.
+    if (s.setup.step === 'done' || stepOf(s, OLD_PROFILE_UNKNOWN) === 'done') return { status: s, reading: false };
+    if (!oldRead.known) {
+      const read = readOldProfile();
+      if (wait === Infinity) {
+        await read;
+      } else {
+        const slot = { current: null };
+        await Promise.race([read, sleep(wait, slot)]);
+        wakeSlot(slot);
+      }
+    }
+    if (!oldRead.known) return { status: s, reading: true };
+    s.oldProfile = oldRead.value;
+    s.setup.step = stepOf(s, oldRead.value);
+    return { status: s, reading: false };
+  }
+
+  // §8's desktop:setupStep. Never leaves the walk past the move while it does not
+  // know whether there is one: a line and no press until the read answers.
+  async function setupStep() {
+    const { status: s, reading } = await setupStatus(oldProfileWaitMs);
+    if (reading) return describeNow({ ...s, oldProfile: OLD_PROFILE_UNKNOWN }, { setupProgress: setupProgress || READING_OLD_PROFILE });
+    // The phone step's first instruction stops the node: once offered it stays.
+    if (s.setup.step === 'phone' && !s.setup.phoneOffered) {
+      state.noteSetup({ phoneOffered: true });
+      s.setup.phoneOffered = true;
+    }
+    return describeNow(s);
+  }
+
+  // §6.3's Not now: the standalone-once relaunch, while there is something the
+  // owner would be cut off from and nothing is under way.
+  function setupLater() {
+    return joined('later', async () => {
+      clearAnswers();
+      const refused = (answer) => { answers = { setupError: answer }; notify(); return answer; };
+      if (state.migration) return refused(profileMigrated());
+      if (moveRun) return { ...MOVE_RUNNING };
+      const old = await readOldProfile();
+      if (state.migration) return refused(profileMigrated());
+      if (moveRun) return { ...MOVE_RUNNING };
+      if (!old || !old.found || old.schemaProblem) {
+        return refused({ ok: false, code: 'NOT_POSTPONABLE', error: 'There is nothing on this computer to keep using, so there is no standalone mode to go back to.' });
+      }
+      return relaunch([STANDALONE_ONCE]);
+    });
+  }
+
+  // §6.3's Done, and the Skip of the step it names: a press arriving twice finds
+  // the walk already past that step and does nothing. Finishing stays closed
+  // until the move has had its turn, and the first completedAt stands.
+  async function setupFinish({ skip = null } = {}) {
+    if (moveRun) return { ...MOVE_RUNNING };
+    const { status: s } = await setupStatus(Infinity);
+    // A window with its own core has no setup to finish.
+    if (launch.host === 'standalone') return describeNow(s);
+    const step = s.setup.step;
+    const answer = async () => {
+      notify();
+      return setupStep();
+    };
+    if (skip !== null) {
+      if (skip !== step) return describeNow(s);
+      if (step === 'migrate') {
+        migrateSkipped = true;
+        clearAnswers();
+        if (importSession && importSession.move && !moveRun) closeImportSession();
+      } else if (step === 'phone') {
+        state.noteSetup({ phoneSeen: true });
+      } else {
+        return { ok: false, code: 'SETUP_CANNOT_SKIP', error: 'This step cannot be skipped.' };
+      }
+      return answer();
+    }
+    if (state.setup && state.setup.completedAt) return answer();
+    if (BEFORE_THE_FORM.has(step)) {
+      answers = { setupError: { ok: false, code: 'SETUP_NOT_DONE', error: 'King Louie Node is not set up yet; this step comes first.' } };
+      notify();
+      return answers.setupError;
+    }
+    if (step === 'phone') state.noteSetup({ phoneSeen: true });
+    state.setSetup({ completedAt: now().toISOString() });
+    return answer();
+  }
+
+  function joined(key, work) {
+    if (pressRuns.has(key)) return pressRuns.get(key);
+    const run = Promise.resolve().then(work).finally(() => {
+      if (pressRuns.get(key) === run) pressRuns.delete(key);
+    });
+    pressRuns.set(key, run);
+    return run;
   }
 
   // §6.8, C-12: only a node this launch has heard from. The version in the
@@ -457,6 +706,14 @@ function createDesktopController({
   // The unpaired view's node: what the inspector said, plus the task and
   // whether a node runs (§7.1), so the pane can offer Install.
   async function unpairedNode(local) {
+    // §6.4: nothing here yet, so Install is the way on (attach stage 2).
+    if (local && local.fresh === true) {
+      nodeState = { ...nodeState, task: 'missing', ...runningFields(null) };
+      return {
+        fresh: true, personal: false, dataDir: shown(local.dataDir, 400), task: 'missing', running: false, pid: null,
+        starting: false, startError: null, defaultDataDir: cliDefaultDataDir()
+      };
+    }
     if (!local || !local.personal) return null;
     const [task, running] = await Promise.all([
       nodeRunner.queryTask({ me: local.me }).catch(() => ({ state: 'unknown' })),
@@ -622,15 +879,21 @@ function createDesktopController({
     const dataDir = state.pendingPair.personal.dataDir;
     const slot = { current: null };
     pairSlot = slot;
+    // A confirm that held clears the pending pair, which is what `current` looks
+    // at: that is the flow ending, not the flow overtaken.
+    let confirmed = false;
     const waited = await waitForNode({
       dataDir,
       since,
       slot,
-      isCurrent: current,
+      isCurrent: () => confirmed || current(),
       attempt: async () => {
         found = record;
         const r = await pairConfirm({ nodeId: record.nodeId });
-        if (r && r.ok && r.view && r.view !== 'pairing') return { done: true, result: r };
+        if (r && r.ok && r.view && r.view !== 'pairing') {
+          confirmed = true;
+          return { done: true, result: r };
+        }
         if (r && !r.ok && PAIR_FATAL.has(r.code)) return { done: true, result: r };
         return { done: false };
       }
@@ -646,6 +909,9 @@ function createDesktopController({
     if (!r.ok) return failFlow(request, { code: r.code, message: r.error || '' });
     personalFlow = null;
     nodeState = { ...nodeState, running: true, startError: null };
+    // §6.3 step 2: from the setup, pairing ends attached. The pane's own pairing
+    // keeps its Attach press.
+    if (launch.why === 'needs-node') return attach();
     return status();
   }
 
@@ -671,7 +937,19 @@ function createDesktopController({
     return finishPersonalPair(request, restarted.ranAt);
   }
 
-  async function pairStart() {
+  function pairStart() {
+    return joined('pair', async () => {
+      clearAnswers();
+      const out = await startPairing();
+      if (out && out.ok === false) {
+        answers = { setupError: out };
+        notify();
+      }
+      return out;
+    });
+  }
+
+  async function startPairing() {
     if (!state.secureStorageUsable()) return { ok: false, code: 'SECURE_STORAGE_UNAVAILABLE', error: MESSAGES.SECURE_STORAGE_UNAVAILABLE };
     // §6.2: the local read decides which flow runs.
     let local = null;
@@ -790,6 +1068,7 @@ function createDesktopController({
   async function pairCancel() {
     state.setPendingPair(null);
     personalFlow = null;
+    pressRuns.delete('pair');
     wakeSlot(pairSlot);
     nodeState = { ...nodeState, starting: false };
     stopPolling();
@@ -868,8 +1147,25 @@ function createDesktopController({
     return status();
   }
 
+  // Check again: the facts are read anew, and what the last press said goes. The
+  // screens that say to fix something and press this rely on it.
   async function retry() {
     if (client) client.retryNow().catch(() => {});
+    clearAnswers();
+    elevated = false;
+    invalidateOldProfile();
+    // A refusal for this app being elevated is about that launch's CLI run.
+    const pending = state.pendingPair;
+    if (pending && pending.personal && personalFlow && personalFlow.request === pending.request
+      && personalFlow.error && personalFlow.error.code === 'PAIR_ELEVATED') {
+      state.setPendingPair(null);
+      personalFlow = null;
+      pressRuns.delete('pair');
+      found = null;
+      foundError = null;
+    }
+    await refreshNode({ force: true }).catch(() => {});
+    notify();
     return { ok: true };
   }
 
@@ -934,7 +1230,8 @@ function createDesktopController({
   // One at a time: a second press of the same step gets the run in flight, and
   // the other step is refused until it ends.
   function runMove(kind, work) {
-    if (moveRun) return moveRun.kind === kind ? moveRun.promise : Promise.resolve({ ...MOVE_RUNNING });
+    if (moveRun) return moveRun.kind === kind ? (moveAnswer || moveRun.promise) : Promise.resolve({ ...MOVE_RUNNING });
+    moveAnswer = null;
     const promise = work().finally(() => { moveRun = null; });
     moveRun = { kind, promise };
     return promise;
@@ -958,8 +1255,11 @@ function createDesktopController({
   const backupProgress = (stage) => (p) => send('desktop:importProgress', { stage, ...p, sent: p.files, total: p.totalFiles });
 
   // §6.5: once per launch, while what it wrote still reads whole.
-  async function ensureBackup(onProgress) {
-    if (backupMade && await readBackupManifest(backupMade.dest, { onProgress: backupProgress('backup-check') })) return backupMade;
+  // A backup taken while cases were outside the profile does not hold them once
+  // the owner has moved them in, so a changed count makes a new one.
+  async function ensureBackup(onProgress, customCases) {
+    const sameRoot = backupMade && (backupMade.customCases === undefined || backupMade.customCases === customCases);
+    if (sameRoot && await readBackupManifest(backupMade.dest, { onProgress: backupProgress('backup-check') })) return backupMade;
     backupMade = await move.backupProfile({
       userDataDir, dest: backupDirFor(userDataDir, now), now, appVersion, env, onProgress
     });
@@ -1030,23 +1330,68 @@ function createDesktopController({
     };
   }
 
+  // What a press does for the setup around a move: what it says on screen while
+  // it runs, and its answer after. A press refused because another run is under
+  // way changes nothing on screen, and neither does one joining a run.
+  function movePress(field, line, run, after = null) {
+    if (moveRun) return run();
+    clearAnswers();
+    setProgress(line);
+    const promise = run().then((answer) => {
+      answers[field] = answer;
+      if (after) after(answer);
+      setProgress(null);
+      return answer;
+    }, (err) => {
+      setProgress(null);
+      throw err;
+    });
+    // A second press gets the first press's answer, with its after-work done.
+    moveAnswer = promise;
+    return promise;
+  }
+
   function migrationPlan() {
+    return movePress('migrationPlan', READING_OLD_PROFILE, runMigrationPlan);
+  }
+
+  function migrationApply(payload = {}) {
+    if (!payload || payload.confirmed !== true) return runMigrationApply(payload);
+    return movePress('migrationResult', 'Moving your chats and cases into King Louie Node…', () => runMigrationApply(payload), (answer) => {
+      // An apply that never began left the store as it was; anything that ran may
+      // have changed what there is to move.
+      if (answer.code !== 'PLAN_EXPIRED') invalidateOldProfile();
+      if (answer.ok === true) restartAfterMove();
+    });
+  }
+
+  // What landed (MCP servers, bots, hooks) starts only when the node does, and
+  // otherwise stays down until the next logon. A restart the node refuses shows
+  // on its row; the move is done either way.
+  function restartAfterMove() {
+    restartedAfterMove = true;
+    nodeStartNow({ restart: true }).catch((err) => log.warn(`restarting King Louie Node after the move failed: ${err.message}`));
+  }
+
+  function runMigrationPlan() {
     return runMove('plan', async () => {
       if (state.migration) return profileMigrated();
       const target = moveTarget();
       if (target.refusal) return target.refusal;
       try {
         const old = await move.detectOldProfile(userDataDir, { env });
+        setOldProfile(old);
         if (old.schemaProblem) return moveSourceRefusal(`The old profile cannot be read, so nothing was moved: ${old.schemaProblem}`);
         if (!old.found) return moveSourceRefusal('This profile holds no chats or cases to move.');
         let backup;
         try {
-          backup = await ensureBackup(backupProgress('backup'));
+          setProgress('Making a backup of your earlier King Louie…');
+          backup = await ensureBackup(backupProgress('backup'), old.customCases);
         } catch (err) {
           return { ok: false, code: err.code || 'BACKUP_FAILED', error: shown(err.message, 800), backupDir: err.dest ? shown(err.dest, 400) : null };
         }
-        notify();
-        const source = await move.loadDesktopSource({ userDataDir, safeStorage, platform });
+        setProgress('Working out what will move…');
+        const source = await move.loadDesktopSource({ userDataDir, safeStorage, platform, customRootEmpty: old.customCases === 0 });
         const problem = sourceProblem(source, backup);
         if (problem) return moveSourceRefusal(`The old profile did not read whole, so nothing was moved: ${problem}`);
         closeImportSession();
@@ -1090,7 +1435,7 @@ function createDesktopController({
     });
   }
 
-  function migrationApply({ confirmed = false } = {}) {
+  function runMigrationApply({ confirmed = false } = {}) {
     if (confirmed !== true) {
       return Promise.resolve({ ok: false, code: 'CONFIRM_REQUIRED', error: 'Moving this profile needs the owner\'s press.' });
     }
@@ -1119,6 +1464,7 @@ function createDesktopController({
         if (client && client.connected) {
           try { client.service = await client.call('bridge.status'); } catch { /* keep the old summary */ }
         }
+        setProgress('Checking what landed on the node…');
         const verified = await verifyMigration({
           plan: session.plan,
           report,
@@ -1179,6 +1525,14 @@ function createDesktopController({
     });
   }
 
+  // A plan lives on the node for its connection: after a drop only a new one can
+  // be applied. A move in flight ends with its own refusal.
+  function forgetPlan() {
+    if (moveRun) return;
+    if (importSession && importSession.move) closeImportSession();
+    if (answers.migrationPlan && answers.migrationPlan.ok) delete answers.migrationPlan;
+  }
+
   function createClient() {
     const pairing = state.pairing;
     if (!pairing || !pairing.service) return null;
@@ -1200,6 +1554,7 @@ function createDesktopController({
       // §7.4, C-13: after a drop the row is chosen from what §7.1 finds
       // now. Read only: a drop never runs the task.
       if (was === 'connected' && s.status !== 'connected') {
+        forgetPlan();
         refreshNode({ force: true })
           .then((changed) => { if (changed) notify(); })
           .catch((err) => log.warn(`reading King Louie Node after a drop failed: ${err.message}`));
@@ -1226,7 +1581,8 @@ function createDesktopController({
 
   // Today's connect: the client's own loop and backoff, nothing else.
   function connectNow() {
-    if (client) client.connect().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
+    // A restart refused while connected leaves the connection it had: no second one.
+    if (client && !client.connected) client.connect().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
   }
 
   function endStart(startError) {
@@ -1390,6 +1746,15 @@ function createDesktopController({
   // is under way; the wait goes on in the background (statusChanged on
   // each step), so the pane is not held for up to 60 s.
   async function nodeStart({ restart = false } = {}) {
+    clearAnswers();
+    const out = await nodeStartNow({ restart });
+    if (out && out.ok === false) answers = { setupError: out };
+    return out;
+  }
+
+  const nodeRestart = () => nodeStart({ restart: true });
+
+  async function nodeStartNow({ restart = false } = {}) {
     const dataDir = personalPairingDir();
     if (!dataDir || !nodeRunner) return { ok: false, code: 'NOT_PERSONAL', error: NOT_PERSONAL_TEXT };
     if (mode !== 'attached' || !client) return { ok: false, code: 'NOT_ATTACHED', error: 'Attach to King Louie Node first.' };
@@ -1437,14 +1802,42 @@ function createDesktopController({
 
   const notPersonalInstall = () => ({ ok: false, code: 'NOT_PERSONAL', message: NOT_PERSONAL_TEXT, error: NOT_PERSONAL_TEXT, lines: [] });
 
-  async function nodeInstallPreview() {
+  // What the setup keeps of an install press, and the elevated refusal in it.
+  function installPress(field, line, work) {
+    return joined(field, async () => {
+      clearAnswers();
+      elevated = false;
+      setProgress(line);
+      let answer;
+      try {
+        answer = await work();
+      } finally {
+        setupProgress = null;
+      }
+      answers[field] = answer;
+      if (!answer.ok && INSTALL_ELEVATED.test(`${answer.message || ''}\n${(answer.lines || []).join('\n')}`)) elevated = true;
+      notify();
+      return answer;
+    });
+  }
+
+  function nodeInstallPreview() {
+    return installPress('installPreview', 'Reading what installing would do…', runInstallPreview);
+  }
+
+  function nodeInstall(payload = {}) {
+    if (!payload || payload.confirmed !== true) return runInstall(payload);
+    return installPress('installResult', 'Installing King Louie Node…', () => runInstall(payload));
+  }
+
+  async function runInstallPreview() {
     const target = await installTarget();
     if (!target) return notPersonalInstall();
     const cli = await nodeRunner.runCli(['install', '--personal', '--dry-run', '--data-dir', target.dataDir], { timeoutMs: INSTALL_CLI_TIMEOUT_MS });
     return installResult(cli);
   }
 
-  async function nodeInstall({ confirmed = false } = {}) {
+  async function runInstall({ confirmed = false } = {}) {
     if (confirmed !== true) {
       const text = 'Installing King Louie Node needs the Install press.';
       return { ok: false, code: 'CONFIRM_REQUIRED', message: text, error: text, lines: [] };
@@ -1475,7 +1868,8 @@ function createDesktopController({
   return {
     status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
     importPlan, importApply, migrationPlan, migrationApply, dismissServiceCommand, createClient, setClient, dispose,
-    startAttached, startIdle, refreshIdle, nodeStart, nodeInstallPreview, nodeInstall,
+    startAttached, startIdle, refreshIdle, nodeStart, nodeRestart, nodeInstallPreview, nodeInstall,
+    setupStep, setupLater, setupFinish,
     on: (event, fn) => emitter.on(event, fn)
   };
 }

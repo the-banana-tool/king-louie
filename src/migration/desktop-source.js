@@ -165,7 +165,12 @@ function createSafeReader({ root, platform = process.platform, fsImpl = fs, maxF
   return { root: rootPath, readFile, checkFile, listDir, listFiles };
 }
 
-function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null }) {
+// customRootEmpty: the caller counted the setting's cases root and it holds no
+// case, so the profile's own folder is where the cases are. It is how an owner
+// with a custom root gets them moved (attach stage 2 §6.5): the setting cannot be
+// changed from a window with no core, and the desktop never writes this profile's
+// stores. The CLI does not pass it.
+function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null, customRootEmpty = false }) {
   const attention = [];
   const readJson = (rel) => {
     const r = reader.readFile(rel);
@@ -216,7 +221,7 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
   const toolApprovals = chatData.toolApprovals && typeof chatData.toolApprovals === 'object' ? chatData.toolApprovals : {};
   const alwaysApprove = toolApprovals.alwaysApproveTools && typeof toolApprovals.alwaysApproveTools === 'object' ? toolApprovals.alwaysApproveTools : {};
   const oauth = chatData.anthropicOAuth && chatData.anthropicOAuth.accessToken ? chatData.anthropicOAuth : null;
-  const casesRootSetting = settings.cases && typeof settings.cases.root === 'string' ? settings.cases.root.trim() : '';
+  const casesRootSetting = !customRootEmpty && settings.cases && typeof settings.cases.root === 'string' ? settings.cases.root.trim() : '';
   const memoryEntries = arr(memoryDoc.entries).filter((e) => e && typeof e.id === 'string' && e.id);
   // System jobs (cases stage 2's cases:wakeups) are created by every core for
   // itself and can't be written through the cron API, so they are never sent.

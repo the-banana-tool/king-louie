@@ -119,6 +119,45 @@ const LAUNCH_ATTACHED = { host: 'attached', why: 'attached', degraded: false };
 const attachedUp = (extra = {}) => base({ launch: LAUNCH_ATTACHED, mode: 'attached', view: 'attached-connected', pairing: PAIRING, service: { hosting: 'personal', providersConfigured: true, version: '1.0.0' }, connection: { status: 'connected' }, node: NODE, ...extra });
 const OLD = { found: true, chats: 3, messages: 120, cases: 2, bytes: 5 * 1024 * 1024, schemaProblem: null, customCasesRoot: null, customCases: 0 };
 
+describe('the custom-root instruction says what follows from it', () => {
+  it('names the standalone mode, which still looks in the old folder', () => {
+    const { error } = describeSetup({
+      platform: 'win32', launch: { host: 'attached', why: 'attached' }, mode: 'attached',
+      pairing: { service: { hosting: 'personal', dataDir: 'C:\\d' } }, connection: { status: 'connected' }, service: { providersConfigured: true, hosting: 'personal' },
+      oldProfile: { found: true, chats: 1, messages: 1, cases: 0, bytes: 1, customCasesRoot: 'D:\\cases', customCases: 2 },
+      node: { hosting: 'personal', task: 'registered', running: true }, setup: {}, profileDir: 'C:\\p'
+    });
+    assert.match(error.message, /C:\\p\\cases/);
+    assert.match(error.message, /old standalone mode/);
+  });
+});
+
+describe('the plan screen: what an item says', () => {
+  const status = (items) => ({
+    platform: 'win32', launch: { host: 'attached', why: 'attached' }, mode: 'attached',
+    pairing: { service: { hosting: 'personal', dataDir: 'C:\\d' } }, connection: { status: 'connected' }, service: { providersConfigured: true, hosting: 'personal' },
+    oldProfile: { found: true, chats: 1, messages: 1, cases: 0, bytes: 1 }, node: { hosting: 'personal', task: 'registered', running: true },
+    setup: {}, migrationPlan: { ok: true, backup: { dest: 'C:\\b', bytes: 1, files: 1, history: { chats: 1, messages: 1 } }, plan: { items, counts: {} }, staysBehind: [] }
+  });
+  const item = (key, note, action = 'copy') => ({ category: 'chat', key, action, note });
+
+  it('shows each different note once, says how many it holds, and shows it through shown', () => {
+    const { lines } = describeSetup(status([item('a', 'comes as a copy named (from desktop)'), item('b', 'comes as a copy named (from desktop)'), item('c', 'odd \u202Eword')]));
+    assert.strictEqual(lines.filter((l) => l.includes('comes as a copy named')).length, 1);
+    assert.ok(lines.some((l) => l.includes('comes as a copy named') && l.includes('2 ')), lines.join('\n'));
+    assert.ok(!lines.join('\n').includes('\u202E'));
+    assert.ok(lines.some((l) => l.includes('odd')));
+  });
+
+  it('leaves notes that are on screen another way, and cuts a long list saying so', () => {
+    const { lines } = describeSetup(status([item('a', 'left behind', 'needs-attention'), item('b', 'stays', 'skip-excluded')]));
+    assert.ok(!lines.some((l) => l.startsWith('Note:')));
+    const many = describeSetup(status(Array.from({ length: 40 }, (_, i) => item(`c${i}`, `note ${i}`))));
+    assert.ok(many.lines.filter((l) => l.startsWith('Note:')).length <= 21);
+    assert.ok(many.lines.some((l) => /more/.test(l) && l.startsWith('Note:')));
+  });
+});
+
 const planAnswer = (extra = {}) => ({
   ok: true,
   backup: { dest: 'C:\\Users\\owner\\AppData\\Roaming\\king-louie.backup-20261104T100000Z', bytes: 5 * 1024 * 1024, files: 40, history: { chats: 3, messages: 120 }, customCasesRoot: null, customCases: 0 },

@@ -79,11 +79,20 @@ function startAttachedHost(deps) {
     'history:import.pick': localImport('history:import.pick', () => importPicks.pick()),
     'history:import.preview': localImport('history:import.preview', (payload) => attachedImport.preview(payload)),
     'history:import.commit': localImport('history:import.commit', (payload) => attachedImport.commit(payload)),
-    'wizard:getStatus': async () => ({ ok: true, isFirstRun: false }),
-    'wizard:complete': async () => ({ ok: true }),
+    // §6.3: the wizard is the setup's provider, profile and phone steps. A fleet
+    // pairing has no setup, so it has no first run.
+    'wizard:getStatus': async () => {
+      const setupDone = Boolean(state.setup && state.setup.completedAt);
+      const fleet = Boolean(state.pairing && state.pairing.service) && hosting() !== 'personal';
+      return { ok: true, isFirstRun: !setupDone && !fleet && !(launch && launch.why === 'dev') };
+    },
+    'wizard:complete': async () => {
+      const finished = await controller.setupFinish();
+      return finished && finished.ok ? { ok: true } : finished;
+    },
     'wizard:getSteps': async () => {
       const { getWizardSteps } = require('../wizard/onboarding-wizard');
-      return { ok: true, steps: getWizardSteps().map((s) => ({ id: s.id, title: s.title, description: s.description, optional: s.optional })) };
+      return { ok: true, steps: getWizardSteps({ attached: true }).map((s) => ({ id: s.id, title: s.title, description: s.description, optional: s.optional })) };
     },
     'app:quitWindow': async () => {
       const win = getWindow();

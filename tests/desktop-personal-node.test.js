@@ -190,6 +190,30 @@ describe('detectPersonalNode', () => {
   });
 });
 
+describe('inspectLocal: an empty machine (attach stage 2 §6.4)', () => {
+  it('answers fresh from the same inspector call when nothing is there', async () => {
+    const { file } = layout();
+    const localAppData = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-fresh-'));
+    try {
+      const inspectOwners = recording([null, null, null, null]);
+      const execFile = (_f, args, _o, cb) => cb(Object.assign(new Error('no task'), { code: 1 }), '', 'ERROR: The system cannot find the file specified.');
+      const runner = createPersonalNodeRunner({ platform: 'win32', env: { LOCALAPPDATA: localAppData, ProgramData: localAppData, SystemRoot: 'C:\\Windows' }, bridgeFile: file, inspectOwners, execFile, exists: () => false });
+      const out = await runner.inspectLocal();
+      assert.strictEqual(inspectOwners.calls.length, 1);
+      assert.strictEqual(out.node.fresh, true);
+      assert.strictEqual(out.node.personal, false);
+    } finally {
+      fs.rmSync(localAppData, { recursive: true, force: true });
+    }
+  });
+
+  it('a recorded data dir is never fresh', async () => {
+    const { file, dataDir } = layout();
+    const runner = createPersonalNodeRunner({ platform: 'win32', env: { LOCALAPPDATA: 'C:\\x' }, bridgeFile: file, inspectOwners: recording([null, null, null, null]), exists: () => false });
+    assert.ok(!(await runner.inspectLocal({ dataDir })).node.fresh);
+  });
+});
+
 describe('inspectLocal (C-1: the bridge read and the personal question from one inspector call)', () => {
   it('answers both from one call: a personal node with no bridge file yet', async () => {
     const { configDir, dataDir, file } = layout();

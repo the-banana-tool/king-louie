@@ -56,7 +56,7 @@ async function addCaseCleanliness(source, userDataDir) {
   return source;
 }
 
-async function loadDesktopSource({ userDataDir, safeStorage, platform = process.platform }) {
+async function loadDesktopSource({ userDataDir, safeStorage, platform = process.platform, customRootEmpty = false }) {
   const usable = secureStorageUsable(safeStorage, platform);
   const cipher = usable ? createSafeStorageCipher(safeStorage) : null;
   const reader = createSafeReader({ root: userDataDir, platform });
@@ -66,7 +66,8 @@ async function loadDesktopSource({ userDataDir, safeStorage, platform = process.
     reader,
     decrypt: cipher ? (encrypted) => cipher.decryptString(encrypted) : null,
     secrets: usable ? 'included' : 'unavailable',
-    history
+    history,
+    customRootEmpty
   }), userDataDir);
 }
 

@@ -157,7 +157,13 @@ function createPersonalNodeRunner(deps = {}) {
       return report;
     };
     const trust = await pairing.readTrustedBridgeFile(file, { env, platform, inspectOwners: replay, loadNodeConfig });
-    return { trust, node: judgeNode(file, paths, report) };
+    const node = judgeNode(file, paths, report);
+    // The unpaired status's question too (§6.4): one inspector call answers it.
+    if (!node.personal && !dataDir && node.reason !== 'unreadable') {
+      const fresh = await freshLayout(report);
+      if (fresh) return { trust, node: fresh };
+    }
+    return { trust, node };
   }
 
   // execFile as a promise that never rejects: { err, stdout, stderr }.

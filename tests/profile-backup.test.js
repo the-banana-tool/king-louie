@@ -112,6 +112,114 @@ describe('EXCLUDED_DIRS', () => {
   });
 });
 
+describe('detectOldProfile, out of the main process', () => {
+  const { detectOldProfileApart } = require('../src/migration/old-profile-read');
+
+  it('answers what the read in process answers, from a child of this binary', async () => {
+    const root = emptyProfile();
+    fs.mkdirSync(path.join(root, 'cases', 'lakeside-lot'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'cases', 'lakeside-lot', 'case.yaml'), 'id: case-lot\nslug: lakeside-lot\ntitle: Lakeside lot\n');
+    const apart = await detectOldProfileApart(root, { env: {} });
+    assert.deepStrictEqual(apart, await detectOldProfile(root, { env: {} }));
+    assert.strictEqual(apart.cases, 1);
+  });
+
+  it('carries the cases root the host was told', async () => {
+    const root = emptyProfile();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-outside-'));
+    try {
+      fs.mkdirSync(path.join(outside, 'lakeside-lot'));
+      const res = await detectOldProfileApart(root, { env: { KL_CASES_ROOT: outside } });
+      assert.strictEqual(res.customCases, 1);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('runs the app\'s own binary as Node, by absolute path, with no shell', async () => {
+    const calls = [];
+    const spawn = (file, args, opts) => {
+      calls.push({ file, args, opts });
+      throw new Error('no such binary');
+    };
+    const res = await detectOldProfileApart('C:\\p', { env: {}, spawn, execPath: 'C:\\app\\King Louie.exe' });
+    assert.strictEqual(calls[0].file, 'C:\\app\\King Louie.exe');
+    assert.strictEqual(calls[0].opts.env.ELECTRON_RUN_AS_NODE, '1');
+    assert.strictEqual(calls[0].opts.shell, false);
+    assert.strictEqual(res.found, true, 'a read that failed never says nothing is here');
+    assert.match(res.schemaProblem, /no such binary/);
+  });
+
+  it('a child that dies, says nothing or runs past its time is a problem, never nothing to move', async () => {
+    const { EventEmitter } = require('events');
+    const child = ({ out = '', code = 0, hang = false }) => () => {
+      const c = new EventEmitter();
+      c.stdout = new EventEmitter();
+      c.stderr = new EventEmitter();
+      c.stdin = { on() {}, end() {} };
+      c.kill = () => { setImmediate(() => c.emit('close', null)); };
+      if (!hang) setImmediate(() => { if (out) c.stdout.emit('data', out); c.emit('close', code); });
+      return c;
+    };
+    for (const opts of [{ code: 3 }, { out: 'noise' }, { out: 'KL_OLD_PROFILE {not json' }, { out: 'KL_OLD_PROFILE 7' }]) {
+      const res = await detectOldProfileApart('C:\\p', { env: {}, spawn: child(opts) });
+      assert.strictEqual(res.found, true, JSON.stringify(opts));
+      assert.ok(res.schemaProblem, JSON.stringify(opts));
+    }
+    const late = await detectOldProfileApart('C:\\p', { env: {}, spawn: child({ hang: true }), timeoutMs: 5 });
+    assert.match(late.schemaProblem, /did not finish/);
+  });
+});
+
+describe('a custom cases root the owner emptied', () => {
+  const { readDesktopSource } = require('../src/migration/desktop-source');
+  const { loadDesktopSource } = require('../src/ipc/desktop-export');
+
+  function profileWithRoot(outside) {
+    const root = emptyProfile();
+    fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ settings: { cases: { root: outside } } }));
+    fs.mkdirSync(path.join(root, 'cases', 'lakeside-lot'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'cases', 'lakeside-lot', 'case.yaml'), 'id: case-lot\nslug: lakeside-lot\ntitle: Lakeside lot\n');
+    return root;
+  }
+
+  it('the detection counts the cases moved into the profile, and still finds the setting', async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-outside-'));
+    try {
+      const res = await detectOldProfile(profileWithRoot(outside), { env: {} });
+      assert.strictEqual(res.customCases, 0);
+      assert.strictEqual(res.cases, 1);
+      assert.strictEqual(res.found, true);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('the detection does not count them while the root still holds cases', async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-outside-'));
+    try {
+      fs.mkdirSync(path.join(outside, 'other'));
+      const res = await detectOldProfile(profileWithRoot(outside), { env: {} });
+      assert.strictEqual(res.customCases, 1);
+      assert.strictEqual(res.cases, 0);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('the source lists them only when told the root is empty; the CLI\'s reading does not change', async () => {
+    const root = profileWithRoot('C:\\nowhere');
+    const safeStorage = { isEncryptionAvailable: () => false };
+    const asToday = await loadDesktopSource({ userDataDir: root, safeStorage, platform: 'win32' });
+    assert.strictEqual(asToday.inventory.cases.length, 0);
+    assert.strictEqual(asToday.inventory.customCasesRoot, 'C:\\nowhere');
+    const emptied = await loadDesktopSource({ userDataDir: root, safeStorage, platform: 'win32', customRootEmpty: true });
+    assert.strictEqual(emptied.inventory.cases.length, 1);
+    assert.strictEqual(emptied.inventory.customCasesRoot, null);
+    assert.strictEqual(typeof readDesktopSource, 'function');
+  });
+});
+
 describe('detectOldProfile', () => {
   it('empty dir is not found', async () => {
     const res = await detectOldProfile(emptyProfile());

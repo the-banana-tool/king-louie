@@ -290,6 +290,10 @@ module.exports = {
   DESKTOP_PAIR_RESTART_CONFIRM: 'desktop:pairRestartConfirm',
   DESKTOP_MIGRATION_PLAN: 'desktop:migrationPlan',
   DESKTOP_MIGRATION_APPLY: 'desktop:migrationApply',
+  DESKTOP_SETUP_STEP: 'desktop:setupStep',
+  DESKTOP_SETUP_LATER: 'desktop:setupLater',
+  DESKTOP_SETUP_FINISH: 'desktop:setupFinish',
+  DESKTOP_NODE_RESTART: 'desktop:nodeRestart',
   DESKTOP_STATUS_CHANGED: 'desktop:statusChanged',
   DESKTOP_IMPORT_PROGRESS: 'desktop:importProgress'
 };

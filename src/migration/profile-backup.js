@@ -178,8 +178,8 @@ async function countCaseDirs(dir) {
   }
 }
 
-function settingRootFrom(root) {
-  const read = createSafeReader({ root }).readFile('chat-data.json');
+function settingRootFrom(root, reader = createSafeReader({ root })) {
+  const read = reader.readFile('chat-data.json');
   if (!read.ok) return null;
   try {
     const value = JSON.parse(read.data.toString('utf8'))?.settings?.cases?.root;
@@ -454,9 +454,17 @@ async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, r
   }
   let source;
   let history;
+  let settingRoot;
+  let customCasesRoot;
+  let customCases;
   try {
+    settingRoot = settingRootFrom(root, safe);
+    customCasesRoot = customRootOf(root, settingRoot, env);
+    customCases = customCasesRoot ? await countCaseDirs(customCasesRoot) : 0;
     history = await readHistory({ reader: safe });
-    source = readDesktopSource({ userDataDir: root, reader: safe, secrets: 'needs-desktop', history });
+    // With the root empty the cases are the ones in the profile's own folder,
+    // where the setup's screen tells the owner to put them.
+    source = readDesktopSource({ userDataDir: root, reader: safe, secrets: 'needs-desktop', history, customRootEmpty: customCases === 0 });
   } catch (err) {
     return problemOnly(err.message);
   }
@@ -467,11 +475,9 @@ async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, r
     const chat = getValue('chat', c.id);
     return n + (chat && Array.isArray(chat.messages) ? chat.messages.length : 0);
   }, 0);
-  const customCasesRoot = customRootOf(root, inventory.customCasesRoot, env);
-  const customCases = customCasesRoot ? await countCaseDirs(customCasesRoot) : 0;
   const found = Boolean(
     history.found || schemaProblem || inventory.chats.length || inventory.cases.length
-    || inventory.customCasesRoot || customCases !== 0 || attention.some((a) => a.category === 'case')
+    || settingRoot || customCases !== 0 || attention.some((a) => a.category === 'case')
   );
   if (!found) return nothing;
   let bytes = 0;

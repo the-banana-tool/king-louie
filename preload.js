@@ -1397,6 +1397,11 @@ contextBridge.exposeInMainWorld(
       pairRestartConfirm: (payload = {}) => ipcRenderer.invoke('desktop:pairRestartConfirm', { confirmed: Boolean(payload && payload.confirmed === true) }),
       migrationPlan: () => ipcRenderer.invoke('desktop:migrationPlan'),
       migrationApply: (payload = {}) => ipcRenderer.invoke('desktop:migrationApply', { confirmed: Boolean(payload && payload.confirmed === true) }),
+      setupStep: () => ipcRenderer.invoke('desktop:setupStep'),
+      setupLater: () => ipcRenderer.invoke('desktop:setupLater'),
+      // skip: the step the Skip was pressed on, or nothing to finish.
+      setupFinish: (payload = {}) => ipcRenderer.invoke('desktop:setupFinish', payload && typeof payload.skip === 'string' ? { skip: payload.skip } : {}),
+      nodeRestart: () => ipcRenderer.invoke('desktop:nodeRestart'),
       importPlan: () => ipcRenderer.invoke('desktop:importPlan'),
       importApply: () => ipcRenderer.invoke('desktop:importApply'),
       onStatusChanged: (callback) => registerOnce('desktop:statusChanged', callback),

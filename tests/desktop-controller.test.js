@@ -662,8 +662,9 @@ function fakeRunner({
   const runner = {
     calls,
     running,
-    async inspectLocal(a = {}) { calls.push(['inspectLocal', a]); return { trust: trust(), node }; },
-    async detectPersonalNode(a = {}) { calls.push(['detectPersonalNode', a]); return node; },
+    node,
+    async inspectLocal(a = {}) { calls.push(['inspectLocal', a]); return { trust: trust(), node: runner.node }; },
+    async detectPersonalNode(a = {}) { calls.push(['detectPersonalNode', a]); return runner.node; },
     task,
     async queryTask(a) { calls.push(['queryTask', a]); return { state: runner.task }; },
     async nodeRunning(a) { calls.push(['nodeRunning', a]); return runner.running ? { running: true, pid: 4242 } : { running: false, pid: null }; },
@@ -2321,5 +2322,652 @@ describe('desktop controller: the one-time move', () => {
     await second.controller.unpair();
     assert.ok(second.state.migration);
     second.controller.dispose();
+  });
+});
+
+// --- Attach stage 2 §6.3: the controller walks the setup. ---
+
+describe('desktop controller: the setup walk', () => {
+  const { openTempStore, seedChat } = require('./helpers/history-fixture');
+  const NEEDS_NODE = { host: 'attached', why: 'needs-node', degraded: false };
+  const ATTACHED = { host: 'attached', why: 'attached', degraded: false };
+
+  function seedProfile(userDataDir, { chats = [['c1', 2]], settings = {} } = {}) {
+    const temp = openTempStore();
+    for (const [id, n] of chats) seedChat(temp.store, { id, messages: Array.from({ length: n }, (_, i) => ({ sender: 'user', text: `line ${i}` })) });
+    temp.store.close();
+    fs.copyFileSync(temp.dbPath, path.join(userDataDir, 'history.sqlite'));
+    fs.rmSync(temp.dir, { recursive: true, force: true });
+    fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify({ settings }));
+  }
+
+  // The fake clock, but for the one real wait: how long a step waits for the read.
+  const READ_WAIT_MS = 30000;
+  function walkTimers() {
+    const fake = fakeTimers().extra;
+    return {
+      ...fake,
+      oldProfileWaitMs: READ_WAIT_MS,
+      setTimer: (fn, ms) => (ms === READ_WAIT_MS ? setTimeout(fn, ms) : fake.setTimer(fn, ms)),
+      clearTimer: (h) => { clearTimeout(h); clearImmediate(h); }
+    };
+  }
+
+  // A store on a temp profile, and a controller over it; `again` builds the next
+  // launch's controller over the same state.
+  function walk({ profile = true, seed = {}, launch = NEEDS_NODE, mode = 'standalone', runner = fakeRunner({ fresh: true, task: 'missing' }), client = null, pairingRecord = null, extra = {}, counted = true } = {}) {
+    const parent = tmp();
+    const userDataDir = path.join(parent, 'king-louie');
+    fs.mkdirSync(userDataDir);
+    if (profile) seedProfile(userDataDir, seed);
+    const state = openDesktopState(userDataDir, fakeSafeStorage(), { storeFactory });
+    state.setMode(mode);
+    if (pairingRecord) state.setPairing(pairingRecord);
+    const app = fakeApp();
+    const reads = { count: 0 };
+    const { detectOldProfile } = require('../src/migration/profile-backup');
+    const detect = async (dir, opts) => { reads.count += 1; return detectOldProfile(dir, opts); };
+    const build = (over = {}) => {
+      const made = createDesktopController({
+        state, mode: over.mode || mode, app, getWindow: () => null,
+        env: {}, platform: 'win32', userDataDir, safeStorage: fakeSafeStorage(), stdout: { write() {} },
+        argv: ['electron', '.'], username: 'alex', launch: over.launch || launch, nodeRunner: runner,
+        ...walkTimers(),
+        migrationDeps: counted ? { detectOldProfile: detect } : {},
+        ...extra
+      });
+      const liveClient = 'client' in over ? over.client : client;
+      if (liveClient) {
+        made.setClient(liveClient);
+        if (liveClient.connected) liveClient.emit('state', { status: 'connected', code: null, error: null, nextRetryAt: null });
+      }
+      return made;
+    };
+    const controller = build();
+    return { controller, build, state, app, runner, client, reads, userDataDir, parent };
+  }
+  // A node that answers the setup's own reads as well as the import.
+  function nodeClient({ providersConfigured = true, userProfile = { name: 'Alex', role: 'Owner' }, ...rest } = {}) {
+    const client = new FakeNodeClient(rest);
+    client.service.providersConfigured = providersConfigured;
+    client.userProfile = userProfile;
+    client.connect = async () => client.service;
+    const invoke = client.invoke.bind(client);
+    client.invoke = async (channel, args) => (channel === 'settings:load' ? { ok: true, userProfile: client.userProfile } : invoke(channel, args));
+    return client;
+  }
+  const attachedWalk = (opts = {}) => walk({ launch: ATTACHED, mode: 'attached', pairingRecord: personalPairing(), runner: fakeRunner({ running: true }), client: nodeClient(), ...opts });
+  const ids = (answer) => answer.actions.map((a) => a.id);
+
+  it('a fresh machine is at install, and the install moves it to pair', async () => {
+    const runner = fakeRunner({ fresh: true, task: 'missing', cli: (args) => {
+      if (args.includes('--yes')) { runner.task = 'registered'; runner.node = { personal: true, name: 'laptop-01', dataDir: PERSONAL_DATA_DIR, me: OWNER_SID }; }
+      return { code: 0, stdout: 'would do this\n', stderr: '', json: null };
+    } });
+    const { controller } = walk({ runner, profile: false });
+    const first = await controller.setupStep();
+    assert.strictEqual(first.ok, true);
+    assert.strictEqual(first.step, 'install');
+    assert.deepStrictEqual(ids(first), ['nodeInstallPreview']);
+    const status = await controller.status();
+    assert.strictEqual(status.node.fresh, true);
+    assert.strictEqual(status.platform, 'win32');
+    assert.deepStrictEqual(status.launch, NEEDS_NODE);
+    assert.strictEqual(status.setup.step, 'install');
+    assert.strictEqual(status.setup.completedAt, null);
+
+    assert.strictEqual((await controller.nodeInstallPreview()).ok, true);
+    const previewed = await controller.setupStep();
+    assert.deepStrictEqual(ids(previewed), ['nodeInstall']);
+    assert.match(previewed.pre, /would do this/);
+
+    assert.strictEqual((await controller.nodeInstall({ confirmed: true })).ok, true);
+    assert.strictEqual(runner.task, 'registered');
+    const paired = await controller.setupStep();
+    assert.strictEqual(paired.step, 'pair');
+    assert.deepStrictEqual(ids(paired), ['pairStart']);
+    controller.dispose();
+  });
+
+  it('a fleet machine reads NOT_PERSONAL, and a refused install on a fresh machine shows its refusal', async () => {
+    const fleet = walk({ runner: fakeRunner({ personal: false }), profile: false });
+    assert.strictEqual((await fleet.controller.setupStep()).error.code, 'NOT_PERSONAL');
+    fleet.controller.dispose();
+
+    const refused = walk({ runner: fakeRunner({ fresh: true, task: 'missing', cli: () => ({ code: 1, stdout: '', stderr: 'no room on the disk\n', json: null }) }), profile: false });
+    await refused.controller.nodeInstallPreview();
+    const answer = await refused.controller.setupStep();
+    assert.strictEqual(answer.error.code, 'NODE_INSTALL_FAILED');
+    assert.match(answer.error.message, /no room on the disk/);
+    refused.controller.dispose();
+  });
+
+  it('install --personal elevated is the elevated answer, and Check again clears it', async () => {
+    const runner = fakeRunner({ fresh: true, task: 'missing', cli: () => ({ code: 2, stdout: '', stderr: 'install --personal runs as you, not elevated: open a normal prompt\n', json: null }) });
+    const { controller } = walk({ runner, profile: false });
+    await controller.nodeInstallPreview();
+    assert.strictEqual((await controller.status()).elevated, true);
+    const answer = await controller.setupStep();
+    assert.strictEqual(answer.error.code, 'PAIR_ELEVATED');
+    assert.deepStrictEqual(ids(answer), ['retry']);
+    assert.deepStrictEqual(await controller.retry(), { ok: true });
+    const after = await controller.setupStep();
+    assert.strictEqual(after.error, null);
+    assert.deepStrictEqual(ids(after), ['nodeInstallPreview']);
+    controller.dispose();
+  });
+
+  it('Check again clears a PAIR_ELEVATED pending pair, so the step is not stuck on it', async () => {
+    const runner = fakeRunner({ cli: () => ({ code: 1, stdout: '', stderr: '', json: { ok: false, code: 'PAIR_ELEVATED', message: 'runs as you' } }) });
+    const { controller, state } = walk({ runner, profile: false });
+    await controller.pairStart();
+    assert.strictEqual((await controller.setupStep()).error.code, 'PAIR_ELEVATED');
+    assert.ok(state.pendingPair);
+    await controller.retry();
+    assert.strictEqual(state.pendingPair, null);
+    const after = await controller.setupStep();
+    assert.strictEqual(after.step, 'pair');
+    assert.deepStrictEqual(ids(after), ['pairStart']);
+    controller.dispose();
+  });
+
+  it('pairing from the setup ends attached, with a relaunch; from the pane it stays as it was', async () => {
+    const svc = await startService();
+    const made = walk({ runner: fakeRunner({ cli: pairingCli(svc), trust: trustedRecord(svc.port) }), profile: false });
+    const out = await made.controller.pairStart();
+    assert.strictEqual(out.ok, true, JSON.stringify(out));
+    assert.strictEqual(made.state.mode, 'attached', JSON.stringify(out.pendingPair));
+    assert.ok(made.state.pairing);
+    assert.ok(made.app.calls.some(([name]) => name === 'relaunch'));
+    made.controller.dispose();
+
+    const pane = walk({ launch: { host: 'standalone', why: 'dev', degraded: false }, runner: fakeRunner({ cli: pairingCli(svc), trust: trustedRecord(svc.port) }), profile: false });
+    const paned = await pane.controller.pairStart();
+    assert.strictEqual(paned.view, 'paired');
+    assert.strictEqual(pane.state.mode, 'standalone');
+    assert.deepStrictEqual(pane.app.calls, []);
+    pane.controller.dispose();
+  });
+
+  it('attached and connected over a profile with chats is at migrate, then provider, profile, phone, done', async () => {
+    const client = nodeClient({ providersConfigured: false, userProfile: { name: '', role: '', goals: [], preferences: {}, projectContext: '' } });
+    const { controller, state, runner } = attachedWalk({ client });
+    const migrate = await controller.setupStep();
+    assert.strictEqual(migrate.step, 'migrate');
+    assert.deepStrictEqual(ids(migrate), ['migrationPlan', 'setupLater']);
+    assert.strictEqual((await controller.migrationPlan()).ok, true);
+    const planned = await controller.setupStep();
+    assert.ok(ids(planned).includes('migrationApply'));
+
+    const applied = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(applied.ok, true, JSON.stringify(applied));
+    assert.ok(state.migration);
+    await controller.startIdle();
+    client.goLive?.();
+    const provider = await controller.setupStep();
+    assert.strictEqual(provider.step, 'provider');
+    assert.match(provider.lines.join('\n'), /moved into King Louie Node/);
+
+    // The form saves through the proxied channel; the next step reads it anew.
+    client.service.providersConfigured = true;
+    const profile = await controller.setupStep();
+    assert.strictEqual(profile.step, 'profile');
+
+    client.userProfile = { name: 'Alex', role: 'Owner', goals: [], preferences: {}, projectContext: '' };
+    const phone = await controller.setupStep();
+    assert.strictEqual(phone.step, 'phone');
+    assert.strictEqual(state.setup.phoneOffered, true);
+
+    assert.strictEqual((await controller.setupFinish({ skip: 'phone' })).step, 'done');
+    assert.strictEqual(state.setup.phoneSeen, true);
+    const finished = await controller.setupFinish();
+    assert.strictEqual(finished.ok, true);
+    assert.ok(state.setup.completedAt);
+    assert.strictEqual((await controller.setupStep()).step, 'done');
+    assert.strictEqual((await controller.status()).setup.step, 'done');
+    assert.ok(runner.calls.length);
+    controller.dispose();
+  });
+
+  it('a verified apply restarts the node, so its channels and MCP servers come up; a failed one does not', async () => {
+    const good = attachedWalk();
+    await good.controller.migrationPlan();
+    assert.strictEqual((await good.controller.migrationApply({ confirmed: true })).ok, true);
+    await good.controller.startIdle();
+    assert.strictEqual(good.runner.calls.filter(([c]) => c === 'stopNode').length, 1);
+    assert.strictEqual(good.runner.calls.filter(([c]) => c === 'runTask').length, 1);
+    good.controller.dispose();
+
+    const bad = attachedWalk({ client: nodeClient({ dropChat: 'c1' }) });
+    await bad.controller.migrationPlan();
+    assert.strictEqual((await bad.controller.migrationApply({ confirmed: true })).code, 'MIGRATION_UNVERIFIED');
+    await bad.controller.startIdle();
+    assert.ok(!bad.runner.calls.some(([c]) => c === 'stopNode' || c === 'runTask'));
+    bad.controller.dispose();
+  });
+
+  it('setupLater relaunches once while unmigrated, is PROFILE_MIGRATED after, NOT_POSTPONABLE on an empty profile', async () => {
+    const { STANDALONE_ONCE } = require('../src/ipc/desktop-controller');
+    const later = walk();
+    const out = await later.controller.setupLater();
+    assert.strictEqual(out.ok, true);
+    const relaunch = later.app.calls.find(([name]) => name === 'relaunch');
+    assert.ok(relaunch[1].args.includes(STANDALONE_ONCE));
+    later.state.setMigration({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\b', nodeId: 'kl-abc' });
+    assert.strictEqual((await later.controller.setupLater()).code, 'PROFILE_MIGRATED');
+    later.controller.dispose();
+
+    const empty = walk({ profile: false });
+    const refused = await empty.controller.setupLater();
+    assert.strictEqual(refused.code, 'NOT_POSTPONABLE');
+    assert.deepStrictEqual(empty.app.calls, []);
+    assert.strictEqual((await empty.controller.setupStep()).error.code, 'NOT_POSTPONABLE');
+    empty.controller.dispose();
+  });
+
+  it('a failed move can be put off into the standalone mode and tried again at the next launch', async () => {
+    const client = nodeClient({ dropChat: 'c1' });
+    const made = attachedWalk({ client });
+    await made.controller.migrationPlan();
+    await made.controller.migrationApply({ confirmed: true });
+    const failed = await made.controller.setupStep();
+    assert.strictEqual(failed.error.code, 'MIGRATION_UNVERIFIED');
+    assert.ok(ids(failed).includes('setupLater'));
+    assert.strictEqual((await made.controller.setupLater()).ok, true);
+    made.controller.dispose();
+
+    client.dropChat = null;
+    const next = made.build();
+    assert.strictEqual((await next.setupStep()).step, 'migrate');
+    assert.strictEqual((await next.migrationPlan()).ok, true);
+    assert.strictEqual((await next.migrationApply({ confirmed: true })).ok, true);
+    await next.startIdle();
+    next.dispose();
+  });
+
+  it('the old profile is read once per launch, again after Check again, and again after an apply', async () => {
+    const made = attachedWalk();
+    const { controller, reads } = made;
+    await controller.setupStep();
+    await controller.setupStep();
+    await controller.status();
+    assert.strictEqual(reads.count, 1);
+    await controller.retry();
+    assert.strictEqual(reads.count, 1, 'the next step reads, not the press');
+    await controller.setupStep();
+    assert.strictEqual(reads.count, 2);
+    await controller.migrationPlan();
+    assert.strictEqual(reads.count, 3, 'a plan reads what is there now');
+    await controller.setupStep();
+    assert.strictEqual(reads.count, 3, 'and that answers the step');
+    await controller.migrationApply({ confirmed: true });
+    await controller.startIdle();
+    await controller.setupStep();
+    assert.strictEqual(reads.count, 4);
+    controller.dispose();
+  });
+
+  it('nothing reads the old profile where no setup is shown', async () => {
+    for (const opts of [
+      { launch: { host: 'standalone', why: 'dev', degraded: false } },
+      { launch: { host: 'standalone', why: 'once', degraded: true } },
+      { launch: ATTACHED, mode: 'attached', pairingRecord: pairedRecord(), client: nodeClient({ hosting: 'service' }) }
+    ]) {
+      const made = walk(opts);
+      assert.strictEqual((await made.controller.setupStep()).step, 'done');
+      await made.controller.status();
+      assert.strictEqual(made.reads.count, 0, JSON.stringify(opts.launch));
+      made.controller.dispose();
+    }
+    const finished = attachedWalk();
+    finished.state.setSetup({ completedAt: '2026-11-04T10:00:00.000Z' });
+    assert.strictEqual((await finished.controller.setupStep()).step, 'done');
+    assert.strictEqual(finished.reads.count, 0);
+    finished.controller.dispose();
+  });
+
+  it('a read that is slow answers with a line and no press, never a step past the move', async () => {
+    let release;
+    const held = new Promise((r) => { release = r; });
+    const made = attachedWalk({ counted: false, extra: { setTimer: setTimeout, clearTimer: clearTimeout, clock: Date.now, oldProfileWaitMs: 5, migrationDeps: { detectOldProfile: () => held } } });
+    const changed = [];
+    made.controller.on('changed', () => changed.push(1));
+    const answer = await made.controller.setupStep();
+    assert.strictEqual(answer.step, 'migrate');
+    assert.deepStrictEqual(answer.actions, []);
+    assert.match(answer.lines[0], /earlier/);
+    assert.strictEqual((await made.controller.status()).oldProfile, null);
+    release({ found: false, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: null, customCasesRoot: null, customCases: 0 });
+    await new Promise((r) => setImmediate(r));
+    assert.ok(changed.length, 'the window is told when it is known');
+    assert.strictEqual((await made.controller.setupStep()).step, 'phone');
+    made.controller.dispose();
+  });
+
+  it('a read that throws is a problem on screen, never nothing to move', async () => {
+    const made = attachedWalk({ extra: { migrationDeps: { detectOldProfile: async () => { throw new Error('the child went away'); } } } });
+    const answer = await made.controller.setupStep();
+    assert.strictEqual(answer.step, 'migrate');
+    assert.match(answer.error.message, /the child went away/);
+    assert.deepStrictEqual(ids(answer), ['retry', 'skip']);
+    made.controller.dispose();
+  });
+
+  it('skip names the step it was pressed on: a press arriving twice does not skip the next one', async () => {
+    const made = attachedWalk({ counted: false, extra: { migrationDeps: { detectOldProfile: async () => ({ found: true, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: 'unreadable', customCasesRoot: null, customCases: 0 }) } } });
+    const { controller, state } = made;
+    assert.strictEqual((await controller.setupStep()).step, 'migrate');
+    const [one, two] = await Promise.all([controller.setupFinish({ skip: 'migrate' }), controller.setupFinish({ skip: 'migrate' })]);
+    assert.strictEqual(one.step, 'phone');
+    assert.strictEqual(two.step, 'phone');
+    assert.ok(!state.setup || !state.setup.phoneSeen);
+    assert.strictEqual((await controller.setupFinish({ skip: 'phone' })).step, 'done');
+    assert.strictEqual(state.setup.phoneSeen, true);
+    // A step with nothing to skip stays where it is.
+    assert.strictEqual((await controller.setupFinish({ skip: 'phone' })).step, 'done');
+    controller.dispose();
+  });
+
+  it('setupFinish cannot jump the steps before the wizard, and keeps the first completedAt', async () => {
+    const early = walk();
+    const refused = await early.controller.setupFinish();
+    assert.strictEqual(refused.code, 'SETUP_NOT_DONE');
+    assert.strictEqual(early.state.setup, null);
+    early.controller.dispose();
+
+    const unmoved = attachedWalk();
+    assert.strictEqual((await unmoved.controller.setupFinish()).code, 'SETUP_NOT_DONE');
+    unmoved.controller.dispose();
+
+    const clock = [new Date('2026-11-04T10:00:00.000Z'), new Date('2026-11-04T11:00:00.000Z')];
+    const done = attachedWalk({ profile: false, extra: { now: () => clock.shift() } });
+    await done.controller.setupStep();
+    const first = done.controller.setupFinish();
+    const second = done.controller.setupFinish();
+    await Promise.all([first, second]);
+    assert.strictEqual(done.state.setup.completedAt, '2026-11-04T10:00:00.000Z');
+    done.controller.dispose();
+  });
+
+  it('a press arriving twice runs the one thing once', async () => {
+    let installs = 0;
+    const runner = fakeRunner({ fresh: true, task: 'missing', cli: () => { installs += 1; return { code: 0, stdout: 'x', stderr: '', json: null }; } });
+    const { controller } = walk({ runner, profile: false });
+    await Promise.all([controller.nodeInstallPreview(), controller.nodeInstallPreview()]);
+    assert.strictEqual(installs, 1);
+    await Promise.all([controller.nodeInstall({ confirmed: true }), controller.nodeInstall({ confirmed: true })]);
+    assert.strictEqual(installs, 2);
+    controller.dispose();
+
+    const pairs = fakeRunner({ cli: () => ({ code: 1, stdout: '', stderr: '', json: { ok: false, code: 'PERSONAL_NOT_OWNER', message: 'no' } }) });
+    const pair = walk({ runner: pairs, profile: false });
+    await Promise.all([pair.controller.pairStart(), pair.controller.pairStart()]);
+    assert.strictEqual(pairs.calls.filter(([c]) => c === 'runCli').length, 1);
+    pair.controller.dispose();
+
+    const later = walk();
+    await Promise.all([later.controller.setupLater(), later.controller.setupLater()]);
+    assert.strictEqual(later.app.calls.filter(([name]) => name === 'relaunch').length, 1);
+    later.controller.dispose();
+
+    const moved = attachedWalk();
+    const [a, b] = await Promise.all([moved.controller.migrationPlan(), moved.controller.migrationPlan()]);
+    assert.strictEqual(a, b);
+    assert.strictEqual(moved.client.plans, 1);
+    moved.controller.dispose();
+  });
+
+  it('an apply pressed twice moves once and restarts once', async () => {
+    const made = attachedWalk();
+    await made.controller.migrationPlan();
+    const [a, b] = await Promise.all([made.controller.migrationApply({ confirmed: true }), made.controller.migrationApply({ confirmed: true })]);
+    assert.strictEqual(a, b);
+    assert.strictEqual(a.ok, true);
+    await made.controller.startIdle();
+    assert.strictEqual(made.runner.calls.filter(([c]) => c === 'stopNode').length, 1);
+    made.controller.dispose();
+  });
+
+  it('while the node restarts after the move the step has no press, and a restart that fails says what it means', async () => {
+    let release;
+    const held = new Promise((r) => { release = r; });
+    const runner = fakeRunner({ running: true, stop: () => ({ ok: false, code: 'NODE_STOP_FAILED', message: 'stop did not finish' }) });
+    const stopNode = runner.stopNode.bind(runner);
+    runner.stopNode = async (a) => { await held; return stopNode(a); };
+    const made = attachedWalk({ runner });
+    await made.controller.migrationPlan();
+    assert.strictEqual((await made.controller.migrationApply({ confirmed: true })).ok, true);
+    const during = await made.controller.setupStep();
+    assert.deepStrictEqual(during.actions, []);
+    assert.match(during.lines.join(' '), /[Rr]estart/);
+    release();
+    await made.controller.startIdle();
+    const after = await made.controller.setupStep();
+    assert.strictEqual(after.step, 'phone');
+    assert.ok(after.actions.length);
+    assert.match(after.error.message, /stop did not finish/);
+    assert.match(after.error.message, /next time/);
+    made.controller.dispose();
+  });
+
+  it('a standalone window finishes nothing, and neither a Finish nor a Skip lands during a move', async () => {
+    const dev = walk({ launch: { host: 'standalone', why: 'dev', degraded: false } });
+    assert.strictEqual((await dev.controller.setupFinish()).ok, true);
+    assert.strictEqual(dev.state.setup, null);
+    dev.controller.dispose();
+
+    let release;
+    const held = new Promise((r) => { release = r; });
+    const { backupProfile } = require('../src/migration/profile-backup');
+    const made = attachedWalk({ extra: { migrationDeps: { backupProfile: async (args) => { await held; return backupProfile(args); } } }, counted: false });
+    const planning = made.controller.migrationPlan();
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual((await made.controller.setupFinish({ skip: 'migrate' })).code, 'MIGRATION_BUSY');
+    assert.strictEqual((await made.controller.setupFinish()).code, 'MIGRATION_BUSY');
+    release();
+    await planning;
+    assert.strictEqual((await made.controller.status()).setup.migrateSkipped, false);
+    made.controller.dispose();
+  });
+
+  it('while a plan runs, a status answers and the step says so with no press', async () => {
+    let release;
+    const held = new Promise((r) => { release = r; });
+    const { backupProfile } = require('../src/migration/profile-backup');
+    const made = attachedWalk({ extra: { migrationDeps: { backupProfile: async (args) => { await held; return backupProfile(args); } } }, counted: false });
+    const planning = made.controller.migrationPlan();
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual((await made.controller.status()).ok, true);
+    const busy = await made.controller.setupStep();
+    assert.deepStrictEqual(busy.actions, []);
+    assert.ok(busy.lines.length === 1);
+    assert.strictEqual((await made.controller.migrationApply({ confirmed: true })).code, 'MIGRATION_BUSY');
+    assert.strictEqual((await made.controller.setupLater()).code, 'MIGRATION_BUSY');
+    release();
+    assert.strictEqual((await planning).ok, true);
+    assert.ok(ids(await made.controller.setupStep()).includes('migrationApply'), 'a refused second press leaves the plan on screen');
+    made.controller.dispose();
+  });
+
+  it('the node dying during the move: start while it is down, then the failure and a new plan', async () => {
+    const client = nodeClient();
+    const made = attachedWalk({ client });
+    await made.controller.migrationPlan();
+    const realCall = client.call.bind(client);
+    const realInvoke = client.invoke.bind(client);
+    const gone = () => Object.assign(new Error('The local King Louie service is not reachable.'), { code: 'SERVICE_UNREACHABLE' });
+    client.invoke = async () => { throw gone(); };
+    client.call = async (method) => {
+      if (method === 'import.apply') {
+        client.connected = false;
+        client.emit('state', { status: 'disconnected', code: 'SERVICE_UNREACHABLE', error: 'not reachable', nextRetryAt: null });
+      }
+      throw gone();
+    };
+    const out = await made.controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.code, 'SERVICE_UNREACHABLE');
+    assert.strictEqual(made.state.migration, null);
+    assert.ok(!made.runner.calls.some(([c]) => c === 'stopNode'));
+    assert.strictEqual((await made.controller.setupStep()).step, 'start');
+
+    client.call = realCall;
+    client.invoke = realInvoke;
+    client.connected = true;
+    client.emit('state', { status: 'connected', code: null, error: null, nextRetryAt: null });
+    const back = await made.controller.setupStep();
+    assert.strictEqual(back.step, 'migrate');
+    assert.strictEqual(back.error.code, 'SERVICE_UNREACHABLE');
+    assert.ok(ids(back).includes('migrationPlan'));
+    assert.strictEqual((await made.controller.migrationPlan()).ok, true);
+    assert.strictEqual((await made.controller.migrationApply({ confirmed: true })).ok, true);
+    await made.controller.startIdle();
+    made.controller.dispose();
+  });
+
+  it('a drop forgets a plan the node no longer holds, and the apply says it expired', async () => {
+    const client = nodeClient();
+    const { controller } = attachedWalk({ client });
+    await controller.migrationPlan();
+    client.connected = false;
+    client.emit('state', { status: 'disconnected', code: 'SERVICE_UNREACHABLE', error: 'not reachable', nextRetryAt: null });
+    client.connected = true;
+    client.emit('state', { status: 'connected', code: null, error: null, nextRetryAt: null });
+    assert.deepStrictEqual(ids(await controller.setupStep()), ['migrationPlan', 'setupLater']);
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).code, 'PLAN_EXPIRED');
+    controller.dispose();
+  });
+
+  it('a relaunch at each step comes back to that step', async () => {
+    // After the install: the task and node.yaml are there.
+    const installed = walk({ runner: fakeRunner({ task: 'registered' }) });
+    const relaunched = installed.build();
+    assert.strictEqual((await relaunched.setupStep()).step, 'pair');
+    installed.controller.dispose();
+    relaunched.dispose();
+
+    // In the middle of pairing: says so, runs nothing by itself.
+    const pairing = walk({ runner: fakeRunner({ cli: () => ({ code: 1, stdout: '', stderr: '', json: { ok: false, code: 'X', message: 'y' } }) }) });
+    await pairing.controller.pairStart();
+    pairing.controller.dispose();
+    const cliBefore = pairing.runner.calls.filter(([c]) => c === 'runCli').length;
+    const midPair = pairing.build();
+    const midAnswer = await midPair.setupStep();
+    assert.strictEqual(midAnswer.step, 'pair');
+    assert.strictEqual(midAnswer.error.code, 'PAIR_COMMAND_FAILED');
+    assert.strictEqual(pairing.runner.calls.filter(([c]) => c === 'runCli').length, cliBefore);
+    midPair.dispose();
+
+    // Paired, the relaunch into attached lost: Attach is the one press.
+    const paired = walk({ runner: fakeRunner({ running: true }), pairingRecord: personalPairing() });
+    const pairedAnswer = await paired.controller.setupStep();
+    assert.strictEqual(pairedAnswer.step, 'pair');
+    assert.ok(ids(pairedAnswer).includes('attach'));
+    paired.controller.dispose();
+
+    // Attached with the node down.
+    const down = attachedWalk({ client: new FakeAttachedClient(), runner: fakeRunner() });
+    assert.strictEqual((await down.controller.setupStep()).step, 'start');
+    down.controller.dispose();
+
+    // A plan on screen does not outlive the launch; the backup is made again.
+    const planned = attachedWalk();
+    await planned.controller.migrationPlan();
+    planned.controller.dispose();
+    const next = planned.build();
+    const answer = await next.setupStep();
+    assert.strictEqual(answer.step, 'migrate');
+    assert.deepStrictEqual(ids(answer), ['migrationPlan', 'setupLater']);
+    next.dispose();
+
+    // Moved: the marker holds, and the phone step once offered stays offered.
+    const moved = attachedWalk();
+    await moved.controller.migrationPlan();
+    await moved.controller.migrationApply({ confirmed: true });
+    await moved.controller.startIdle();
+    assert.strictEqual((await moved.controller.setupStep()).step, 'phone');
+    moved.controller.dispose();
+    const stopped = nodeClient();
+    stopped.connected = false;
+    const after = moved.build({ client: stopped });
+    assert.strictEqual((await after.setupStep()).step, 'phone', 'stopping the node is its first instruction');
+    after.dispose();
+  });
+
+  it('the custom-root instruction works: do what the screen says, press Check again, and the cases move', async () => {
+    const outside = tmp();
+    fs.mkdirSync(path.join(outside, 'lakeside-lot'));
+    fs.writeFileSync(path.join(outside, 'lakeside-lot', 'case.yaml'), 'id: case-lot\nslug: lakeside-lot\ntitle: Lakeside lot\n');
+    fs.mkdirSync(path.join(outside, '.index'));
+    fs.writeFileSync(path.join(outside, '.index', 'bm25.json'), '{}');
+    const client = nodeClient();
+    const made = attachedWalk({ client, seed: { settings: { cases: { root: outside } } }, counted: false });
+    const { controller, userDataDir, state, parent } = made;
+
+    const before = await controller.setupStep();
+    assert.strictEqual(before.step, 'migrate');
+    assert.strictEqual(before.error.code, 'MIGRATION_SOURCE');
+    assert.ok(before.error.message.includes(path.join(userDataDir, 'cases')), before.error.message);
+    assert.deepStrictEqual(ids(before), ['retry', 'setupLater']);
+    // The plan refuses too, and makes a backup that does not hold the case.
+    const refusedPlan = await controller.migrationPlan();
+    assert.strictEqual(refusedPlan.ok, true);
+    assert.strictEqual(refusedPlan.backup.customCases, 1);
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).code, 'MIGRATION_SOURCE');
+    await controller.retry();
+
+    // What the screen says, as the owner would do it: the folder, not the index.
+    fs.mkdirSync(path.join(userDataDir, 'cases'));
+    fs.renameSync(path.join(outside, 'lakeside-lot'), path.join(userDataDir, 'cases', 'lakeside-lot'));
+
+    const after = await controller.setupStep();
+    assert.strictEqual(after.error, null, JSON.stringify(after.error));
+    assert.deepStrictEqual(ids(after), ['migrationPlan', 'setupLater']);
+    assert.match(after.lines[0], /1 case\b/);
+    const plan = await controller.migrationPlan();
+    assert.strictEqual(plan.ok, true, JSON.stringify(plan));
+    assert.ok(plan.plan.items.some((i) => i.category === 'case' && i.key === 'lakeside-lot' && i.action === 'new'), JSON.stringify(plan.plan.items));
+    assert.ok(!plan.leftBehind.needsAttention.some((a) => String(a.note).includes('custom')), 'no word of a root that holds nothing');
+    // The backup taken before the move of the folder does not hold it: a new one does.
+    const manifest = JSON.parse(fs.readFileSync(path.join(plan.backup.dest, 'backup.json'), 'utf8'));
+    assert.ok(manifest.files.some((f) => f.path.includes('lakeside-lot')), 'the backup holds the moved case');
+    assert.ok(fs.readdirSync(parent).filter((n) => n.startsWith('king-louie.backup-')).length >= 1);
+    assert.ok(ids(await controller.setupStep()).includes('migrationApply'));
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).ok, true);
+    assert.ok(client.cases.has('lakeside-lot'));
+    assert.ok(state.migration);
+    await controller.startIdle();
+    controller.dispose();
+  });
+
+  it('status carries the launcher, the default data dir, the profile dir and the setup facts through shown', async () => {
+    const made = attachedWalk({ extra: { cliExists: () => true }, profile: false });
+    await made.controller.setupStep();
+    const status = await made.controller.status();
+    assert.ok(status.node.serviceCli.endsWith('king-louie-service.cmd'));
+    assert.strictEqual(typeof status.node.defaultDataDir, 'string');
+    assert.strictEqual(status.profileDir, made.userDataDir);
+    assert.strictEqual(status.userProfileDefault, false);
+    assert.deepStrictEqual(Object.keys(status.setup).sort(), ['completedAt', 'migrateSkipped', 'phoneOffered', 'phoneSeen', 'step']);
+    made.controller.dispose();
+  });
+
+  it('a profile read fails open: a node that cannot say is not asked for a name', async () => {
+    const client = nodeClient();
+    client.invoke = async () => { throw new Error('gone'); };
+    const made = attachedWalk({ client, profile: false });
+    assert.strictEqual((await made.controller.setupStep()).step, 'phone');
+    made.controller.dispose();
+  });
+
+  it('the handlers reach the new methods', async () => {
+    const { DESKTOP_METHODS } = require('../src/ipc/desktop-handlers');
+    for (const [channel, method] of [['desktop:setupStep', 'setupStep'], ['desktop:setupLater', 'setupLater'], ['desktop:setupFinish', 'setupFinish'], ['desktop:nodeRestart', 'nodeRestart']]) {
+      assert.strictEqual(DESKTOP_METHODS[channel], method);
+    }
+    const made = attachedWalk({ profile: false, client: new FakeAttachedClient(), runner: fakeRunner() });
+    await made.controller.nodeRestart();
+    await made.controller.startIdle();
+    assert.strictEqual(made.runner.calls.filter(([c]) => c === 'runTask').length, 1);
+    made.controller.dispose();
   });
 });

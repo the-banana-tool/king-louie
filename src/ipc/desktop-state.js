@@ -109,7 +109,16 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
     get setup() { return store.get('setup') || null; },
     setSetup(entry) {
       if (!entry || typeof entry.completedAt !== 'string' || !entry.completedAt) throw new Error('setSetup needs completedAt');
-      store.set('setup', { completedAt: entry.completedAt });
+      store.set('setup', { ...(store.get('setup') || {}), completedAt: entry.completedAt });
+    },
+    // What the walk has shown, so a relaunch comes back to it. One way: only true
+    // is ever written, and only these two.
+    noteSetup({ phoneOffered, phoneSeen } = {}) {
+      store.set('setup', {
+        ...(store.get('setup') || {}),
+        ...(phoneOffered === true ? { phoneOffered: true } : {}),
+        ...(phoneSeen === true ? { phoneSeen: true } : {})
+      });
     },
     secureStorageUsable: usable,
     seal(text) {

@@ -167,6 +167,43 @@ describe('attached host', () => {
     assert.strictEqual((await handlers.get('chat:load')({})).error, 'That request is too large for the local service (64 MiB limit).');
   });
 
+  it('wizard answers from the setup state on a personal pairing; a fleet pairing has no first run', async () => {
+    const personal = { hosting: 'personal', dataDir: 'C:\\Users\\owner\\node\\data' };
+    const attached = { host: 'attached', why: 'attached', degraded: false };
+    const first = setup({ pairingService: personal, launch: attached, nodeRunner: null });
+    assert.deepStrictEqual(await first.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: true });
+    assert.deepStrictEqual((await first.handlers.get('wizard:getSteps')({})).steps.map((s) => s.id), ['provider', 'profile', 'phone', 'finish']);
+    first.state.setSetup({ completedAt: '2026-11-04T10:00:00.000Z' });
+    assert.deepStrictEqual(await first.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
+
+    const dev = setup({ pairingService: personal, launch: { host: 'standalone', why: 'dev', degraded: false } });
+    assert.deepStrictEqual(await dev.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
+
+    const fleet = setup({ launch: attached });
+    assert.deepStrictEqual(await fleet.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
+    await first.host.shutdown();
+    await dev.host.shutdown();
+    await fleet.host.shutdown();
+  });
+
+  it('wizard:complete finishes the setup, and is refused before the move', async () => {
+    const finished = [];
+    const controllerFactory = (deps) => {
+      const { createDesktopController } = require('../src/ipc/desktop-controller');
+      const controller = createDesktopController({ ...deps, nodeRunner: null });
+      const setupFinish = controller.setupFinish;
+      return { ...controller, setupFinish: async (p) => { finished.push(p); return setupFinish(p); } };
+    };
+    const made = setup({ pairingService: { hosting: 'personal', dataDir: 'C:\\x\\data' }, launch: { host: 'attached', why: 'attached', degraded: false }, controllerFactory });
+    made.client.goLive(SERVICE([]));
+    const answer = await made.handlers.get('wizard:complete')({});
+    assert.strictEqual(finished.length, 1);
+    assert.deepStrictEqual(answer, { ok: true });
+    assert.ok(made.state.setup.completedAt);
+    assert.deepStrictEqual(await made.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
+    await made.host.shutdown();
+  });
+
   it('wizard is local, and a send without a provider says so', async () => {
     const { handlers, client } = setup();
     assert.deepStrictEqual(await handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
