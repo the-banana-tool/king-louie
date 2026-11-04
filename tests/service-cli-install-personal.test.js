@@ -53,6 +53,7 @@ function deps(s, extra = {}) {
     findFfmpeg: () => 'C:\\ffmpeg\\bin\\ffmpeg.exe',
     fleetInstalled: () => ({ task: false, marker: null }),
     taskRegistered: () => true,
+    taskDataDir: () => null,
     // Only the temp tree exists, never the machine's real ProgramData.
     exists: (p) => p.startsWith(s.base) && fs.existsSync(p),
     hostname: () => 'laptop',
@@ -581,6 +582,16 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
       const again = deps(s, { runAsNode: true, nodePath: APP, taskRegistered: () => false });
       await run('install', s, again, { yes: true });
       assert.ok(launcherStep(again), 'an older launcher of ours is replaced');
+    });
+
+    it('uninstall with no --data-dir stops the node where its task says it runs (the uninstaller passes none)', async () => {
+      const s = setup();
+      const custom = path.join(path.dirname(path.resolve(s.dataDir)), 'elsewhere', 'data');
+      const stopped = [];
+      const d = deps(s, { taskDataDir: () => custom, runningServicePid: (dir) => (dir === custom ? 4242 : null), stopNode: async (dir) => { stopped.push(dir); return 0; } });
+      const { code, t } = await run('uninstall', s, d, { yes: true, dataDir: undefined });
+      assert.equal(code, 0, t.errors());
+      assert.deepStrictEqual(stopped, [custom]);
     });
 
     it('uninstall with no --data-dir looks at the default place, and with no default says what to pass', async () => {

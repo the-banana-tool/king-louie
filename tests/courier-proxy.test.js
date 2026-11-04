@@ -56,6 +56,25 @@ function fakeFork() {
   return { child, forkImpl: () => child };
 }
 
+describe('the courier child under the app binary (final review, finding 7)', () => {
+  it('runs as Node: ELECTRON_RUN_AS_NODE is 1 in the fork env, and absent under real Node', async () => {
+    const saved = process.env.ELECTRON_RUN_AS_NODE;
+    process.env.ELECTRON_RUN_AS_NODE = '1';
+    try {
+      for (const [electron, want] of [[true, '1'], [false, undefined]]) {
+        const { child } = fakeFork();
+        let seen = null;
+        const proxy = new CourierProxy({ dataDir: dataDir(), electron, forkImpl: (_p, _a, opts) => { seen = opts.env; return child; } });
+        const started = proxy.start({ timeoutMs: 50 }).catch(() => {});
+        assert.strictEqual(seen.ELECTRON_RUN_AS_NODE, want);
+        await started;
+      }
+    } finally {
+      if (saved === undefined) delete process.env.ELECTRON_RUN_AS_NODE; else process.env.ELECTRON_RUN_AS_NODE = saved;
+    }
+  });
+});
+
 describe('drop-privileges', () => {
   it('isRoot reads getuid/geteuid and is false without them (Windows)', () => {
     assert.equal(isRoot({ getuid: () => 0, geteuid: () => 0 }), true);

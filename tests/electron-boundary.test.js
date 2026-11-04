@@ -64,6 +64,22 @@ describe('Electron import boundary', () => {
     assert.deepStrictEqual(missing, []);
   });
 
+  // fork runs process.execPath without naming it, so the scan above cannot see it.
+  it('whatever forks sets ELECTRON_RUN_AS_NODE itself', () => {
+    const FORKS = /(?:\{[^}]*\bfork\b[^}]*\}\s*=\s*require\(\s*['"](?:node:)?child_process['"]\s*\))|(?:child_?[pP]rocess\.fork\()/;
+    const forkers = [];
+    const missing = [];
+    for (const file of walk(SRC)) {
+      const rel = path.relative(SRC, file).split(path.sep).join('/');
+      const code = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+      if (!FORKS.test(code)) continue;
+      forkers.push(rel);
+      if (!/ELECTRON_RUN_AS_NODE:?\s*=?\s*'1'/.test(code)) missing.push(rel);
+    }
+    assert.ok(forkers.includes('service/courier-proxy.js'), 'the scan sees the one fork there is');
+    assert.deepStrictEqual(missing, []);
+  });
+
   it('walks the fleet stage 7 desktop bridge and migration modules', () => {
     const files = walk(SRC).map((f) => path.relative(SRC, f).split(path.sep).join('/'));
     assert.ok(files.some((f) => f.startsWith('desktop-bridge/')), 'src/desktop-bridge/ is checked');

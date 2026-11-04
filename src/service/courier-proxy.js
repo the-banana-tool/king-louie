@@ -56,8 +56,9 @@ function validLink(link) {
 }
 
 class CourierProxy extends EventEmitter {
-  constructor({ dataDir, who = 'this command', pollMs = null, forkImpl = fork, childPath = CHILD } = {}) {
+  constructor({ dataDir, who = 'this command', pollMs = null, forkImpl = fork, childPath = CHILD, electron = Boolean(process.versions.electron) } = {}) {
     super();
+    this.electron = electron;
     this.dataDir = dataDir;
     this.who = who;
     this.pollMs = pollMs;
@@ -76,8 +77,12 @@ class CourierProxy extends EventEmitter {
   // Resolves { link } once the child has dropped privileges and its courier
   // runs; rejects (and leaves `dead` set) if it cannot.
   start({ timeoutMs = 15000 } = {}) {
+    // fork runs process.execPath: under the app's binary (the launcher a window
+    // install writes) the child runs as Node only with this set, and without it boots
+    // the desktop app. Under real Node the variable means nothing to pass on.
     const env = { ...process.env };
-    delete env.ELECTRON_RUN_AS_NODE;
+    if (this.electron) env.ELECTRON_RUN_AS_NODE = '1';
+    else delete env.ELECTRON_RUN_AS_NODE;
     this.child = this.forkImpl(this.childPath, [], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'], env });
     if (this.child.stderr) {
       this.child.stderr.on('data', (d) => { if (this.stderr.length < 4096) this.stderr += String(d); });

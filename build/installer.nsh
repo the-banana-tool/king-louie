@@ -13,6 +13,8 @@
 ; Order: the CLI stops a running node first, so a node running as this app's
 ; binary does not hold files that the uninstall then removes. The CLI deletes
 ; the task itself; this script deletes nothing, and never touches the data dir.
+; It is given no data dir: the CLI reads the one the task runs from the task's own
+; XML, so a node installed with --data-dir is stopped where it is.
 ;
 ; A failure must not stop the uninstall: the exit code is popped and ignored.
 ; The install is per-user by default, so the uninstaller runs as the owner and

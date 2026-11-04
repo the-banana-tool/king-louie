@@ -127,6 +127,18 @@ function defaultFindChrome(env) {
   return null;
 }
 
+// The data dir the registered task runs, read from its XML: a node installed with
+// --data-dir is stopped where it is, whoever asks with no --data-dir (the uninstaller).
+function defaultTaskDataDir(env) {
+  const { parseTaskXml, decodeOutput } = require('../desktop-bridge/personal-node');
+  try {
+    const xml = execFileSync(windowsSchtasksExe(env), ['/Query', '/TN', PERSONAL_TASK_NAME, '/XML', 'ONE'], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 30000 });
+    return parseTaskXml(decodeOutput(xml)).dataDir;
+  } catch {
+    return null;
+  }
+}
+
 function taskExists(env, name) {
   try {
     execFileSync(windowsSchtasksExe(env), ['/Query', '/TN', name], { stdio: 'ignore', windowsHide: true, timeout: 30000 });
@@ -225,6 +237,7 @@ function resolveDeps(deps, io) {
     fleetInstalled: deps.fleetInstalled || (() => defaultFleetInstalled(env)),
     startable: deps.startable || defaultStartable,
     taskRegistered: deps.taskRegistered || (() => taskExists(env, PERSONAL_TASK_NAME)),
+    taskDataDir: deps.taskDataDir || (() => defaultTaskDataDir(env)),
     exists: deps.exists || fs.existsSync,
     hostname: deps.hostname || os.hostname,
     tmpDir: deps.tmpDir || os.tmpdir(),
@@ -467,7 +480,7 @@ async function uninstall({ flags, io, c }) {
   if (!flags.dryRun && !flags.yes && !c.isTTY()) {
     return refuse(io, 'Refusing to remove the personal node\'s logon task without confirmation on a non-interactive terminal; pass --yes.');
   }
-  const named = flags.dataDir || personalDataDir({ platform: 'win32', env: c.env });
+  const named = flags.dataDir || c.taskDataDir() || personalDataDir({ platform: 'win32', env: c.env });
   if (!named) return refuse(io, 'LOCALAPPDATA is not set, so there is no default data dir: pass --data-dir DIR');
   const dataDir = path.resolve(named);
   const cliPath = path.join(path.dirname(dataDir), PERSONAL_CLI_FILE);
