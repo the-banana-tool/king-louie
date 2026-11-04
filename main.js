@@ -66,7 +66,9 @@ function createWindow() {
   });
 
   mainWindow.removeMenu();
-  mainWindow.loadFile('index.html');
+  // An attached launch hides the chat shell until the first status says whether it may
+  // show (renderer-helpers/launch-class.js). A standalone one loads as it always has.
+  mainWindow.loadFile('index.html', attached ? { query: { launch: 'attached' } } : undefined);
   mainWindow.on('closed', function () {
     mainWindow = null;
   });

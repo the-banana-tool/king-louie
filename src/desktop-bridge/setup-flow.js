@@ -497,7 +497,14 @@ function bodyFor(step, s, f) {
     case 'start': return startStep(s);
     case 'migrate': return migrateStep(s, f);
     case 'provider':
-      return { lines: ['King Louie needs a key from an AI provider before it can answer. Choose a provider and enter your key; it is kept by King Louie Node on this computer.'], actions: [PAST_THE_FORM], form: 'provider' };
+      return {
+        lines: [
+          'King Louie needs a key from an AI provider before it can answer. Choose a provider and enter your key; it is kept by King Louie Node on this computer.',
+          'To use Ollama, skip this and set its address later in Settings, under API keys. Local servers are not added from this window: they go in King Louie Node\'s service.json.'
+        ],
+        actions: [PAST_THE_FORM],
+        form: 'provider'
+      };
     case 'profile':
       return { lines: ['Tell King Louie your name and what you do.'], actions: [PAST_THE_FORM], form: 'profile' };
     case 'phone': return phoneStep(s, f);

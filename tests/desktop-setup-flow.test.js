@@ -832,6 +832,12 @@ describe('describeSetup: what the window draws at the form steps', () => {
     assert.deepStrictEqual(ids(q), ['setupFinish']);
   });
 
+  it('the provider line says where Ollama and local servers go', () => {
+    const line = describeSetup(attachedUp(noKey)).lines.join(' ');
+    assert.match(line, /Ollama.*Settings, under API keys/);
+    assert.match(line, /Local servers .*service\.json/);
+  });
+
   it('no form while a progress line is up, or on any other step', () => {
     assert.strictEqual(describeSetup(attachedUp({ ...noKey, setupProgress: 'Restarting…' })).form, null);
     assert.strictEqual(describeSetup(attachedUp()).form, null);

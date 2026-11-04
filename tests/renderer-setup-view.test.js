@@ -37,7 +37,13 @@ describe('the setup view', () => {
   });
 
   it('every action id describeSetup can answer has a press', () => {
-    for (const id of ['retry', 'attach', 'nodeStart', 'nodeRestart', 'nodeInstallPreview', 'nodeInstall', 'pairStart', 'pairConfirm', 'pairCancel', 'pairRestartConfirm', 'migrationPlan', 'migrationApply', 'setupLater', 'setupFinish', 'skip', 'openServiceSettings']) {
+    const idsIn = (f) => [...read(f).matchAll(/\bid: '(\w+)'/g)].map((m) => m[1]);
+    // The pane's other views: the setup draws its actions only for a pairing under way.
+    const PANE_ONLY = new Set(['import', 'detach', 'unpair', 'standaloneOnce', 'nodeInstallCancel']);
+    const fromPane = idsIn('src/desktop-bridge/pane-model.js').filter((id) => !PANE_ONLY.has(id)).map((id) => (id === 'pair' ? 'pairStart' : id));
+    const ids = new Set([...idsIn('src/desktop-bridge/setup-flow.js'), ...fromPane]);
+    assert.ok(ids.has('pairStart') && ids.has('skip') && ids.has('migrationApply'), 'the regex found them');
+    for (const id of ids) {
       assert.match(view(), new RegExp(`\\b${id}:`), `no press for ${id}`);
     }
     assert.match(view(), /nodeInstall: \(\) => desktop\.nodeInstall\(\{ confirmed: true \}\)/);
@@ -76,8 +82,34 @@ describe('the setup view', () => {
     assert.match(near, /setup-active/);
   });
 
-  it('preload exposes describeSetup like describeBanner', () => {
-    assert.match(preload, /describeSetup: \(status\) => \(setupFlow \? setupFlow\.describeSetup\(status\) : null\)/);
+  it('the renderer asks for the step: the preload has no second reading of it', () => {
+    assert.doesNotMatch(preload, /describeSetup/);
+  });
+
+  it('an attached launch hides the shell from the first parse; a standalone one is as it was', () => {
+    const main = read('main.js');
+    assert.match(main, /loadFile\('index\.html', attached \? \{ query: \{ launch: 'attached' \} \} : undefined\)/);
+    const at = html.indexOf('<script src="renderer-helpers/launch-class.js"></script>');
+    assert.ok(at > 0 && at < html.indexOf('</head>'), 'in the head, before the body is parsed');
+    assert.match(css, /html\.setup-pending \.container/);
+    assert.match(read('renderer-helpers/launch-class.js'), /launch=attached|get\('launch'\) === 'attached'/);
+  });
+
+  it('every way out of the first status shows the shell again', () => {
+    const refresh = block('async function refreshServiceStatus(', '\nif (window.electron.desktop) {');
+    assert.match(refresh, /status\.ok === false\) \{\n\s*revealShell\(\);/);
+    const setup = block('async function refreshSetupView(', 'async function drawSetupAnswer(');
+    assert.strictEqual((setup.match(/revealShell\(\)/g) || []).length, 3);
+    assert.match(setup, /finally \{\n\s*revealShell\(\);/);
+  });
+
+  it('a press leaves re-enabling to the draw, which honours a disabled action', () => {
+    assert.doesNotMatch(view(), /btn\.disabled = false|setSetupPressesDisabled\(false\)/);
+    assert.match(view(), /btn\.disabled = setupView\.pressing \|\| Boolean\(action\.disabled\)/);
+  });
+
+  it('the form takes no key for Ollama', () => {
+    assert.match(view(), /option\[value="ollama"\]'\)\?\.remove\(\)/);
   });
 });
 

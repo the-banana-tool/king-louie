@@ -3479,6 +3479,10 @@ div.models-picker-item.is-unusable { cursor: default; }
 }
 
 /* --- Setup view (attach stage 2 spec 6.2): the window with no node ------ */
+html.setup-pending .container {
+  display: none !important;
+}
+
 .setup-lines:empty {
   display: none !important;
 }

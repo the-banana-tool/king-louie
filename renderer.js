@@ -14692,7 +14692,7 @@ function renderAttachedBanner(status) {
 // The window with no node (attach stage 2 spec §6.2, §6.3). describeSetup, in the
 // controller, says what to draw; this draws it, every string with textContent, and
 // holds no rule of its own. The answer says nothing to draw once the setup is over.
-const setupView = { active: false, answer: null, status: null, generation: 0, pressing: false, pressError: null, pressScreen: null, formStep: null, stepWords: null };
+const setupView = { active: false, answer: null, status: null, generation: 0, pressing: false, pressError: null, pressScreen: null, formStep: null, stepWords: null, draws: 0, focusId: null, focusScreen: null };
 
 const SETUP_TITLES = {
   install: 'Install King Louie Node',
@@ -14710,6 +14710,15 @@ function enterSetupView() {
   setupView.active = true;
   document.body.classList.add('setup-active');
   document.getElementById('setup-view').hidden = false;
+  // Never a blank card while the step is on its way.
+  document.getElementById('setup-title').textContent = 'Getting ready';
+  setupParagraphs(document.getElementById('setup-lines'), ['Checking this computer…']);
+}
+
+// An attached launch starts with the shell hidden (renderer-helpers/launch-class.js),
+// so the chat never shows before the first answer says whether it may.
+function revealShell() {
+  document.documentElement.classList.remove('setup-pending');
 }
 
 function leaveSetupView() {
@@ -14761,7 +14770,13 @@ function setupActionButton(action, primary, onPress) {
   btn.className = primary ? 'btn btn-primary' : 'btn';
   btn.textContent = action.label;
   btn.disabled = setupView.pressing || Boolean(action.disabled);
-  btn.addEventListener('click', onPress);
+  if (onPress) {
+    btn.addEventListener('click', onPress);
+  } else {
+    // The form's own button, though it sits with the others: Enter in a field presses it.
+    btn.type = 'submit';
+    btn.setAttribute('form', 'setup-form');
+  }
   return btn;
 }
 
@@ -14770,6 +14785,8 @@ function drawSetupForm(answer) {
   const form = document.getElementById('setup-form');
   if (answer.form && setupView.formStep !== answer.form) {
     form.replaceChildren(document.createRange().createContextualFragment(wizardFieldsHtml(answer.form)));
+    // It takes an address, not a key, so a key here could only store rubbish as a token.
+    form.querySelector('option[value="ollama"]')?.remove();
     setupView.formStep = answer.form;
     setupView.pressError = null;
   } else if (!answer.form && !['provider', 'profile'].includes(answer.step)) {
@@ -14780,6 +14797,7 @@ function drawSetupForm(answer) {
 }
 
 function drawSetupView(answer, steps) {
+  setupView.draws += 1;
   const view = document.getElementById('setup-view');
   // A refused press was about the screen it was made on: once that has moved on, so has it.
   const screen = JSON.stringify([answer.step, answer.lines, answer.pre, answer.actions]);
@@ -14793,27 +14811,51 @@ function drawSetupView(answer, steps) {
   pre.textContent = answer.pre || '';
   pre.hidden = !answer.pre;
   drawSetupForm(answer);
-  // A refusal the answer already says is not said twice.
-  setupSayError(document.getElementById('setup-press-error'), answer.error ? '' : setupView.pressError);
+  // A refusal the answer already says is not said twice; any other is.
+  setupSayError(document.getElementById('setup-press-error'), answer.error && answer.error.message === setupView.pressError ? '' : setupView.pressError);
   const presses = [];
-  if (answer.form) presses.push(setupActionButton({ id: 'formSave', label: 'Save and continue' }, true, () => { saveSetupForm(answer.form); }));
+  if (answer.form) presses.push(setupActionButton({ id: 'formSave', label: 'Save and continue' }, true, null));
   answer.actions.forEach((action, i) => {
     // Not now is never what the screen offers first, whatever else there is.
     const primary = !answer.form && i === 0 && action.id !== 'setupLater';
     presses.push(setupActionButton(action, primary, () => { pressSetupAction(action.id); }));
   });
+  const held = document.activeElement && document.activeElement.closest('#setup-actions') ? document.activeElement.id : null;
+  if (held) setupView.focusId = held;
   document.getElementById('setup-actions').replaceChildren(...presses);
+  placeSetupFocus(answer);
 }
 
-function setSetupPressesDisabled(disabled) {
-  document.querySelectorAll('#setup-actions button').forEach((btn) => { btn.disabled = disabled; });
+// A new screen starts at its form or its first press; a repaint of the same screen
+// leaves the owner where they were. Never from under the settings drawer.
+function placeSetupFocus(answer) {
+  const screen = JSON.stringify([answer.step, answer.form, answer.actions.map((a) => a.id)]);
+  const changed = setupView.focusScreen !== screen;
+  setupView.focusScreen = screen;
+  if (changed) setupView.focusId = null;
+  if (!document.getElementById('settings-drawer')?.hidden) return;
+  const nothingHeld = !document.activeElement || document.activeElement === document.body;
+  let target = null;
+  if (changed) {
+    target = document.querySelector('#setup-form:not([hidden]) input, #setup-form:not([hidden]) select')
+      || document.querySelector('#setup-actions .btn-primary:not(:disabled)');
+  } else if (nothingHeld && setupView.focusId) {
+    target = document.getElementById(setupView.focusId);
+  }
+  if (target && !target.disabled) target.focus();
+}
+
+function disableSetupPresses() {
+  document.querySelectorAll('#setup-actions button').forEach((btn) => { btn.disabled = true; });
 }
 
 async function runSetupPress(work) {
   if (setupView.pressing) return;
   setupView.pressing = true;
   setupView.pressError = null;
-  setSetupPressesDisabled(true);
+  const pressed = document.activeElement && document.activeElement.closest('#setup-actions');
+  if (pressed) setupView.focusId = pressed.id;
+  disableSetupPresses();
   try {
     const result = await work();
     if (result && result.ok === false) setupView.pressError = result.error || result.message || result.code || 'That did not work.';
@@ -14821,11 +14863,15 @@ async function runSetupPress(work) {
     setupView.pressError = (err && err.message) || 'That did not work.';
   }
   setupView.pressing = false;
+  const drawn = setupView.draws;
   try {
     await refreshServiceStatus();
   } finally {
-    // A refresh that could not read the status draws nothing, so nothing else turns them on.
-    if (setupView.active && !setupView.pressing) setSetupPressesDisabled(false);
+    // A refresh that could not read the status drew nothing: the last answer again, so
+    // each button has its own state back and the refusal is on screen.
+    if (setupView.active && setupView.answer && !setupView.pressing && setupView.draws === drawn) {
+      drawSetupView(setupView.answer, setupView.stepWords || []);
+    }
   }
 }
 
@@ -14885,18 +14931,30 @@ function saveSetupForm(step) {
 async function refreshSetupView(status) {
   if (!status.launch || status.launch.host !== 'attached') {
     leaveSetupView();
+    revealShell();
     return;
   }
   const generation = ++setupView.generation;
   // Known at once from the status, and the step can wait on a slow read of the old
   // profile: no chat with no node meanwhile.
-  if (status.setup && status.setup.step && status.setup.step !== 'done') enterSetupView();
+  if (status.setup && status.setup.step && status.setup.step !== 'done') {
+    enterSetupView();
+    revealShell();
+  }
   let answer;
   try {
     answer = await window.electron.desktop.setupStep();
   } catch (err) {
     answer = { ok: false, error: err && err.message };
   }
+  try {
+    await drawSetupAnswer(answer, status, generation);
+  } finally {
+    revealShell();
+  }
+}
+
+async function drawSetupAnswer(answer, status, generation) {
   if (generation !== setupView.generation) return;
   if (!answer || answer.ok === false) {
     // Past the setup, a failed read of it is no reason to take the chat away.
@@ -14924,12 +14982,20 @@ async function refreshSetupView(status) {
 }
 // -- setup view: end
 
+document.getElementById('setup-form')?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  if (setupView.formStep) saveSetupForm(setupView.formStep);
+});
+
 async function refreshServiceStatus() {
   const status = await window.electron.desktop.status().catch((err) => {
     serviceLog.warn('fetching desktop status failed', { error: err && err.message });
     return null;
   });
-  if (!status || status.ok === false) return;
+  if (!status || status.ok === false) {
+    revealShell();
+    return;
+  }
   markUnavailableTabs(status.unavailableTabs || []);
   renderAttachedBanner(status);
   await refreshSetupView(status);

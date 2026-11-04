@@ -131,6 +131,7 @@ describe('E2E: the setup view', { skip }, () => {
     it('shows the view within 20 s, and no chat', async () => {
       await waitFor(ctx, shown('#setup-view'), 20000);
       await waitFor(ctx, `document.getElementById('setup-lines').textContent.length > 0 || document.getElementById('setup-error').textContent.length > 0`, 20000);
+      assert.strictEqual(await evaluate(ctx, `document.documentElement.classList.contains('setup-pending')`), false);
       assert.strictEqual(await evaluate(ctx, shown('#user-input')), false);
       assert.strictEqual(await evaluate(ctx, shown('.sidebar')), false);
       assert.strictEqual(await evaluate(ctx, shown('#open-settings-btn')), false);
@@ -138,10 +139,9 @@ describe('E2E: the setup view', { skip }, () => {
     });
 
     it('offers Install, or says what stops it, with a primary press either way', async () => {
-      await waitFor(ctx, shown('#setup-actions .btn-primary'), 20000);
-      const offered = await evaluate(ctx, `Boolean(document.getElementById('setup-action-nodeInstallPreview'))`);
-      const refused = await evaluate(ctx, `document.getElementById('setup-error').textContent`);
-      assert.ok(offered || refused.length > 0, 'an action or a refusal');
+      // The read of the old profile can hold the reading line for a while first.
+      await waitFor(ctx, `Boolean(document.getElementById('setup-action-nodeInstallPreview')) || document.getElementById('setup-error').textContent.length > 0`, 20000);
+      assert.ok(await evaluate(ctx, shown('#setup-actions .btn-primary')), 'a primary press');
       await shot(ctx, '1-fresh');
     });
 
@@ -330,9 +330,20 @@ describe('E2E: the setup view', { skip }, () => {
       await showStatus(ctx, connected({ service: { hosting: 'personal', providersConfigured: false } }));
       await new Promise((r) => setTimeout(r, 300));
       assert.strictEqual(await evaluate(ctx, `document.getElementById('wizard-apikey').value`), 'sk-example-not-a-key');
+      assert.strictEqual(await evaluate(ctx, `document.querySelector('#wizard-provider option[value="ollama"]')`), null, 'no key for Ollama here');
+      assert.match(await evaluate(ctx, viewText()), /To use Ollama/);
+      assert.strictEqual(await evaluate(ctx, `document.activeElement.id`), 'wizard-provider', 'a new screen starts at its form');
       await shot(ctx, '6-provider');
-      await evaluate(ctx, `document.getElementById('setup-action-formSave').click(); true`);
+      await evaluate(ctx, `document.getElementById('wizard-apikey').focus(); true`);
+      await showStatus(ctx, connected({ service: { hosting: 'personal', providersConfigured: false } }));
+      await new Promise((r) => setTimeout(r, 300));
+      assert.strictEqual(await evaluate(ctx, `document.activeElement.id`), 'wizard-apikey', 'a repaint leaves the focus');
+      const before = (await saves(ctx)).length;
+      const page = await ctx.electronApp.firstWindow();
+      await page.keyboard.press('Enter');
       await waitFor(ctx, `!document.getElementById('setup-action-formSave').disabled`, 10000);
+      await new Promise((r) => setTimeout(r, 200));
+      assert.strictEqual((await saves(ctx)).length, before + 1, 'Enter submits the form');
       assert.deepStrictEqual((await saves(ctx)).at(-1), { channel: 'settings:saveProvider', keys: ['provider', 'token'] });
     });
 
@@ -363,6 +374,10 @@ describe('E2E: the setup view', { skip }, () => {
       await waitFor(ctx, shown('#setup-action-nodeRestart'), 10000);
       assert.match(await evaluate(ctx, `document.getElementById('setup-error').textContent`), /did not restart/);
       assert.strictEqual(await evaluate(ctx, shown('#wizard-name')), true);
+      await ctx.electronApp.evaluate(() => { globalThis.klStub.saveAnswer = { ok: false, code: 'X', error: 'The save was refused.' }; });
+      await evaluate(ctx, `document.getElementById('wizard-name').value = 'Example Owner'; document.getElementById('setup-action-formSave').click(); true`);
+      await waitFor(ctx, `document.getElementById('setup-press-error').textContent === 'The save was refused.' && document.getElementById('setup-press-error').checkVisibility()`, 5000);
+      await ctx.electronApp.evaluate(() => { globalThis.klStub.saveAnswer = { ok: true }; });
       await shot(ctx, '8-restart-failed');
     });
 
@@ -394,6 +409,23 @@ describe('E2E: the setup view', { skip }, () => {
       await shot(ctx, '11-after-done');
     });
 
+    it('a failed refresh gives each button its own state back', async () => {
+      const shownBefore = await showStatus(ctx, { view: 'pairing', pendingPair: { request: 'r', deviceFingerprint: 'aa', command: 'king-louie-service desktop pair r', service: null }, node: { fresh: true } });
+      assert.ok(shownBefore.actions.some((a) => a.id === 'pairConfirm' && a.disabled), JSON.stringify(shownBefore.actions));
+      await waitFor(ctx, shown('#setup-action-pairConfirm'), 10000);
+      await ctx.electronApp.evaluate(({ ipcMain }) => {
+        ipcMain.removeHandler('desktop:status');
+        ipcMain.handle('desktop:status', () => { throw new Error('no status'); });
+      });
+      await evaluate(ctx, `document.getElementById('setup-action-pairCancel').click(); true`);
+      await waitFor(ctx, `!document.getElementById('setup-action-pairCancel').disabled`, 10000);
+      assert.strictEqual(await evaluate(ctx, `document.getElementById('setup-action-pairConfirm').disabled`), true, 'Confirm stays off');
+      await ctx.electronApp.evaluate(({ ipcMain }) => {
+        ipcMain.removeHandler('desktop:status');
+        ipcMain.handle('desktop:status', () => globalThis.klStub.status);
+      });
+    });
+
     it('a fleet pairing has no setup to show', async () => {
       const answer = await showStatus(ctx, connected({ pairing: { service: { hosting: 'service' } } }));
       assert.deepStrictEqual([answer.step, answer.lines, answer.actions], ['done', [], []]);
@@ -413,6 +445,8 @@ describe('E2E: the setup view', { skip }, () => {
       assert.strictEqual(await evaluate(ctx, shown('#setup-view')), false);
       assert.strictEqual(await evaluate(ctx, `document.body.classList.contains('setup-active')`), false);
       assert.strictEqual(await evaluate(ctx, shown('.sidebar')), true);
+      assert.strictEqual(await evaluate(ctx, `document.documentElement.classList.contains('setup-pending')`), false);
+      assert.strictEqual(await evaluate(ctx, `location.search`), '', 'a standalone launch loads as it always has');
       await shot(ctx, '12-standalone-dev');
     });
   });
