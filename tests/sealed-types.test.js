@@ -19,7 +19,7 @@ const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 // this list and SEAL_SPLIT together.
 const CONTENT_TYPES = ['kl.approval.request', 'kl.lease.request', 'kl.lease.status', 'kl.lease.view', 'kl.question.ask', 'kl.question.answer'];
 // The types whose sealed shape a later task's validator takes.
-const NOT_YET = { 'kl.lease.request': 'Task 7', 'kl.lease.status': 'Task 7', 'kl.lease.view': 'Task 7', 'kl.question.ask': 'Task 6', 'kl.question.answer': 'Task 6' };
+const NOT_YET = { 'kl.lease.request': 'Task 7', 'kl.lease.status': 'Task 7', 'kl.lease.view': 'Task 7' };
 
 const node = testNodeIdentity({ box: true });
 const phone = createFakePhone({ boxKey: true });
@@ -48,11 +48,11 @@ const FULL = {
     foreground: { app_id: null, matches: false }, frame: null, frame_dropped: false, actions: []
   },
   'kl.question.ask': {
-    v: 1, type: 'kl.question.ask', node_id: node.nodeId, token: 'ABCD2345', kind: 'question', urgency: 'normal', expires_at: LATER, node_box: node.box.jwk,
+    v: 1, type: 'kl.question.ask', node_id: node.nodeId, token: 'ABCD23', kind: 'question', urgency: 'normal', expires_at: LATER, node_box: node.box.jwk,
     case_id: 'case-1', question_id: 'q-0001', case_title: 'Lakeside lot', text: 'Which one?', options: []
   },
   'kl.question.answer': {
-    v: 1, type: 'kl.question.answer', node_id: node.nodeId, token: 'ABCD2345', device_id: phone.deviceId, nonce: NONCE, signed_at: NOW,
+    v: 1, type: 'kl.question.answer', node_id: node.nodeId, token: 'ABCD23', device_id: phone.deviceId, nonce: NONCE, signed_at: NOW,
     case_id: 'case-1', question_id: 'q-0001', answer: { text: 'The first' }
   }
 };

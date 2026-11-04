@@ -1,0 +1,52 @@
+{
+  "name": "question-ask-sealed",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    },
+    "type": "kl.question.ask",
+    "node_public_key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-c2ubd6jjqumalzt5",
+    "payload": "eyJleHBpcmVzX2F0IjpudWxsLCJraW5kIjoicXVlc3Rpb24iLCJub2RlX2JveCI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6InRzWUc2ZmZVcGJqczkwUnp3RlF5RUZxS194a3piTzJYZkFVLXk3M01KTXciLCJ5IjoicVNsd2Y4a2xSR1BVU3BTQXdvR1d2eEZoZU9HTktWa200YXhPclplVUpZUSJ9LCJub2RlX2lkIjoia2wtYzJ1YmQ2ampxdW1hbHp0NSIsInNlYWxlZCI6eyJjdCI6IkNXMTY2T0xETmhSMWJHZ3F5MlJvSEZzeThjd2Y0MEdPdVdKejNsOVU1bTBfc0xPNVpTZWRqckZsNUtCSkszMnMzYUFTWVVmVF9LSXJlZkl4WWRxU1JJenpTSm15N2pFS0hvT2F2eDhUdFZVQW5qOGt3ZjFmQ1BCaXBTc0FKMUhLTHVacEQ0dEM5VEtjcWM3WXRjMTBzbHk2YTNYbXJpZlc3VFFyWnQ5dlhUUzFqSnpZSTBKUUJoQ01yc0U0d0lGX2E2YWdaZ3RmNlZiSzRDRFgxMnFWU1lnczUyOElpLWJDYTZ1dTYtdjgtT1lqMWkzUG9BOFhtVWpKd0ZzIiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiYnk5WlNnNXJFalRxOGhMNTdPalhOZEZValZrZGxWanBMRlpDYXVXUWxTSSIsInkiOiJ0UTNyUGk1Nm1JRThya2ZnY1pjbDFUOFN5YllOMjl0X3ZGNXM1MzB1clRnIn0sIml2IjoiRDdDZU9YZUduYlNFdjVjcSIsImtleXMiOnsiZC0zdm13cmloaGRibml0NG9pIjoib3RjVy1yYjhnUHlvR3ZmY2xnZUtKREt3eU1xTFhwQUJvZ25CUkZUUWsydENya2pUdTJRV1pmV19ndkpYSU1CVCIsImQtNnhkbGJ4Z2xobnZmYTNsdyI6InFZRWxtcTAyN1AwV2Qzdm5LMFJiY2VSb0F1aXp3N1M0Zzd4SkszQ21vOXdNS0NkcE1TQnU0cXRoc09uZGJZbjAiLCJrbC1jMnViZDZqanF1bWFsenQ1IjoiT2I1bVM0aUsyek9WVjB0eWVzSTRVYnlMNmtPdzZaMjh1dnBFZ25pc1ltNlBKMTF2YWpraVdoR2VzMWR4QTNaTiJ9LCJ2IjoxfSwidG9rZW4iOiI3UUQ0S00iLCJ0eXBlIjoia2wucXVlc3Rpb24uYXNrIiwidXJnZW5jeSI6ImhpZ2giLCJ2IjoxfQ",
+    "sig": "odcbbR-3_xf2rpD6xzJ2xC-XodM89RVBBITUNe4B-1IctSK0oD3X3c0L_UetdooD5B8l4dBUTM4SD4NvV4p9BA"
+  },
+  "expect": {
+    "reason": null,
+    "message": {
+      "v": 1,
+      "type": "kl.question.ask",
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "token": "7QD4KM",
+      "kind": "question",
+      "urgency": "high",
+      "expires_at": null,
+      "node_box": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw",
+        "y": "qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ"
+      },
+      "case_id": "mfz1k2-0a1b2c3d",
+      "question_id": "q-0012",
+      "case_title": "Lakeside lot",
+      "text": "Accept the 41k offer?",
+      "options": [
+        {
+          "id": "a",
+          "label": "Yes"
+        },
+        {
+          "id": "b",
+          "label": "No"
+        }
+      ]
+    }
+  }
+}

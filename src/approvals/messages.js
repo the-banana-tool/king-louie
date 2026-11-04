@@ -499,6 +499,7 @@ module.exports = {
   NODE_ID_RE,
   MAX_ACTION_BYTES,
   SEALED_PAYLOAD_MAX,
+  sealTargets,
   validateOpenedRequest,
   TTL_MIN_MS,
   TTL_MAX_MS,

@@ -10,12 +10,13 @@ const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { canonicalize } = require('../src/platform/jcs');
-const { open, deviceIdFromJwk, deriveDeviceId, fingerprintGroups, fromB64url, verifyEs256 } = require('../src/approvals/envelope');
+const { open, deviceIdFromJwk, deriveDeviceId, fingerprintGroups, fromB64url, verifyEs256, verifyEd25519 } = require('../src/approvals/envelope');
 const { phoneAuthString, validateMessage } = require('../src/approvals/messages');
 const { verifyConsoleEnrollment } = require('../src/approvals/verify-device');
 const { openSealed, saltedHash, SealError } = require('../src/approvals/seal');
 const { PhoneApprover } = require('../src/approvals/phone-approver');
 const { verifyAuditSlice } = require('../src/audit/audit-ledger');
+require('../src/channels/mobile-app-channel'); // registers the kl.question.* validators
 const { setLogLevel } = require('../src/logging');
 const { testNodeIdentity, createFakePhone, KEYS } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
@@ -42,6 +43,8 @@ const SEAL = ['seal-open', 'seal-not-recipient', 'seal-tampered-ct', 'seal-tampe
 const BOX_KEY = ['enroll-console-box-key', 'enroll-console-box-key-equal', 'enroll-signed-box-key', 'box-key-valid', 'box-key-wrong-signer', 'box-key-stale'];
 // Sealed tool approvals (R-SP-2, R-SP-5): the node's for now.
 const SEALED_APPROVAL = ['request-sealed-display', 'response-approve-sealed', 'response-reject-sealed-changed-parameter', 'response-reject-sealed-hash-unsalted'];
+// Sealed questions (R-SP-4): the node's for now.
+const SEALED_QUESTION = ['question-ask-sealed', 'question-answer-sealed'];
 const EXPECTED = [
   'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
   'request-malformed', 'request-display-edge', 'request-malformed-equivalent-keys',
@@ -55,7 +58,8 @@ const EXPECTED = [
   ...READ_KEY,
   ...SEAL,
   ...BOX_KEY,
-  ...SEALED_APPROVAL
+  ...SEALED_APPROVAL,
+  ...SEALED_QUESTION
 ];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json') && f !== 'keys.json')
@@ -123,9 +127,9 @@ describe('approval-v1 vectors', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
   });
 
-  it('66 vectors; the read-key ones name node and android only, android where the phone builds or signs; the box-key and sealed approval ones the node alone', () => {
-    assert.equal(EXPECTED.length, 66);
-    for (const name of [...BOX_KEY, ...SEALED_APPROVAL]) assert.deepEqual(byName.get(name).consumers, ['node'], name);
+  it('68 vectors; the read-key ones name node and android only, android where the phone builds or signs; the box-key, sealed approval and sealed question ones the node alone', () => {
+    assert.equal(EXPECTED.length, 68);
+    for (const name of [...BOX_KEY, ...SEALED_APPROVAL, ...SEALED_QUESTION]) assert.deepEqual(byName.get(name).consumers, ['node'], name);
     for (const name of READ_KEY) {
       const want = READ_KEY_ANDROID.includes(name) ? ['node', 'android'] : ['node'];
       assert.deepEqual(byName.get(name).consumers, want, name);
@@ -246,6 +250,39 @@ describe('approval-v1 vectors', () => {
     assert.ok(keys.includes(composed) && keys.includes(decomposed), 'the params carry both forms of the key');
     assert.equal(validateMessage('kl.approval.request', message), null, 'the node keeps both keys and accepts the shape');
     assert.deepEqual(phoneView(v.input, { pinned: v.given.pinned_nodes }), { shown: false, reason: 'malformed', display: null });
+  });
+
+  const agreeWith = (d) => {
+    const ecdh = crypto.createECDH('prime256v1');
+    ecdh.setPrivateKey(fromB64url(d));
+    return (jwk) => ecdh.computeSecret(Buffer.concat([Buffer.from([0x04]), fromB64url(jwk.x), fromB64url(jwk.y)]));
+  };
+
+  it('question-ask-sealed: signed by the node, its clear part has no content, and the box opens it to the clear ask', () => {
+    const v = byName.get('question-ask-sealed');
+    assert.equal(verifyEd25519(v.input, v.given.node_public_key), true);
+    const { message } = open(v.input);
+    assert.equal(validateMessage(v.given.type, message), null);
+    for (const key of ['case_id', 'question_id', 'case_title', 'text', 'options']) assert.ok(!Object.hasOwn(message, key), key);
+    const opened = openSealed({ type: v.given.type, message, recipientId: v.given.box.device_id, agree: agreeWith(v.given.box.d) });
+    assert.deepEqual(opened.message, v.expect.message);
+    assert.equal(validateMessage(v.given.type, opened.message), null);
+  });
+
+  it('question-answer-sealed: signed by the device, opened by the node, the whole answer of given.ask and given.answer', () => {
+    const v = byName.get('question-answer-sealed');
+    assert.equal(verifyEs256(v.input, v.given.device.jwk), true);
+    const { message } = open(v.input);
+    assert.equal(validateMessage(v.given.type, message), null);
+    for (const key of ['case_id', 'question_id', 'answer']) assert.ok(!Object.hasOwn(message, key), key);
+    assert.deepEqual(Object.keys(message.sealed.keys), [v.given.box.node_id]);
+    const opened = openSealed({ type: v.given.type, message, recipientId: v.given.box.node_id, agree: agreeWith(v.given.box.d) });
+    assert.deepEqual(opened.message, v.expect.message);
+    assert.equal(validateMessage(v.given.type, opened.message), null);
+    assert.equal(opened.message.case_id, v.given.ask.case_id);
+    assert.equal(opened.message.question_id, v.given.ask.question_id);
+    assert.equal(opened.message.token, v.given.ask.token);
+    assert.deepEqual(opened.message.answer, v.given.answer);
   });
 
   it('request-sealed-display: a sealed request shows what the clear one shows, and only to a box that opens it', () => {

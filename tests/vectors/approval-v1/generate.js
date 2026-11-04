@@ -15,7 +15,7 @@ const path = require('path');
 const { canonicalize } = require('../../../src/platform/jcs');
 const { seal, fromB64url, verifyEs256, nodeSigner, deviceIdFromJwk } = require('../../../src/approvals/envelope');
 const { enrollMac, phoneAuthString, READ_KEY_MAX_MS, BOX_KEY_MAX_MS } = require('../../../src/approvals/messages');
-const { sealContent, saltedHash } = require('../../../src/approvals/seal');
+const { sealContent, saltedHash, splitMessage } = require('../../../src/approvals/seal');
 const { deriveNodeId, base32Encode } = require('../../../src/mesh/node-identity');
 const { AuditLedger, entryHash } = require('../../../src/audit/audit-ledger');
 const { phoneView, phoneReadAuthString } = require('./phone-reference');
@@ -553,6 +553,42 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     ...sealedGiven, current_action: { ...toolActionLit, params: { command: 'git push --force origin main' }, summary: 'Bash(git push --force origin main)' }
   });
   nodeVector('response-reject-sealed-hash-unsalted', 10, respondSealed({ action_hash: unsalted }), { accepted: false, reason: 'action_hash_mismatch' }, sealedGiven);
+
+  // ── Sealed questions (R-SP-4): the ask to both phones and the node, the answer
+  // to the node. The node's for now; a phone builds the answer from given.ask
+  // and given.answer, sealed to the ask's node_box.
+  const askType = 'kl.question.ask';
+  const fullAsk = {
+    v: 1, type: askType, node_id: web.nodeId, token: '7QD4KM', kind: 'question', urgency: 'high', expires_at: null, node_box: webBox,
+    case_id: 'mfz1k2-0a1b2c3d', question_id: 'q-0012', case_title: 'Lakeside lot', text: 'Accept the 41k offer?', options: [{ id: 'a', label: 'Yes' }, { id: 'b', label: 'No' }]
+  };
+  const askSplit = splitMessage(askType, fullAsk);
+  const sealedAsk = sealContent({
+    type: askType, senderId: web.nodeId, clear: askSplit.clear, content: askSplit.content, recipients: { ...boxA, ...boxB, [web.nodeId]: webBox },
+    ephemeral: fixedBox(sha('sealed ask epk')), random: (n) => (n === 32 ? sha('sealed ask cek') : sha('sealed ask iv').subarray(0, n))
+  });
+  add({
+    name: 'question-ask-sealed', consumers: ['node'], given: { box: boxOfA, type: askType, node_public_key: web.key },
+    input: seal(sealedAsk, nodeSigner(web)), expect: { reason: null, message: fullAsk }
+  });
+  const answerType = 'kl.question.answer';
+  const fullAnswer = {
+    v: 1, type: answerType, node_id: web.nodeId, token: fullAsk.token, device_id: A.id, nonce: nonceOf('sealed answer'), signed_at: NOW,
+    case_id: fullAsk.case_id, question_id: fullAsk.question_id, answer: { option_id: 'a' }
+  };
+  const answerSplit = splitMessage(answerType, fullAnswer);
+  const sealedReply = sealContent({
+    type: answerType, senderId: A.id, clear: answerSplit.clear, content: answerSplit.content, recipients: { [web.nodeId]: webBox },
+    ephemeral: fixedBox(sha('sealed answer epk')), random: (n) => (n === 32 ? sha('sealed answer cek') : sha('sealed answer iv').subarray(0, n))
+  });
+  add({
+    name: 'question-answer-sealed', consumers: ['node'],
+    given: {
+      box: { node_id: web.nodeId, d: KEYS.nodes['web-01'].box.d }, type: answerType, device: { device_id: A.id, jwk: A.jwk },
+      ask: fullAsk, answer: fullAnswer.answer, nonce: fullAnswer.nonce, signed_at: NOW
+    },
+    input: seal(sealedReply, A), expect: { reason: null, message: fullAnswer }
+  });
 
   return vectors;
 }

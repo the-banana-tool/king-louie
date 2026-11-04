@@ -243,7 +243,9 @@ class ContactRouter {
       batchToken: token,
       idempotencyKey: id,
       status: 'sending',
-      items: message.items.map((i) => ({ n: i.n, caseId: i.caseId, questionId: i.questionId, token: i.token, kind: i.kind, answerable: i.answerable }))
+      items: message.items.map((i) => ({ n: i.n, caseId: i.caseId, questionId: i.questionId, token: i.token, kind: i.kind, answerable: i.answerable })),
+      // Only the phone seals; the phone's answers are held to this (R-SP-4).
+      ...(typeof adapter.sealsQuestions === 'function' && adapter.sealsQuestions() ? { sealed: true } : {})
     };
     this.state.recordDelivery(id, record);
     let sent;
