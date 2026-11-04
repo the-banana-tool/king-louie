@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { canonicalize, sha256b64url } = require('../platform/jcs');
 const { seal, open, nodeSigner, deriveDeviceId, deviceIdFromJwk, fingerprintGroups, isDeviceJwk, samePoint, fromB64url, toB64url, EnvelopeError } = require('./envelope');
+const { boxKeyFingerprint } = require('./seal');
 
 class MessageError extends Error {
   constructor(reason, detail = '') {
@@ -34,6 +35,7 @@ const TTL_MAX_MS = 300000;
 const ENROLL_MAX_MS = 10 * 60 * 1000;
 const REVOKE_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const READ_KEY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+const BOX_KEY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const PLATFORMS = ['ios', 'android', 'demo'];
 const STATUS_STATES = ['approved', 'denied', 'expired', 'withdrawn', 'refused'];
 
@@ -285,16 +287,21 @@ function checkOrigin(origin) {
 
 const DEVICE_KEYS = ['device_id', 'name', 'platform', 'public_key'];
 
-// The four keys of today, or exactly those and `read_key` (android-slim spec
-// §8.2): a P-256 JWK on the curve whose point is not `public_key`'s. The
-// device id still derives from `public_key` alone.
+// The four keys of today, or those and `read_key` (android-slim spec §8.2)
+// and `box_key` (sealed phones, R-SP-10): each a P-256 JWK on the curve whose
+// point is no other key's here. The device id still derives from `public_key`
+// alone.
 function isDevice(device) {
   if (!isPlainObject(device)) return false;
   const withReadKey = Object.hasOwn(device, 'read_key');
-  if (!hasExactKeys(device, withReadKey ? [...DEVICE_KEYS, 'read_key'] : DEVICE_KEYS)) return false;
+  const withBoxKey = Object.hasOwn(device, 'box_key');
+  const keys = [...DEVICE_KEYS, ...(withReadKey ? ['read_key'] : []), ...(withBoxKey ? ['box_key'] : [])];
+  if (!hasExactKeys(device, keys)) return false;
   if (!isString(device.name) || device.name.length < 1 || device.name.length > 64) return false;
   if (!PLATFORMS.includes(device.platform) || !isDeviceJwk(device.public_key)) return false;
   if (withReadKey && (!isDeviceJwk(device.read_key) || samePoint(device.read_key, device.public_key))) return false;
+  if (withBoxKey && (!isDeviceJwk(device.box_key) || samePoint(device.box_key, device.public_key))) return false;
+  if (withReadKey && withBoxKey && samePoint(device.box_key, device.read_key)) return false;
   return DEVICE_ID_RE.test(device.device_id) && deviceIdFromJwk(device.public_key) === device.device_id;
 }
 
@@ -334,6 +341,15 @@ const VALIDATORS = {
     if (!isTimestamp(m.created_at) || !isTimestamp(m.expires_at) || !NONCE_RE.test(m.nonce)) return false;
     const span = Date.parse(m.expires_at) - Date.parse(m.created_at);
     return span > 0 && span <= READ_KEY_MAX_MS;
+  },
+  // The device key's statement of its box key (sealed phones, R-SP-10), as for
+  // the read key. There is no form of it that takes a box key away.
+  'kl.device.box_key': (m) => {
+    if (!hasExactKeys(m, ['v', 'type', 'device_id', 'box_key', 'created_at', 'expires_at', 'nonce'])) return false;
+    if (!DEVICE_ID_RE.test(m.device_id) || !isDeviceJwk(m.box_key)) return false;
+    if (!isTimestamp(m.created_at) || !isTimestamp(m.expires_at) || !NONCE_RE.test(m.nonce)) return false;
+    const span = Date.parse(m.expires_at) - Date.parse(m.created_at);
+    return span > 0 && span <= BOX_KEY_MAX_MS;
   },
   'kl.enroll.open': (m) => hasExactKeys(m, ['v', 'type', 'node_id', 'code_id', 'expires_at', 'nonce'])
     && NODE_ID_RE.test(m.node_id) && CODE_ID_RE.test(m.code_id) && isTimestamp(m.expires_at) && NONCE_RE.test(m.nonce),
@@ -424,8 +440,10 @@ module.exports = {
   enrollMac,
   inviteMac,
   READ_KEY_MAX_MS,
+  BOX_KEY_MAX_MS,
   phoneAuthString,
   readKeyFingerprint,
+  boxKeyFingerprint,
   isDevice,
   encodeQr,
   decodeQr,

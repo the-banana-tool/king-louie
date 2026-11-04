@@ -38,6 +38,8 @@ const READ_KEY = [
 const READ_KEY_ANDROID = ['phone-api-auth-read', 'enroll-console-read-key', 'read-key-valid'];
 // The seal (sealed phones, R-SP-1, R-SP-2): the node's for now.
 const SEAL = ['seal-open', 'seal-not-recipient', 'seal-tampered-ct', 'seal-tampered-clear', 'seal-hash-mismatch', 'seal-content-not-jcs', 'seal-content-clear-key'];
+// The box key (sealed phones, R-SP-10): the node's.
+const BOX_KEY = ['enroll-console-box-key', 'enroll-console-box-key-equal', 'enroll-signed-box-key', 'box-key-valid', 'box-key-wrong-signer', 'box-key-stale'];
 const EXPECTED = [
   'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
   'request-malformed', 'request-display-edge', 'request-malformed-equivalent-keys',
@@ -49,7 +51,8 @@ const EXPECTED = [
   'revoke-valid', 'revoke-self-rejected', 'revoke-mutual', 'audit-slice', 'phone-api-auth',
   // Revised 2026-10-28: the read key (android-slim spec §8.8).
   ...READ_KEY,
-  ...SEAL
+  ...SEAL,
+  ...BOX_KEY
 ];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json') && f !== 'keys.json')
@@ -114,8 +117,9 @@ describe('approval-v1 vectors', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
   });
 
-  it('56 vectors; the read-key ones name node and android only, android where the phone builds or signs', () => {
-    assert.equal(EXPECTED.length, 56);
+  it('62 vectors; the read-key ones name node and android only, android where the phone builds or signs; the box-key ones the node alone', () => {
+    assert.equal(EXPECTED.length, 62);
+    for (const name of BOX_KEY) assert.deepEqual(byName.get(name).consumers, ['node'], name);
     for (const name of READ_KEY) {
       const want = READ_KEY_ANDROID.includes(name) ? ['node', 'android'] : ['node'];
       assert.deepEqual(byName.get(name).consumers, want, name);
@@ -136,7 +140,7 @@ describe('approval-v1 vectors', () => {
     });
   }
 
-  for (const v of vectors.filter((x) => /^(enroll-signed|revoke-|read-key-)/.test(x.name))) {
+  for (const v of vectors.filter((x) => /^(enroll-signed|revoke-|read-key-|box-key-)/.test(x.name))) {
     it(v.name, async () => {
       const store = await approverStoreWith(v.given.approvers, { overlay: v.given.overlay, allowTestKeys: v.given.allow_test_keys, now: () => Date.parse(v.given.now) });
       stores.push(store);
@@ -152,6 +156,14 @@ describe('approval-v1 vectors', () => {
         });
         assert.deepEqual(staged, v.expect.staged_read_keys);
       }
+      // And the box key, the same way.
+      if (v.expect.staged_box_keys) {
+        const staged = v.input.filter((_, i) => results[i].state !== 'rejected').map((env) => {
+          const { message } = open(JSON.parse(fs.readFileSync(path.join(store.stagedDir, `${open(env).message.nonce}.json`), 'utf8')).envelope);
+          return message.type === 'kl.device.enroll' ? message.device.box_key : message.box_key;
+        });
+        assert.deepEqual(staged, v.expect.staged_box_keys);
+      }
     });
   }
 
@@ -161,6 +173,7 @@ describe('approval-v1 vectors', () => {
       const got = { accepted: r.ok, reason: r.ok ? null : r.reason, device_id: r.ok ? r.deviceId : null };
       // A console enrollment that carries a read key: the record `enroll-device` writes holds it.
       if (Object.hasOwn(v.expect, 'read_key')) got.read_key = r.ok ? r.message.device.read_key : null;
+      if (Object.hasOwn(v.expect, 'box_key')) got.box_key = r.ok ? r.message.device.box_key : null;
       assert.deepEqual(got, v.expect);
     });
   }

@@ -14,7 +14,7 @@ const os = require('os');
 const path = require('path');
 const { canonicalize } = require('../../../src/platform/jcs');
 const { seal, fromB64url, verifyEs256, nodeSigner, deviceIdFromJwk } = require('../../../src/approvals/envelope');
-const { enrollMac, phoneAuthString, READ_KEY_MAX_MS } = require('../../../src/approvals/messages');
+const { enrollMac, phoneAuthString, READ_KEY_MAX_MS, BOX_KEY_MAX_MS } = require('../../../src/approvals/messages');
 const { sealContent, saltedHash } = require('../../../src/approvals/seal');
 const { deriveNodeId, base32Encode } = require('../../../src/mesh/node-identity');
 const { AuditLedger, entryHash } = require('../../../src/audit/audit-ledger');
@@ -314,21 +314,21 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   // ── Enrollment and revocation ─────────────────────────────────────────────
   const code = sha('console code').toString('base64url');
   const codeId = codeIdOf('console');
-  // readKey: the read key's public half, sent beside the device key (android-slim §8.2).
-  const deviceOf = (dev, platform = 'android', readKey = null) => ({
-    device_id: dev.id, name: `Phone ${dev.id.slice(2, 6)}`, platform, public_key: dev.jwk, ...(readKey ? { read_key: readKey } : {})
+  // readKey, boxKey: public halves sent beside the device key (android-slim §8.2, R-SP-10).
+  const deviceOf = (dev, platform = 'android', readKey = null, boxKey = null) => ({
+    device_id: dev.id, name: `Phone ${dev.id.slice(2, 6)}`, platform, public_key: dev.jwk, ...(readKey ? { read_key: readKey } : {}), ...(boxKey ? { box_key: boxKey } : {})
   });
-  const consoleEnroll = (dev, macCode, { readKey = null, label = `enroll ${dev.id}` } = {}) => {
-    const base = { v: 1, type: 'kl.device.enroll', device: deviceOf(dev, 'android', readKey), enrolled_by: null, created_at: NOW, expires_at: iso(NOW_MS + 600000), nonce: nonceOf(label), code_id: codeId };
+  const consoleEnroll = (dev, macCode, { readKey = null, boxKey = null, label = `enroll ${dev.id}` } = {}) => {
+    const base = { v: 1, type: 'kl.device.enroll', device: deviceOf(dev, 'android', readKey, boxKey), enrolled_by: null, created_at: NOW, expires_at: iso(NOW_MS + 600000), nonce: nonceOf(label), code_id: codeId };
     return seal({ ...base, code_mac: enrollMac(macCode, base) }, dev);
   };
   const consoleGiven = { now: iso(NOW_MS + 60000), code_id: codeId, code, allow_test_keys: true };
   add({ name: 'enroll-console', consumers: ['node', 'ios', 'android'], given: consoleGiven, input: consoleEnroll(C, code), expect: { accepted: true, reason: null, device_id: C.id } });
   add({ name: 'enroll-console-bad-mac', consumers: ['node'], given: consoleGiven, input: consoleEnroll(C, sha('wrong code').toString('base64url')), expect: { accepted: false, reason: 'bad_mac', device_id: null } });
 
-  const signedEnroll = (by, dev, { platform = 'ios', readKey = null } = {}) => seal({
-    v: 1, type: 'kl.device.enroll', device: deviceOf(dev, platform, readKey), enrolled_by: by.id, created_at: NOW, expires_at: iso(NOW_MS + 600000),
-    nonce: nonceOf(readKey ? `signed ${by.id} ${dev.id} read key` : `signed ${by.id} ${dev.id}`)
+  const signedEnroll = (by, dev, { platform = 'ios', readKey = null, boxKey = null } = {}) => seal({
+    v: 1, type: 'kl.device.enroll', device: deviceOf(dev, platform, readKey, boxKey), enrolled_by: by.id, created_at: NOW, expires_at: iso(NOW_MS + 600000),
+    nonce: nonceOf(`signed ${by.id} ${dev.id}${readKey ? ' read key' : ''}${boxKey ? ' box key' : ''}`)
   }, by);
   const revoke = (by, target) => seal({ v: 1, type: 'kl.device.revoke', device_id: target.id, revoked_by: by.id, reason: 'lost phone', created_at: NOW, expires_at: iso(NOW_MS + 3600000), nonce: nonceOf(`revoke ${by.id} ${target.id}`) }, by);
   const stageGiven = { now: iso(NOW_MS + 60000), approvers: [approver(A), approver(B)], overlay: [], allow_test_keys: true };
@@ -373,6 +373,34 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   // Dated more than five minutes past the node's clock.
   stageVector('read-key-from-the-future', [seal(readKeyStatement(A, AR.jwk, { created: NOW_MS + 10 * 60000, label: `read key ${A.id} future` }), A)],
     [{ state: 'rejected', reason: 'from_the_future' }], [A.id, B.id]);
+
+  // ── The box key (sealed phones, R-SP-10): as the read key, the node's ───────
+  const AB = KEYS.devices.A_box.jwk;
+  const BB = KEYS.devices.B_box.jwk;
+  add({
+    name: 'enroll-console-box-key', consumers: ['node'], given: consoleGiven,
+    input: consoleEnroll(A, code, { boxKey: AB, label: `enroll ${A.id} box key` }),
+    expect: { accepted: true, reason: null, device_id: A.id, box_key: AB }
+  });
+  // A box key that is the read key beside it: the shape is wrong.
+  add({
+    name: 'enroll-console-box-key-equal', consumers: ['node'], given: consoleGiven,
+    input: consoleEnroll(A, code, { readKey: AR.jwk, boxKey: AR.jwk, label: `enroll ${A.id} box key equal` }),
+    expect: { accepted: false, reason: 'malformed', device_id: null, box_key: null }
+  });
+  stageVector('enroll-signed-box-key', [signedEnroll(A, B, { platform: 'android', boxKey: BB })], [{ state: 'staged' }], [A.id],
+    { approvers: [approver(A)] }, { expect: { staged_box_keys: [BB] } });
+  const boxKeyStatement = (dev, boxKey, { created = NOW_MS, label = `box key ${dev.id}` } = {}) => ({
+    v: 1, type: 'kl.device.box_key', device_id: dev.id, box_key: boxKey,
+    created_at: iso(created), expires_at: iso(created + BOX_KEY_MAX_MS), nonce: nonceOf(label)
+  });
+  const boxStatement = boxKeyStatement(A, AB);
+  stageVector('box-key-valid', [seal(boxStatement, A)], [{ state: 'box-key-pending-apply' }], [A.id, B.id], {}, { expect: { staged_box_keys: [AB] } });
+  // The same statement signed by the device's read key: only the device key may.
+  stageVector('box-key-wrong-signer', [seal(boxStatement, AR)], [{ state: 'rejected', reason: 'bad_signature' }], [A.id, B.id]);
+  // Not newer than the key the record holds: a relay's replay of an old statement.
+  stageVector('box-key-stale', [seal(boxKeyStatement(A, AB, { created: NOW_MS - 60000, label: `box key ${A.id} stale` }), A)],
+    [{ state: 'rejected', reason: 'stale' }], [A.id, B.id], { approvers: [approver(A, { box_key: BB, box_key_at: NOW }), approver(B)] });
 
   // ── History slice ─────────────────────────────────────────────────────────
   const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-vector-audit-'));

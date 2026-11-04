@@ -180,7 +180,7 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
     const { device } = check.message;
     // The name and platform come from the phone: printed without control or
     // bidi characters so they cannot rewrite what the administrator reads.
-    io.stdout.write(`Device "${printable(device.name)}" (${printable(device.platform)}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)}${withReadKey(device)} — does the phone show the same? [y/N] `);
+    io.stdout.write(`Device "${printable(device.name)}" (${printable(device.platform)}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)}${withReadKey(device)}${withBoxKey(device)} — does the phone show the same? [y/N] `);
     const answer = await readLine(io.stdin, { signal: expired.signal });
     if (answer === null) {
       await finish(null, true);
@@ -209,6 +209,7 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
         platform: device.platform,
         public_key: device.public_key,
         ...(device.read_key ? { read_key: device.read_key, read_key_at: check.message.created_at } : {}),
+        ...(device.box_key ? { box_key: device.box_key, box_key_at: check.message.created_at } : {}),
         enrolled_at: new Date(now()).toISOString(),
         enrolled_by: 'console',
         revoked_at: null,
@@ -285,6 +286,13 @@ function withReadKey(holder) {
   return ` with a read key ${readKeyText(holder.read_key)}`;
 }
 
+// " with a box key b-abcd efgh ijkl mnop" for one that holds one (sealed
+// phones, R-SP-10), else "".
+function withBoxKey(holder) {
+  if (!holder || !holder.box_key) return '';
+  return ` with a box key ${boxKeyText(holder.box_key)}`;
+}
+
 function describeState(store, record) {
   if (record.revoked_at) return `revoked ${record.revoked_at} by ${record.revoked_by}`;
   if (record.platform === 'demo') return 'demo (never accepted)';
@@ -308,7 +316,17 @@ function readKeyText(jwk) {
   }
 }
 
-// `recordsById` maps a device id to its approver record, for read-key statements.
+// As readKeyText, for a box key.
+function boxKeyText(jwk) {
+  const { boxKeyFingerprint } = require('../../approvals/messages');
+  try {
+    return boxKeyFingerprint(jwk);
+  } catch {
+    return '(malformed box key)';
+  }
+}
+
+// `recordsById` maps a device id to its approver record, for key statements.
 function describeStagedItem(item, now, recordsById = null) {
   if (item.type === 'unsafe' || item.type === 'unreadable') {
     return `${item.type}  ${item.file}  (${item.reason || item.error || 'unknown problem'})`;
@@ -317,17 +335,22 @@ function describeStagedItem(item, now, recordsById = null) {
   // never the data dir's received_at, which the service itself writes and so
   // does not get to use to set policy or displayed trust).
   const age = describeAge(item.message && item.message.created_at, now);
-  if (item.type === 'kl.device.read_key') {
-    // The device's own statement of its read key (android-slim spec §8.7):
-    // the device as this node knows it, and the new key's fingerprint.
+  if (item.type === 'kl.device.read_key' || item.type === 'kl.device.box_key') {
+    // The device's own statement of its read key (android-slim spec §8.7) or
+    // box key (sealed phones, R-SP-10): the device as this node knows it, and
+    // the new key's fingerprint.
     const record = recordsById && recordsById.get(item.deviceId);
     const name = record ? `"${printable(record.name)}"` : '(not an approver here)';
-    return `read key  ${item.deviceId}  ${name}  ${readKeyText(item.message.read_key)}  signed by the device itself  (${age})`;
+    const [word, text] = item.type === 'kl.device.read_key'
+      ? ['read key', readKeyText(item.message.read_key)]
+      : ['box key', boxKeyText(item.message.box_key)];
+    return `${word}  ${item.deviceId}  ${name}  ${text}  signed by the device itself  (${age})`;
   }
   if (item.type === 'kl.device.revoke') return `revoke  ${item.deviceId}  signed by ${item.signer}  (${age})`;
   const device = item.message && item.message.device;
   const readKey = device && device.read_key ? `  with a read key ${readKeyText(device.read_key)}` : '';
-  return `enroll  ${item.deviceId}${readKey}  signed by ${item.signer}  (${age})`;
+  const boxKey = device && device.box_key ? `  with a box key ${boxKeyText(device.box_key)}` : '';
+  return `enroll  ${item.deviceId}${readKey}${boxKey}  signed by ${item.signer}  (${age})`;
 }
 
 // "N min ago" from a signed timestamp; a phone clock ahead of this one reads
@@ -355,7 +378,7 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
     const records = store.list();
     if (records.length === 0) io.stdout.write('No approver devices on this node.\n');
     for (const r of records) {
-      io.stdout.write(`${fingerprintGroups(r.device_id)}  ${r.device_id}  ${printable(r.name)} (${printable(r.platform)})${r.read_key ? `  read key ${readKeyText(r.read_key)}` : ''}  ${describeState(store, r)}  enrolled by ${r.enrolled_by}\n`);
+      io.stdout.write(`${fingerprintGroups(r.device_id)}  ${r.device_id}  ${printable(r.name)} (${printable(r.platform)})${r.read_key ? `  read key ${readKeyText(r.read_key)}` : ''}${r.box_key ? `  box key ${boxKeyText(r.box_key)}` : ''}  ${describeState(store, r)}  enrolled by ${r.enrolled_by}\n`);
     }
     try {
       const staged = admin.listStaged();
@@ -408,7 +431,7 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
           const nowMs = (deps.now || Date.now)();
           const recordsById = new Map();
           for (const i of items) {
-            if (i.type !== 'kl.device.read_key') continue;
+            if (i.type !== 'kl.device.read_key' && i.type !== 'kl.device.box_key') continue;
             const record = admin.read(i.deviceId);
             if (record) recordsById.set(i.deviceId, record);
           }
@@ -438,6 +461,7 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
       if (r.result === 'enrolled') await ledger.append({ kind: 'device.enrolled', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'revoked') await ledger.append({ kind: 'device.revoked', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'read key set') await ledger.append({ kind: 'device.read_key_set', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
+      if (r.result === 'box key set') await ledger.append({ kind: 'device.box_key_set', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
     }
     return 0;
   } finally {

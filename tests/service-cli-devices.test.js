@@ -384,6 +384,124 @@ describe('the read key in the device commands', () => {
   });
 });
 
+// Sealed phones, R-SP-10: the box key's fingerprint, the same way.
+describe('the box key in the device commands', () => {
+  const crypto = require('crypto');
+  const { boxKeyFingerprint, readKeyFingerprint, iso, randomNonce } = require('../src/approvals/messages');
+  function boxJwk() {
+    const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const { kty, crv, x, y } = publicKey.export({ format: 'jwk' });
+    return { kty, crv, x, y };
+  }
+  function statement(phone, jwk, now = Date.now()) {
+    return phone.sign({ v: 1, type: 'kl.device.box_key', device_id: phone.deviceId, box_key: jwk, created_at: iso(now), expires_at: iso(now + 24 * 60 * 60 * 1000), nonce: randomNonce() });
+  }
+  function stagedNode(records) {
+    const n = node();
+    for (const r of records) fs.writeFileSync(path.join(n.configDir, 'approvers', `${r.device_id}.json`), JSON.stringify(r), { mode: 0o644 });
+    const store = new ApproverStore({ dir: path.join(n.configDir, 'approvers'), stagedDir: path.join(n.dataDir, 'approvals', 'staged'), ...storeOptions });
+    return { n, store };
+  }
+
+  it('enroll-device names the box key before asking, and the record keeps it', async () => {
+    const n = node();
+    const { pump, calls } = servicePump(n);
+    const io = streamIo();
+    const phone = createFakePhone({ name: 'Pixel 9' });
+    const box = boxJwk();
+    const running = runEnrollDevice({ ...n, io, deps });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    const envelope = phone.enroll({ device: { ...phone.device({ readKey: true }), box_key: box }, codeId: qr.code_id, code: qr.code });
+    pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope });
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    assert.ok(io.text.out.includes(` with a read key ${readKeyFingerprint(phone.readJwk)} with a box key ${boxKeyFingerprint(box)} — does the phone show the same? [y/N]`), io.text.out);
+    io.stdin.write('y\n');
+    assert.equal(await running, 0);
+    await waitFor(() => calls.some(([m]) => m === 'enroll.done'), 'enroll.done');
+    const record = JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${phone.deviceId}.json`), 'utf8'));
+    assert.deepEqual(record.box_key, box);
+    assert.equal(record.box_key_at, open(envelope).message.created_at);
+  });
+
+  it('enroll-device without a box key asks as before', async () => {
+    const n = node();
+    const { pump } = servicePump(n);
+    const io = streamIo();
+    const phone = createFakePhone();
+    const running = runEnrollDevice({ ...n, io, deps });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope: phone.enroll({ codeId: qr.code_id, code: qr.code }) });
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    assert.doesNotMatch(io.text.out, /box key/);
+    io.stdin.write('n\n');
+    assert.equal(await running, 1);
+  });
+
+  it('device apply shows a staged box-key statement with its fingerprint, asks, writes it after y, audits it, and device list shows it', async () => {
+    const a = createFakePhone({ name: 'Owner phone' });
+    const { n, store } = stagedNode([a.approverRecord()]);
+    await store.ready();
+    const box = boxJwk();
+    assert.equal(store.stage(statement(a, box)).state, 'box-key-pending-apply');
+    const onDisk = () => JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${a.deviceId}.json`), 'utf8'));
+
+    let io = streamIo();
+    let running = runDevice({ sub: 'apply', flags: {}, ...n, io, deps });
+    await waitFor(() => /Apply these\? \[y\/N\]/.test(io.text.out), 'the question');
+    assert.ok(io.text.out.includes(`box key  ${a.deviceId}  "Owner phone"  ${boxKeyFingerprint(box)}  signed by the device itself`), io.text.out);
+    io.stdin.write('n\n');
+    assert.equal(await running, 0);
+    assert.equal(onDisk().box_key, undefined);
+
+    io = streamIo();
+    running = runDevice({ sub: 'apply', flags: {}, ...n, io, deps });
+    await waitFor(() => /Apply these\? \[y\/N\]/.test(io.text.out), 'the question');
+    io.stdin.write('y\n');
+    assert.equal(await running, 0);
+    assert.ok(io.text.out.includes(`${a.deviceId}: box key set`), io.text.out);
+    assert.deepEqual(onDisk().box_key, box);
+    const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: null });
+    assert.deepEqual(ledger.tail(1).map((e) => [e.kind, e.data.device_id]), [['device.box_key_set', a.deviceId]]);
+
+    io = streamIo();
+    assert.equal(await runDevice({ sub: 'list', ...n, io, deps }), 0);
+    assert.ok(io.text.out.includes(`${a.deviceId}  Owner phone (android)  box key ${boxKeyFingerprint(box)}  active`), io.text.out);
+  });
+
+  it('device apply says rejected for a statement it will not write, and audits nothing', async () => {
+    const a = createFakePhone({ name: 'Owner phone' });
+    const current = boxJwk();
+    const setAt = iso(Date.now());
+    const { n } = stagedNode([{ ...a.approverRecord(), box_key: current, box_key_at: setAt }]);
+    const older = a.sign({ v: 1, type: 'kl.device.box_key', device_id: a.deviceId, box_key: boxJwk(), created_at: iso(Date.now() - 60000), expires_at: iso(Date.now() + 60000), nonce: randomNonce() });
+    const { message } = open(older);
+    const stagedDir = path.join(n.dataDir, 'approvals', 'staged');
+    fs.mkdirSync(stagedDir, { recursive: true });
+    fs.writeFileSync(path.join(stagedDir, `${message.nonce}.json`), JSON.stringify({ received_at: iso(Date.now()), envelope: older }));
+    const io = streamIo();
+    assert.equal(await runDevice({ sub: 'apply', flags: { yes: true }, ...n, io, deps }), 0);
+    assert.ok(io.text.out.includes(`${a.deviceId}: rejected: stale`), io.text.out);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${a.deviceId}.json`), 'utf8')).box_key, current);
+    const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: null });
+    assert.equal(ledger.tail(5).filter((e) => e.kind === 'device.box_key_set').length, 0);
+  });
+
+  it('device apply names the box key a staged enrollment carries', async () => {
+    const a = createFakePhone();
+    const { n, store } = stagedNode([a.approverRecord()]);
+    await store.ready();
+    const b = createFakePhone();
+    const box = boxJwk();
+    store.stage(a.enroll({ device: { ...b.device(), box_key: box } }));
+    const io = streamIo();
+    assert.equal(await runDevice({ sub: 'apply', flags: { yes: true }, ...n, io, deps }), 0);
+    assert.ok(io.text.out.includes(`enroll  ${b.deviceId}  with a box key ${boxKeyFingerprint(box)}  signed by ${a.deviceId}`), io.text.out);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${b.deviceId}.json`), 'utf8')).box_key, box);
+  });
+});
+
 describe('device list | revoke | apply', () => {
   it('the real CLI entry accepts --yes for "device apply" and refuses it for every other device command', async () => {
     const n = node();
@@ -575,6 +693,71 @@ describe('doctor', () => {
     await store.ready();
     assert.equal(store.stage(b.revoke(a.deviceId)).state, 'revoked-pending-apply');
     assert.equal(await count(), '1');
+  });
+
+  // Sealed phones, R-SP-11.
+  describe('the box key rows', () => {
+    const crypto = require('crypto');
+    const { fingerprintGroups } = require('../src/approvals/envelope');
+    const boxJwk = () => {
+      const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+      const { kty, crv, x, y } = publicKey.export({ format: 'jwk' });
+      return { kty, crv, x, y };
+    };
+    const put = (n, record) => fs.writeFileSync(path.join(n.configDir, 'approvers', `${record.device_id}.json`), JSON.stringify(record), { mode: 0o644 });
+    const rows = async (n) => {
+      const results = await runDoctor({ dataDir: n.dataDir, platform: 'win32' });
+      return { sealing: results.find((r) => r.check === 'sealing to phones'), without: results.find((r) => r.check === 'phones without a box key') };
+    };
+
+    it('no phones: off, none', async () => {
+      const { sealing, without } = await rows(node());
+      assert.deepEqual([sealing.ok, sealing.detail], [true, 'off: no phone has a box key yet']);
+      assert.deepEqual([without.ok, without.detail], [true, 'none']);
+    });
+
+    it('a phone with no box key: off, and its fingerprint', async () => {
+      const n = node();
+      const a = createFakePhone();
+      put(n, a.approverRecord());
+      const { sealing, without } = await rows(n);
+      assert.equal(sealing.detail, 'off: no phone has a box key yet');
+      assert.equal(without.detail, fingerprintGroups(a.deviceId));
+    });
+
+    it('counts the phones sealed to, and lists only the active ones without a box key', async () => {
+      const n = node();
+      const [a, b, c, d, gone] = [1, 2, 3, 4, 5].map(() => createFakePhone());
+      put(n, { ...a.approverRecord(), box_key: boxJwk() });
+      put(n, { ...b.approverRecord(), box_key: boxJwk() });
+      put(n, c.approverRecord());
+      put(n, d.approverRecord());
+      put(n, gone.approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' }));
+      const { sealing, without } = await rows(n);
+      assert.equal(sealing.detail, 'on (2 phones)');
+      assert.deepEqual(without.detail.split(', ').sort(), [fingerprintGroups(c.deviceId), fingerprintGroups(d.deviceId)].sort());
+    });
+
+    it('a revoked phone that held a box key is not counted, and every phone holding one says none', async () => {
+      const n = node();
+      const a = createFakePhone();
+      const b = createFakePhone();
+      put(n, { ...a.approverRecord(), box_key: boxJwk() });
+      put(n, { ...b.approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' }), box_key: boxJwk() });
+      const { sealing, without } = await rows(n);
+      assert.equal(sealing.detail, 'on (1 phone)');
+      assert.equal(without.detail, 'none');
+    });
+
+    // assertAdminOwned is a no-op on Windows, so only POSIX can make the set untrusted here.
+    it('an untrusted set says so rather than that no phone has a box key', { skip: !POSIX }, async () => {
+      const n = node();
+      put(n, createFakePhone().approverRecord());
+      fs.chmodSync(path.join(n.configDir, 'approvers'), 0o777);
+      const results = await runDoctor({ dataDir: n.dataDir, platform: 'linux' });
+      assert.equal(results.find((r) => r.check === 'sealing to phones').detail, 'off: the set is not trusted');
+      assert.equal(results.find((r) => r.check === 'phones without a box key').detail, 'none (the set is not trusted)');
+    });
   });
 
   // The row reads front-door.json first (it supersedes approvers.relay in

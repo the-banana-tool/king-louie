@@ -344,6 +344,26 @@ async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = nul
     await store.ready();
     return { ok: true, detail: String(store.activeCount()) };
   });
+  // Sealed phones, R-SP-5, R-SP-11: active records that hold a box key are who
+  // a node seals to. The same store reading as the row above.
+  const activeRecords = async () => {
+    const { ApproverStore } = require('../approvals/approver-store');
+    const store = new ApproverStore({ dir, stagedDir, platform, serviceProbe: false });
+    await store.ready();
+    return store.list().filter((r) => store.isActive(r.device_id));
+  };
+  await attempt('sealing to phones', async () => {
+    if (problem) return { ok: true, detail: 'off: the set is not trusted' };
+    const sealing = (await activeRecords()).filter((r) => r.box_key).length;
+    if (sealing === 0) return { ok: true, detail: 'off: no phone has a box key yet' };
+    return { ok: true, detail: `on (${sealing} ${sealing === 1 ? 'phone' : 'phones'})` };
+  });
+  await attempt('phones without a box key', async () => {
+    if (problem) return { ok: true, detail: 'none (the set is not trusted)' };
+    const { fingerprintGroups } = require('../approvals/envelope');
+    const without = (await activeRecords()).filter((r) => !r.box_key);
+    return { ok: true, detail: without.length ? without.map((r) => fingerprintGroups(r.device_id)).join(', ') : 'none' };
+  });
   await attempt('relay paired and linked', () => {
     const { loadNodeConfig } = require('./node-config');
     const pinDir = configDir || adminConfigDir({ dataDir });
