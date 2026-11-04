@@ -929,9 +929,11 @@ function createDesktopController({
     return { client, service: pairing.service };
   }
 
+  const backupProgress = (stage) => (p) => send('desktop:importProgress', { stage, ...p, sent: p.files, total: p.totalFiles });
+
   // §6.5: once per launch, while what it wrote still reads whole.
   async function ensureBackup(onProgress) {
-    if (backupMade && await readBackupManifest(backupMade.dest)) return backupMade;
+    if (backupMade && await readBackupManifest(backupMade.dest, { onProgress: backupProgress('backup-check') })) return backupMade;
     backupMade = await move.backupProfile({
       userDataDir, dest: backupDirFor(userDataDir, now), now, appVersion, env, onProgress
     });
@@ -1013,7 +1015,7 @@ function createDesktopController({
         if (!old.found) return moveSourceRefusal('This profile holds no chats or cases to move.');
         let backup;
         try {
-          backup = await ensureBackup((p) => send('desktop:importProgress', { stage: 'backup', ...p, sent: p.files, total: p.totalFiles }));
+          backup = await ensureBackup(backupProgress('backup'));
         } catch (err) {
           return { ok: false, code: err.code || 'BACKUP_FAILED', error: shown(err.message, 800), backupDir: err.dest ? shown(err.dest, 400) : null };
         }
@@ -1102,7 +1104,7 @@ function createDesktopController({
           return {
             ok: false,
             code: 'MIGRATION_UNVERIFIED',
-            error: `${verified.missing.length} ${verified.missing.length === 1 ? 'item' : 'items'} could not be found on the node, so this profile was not marked as moved. Nothing was removed; try again.`,
+            error: `${verified.missing.length} ${verified.missing.length === 1 ? 'item' : 'items'} on the node do not match the desktop, so this profile was not marked as moved. Nothing was removed. Each one says what it needs; what is only missing lands if you move again.`,
             report: shownOut,
             leftBehind,
             refusedFiles,
@@ -1111,7 +1113,7 @@ function createDesktopController({
         }
         // The mark is what stops the old profile opening, so the backup it names
         // must still be whole at that moment.
-        if (!(await readBackupManifest(backup.dest))) {
+        if (!(await readBackupManifest(backup.dest, { onProgress: backupProgress('backup-check') }))) {
           backupMade = null;
           return {
             ok: false,

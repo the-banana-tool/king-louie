@@ -377,7 +377,10 @@ async function backupProfile({
 // recorded, or null: an UNFINISHED marker, no backup.json, one that is not a
 // manifest, a listed file gone, a different size or other bytes, a listed path
 // that leaves the backup. Sizes first, so a file gone answers without hashing.
-async function readBackupManifest(dest) {
+// A large backup takes seconds to hash: onProgress gets { phase: 'check', files,
+// totalFiles, bytes, totalBytes, path: '' }, at most every 200 ms, and always at
+// the end of a read that holds.
+async function readBackupManifest(dest, { onProgress = null } = {}) {
   if (await fs.promises.lstat(path.join(dest, UNFINISHED)).then(() => true, () => false)) return null;
   let manifest;
   try {
@@ -396,6 +399,19 @@ async function readBackupManifest(dest) {
       return null;
     }
   }
+  const totalFiles = manifest.files.length;
+  const totalBytes = manifest.files.reduce((n, f) => n + f.bytes, 0);
+  const say = (files, bytes) => {
+    if (!onProgress) return;
+    try {
+      onProgress({ phase: 'check', files, totalFiles, bytes, totalBytes, path: '' });
+    } catch (err) {
+      log.warn('a backup progress listener threw', { error: shown(err.message) });
+    }
+  };
+  let files = 0;
+  let bytes = 0;
+  let lastSaid = 0;
   for (const entry of manifest.files) {
     try {
       const { sha256 } = await hashFile(path.join(dest, ...entry.path.split('/')), { createReadStream: fs.createReadStream });
@@ -403,7 +419,14 @@ async function readBackupManifest(dest) {
     } catch {
       return null;
     }
+    files += 1;
+    bytes += entry.bytes;
+    if (Date.now() - lastSaid >= PROGRESS_EVERY_MS) {
+      lastSaid = Date.now();
+      say(files, bytes);
+    }
   }
+  say(files, bytes);
   return manifest;
 }
 

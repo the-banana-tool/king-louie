@@ -269,13 +269,18 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     if (listed.refused.length) everyCaseRead = false;
     // wholeCase: the case stays behind whole, so it can never show up as missing
     // from the plan, and a move that says it is done must refuse. A dot directory
-    // is the store's own (.index, .contact.lock), never a case.
+    // with no case.yaml is the store's own (.index, .contact.lock): not a case, and
+    // no doubt about any chat. One with a case.yaml is a case to CaseStore, which
+    // lists every directory that has one, and this move would leave it behind.
     for (const r of listed.refused) attention.push({ category: 'case', key: r.relPath, note: r.reason, wholeCase: true });
     for (const dir of listed.dirs) {
       if (dir === '.index') continue; // cases stage 5: the cross-case index cache, not a case (M9)
       if (!CASE_DIR_RE.test(dir)) {
-        everyCaseRead = false;
-        attention.push({ category: 'case', key: dir, note: 'not a valid case directory name; it was not copied', ...(dir.startsWith('.') ? {} : { wholeCase: true }) });
+        const dotMark = dir.startsWith('.') ? readCaseMark(reader, dir) : null;
+        const storeOwn = Boolean(dotMark && dotMark.missing);
+        if (dotMark && dotMark.id !== null) caseIds.set(dotMark.id, dotMark.private || chatMarkedCases.has(dotMark.id));
+        else if (!storeOwn) everyCaseRead = false;
+        attention.push({ category: 'case', key: dir, note: 'not a valid case directory name; it was not copied', ...(storeOwn ? {} : { wholeCase: true }) });
         continue;
       }
       const mark = readCaseMark(reader, dir);
@@ -296,6 +301,7 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
         bytes: files.reduce((n, f) => n + f.size, 0),
         head: readCaseHead(reader, dir),
         tree: { files: counted.length, bytes: counted.reduce((n, f) => n + f.size, 0) },
+        ...(mark.id !== null ? { caseId: mark.id } : {}),
         ...(casePrivate ? { private: true } : {}),
         ...(mark.movedElsewhere ? { movedElsewhere: true } : {})
       });
@@ -383,9 +389,9 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
 // does not parse gives no id and counts as private; a `private` that is not
 // exactly false is private (CaseRuntime#isPrivate).
 function readCaseMark(reader, dir) {
-  const unread = { id: null, private: true, movedElsewhere: false };
+  const unread = { id: null, private: true, movedElsewhere: false, missing: false };
   const r = reader.readFile(path.join('cases', dir, 'case.yaml'));
-  if (!r.ok) return unread;
+  if (!r.ok) return { ...unread, missing: Boolean(r.missing) };
   let meta;
   try {
     meta = parseCaseYaml(r.data.toString('utf8'));

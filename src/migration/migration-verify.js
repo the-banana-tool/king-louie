@@ -38,7 +38,7 @@ function lastMessageTime(messages) {
   return last && typeof last.timestamp === 'string' && last.timestamp ? last.timestamp : null;
 }
 
-const dirtyNote = (dir) => `${dir} has uncommitted changes on the desktop. They move as they stand, and stay uncommitted on the node.`;
+const dirtyNote = (dir) => `${dir} has uncommitted changes on the desktop. They move as they stand, and the node commits them the next time it sweeps the case, within about a minute.`;
 
 // What only the desktop knows, on each item the verification compares with the
 // node: a chat's message count, last message time and private mark, a case's
@@ -115,10 +115,10 @@ async function checkChats(items, invoke, note) {
     } else if (!Number.isInteger(onNode.messageCount)) {
       note('chat', item.key, 'the node did not say how many messages it holds');
     } else if (WRITE_ACTIONS.has(item.action) ? onNode.messageCount !== item.messageCount : onNode.messageCount < item.messageCount) {
-      note('chat', item.key, `the node holds ${onNode.messageCount} messages where the desktop has ${item.messageCount}`);
+      note('chat', item.key, `the node holds ${onNode.messageCount} messages where the desktop has ${item.messageCount}, and trying again will not change a chat already there; compare the two on the node`);
     } else if (item.lastMessageAt && onNode.messageCount === item.messageCount && !sameTime(onNode.lastMessageAt, item.lastMessageAt)) {
       // The same count with another last message: the node's chat is not this one.
-      note('chat', item.key, 'the last message on the node is not the desktop\'s');
+      note('chat', item.key, 'the last message on the node is not the desktop\'s, and trying again will not change a chat already there; compare the two on the node');
     } else if (item.private === true && onNode.private !== true) {
       note('chat', item.key, 'it is private on the desktop and not private on the node; mark it private on the node and try again');
     }
@@ -151,7 +151,7 @@ async function checkCases(items, invoke, note) {
 // Never throws.
 async function verifyMigration({ plan, report, invoke }) {
   const missing = [];
-  const note = (category, key, why) => missing.push({ category: shown(category, 80), key: shown(key), why: shown(why, 400) });
+  const note = (category, key, why) => missing.push({ category: shown(category, 80), key: shown(key), why: shown(why, 800) });
   reportProblems(report, note);
   if (!plan || !Array.isArray(plan.items)) note('import', 'plan', 'there is no plan to check against');
   const items = arr(plan && plan.items);

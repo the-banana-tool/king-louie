@@ -2142,6 +2142,33 @@ describe('desktop controller: the one-time move', () => {
     controller.dispose();
   });
 
+  it('fix round 2, finding 6: both reads of the backup report progress', async () => {
+    const { controller, sent } = moveController();
+    await controller.migrationPlan();
+    const checksOf = () => sent.filter(([ch, p]) => ch === 'desktop:importProgress' && p.stage === 'backup-check');
+    assert.strictEqual(checksOf().length, 0, 'the first plan made the backup and did not read it');
+    await controller.migrationPlan();
+    const onRetry = checksOf().length;
+    assert.ok(onRetry > 0, 'a retry\'s read says so');
+    const last = checksOf()[onRetry - 1][1];
+    assert.ok(Number.isInteger(last.sent) && Number.isInteger(last.total));
+    assert.strictEqual(last.sent, last.total);
+    await controller.migrationApply({ confirmed: true });
+    assert.ok(checksOf().length > onRetry, 'the read before the mark says so');
+    controller.dispose();
+  });
+
+  it('fix round 2: an unverified move says what can help, not just to try again', async () => {
+    const client = new FakeNodeClient({ dropChat: 'c2' });
+    const { controller } = moveController({ client });
+    await controller.migrationPlan();
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.code, 'MIGRATION_UNVERIFIED');
+    assert.doesNotMatch(out.error, /; try again\.$/);
+    assert.match(out.error, /each/i);
+    controller.dispose();
+  });
+
   it('finding 6: a backup that no longer reads whole refuses the mark, and the next plan makes a new one', async () => {
     let tick = 0;
     const { controller, state, parent } = moveController({ extra: { now: () => new Date(Date.UTC(2026, 10, 4, 10, 0, tick++)) } });

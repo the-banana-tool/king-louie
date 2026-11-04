@@ -106,9 +106,13 @@ const ALREADY_ON_NODE = 'already set on this node; left as it is';
 const ALLOWLIST_NOTE = 'who may reach this bot';
 const ALLOWLIST_LEFT_BEHIND = 'this node already has a list for this bot; the desktop\'s list was left behind';
 const profilesNotMoved = (n) => `your ${n} model ${n === 1 ? 'profile was' : 'profiles were'} not moved: this node's models were already set up, so they were left as they are; set the ${n === 1 ? 'profile' : 'profiles'} up again under Settings > Models`;
-const landedIncomplete = (dir) => `${dir} is on this node but an earlier import landed it incomplete, so it does not count as moved. Stop the node, remove that folder from its cases folder, and try again.`;
-const caseOnNodeDiffers = (dir) => `a folder named ${dir} is already on this node and is not this case as the desktop has it (its history or files differ), so it does not count as moved. Compare the two; to move the desktop's, stop the node, remove that folder from its cases folder, and try again.`;
-const MOVED_OUT_NOTE = 'moved to this node by hand and closed on the desktop as moved elsewhere; the copy on this node is the live one and was left as it is';
+// Trying again cannot help either of these: the plan comes out the same. What
+// helps is the owner looking, and removing the node's folder is the last resort,
+// after that, with what it would lose named.
+const lastResort = (added) => `Compare the two first; the desktop's copy and the backup are not touched. Only if nothing in the node's copy matters (${added}), stop the node, remove that folder from its cases folder, and move again.`;
+const landedIncomplete = (dir, added) => `${dir} is on this node but an earlier import landed it incomplete, so it does not count as moved, and trying again will not change that. ${lastResort(added)}`;
+const caseOnNodeDiffers = (dir, added) => `a folder named ${dir} is on this node and is not this case as the desktop has it (its history or files differ), so it does not count as moved, and trying again will not change that. ${lastResort(added)}`;
+const MOVED_OUT_NOTE = 'moved to this node by hand and closed on the desktop as moved elsewhere; the copy on this node is the live one and was left as it is. Anything done in the desktop\'s copy after the move is only in the backup';
 const LANDED_NO_RECORD = 'already on this node, its history and files as the desktop has them';
 const RESTART_NOTE = 'MCP servers, channel bots and hook choices that moved take effect when the node next starts.';
 
@@ -336,13 +340,78 @@ async function nodeTreeTotals(dir) {
   return totals;
 }
 
+// What a landing recorded of its source, to tell later whether the source is still
+// what landed. Null for what the inventory did not say.
+const sourceRecord = (c) => ({
+  head: typeof c.head === 'string' && c.head ? c.head : null,
+  tree: c.tree && Number.isInteger(c.tree.files) && Number.isInteger(c.tree.bytes) ? { files: c.tree.files, bytes: c.tree.bytes } : null,
+  clean: typeof c.clean === 'boolean' ? c.clean : null
+});
+
+const sameSource = (a, b) => Boolean(a && b && a.tree && b.tree)
+  && a.head === b.head && a.clean === b.clean && a.tree.files === b.tree.files && a.tree.bytes === b.tree.bytes;
+
+// The commit HEAD names, or null when there is none to read.
+async function nodeHeadOf(dir) {
+  try {
+    return (await git(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).trim();
+  } catch {
+    return null;
+  }
+}
+
+const repoIsWhole = (dir) => git(dir, ['fsck', '--connectivity-only', '--no-dangling', '--no-progress']);
+
+// A landing on record whose source still equals what landed. Whatever the node
+// did since is its own work, but its repository must still be whole.
+async function recordedLandingHolds(dir, entry, source) {
+  if (!entry || !sameSource(entry.landedFrom, sourceRecord(source))) return false;
+  try {
+    const nodeHead = await nodeHeadOf(dir);
+    if (nodeHead === null) return !source.head;
+    await repoIsWhole(dir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function nodeCaseId(dir) {
+  try {
+    const meta = parseCaseYaml(fs.readFileSync(path.join(dir, 'case.yaml'), 'utf8'));
+    return meta ? String(meta.id) : null;
+  } catch {
+    return null;
+  }
+}
+
+// What removing the node's folder would lose, as far as git can say. Counted from
+// the commit that landed when that is on record, else the source's HEAD; when the
+// node knows neither, the histories cannot be told apart, and it says only that.
+async function whatTheNodeAdded(dir, ...bases) {
+  const parts = [];
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  try {
+    let ahead = null;
+    for (const base of bases) {
+      if (ahead === null && base) ahead = await git(dir, ['rev-list', '--count', `${base}..HEAD`]).catch(() => null);
+    }
+    if (ahead !== null && Number(ahead) > 0) parts.push(`${plural(Number(ahead), 'commit')} made on the node`);
+    if (ahead === null) parts.push(`a history of ${plural(Number(await git(dir, ['rev-list', '--count', 'HEAD'])), 'commit')} that is not the desktop's`);
+    const changes = (await git(dir, ['status', '--porcelain'])).split(/\r?\n/).filter(Boolean).length;
+    if (changes > 0) parts.push(plural(changes, 'uncommitted change'));
+  } catch { /* said below */ }
+  return parts.length ? `it holds ${parts.join(' and ')}, and anything else the node wrote there` : 'and anything the node wrote there';
+}
+
 // Whether a case directory already on the node is the desktop's. Its repository
 // must be whole (fsck reaches every object, an old blob included). At the
 // source's HEAD its files must count and weigh what the source's do, which also
 // proves a dirty source landed as it stood and sees a missing ignored file; a
 // source known clean also needs a clean tree here. Ahead of the source's HEAD
 // (the node went on) the tree has moved, so the only proof is that the source had
-// nothing beyond that commit: a source not known clean is a no. Any doubt is a no.
+// nothing beyond that commit (a source not known clean is a no), and that no file
+// of that commit has gone: a sweep commits a loss like anything else. Any doubt is a no.
 async function caseMatchesSource(dir, source) {
   const { head, tree, clean } = source;
   if (!tree || !Number.isInteger(tree.files) || !Number.isInteger(tree.bytes)) return false;
@@ -352,18 +421,14 @@ async function caseMatchesSource(dir, source) {
   };
   const cleanHere = async () => (await git(dir, ['status', '--porcelain'])).trim() === '';
   try {
-    let nodeHead = null;
-    try {
-      nodeHead = (await git(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).trim();
-    } catch {
-      nodeHead = null;
-    }
+    const nodeHead = await nodeHeadOf(dir);
     if (typeof head !== 'string' || !head) return nodeHead === null && sameTree();
     if (nodeHead === null) return false;
-    await git(dir, ['fsck', '--connectivity-only', '--no-dangling', '--no-progress']);
+    await repoIsWhole(dir);
     if (nodeHead === head) return (await sameTree()) && (clean !== true || cleanHere());
     if (clean !== true) return false;
     await git(dir, ['merge-base', '--is-ancestor', head, nodeHead]);
+    if ((await git(dir, ['diff', '--diff-filter=D', '--name-only', head, 'HEAD'])).trim() !== '') return false;
     return cleanHere();
   } catch {
     return false;
@@ -687,23 +752,28 @@ class DesktopImporter {
         caseExpected.set(dir, {
           files: Number.isFinite(c.files) ? c.files : null,
           bytes: Number.isFinite(c.bytes) ? c.bytes : null,
-          private: c.private === true
+          private: c.private === true,
+          landedFrom: this.personal ? sourceRecord(c) : null
         });
       } else if (done('case', dir)?.incomplete) {
-        add('case', dir, 'needs-attention', landedIncomplete(dir));
+        add('case', dir, 'needs-attention', landedIncomplete(dir, await whatTheNodeAdded(path.join(root, dir), done('case', dir).landedFrom?.head, c.head)));
         items[items.length - 1].incomplete = true;
       } else if (!this.personal) {
         if (done('case', dir)) add('case', dir, 'skip-present');
         else add('case', dir, 'needs-attention', 'a case with this directory already exists on the service');
       // The owner moved this one by hand and closed the desktop's copy: the node
-      // has the live one, and the two are meant to differ.
-      } else if (c.movedElsewhere === true) add('case', dir, 'needs-attention', MOVED_OUT_NOTE);
-      // A landing on record, one a try stopped short of recording, or a case
-      // moved by hand: what is there is compared with the source, never assumed.
-      // A record says it landed once, not that the source has not gone on since.
-      else if (await caseMatchesSource(path.join(root, dir), c)) add('case', dir, 'skip-present', done('case', dir) ? null : LANDED_NO_RECORD);
-      else {
-        add('case', dir, 'needs-attention', caseOnNodeDiffers(dir));
+      // has the live one, and the two are meant to differ. Only if it is that case.
+      } else if (c.movedElsewhere === true && nodeCaseId(path.join(root, dir)) === c.caseId) {
+        add('case', dir, 'needs-attention', MOVED_OUT_NOTE);
+      // On record, and the source is what landed: the node's own work since (its
+      // sweep commits what it finds within a minute) is no reason to doubt it.
+      } else if (await recordedLandingHolds(path.join(root, dir), done('case', dir), c)) {
+        add('case', dir, 'skip-present');
+      // No record, or a source that has changed since: compared, never assumed.
+      } else if (await caseMatchesSource(path.join(root, dir), c)) {
+        add('case', dir, 'skip-present', LANDED_NO_RECORD);
+      } else {
+        add('case', dir, 'needs-attention', caseOnNodeDiffers(dir, await whatTheNodeAdded(path.join(root, dir), done('case', dir)?.landedFrom?.head, c.head)));
         items[items.length - 1].incomplete = true;
       }
     }
@@ -1275,6 +1345,13 @@ class DesktopImporter {
         const notes = [];
         if (short) notes.push(`received ${files.count} file(s)/${files.bytes} byte(s); the inventory listed ${expected.files ?? '?'} file(s)/${expected.bytes ?? '?'} byte(s) — the case may be incomplete`);
         if (headProblem) notes.push(`its git history does not read (${headProblem}) — the case may be incomplete`);
+        // On record at once: a cut-off from here on must not leave a landed case
+        // with nothing to say what landed, or how whole it was.
+        const landedFrom = expected && expected.landedFrom ? expected.landedFrom : null;
+        if (this.personal) {
+          manifest.items[k] = { at, result: 'ok', targetKey: dir, landedFrom, ...(short || headProblem ? { incomplete: true } : {}) };
+          this.writeManifest(manifest);
+        }
         const markProblem = expected && expected.private ? await this.ensureCasePrivate(dest) : null;
         if (markProblem) notes.push(`it is private on the desktop and could not be marked private here (${markProblem})`);
         // Fix round 4, ruling (c): names Windows can't store were skipped;
@@ -1287,7 +1364,7 @@ class DesktopImporter {
           attention: notes.length > 0,
           note: notes.length ? notes.join('; ') : null,
           incomplete: Boolean(markProblem) || (this.personal && (short || Boolean(headProblem))),
-          record: { targetKey: dir }
+          record: { targetKey: dir, ...(landedFrom ? { landedFrom } : {}) }
         });
       } catch (err) {
         plan.results.set(k, { ok: false, error: err.message });

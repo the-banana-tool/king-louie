@@ -937,6 +937,7 @@ describe('fix round 1: a case on the node is compared with the source', () => {
   }
   const caseItemOf = (moved) => moved.plan.items.find((i) => i.category === 'case');
   const forget = (n) => fs.rmSync(path.join(n.dataDir, 'imports'), { recursive: true, force: true });
+  const yamlIdOf = (dir) => /^id: (.+)$/m.exec(fs.readFileSync(path.join(dir, 'case.yaml'), 'utf8'))[1].trim();
   const looseObject = (dir, id) => path.join(dir, '.git', 'objects', id.slice(0, 2), id.slice(2));
 
   it('finding 1: a recorded case and a source that went on is not skipped', async () => {
@@ -994,8 +995,9 @@ describe('fix round 1: a case on the node is compared with the source', () => {
       if (!recorded) forget(n);
       fs.rmSync(path.join(n.root, src.name, '.kl', 'runs', 'chk.txt'));
       const retry = await land(await n.importer(), await snap(src.dir, src.name));
-      assert.strictEqual(caseItemOf(retry).incomplete, true);
-      assert.strictEqual((await verifyMigration({ ...retry, invoke: n.invoke })).ok, false);
+      // Fix round 2: a source equal to the record is skipped, whatever the node did since.
+      assert.strictEqual(caseItemOf(retry).action, recorded ? 'skip-present' : 'needs-attention');
+      assert.strictEqual((await verifyMigration({ ...retry, invoke: n.invoke })).ok, recorded);
     });
 
     it(`finding 2: an older commit's blob missing on the node is a no (${how})`, async () => {
@@ -1068,6 +1070,7 @@ describe('fix round 1: a case on the node is compared with the source', () => {
     await git.commitAll(src.dir, 'status: abandoned');
     const later = await snap(src.dir, src.name);
     later.entry.movedElsewhere = true;
+    later.entry.caseId = yamlIdOf(path.join(n.root, src.name));
     const retry = await land(await n.importer(), later);
     assert.strictEqual(caseItemOf(retry).action, 'needs-attention');
     assert.strictEqual('incomplete' in caseItemOf(retry), false);
@@ -1251,5 +1254,287 @@ describe('fix round 1: a chat\'s content check', () => {
   it('finding 8: a source message with no time compares nothing', async () => {
     const out = withSourceFacts({ items: [chatItem('c1')] }, { getValue: () => ({ id: 'c1', messages: [{ sender: 'user' }] }) });
     assert.strictEqual('lastMessageAt' in out.items[0], false);
+  });
+});
+
+// Fix round 2: what the node's own sweep does to a landed case, and what is said.
+describe('fix round 2: a landing on record, and the node\'s sweep', () => {
+  const { loadDesktopSource } = require('../src/ipc/desktop-export');
+  const { planBatches, createSafeReader, readDesktopSource } = require('../src/migration/desktop-source');
+  const safeStorage = { isEncryptionAvailable: () => false };
+
+  async function node() {
+    const dataDir = tmp();
+    process.env.KL_CASES_ROOT = path.join(dataDir, 'cases');
+    const core = createCore({
+      paths: { dataDir },
+      store: new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: { chats: [], activeChatId: null, apiTokens: {}, apiStatus: {}, toolApprovals: { alwaysApproveTools: {} } } }),
+      vaultStore: new JsonFileStore({ dir: dataDir, name: 'config' }),
+      cipher: createAesGcmCipher(crypto.randomBytes(32)),
+      prompter: createHeadlessPrompter(),
+      builtinSkillsDir: path.join(__dirname, '..', 'skills'),
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false }
+    });
+    cores.push(core);
+    await core.start();
+    const importer = async () => new DesktopImporter({
+      context: core.context, targets: await buildImportTargets({ context: core.context, dataDir }), dataDir, checkPath,
+      scope: createDesktopScope({ dataDir, context: core.context }), hosting: 'personal'
+    });
+    const root = path.join(dataDir, 'cases');
+    const invoke = async (channel) => {
+      if (channel === 'chat:load') return { ok: true, data: { chats: core.context.listChats({ messages: false }), history: { available: true } } };
+      if (channel === 'case:list') return { ok: true, cases: new CaseStore({ root }).list() };
+      throw new Error(`unexpected ${channel}`);
+    };
+    return { core, dataDir, root, importer, invoke, sweep: () => core.context.getCaseRuntime().runDueWakeups() };
+  }
+  async function profile(title = 'Lakeside lot') {
+    const p = path.join(tmp(), 'king-louie');
+    fs.mkdirSync(p);
+    const runtime = new CaseRuntime({ root: path.join(p, 'cases') });
+    const made = await runtime.createCase({ title, objective: 'Sell the lot', force: true });
+    const { dir } = runtime.getCase(made.id);
+    fs.writeFileSync(path.join(dir, 'notes.md'), '# Notes\n');
+    await git.commitAll(dir, 'notes');
+    return { p, runtime, id: made.id, dir, name: path.basename(dir) };
+  }
+  async function move(n, s) {
+    const source = await loadDesktopSource({ userDataDir: s.p, safeStorage, platform: 'win32' });
+    const imp = await n.importer();
+    const raw = await imp.plan({ installId: source.installId, inventory: source.inventory });
+    for (const batch of planBatches(raw.items, source, {})) await imp.apply({ planId: raw.planId, batch });
+    const report = { ...(await imp.finish({ planId: raw.planId })), skipped: [], sendFailures: [] };
+    const plan = withSourceFacts(raw, source);
+    const item = plan.items.find((i) => i.category === 'case');
+    return { plan, report, item, verified: await verifyMigration({ plan, report, invoke: n.invoke }) };
+  }
+  const forget = (n) => fs.rmSync(path.join(n.dataDir, 'imports'), { recursive: true, force: true });
+
+  it('finding 1: a dirty source, landed and committed by the node\'s sweep, is still recognised', async () => {
+    const n = await node();
+    const s = await profile();
+    fs.writeFileSync(path.join(s.dir, 'uncommitted.md'), 'mid-turn\n');
+    fs.writeFileSync(path.join(s.dir, 'notes.md'), '# edited\n');
+    const first = await move(n, s);
+    assert.strictEqual(first.verified.ok, true);
+    await n.sweep();
+    const landed = path.join(n.root, s.name);
+    assert.match((await git.git(landed, ['log', '-1', '--format=%s'])), /sweep/, 'the sweep really committed it');
+    const retry = await move(n, s);
+    assert.strictEqual(retry.item.action, 'skip-present');
+    assert.strictEqual(retry.verified.ok, true);
+    assert.deepStrictEqual(retry.plan.dirtyCases.map((d) => d.key), [s.name], 'the plan still says so');
+  });
+
+  it('finding 1: the note no longer promises the changes stay uncommitted', async () => {
+    const out = withSourceFacts({ items: [{ category: 'case', key: 'lot', action: 'new' }] }, { inventory: { cases: [{ dir: 'lot', clean: false }] }, getValue: () => null });
+    assert.doesNotMatch(out.dirtyCases[0].note, /stay uncommitted/);
+    assert.match(out.dirtyCases[0].note, /commit/);
+  });
+
+  it('finding 1: a case with no .gitattributes line, recorded, is recognised at once and after a sweep', async () => {
+    const n = await node();
+    const s = await profile('Old case');
+    fs.writeFileSync(path.join(s.dir, '.gitattributes'), '');
+    await git.commitAll(s.dir, 'old attrs');
+    await move(n, s);
+    assert.strictEqual((await move(n, s)).item.action, 'skip-present');
+    await n.sweep();
+    assert.strictEqual((await move(n, s)).item.action, 'skip-present');
+  });
+
+  it('finding 1: whatever the node did since, a source equal to the record is skip-present', async () => {
+    const n = await node();
+    const s = await profile();
+    await move(n, s);
+    const landed = path.join(n.root, s.name);
+    fs.mkdirSync(path.join(landed, '.kl', 'runs'), { recursive: true });
+    fs.writeFileSync(path.join(landed, '.kl', 'runs', 'chk.txt'), 'tail');
+    fs.writeFileSync(path.join(landed, 'turn.md'), 'x');
+    await git.commitAll(landed, 'a turn');
+    const retry = await move(n, s);
+    assert.strictEqual(retry.item.action, 'skip-present');
+    assert.strictEqual(retry.verified.ok, true);
+  });
+
+  it('finding 1: a source no longer equal to the record is compared, and refused', async () => {
+    const n = await node();
+    const s = await profile();
+    await move(n, s);
+    fs.writeFileSync(path.join(s.dir, 'later.md'), 'only on the desktop\n');
+    await git.commitAll(s.dir, 'the desktop went on');
+    const retry = await move(n, s);
+    assert.strictEqual(retry.item.incomplete, true);
+    assert.strictEqual(retry.verified.ok, false);
+  });
+
+  it('finding 1: fsck still runs on a recorded landing', async () => {
+    const n = await node();
+    const s = await profile();
+    await move(n, s);
+    const landed = path.join(n.root, s.name);
+    const old = (await git.git(landed, ['rev-parse', 'HEAD~1'])).trim();
+    const object = path.join(landed, '.git', 'objects', old.slice(0, 2), old.slice(2));
+    fs.chmodSync(object, 0o666);
+    fs.rmSync(object);
+    const retry = await move(n, s);
+    assert.strictEqual(retry.item.incomplete, true);
+    assert.strictEqual(retry.verified.ok, false);
+  });
+
+  it('finding 7: a source with no .git, recorded, is recognised after a sweep', async () => {
+    const n = await node();
+    const s = await profile('No history');
+    fs.rmSync(path.join(s.dir, '.git'), { recursive: true, force: true });
+    const first = await move(n, s);
+    assert.strictEqual(first.verified.ok, true);
+    await n.sweep();
+    const retry = await move(n, s);
+    assert.strictEqual(retry.item.action, 'skip-present');
+    assert.strictEqual(retry.verified.ok, true);
+  });
+
+  it('finding 2: each case\'s record is written straight after its rename, incomplete included', async () => {
+    const n = await node();
+    const s = await profile();
+    const source = await loadDesktopSource({ userDataDir: s.p, safeStorage, platform: 'win32' });
+    source.inventory.cases[0].files += 1; // delivered short
+    const imp = await n.importer();
+    const seen = [];
+    const realWrite = imp.writeManifest.bind(imp);
+    imp.writeManifest = (manifest) => {
+      seen.push({ landed: fs.existsSync(path.join(n.root, s.name)), entry: manifest.items[`case:${s.name}`] && JSON.parse(JSON.stringify(manifest.items[`case:${s.name}`])) });
+      return realWrite(manifest);
+    };
+    const raw = await imp.plan({ installId: source.installId, inventory: source.inventory });
+    for (const batch of planBatches(raw.items, source, {})) await imp.apply({ planId: raw.planId, batch });
+    const realReport = imp.reportTree.bind(imp);
+    imp.reportTree = (t) => realReport(t);
+    await imp.finish({ planId: raw.planId });
+    assert.ok(seen.length >= 2, 'once for the case, once at the end');
+    assert.strictEqual(seen[0].landed, true);
+    assert.strictEqual(seen[0].entry.incomplete, true);
+    assert.strictEqual(seen[0].entry.landedFrom.head, source.inventory.cases[0].head);
+    assert.deepStrictEqual(seen[0].entry.landedFrom.tree, source.inventory.cases[0].tree);
+    assert.strictEqual(seen[0].entry.landedFrom.clean, true);
+  });
+
+  it('finding 2: files lost on the node and committed by a sweep, with no record, are refused', async () => {
+    const n = await node();
+    const s = await profile();
+    await move(n, s);
+    const landed = path.join(n.root, s.name);
+    forget(n);
+    fs.rmSync(path.join(landed, 'notes.md'));
+    fs.rmSync(path.join(landed, 'decisions.md'));
+    await n.sweep();
+    assert.strictEqual(fs.existsSync(path.join(landed, 'notes.md')), false);
+    const retry = await move(n, s);
+    assert.strictEqual(retry.item.action, 'needs-attention');
+    assert.strictEqual(retry.item.incomplete, true);
+    assert.strictEqual(retry.verified.ok, false);
+  });
+
+  it('with no record, a node that went on keeping every file is still recognised', async () => {
+    const n = await node();
+    const s = await profile();
+    await move(n, s);
+    forget(n);
+    const landed = path.join(n.root, s.name);
+    fs.writeFileSync(path.join(landed, 'turn.md'), 'x');
+    await git.commitAll(landed, 'a turn');
+    assert.strictEqual((await move(n, s)).item.action, 'skip-present');
+  });
+
+  async function closeAsMoved(s) {
+    await s.runtime.systemAction(s.id, 'status abandoned', () => s.runtime.setStatus(s.id, 'abandoned', { kind: 'moved', by: 'owner', note: '' }));
+  }
+
+  it('finding 3: Moved elsewhere and an unrelated case in that folder: not the live one', async () => {
+    const n = await node();
+    const s = await profile();
+    await closeAsMoved(s);
+    await n.core.context.getCaseRuntime().createCase({ title: 'Lakeside lot', objective: 'A different case entirely', force: true });
+    assert.ok(fs.existsSync(path.join(n.root, s.name)), 'the same folder name');
+    const retry = await move(n, s);
+    assert.strictEqual(retry.item.action, 'needs-attention');
+    assert.strictEqual(retry.item.incomplete, true);
+    assert.doesNotMatch(retry.item.note, /live one/);
+    assert.strictEqual(retry.verified.ok, false);
+  });
+
+  it('finding 3: Moved elsewhere and the same case: non-blocking, and says where later desktop work is', async () => {
+    const n = await node();
+    const s = await profile();
+    await move(n, s);
+    forget(n);
+    await closeAsMoved(s);
+    const retry = await move(n, s);
+    assert.strictEqual(retry.item.action, 'needs-attention');
+    assert.strictEqual('incomplete' in retry.item, false);
+    assert.match(retry.item.note, /live one/);
+    assert.match(retry.item.note, /only in the backup/);
+    assert.strictEqual(retry.verified.ok, true);
+  });
+
+  it('finding 3: the inventory carries the case\'s id', async () => {
+    const s = await profile();
+    const source = await loadDesktopSource({ userDataDir: s.p, safeStorage, platform: 'win32' });
+    assert.strictEqual(source.inventory.cases[0].caseId, s.id);
+  });
+
+  describe('dot directories under cases/', () => {
+    const put = (root, rel, text) => {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), text);
+    };
+    const read = (root, history = null) => readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop', history });
+    const chatNaming = (caseId) => ({ found: true, attention: [], chats: [{ id: 'c9', title: 't', caseId, updatedAt: 'x', messages: [] }] });
+
+    it('finding 4: a store directory leaves a chat naming a deleted case ordinary', () => {
+      const root = tmp();
+      put(root, 'cases/.contact.lock/x', '1');
+      put(root, 'cases/lot/case.yaml', 'id: a\nslug: lot\ntitle: Lot\n');
+      const source = read(root, chatNaming('deleted-case'));
+      assert.strictEqual('private' in source.getValue('chat', 'c9'), false);
+      assert.ok(source.attention.some((a) => a.key === '.contact.lock' && a.wholeCase !== true));
+    });
+
+    it('finding 5: a hand-made dot directory with a case.yaml is held, and vouches for its chats', () => {
+      const root = tmp();
+      put(root, 'cases/.hand-made/case.yaml', 'id: hand\nslug: hand\ntitle: Hand\nprivate: true\n');
+      const source = read(root, chatNaming('hand'));
+      assert.deepStrictEqual(source.attention.filter((a) => a.wholeCase).map((a) => a.key), ['.hand-made']);
+      assert.strictEqual(source.getValue('chat', 'c9').private, true);
+    });
+
+    it('finding 5: one whose case.yaml cannot be read is held, and vouches for nothing', () => {
+      const root = tmp();
+      put(root, 'cases/.broken/case.yaml', 'id: [unclosed\n');
+      const source = read(root, chatNaming('elsewhere'));
+      assert.deepStrictEqual(source.attention.filter((a) => a.wholeCase).map((a) => a.key), ['.broken']);
+      assert.strictEqual(source.getValue('chat', 'c9').private, true);
+    });
+  });
+
+  it('what a refusal says: not that trying again helps; last resort after comparing, naming what the node added', async () => {
+    const n = await node();
+    const s = await profile();
+    await move(n, s);
+    const landed = path.join(n.root, s.name);
+    fs.writeFileSync(path.join(landed, 'turn.md'), 'x');
+    await git.commitAll(landed, 'a turn');
+    fs.writeFileSync(path.join(s.dir, 'later.md'), 'only on the desktop\n');
+    await git.commitAll(s.dir, 'the desktop went on');
+    const { item, verified } = await move(n, s);
+    assert.match(item.note, /trying again will not change/i);
+    assert.match(item.note, /[Cc]ompare/);
+    assert.match(item.note, /1 commit\b/);
+    assert.ok(item.note.indexOf('ompare') < item.note.indexOf('remove'));
+    assert.match(verified.missing[0].why, /1 commit\b/, 'the note reaches the list uncut');
+    forget(n);
+    const noRecord = await move(n, s);
+    assert.match(noRecord.item.note, /history of \d+ commits that is not the desktop's/, 'no count it cannot stand behind');
   });
 });
