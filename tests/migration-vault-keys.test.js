@@ -256,6 +256,14 @@ describe('what reading whole must not widen', () => {
 describe('the verifier covers the vault', () => {
   const cleanReport = () => ({ counts: { failed: 0 }, failures: [], attention: [], incomplete: [], skipped: [], sendFailures: [] });
   const vaultItem = (key, action = 'new') => ({ category: 'vault', key, action, note: null, targetKey: key });
+  it('a held secret the node cannot read is named with its true remedy, not "move again"', async () => {
+    const verified = await verifyMigration({ plan: { items: [vaultItem(LOGIN, 'skip-present')] }, report: cleanReport(), invoke: async () => ({ ok: true, held: [], unreadable: [LOGIN] }) });
+    assert.strictEqual(verified.ok, false);
+    assert.strictEqual(verified.missing[0].key, LOGIN);
+    assert.match(verified.missing[0].why, /cannot read/);
+    assert.match(verified.missing[0].why, /[Dd]elete it/);
+  });
+
   const nodeHolding = (held) => async (channel, args) => {
     if (channel !== 'settings:vaultHeld') throw new Error(`unexpected ${channel}`);
     return { ok: true, held: args[0].keys.filter((k) => held.includes(k)) };
@@ -299,6 +307,7 @@ describe('the verifier covers the vault', () => {
     const answer = await ask([LOGIN, 'github', 'browser_cred:king-louie:login', 'contact.relay', 'sealed', 'absent', 7]);
     const held = answer.held || (answer.data && answer.data.held);
     assert.deepStrictEqual(held, [LOGIN, 'github']);
+    assert.deepStrictEqual(answer.unreadable || answer.data.unreadable, ['sealed'], 'held, and unreadable, is said apart from absent');
     assert.ok(!JSON.stringify(answer).includes('plain-github'));
     assert.ok(cipher);
   });

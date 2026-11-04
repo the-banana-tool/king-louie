@@ -481,22 +481,24 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     return { ok: true, keys: vaultKeys, count: vaultKeys.length };
   }));
 
-  // Which of these names the store holds a secret under that decrypts: names only,
-  // for the move's verifier. A whole key, so a dotted one is asked as itself. Says
+  // Which of these names the store holds a secret under that decrypts, and which it
+  // holds one under that does not: names only, for the move's verifier. A whole key, so a dotted one is asked as itself. Says
   // nothing of what the Vault tool keeps to itself.
   ipcMain.handle('settings:vaultHeld', wrapHandler('settings:vaultHeld', async (_event, { keys } = {}) => {
-    const store = getVaultStore();
-    const held = (Array.isArray(keys) ? keys : []).filter((key) => {
-      if (typeof key !== 'string' || isContactVaultKey(key) || isLocalServerVaultKey(key)) return false;
-      const encrypted = vaultNodeAt(store.store, key);
-      if (typeof encrypted !== 'string' || !encrypted) return false;
+    const data = getVaultStore().store;
+    const held = [];
+    const unreadable = [];
+    for (const key of Array.isArray(keys) ? keys : []) {
+      if (typeof key !== 'string' || isContactVaultKey(key) || isLocalServerVaultKey(key)) continue;
+      const encrypted = vaultNodeAt(data, key);
+      if (typeof encrypted !== 'string' || !encrypted) continue;
+      let plain = null;
       try {
-        return Boolean(decryptToken(encrypted));
-      } catch {
-        return false;
-      }
-    });
-    return { ok: true, held };
+        plain = decryptToken(encrypted);
+      } catch { /* said below */ }
+      (plain ? held : unreadable).push(key);
+    }
+    return { ok: true, held, unreadable };
   }));
 
   ipcMain.handle('settings:vaultStore', wrapHandler('settings:vaultStore', async (_event, { key, value } = {}) => {

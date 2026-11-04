@@ -171,8 +171,11 @@ async function checkVault(items, invoke, note) {
     return;
   }
   const held = new Set(answer.held);
+  const unreadable = new Set(arr(answer.unreadable));
   for (const item of items) {
-    if (!held.has(item.key)) note('vault', item.key, 'it is not in the node\'s vault');
+    // A retry plans it as already there and sends nothing, so moving again cannot help.
+    if (unreadable.has(item.key)) note('vault', item.key, 'the node holds this entry but cannot read it, and moving again will not replace it. Delete it from the node\'s vault under Settings, then move again: the desktop\'s copy lands in its place');
+    else if (!held.has(item.key)) note('vault', item.key, 'it is not in the node\'s vault');
   }
 }
 
