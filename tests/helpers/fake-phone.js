@@ -196,11 +196,13 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
     // lease-v1 (fleet stage 5 §4.1): answers a node-signed kl.lease.request
     // the way the apps do (the request's nonce and expires_at are copied).
     leaseGrant(requestEnvelope, { decision = 'grant', apps = null, minutes = 10, signedAt = new Date().toISOString(), overrides = {} } = {}) {
-      const { message: req } = open(requestEnvelope);
+      const { message: signed } = open(requestEnvelope);
+      // A sealed request's apps are inside; a phone with no box key can only name them itself.
+      const req = signed.sealed && box ? phone.open(requestEnvelope, 'kl.lease.request').message : signed;
       return seal({
         v: 1, type: 'kl.lease.grant', request_id: req.request_id, lease_id: req.lease_id, node_id: req.node_id,
         lease_hash: req.lease_hash, nonce: req.nonce, decision,
-        grant: decision === 'grant' ? { apps: apps || (req.lease.apps || []).map((a) => a.id), minutes } : null,
+        grant: decision === 'grant' ? { apps: apps || ((req.lease && req.lease.apps) || []).map((a) => a.id), minutes } : null,
         expires_at: req.expires_at, device_id: deviceId, signed_at: signedAt, ...overrides
       }, signer);
     },

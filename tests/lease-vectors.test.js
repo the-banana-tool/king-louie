@@ -33,7 +33,9 @@ const EXPECTED = [
   'task-request-allows-unknown', 'task-request-resumes', 'task-request-read-only', 'task-request-sites-over-32', 'task-request-bad-site', 'task-request-usd-under',
   'task-request-usd-over', 'task-request-usd-fraction', 'task-request-attended', 'task-request-minutes-over-240', 'task-request-with-apps',
   'task-request-name-hidden', 'task-request-name-too-long', 'task-grant-with-apps', 'task-grant-minutes-over-requested', 'task-grant-minutes-over-240',
-  'task-grant-ignores-take-cap', 'computer-use-grant-no-apps', 'take-grant-no-apps'
+  'task-grant-ignores-take-cap', 'computer-use-grant-no-apps', 'take-grant-no-apps',
+  // Revised 2026-11-04: sealed. Not in PHONE until the phone cores read them.
+  'request-sealed', 'grant-to-sealed', 'grant-sealed-lease-changed', 'status-sealed', 'view-sealed', 'listing-with-sealed-status'
 ];
 // What the phones consume (android-slim spec §5): iOS consumes PHONE, Android
 // PHONE and the read-key vectors a phone signs (iOS has no read key).
@@ -58,10 +60,11 @@ after(() => { for (const s of stores) s.cleanup(); });
 async function run(v) {
   const g = v.given;
   const now = Date.parse(g.now);
-  if (v.name.startsWith('view-')) return L.verifyLeaseView(v.input, { nodeId: g.node.id, nodePublicKeyHex: g.node.key });
-  if (v.name.startsWith('status-') || v.name.startsWith('task-status')) return verifyStatus(v.input, g.node);
+  const opener = openerFor(g);
+  if (v.name.startsWith('view-')) return L.verifyLeaseView(v.input, { nodeId: g.node.id, nodePublicKeyHex: g.node.key, open: opener });
+  if (v.name.startsWith('status-') || v.name.startsWith('task-status')) return verifyStatus(v.input, g.node, opener);
   // A node-signed request checked for its shape (VALIDATORS['kl.lease.request']).
-  if (v.check === 'request') return verifyRequest(v.input, g.node);
+  if (v.check === 'request') return verifyRequest(v.input, g.node, opener);
   // R-F5-20: what a phone checks on a listing, with its own nonce and device id.
   if (v.name.startsWith('listing-')) return L.verifyLeaseListing(v.input, { nodeId: g.node.id, nodePublicKeyHex: g.node.key, nonce: g.nonce, deviceId: g.device_id, statuses: g.statuses });
   const store = await approverStoreWith(g.approvers, { allowTestKeys: g.allow_test_keys, now: () => now });
@@ -77,9 +80,20 @@ async function run(v) {
   }, now);
 }
 
+// What opens a sealed vector: the phone's box key from given.box.
+function openerFor(g) {
+  if (!g.box) return null;
+  const { open } = require('../src/approvals/envelope');
+  const { openSealed } = require('../src/approvals/seal');
+  const { createBox } = require('../src/approvals/node-box-key');
+  const KEYS = require('./vectors/approval-v1/keys.json');
+  const { agree } = createBox(KEYS.devices.A_box.jwk, g.box.d);
+  return (envelope, type) => openSealed({ type, message: open(envelope).message, recipientId: g.box.device_id, agree });
+}
+
 // What a phone checks on a status: the pinned node's signature over the
 // received bytes, the node id, and the shape.
-function verifyStatus(envelope, node) {
+function verifyStatus(envelope, node, opener = null) {
   const { open, verifyEd25519 } = require('../src/approvals/envelope');
   const { validateMessage } = require('../src/approvals/messages');
   if (envelope.alg !== 'Ed25519' || envelope.kid !== node.id) return { accepted: false, reason: 'malformed' };
@@ -87,16 +101,22 @@ function verifyStatus(envelope, node) {
   const { message } = open(envelope);
   if (validateMessage('kl.lease.status', message)) return { accepted: false, reason: 'malformed' };
   if (message.node_id !== node.id) return { accepted: false, reason: 'wrong_node' };
+  if (opener) return { accepted: true, reason: null, message: L.openNodeStatus(envelope, { nodeId: node.id, nodePublicKeyHex: node.key, open: opener }) };
   return { accepted: true, reason: null, message };
 }
 
 // What a phone checks on a request: the pinned node's signature, the shape, the lease hash.
-function verifyRequest(envelope, node) {
+function verifyRequest(envelope, node, opener = null) {
   const { open, verifyEd25519 } = require('../src/approvals/envelope');
   if (envelope.alg !== 'Ed25519' || envelope.kid !== node.id) return { accepted: false, reason: 'malformed' };
   if (!verifyEd25519(envelope, node.key)) return { accepted: false, reason: 'bad_signature' };
   const { message } = open(envelope);
   if (!L.VALIDATORS['kl.lease.request'](message)) return { accepted: false, reason: 'malformed' };
+  if (message.sealed) {
+    const full = opener(envelope, 'kl.lease.request').message;
+    const reason = L.validateOpenedLeaseRequest(full);
+    return reason ? { accepted: false, reason } : { accepted: true, reason: null, message: full };
+  }
   if (message.lease_hash !== L.leaseHash(message.lease)) return { accepted: false, reason: 'lease_hash_mismatch' };
   return { accepted: true, reason: null, message };
 }
@@ -144,7 +164,7 @@ describe('lease-v1 vectors', () => {
   });
 
   it('has exactly the expected set, and phones consume exactly theirs', () => {
-    assert.equal(EXPECTED.length, 80);
+    assert.equal(EXPECTED.length, 86);
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
     const consumedBy = (phone) => vectors.filter((v) => v.consumers.includes(phone)).map((v) => v.name).sort();
     assert.deepEqual(consumedBy('ios'), [...PHONE].sort());
@@ -196,6 +216,30 @@ describe('lease-v1 vectors', () => {
     const read = byName.get('watch-read-key').expect.message;
     assert.deepEqual(Object.keys(read).sort(), Object.keys(valid).sort());
     assert.equal(read.device_id, valid.device_id);
+  });
+
+  it('the sealed vectors hold in clear only what R-SP-4 says', () => {
+    const { open } = require('../src/approvals/envelope');
+    const { validateMessage } = require('../src/approvals/messages');
+    for (const [name, type, hidden] of [
+      ['request-sealed', 'kl.lease.request', ['lease', 'origin', 'salt']],
+      ['status-sealed', 'kl.lease.status', ['name']],
+      ['view-sealed', 'kl.lease.view', ['foreground', 'frame', 'frame_dropped', 'actions']]
+    ]) {
+      const { message } = open(byName.get(name).input);
+      assert.equal(validateMessage(type, message), null, name);
+      assert.ok(message.sealed, name);
+      for (const key of hidden) assert.ok(!(key in message), `${name} holds ${key} in clear`);
+    }
+    // A reader with no way to open a status still takes it, as a listing does.
+    const v = byName.get('status-sealed');
+    const unopened = L.openNodeStatus(v.input, { nodeId: v.given.node.id, nodePublicKeyHex: v.given.node.key });
+    assert.deepEqual([unopened.state, unopened.name], ['active', undefined]);
+    // A grant over the request's clear hash is the salted one, not the rule of a clear request.
+    const grant = byName.get('grant-to-sealed');
+    const pending = grant.given.pending[0];
+    assert.equal(grant.expect.message.lease_hash, L.leaseHash(pending.lease, pending.salt));
+    assert.notEqual(grant.expect.message.lease_hash, L.leaseHash(pending.lease));
   });
 
   it('resume-capped: a resume never extends past the original expiry', () => {

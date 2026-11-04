@@ -33,8 +33,14 @@ function createBox(jwk, d) {
   }
   if (!derived.equals(ecPoint(jwk))) throw refuse();
   const publicJwk = Object.freeze({ kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y });
+  const scalar = Buffer.from(d, 'base64url');
   return Object.freeze({
     jwk: publicJwk,
+    // A key for another use of this node's secret (the audit's params_hmac,
+    // R-SP-7), which the private half never leaves here to make.
+    deriveKey(info) {
+      return Buffer.from(crypto.hkdfSync('sha256', scalar, Buffer.alloc(0), Buffer.from(String(info), 'utf8'), COORD_BYTES));
+    },
     agree(epkJwk) {
       const secret = ecdh.computeSecret(ecPoint(epkJwk));
       if (secret.length !== COORD_BYTES) throw new Error('the key agreement gave the wrong size');

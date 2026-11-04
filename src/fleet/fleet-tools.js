@@ -9,7 +9,7 @@ const path = require('path');
 const { createLogger } = require('../logging');
 const { JobManager } = require('../runbooks/runbook-engine');
 const { runbookAction, actionHash } = require('../approvals/messages');
-const { canonicalize, sha256b64url } = require('../platform/jcs');
+const { paramsHmac, auditOriginOf, auditError } = require('../approvals/audit-fields');
 
 const log = createLogger('fleet-tools');
 
@@ -18,14 +18,6 @@ const log = createLogger('fleet-tools');
 // src/runbooks/) can list the same tools (Task 27).
 const { MCP_TOOLS, TASK_TOOL_NAMES, WAIT_MS_MAX, ToolError, untrustedOutput } = require('./tool-definitions');
 const { detectCapabilities } = require('./capabilities');
-
-function paramsSha256(params) {
-  try {
-    return sha256b64url(canonicalize(params === undefined || params === null ? {} : params));
-  } catch {
-    return null;
-  }
-}
 
 // Free and total space for each allowed root, or for the filesystem holding
 // the home directory when no roots are configured. A root that cannot be
@@ -86,11 +78,9 @@ function approvalOrigin(origin, jobId = null) {
   };
 }
 
-function auditOrigin(origin, jobId = null) {
-  const base = approvalOrigin(origin, jobId);
-  if (origin && origin.kind === 'frontdoor') return { ...base, via: 'frontdoor', grant_id: origin.grant_id || null, client_id: origin.client_id || null };
-  return base;
-}
+// The ledger is served to the relay's mirror, so an entry names the kind of
+// caller and no client (R-SP-7). No origin at all is the stdio server's.
+const auditOrigin = (origin) => auditOriginOf(origin || STDIO_ORIGIN);
 
 // A task as a client reads it. The text is a client's words and the answer a
 // page's: both go back wrapped (tasks spec §4.4).
@@ -470,10 +460,9 @@ class FleetToolHandler {
   // The request.inbound record for a tools/call, written before anything
   // can refuse it.
   auditInbound(name, params, origin, jobId) {
-    const inbound = auditOrigin(origin, jobId);
     this.auditBestEffort('request.inbound', {
-      client: inbound.client, method: 'tools/call', name: typeof name === 'string' ? name : null,
-      params_sha256: paramsSha256(params), job_id: jobId, origin: inbound
+      method: 'tools/call', name: typeof name === 'string' ? name : null,
+      params_hmac: paramsHmac(params, this.auditLedger && this.auditLedger.identity), job_id: jobId, origin: auditOrigin(origin)
     });
   }
 
@@ -645,7 +634,7 @@ class FleetToolHandler {
     const jobs = this.jobManager;
     const engine = this.runbookEngine;
     const signal = jobs.getSignal(jobId);
-    const runOrigin = auditOrigin(origin, jobId);
+    const runOrigin = auditOrigin(origin);
     // Yield first, so the caller has its job_id before any work starts.
     await Promise.resolve();
     if (jobs.isTerminal(jobId) || signal?.aborted) {
@@ -675,7 +664,7 @@ class FleetToolHandler {
       const logs = Array.isArray(res?.logs) ? res.logs : [];
       const evidence = { checks: Array.isArray(res?.checks) ? res.checks : [] };
       ok = Boolean(res?.success);
-      error = ok ? null : (res?.error || 'runbook failed');
+      error = ok ? null : auditError({ code: res?.error === 'cancelled' ? 'cancelled' : res?.code, error: res?.error || 'runbook failed' });
       if (jobs.isTerminal(jobId)) {
         jobs.updateJob(jobId, { logs, evidence });
       } else if (res?.success) {
@@ -689,7 +678,7 @@ class FleetToolHandler {
       const result = err.code === 'rate_limited' && err.retryAfterSeconds !== undefined
         ? `rate_limited: retry after ${err.retryAfterSeconds}s`
         : err.message;
-      error = result;
+      error = auditError({ code: err.code, error: result });
       log.warn(`Job ${jobId} (${name}) failed: ${err.message}`);
       if (!jobs.isTerminal(jobId)) jobs.updateJob(jobId, { status: 'failed', result });
     } finally {

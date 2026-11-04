@@ -450,7 +450,9 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(section(kotlin, 'fun verifyListing', '\n    }\n'), /if \(!isListing\(m\)\) return refused\("malformed"\)/);
     // Both cores' vector tests name every listing vector the generator marks for phones, and no other.
     const dir = path.join(ROOT, 'tests', 'vectors', 'lease-v1');
-    const listing = fs.readdirSync(dir).filter((f) => f.startsWith('listing-')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+    const listing = fs.readdirSync(dir).filter((f) => f.startsWith('listing-')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')))
+      // listing-with-sealed-status is the node's until the phone cores read it (sealed phones, Tasks 8 and 9).
+      .filter((v) => v.consumers.includes('ios'));
     assert.equal(listing.length, 14);
     for (const v of listing) assert.deepEqual(v.consumers.slice().sort(), ['android', 'ios', 'node'], v.name);
     const names = listing.map((v) => v.name).sort();

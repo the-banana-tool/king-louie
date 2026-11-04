@@ -1,0 +1,61 @@
+{
+  "name": "request-sealed",
+  "consumers": [
+    "node"
+  ],
+  "check": "request",
+  "given": {
+    "node": {
+      "id": "kl-c2ubd6jjqumalzt5",
+      "name": "web-01",
+      "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+    },
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    }
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-c2ubd6jjqumalzt5",
+    "payload": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsImxlYXNlX2hhc2giOiJMclRzQjUyVDIwUFRRUWhoeGNiSnZrRkJQUVZiTGRrM0ZvUFZiQThFWWh3IiwibGVhc2VfaWQiOiI1MTdjZjE4NS02YjBhLTQ3MDEtOWFlMi03NDVhMWMyYmZhNzEiLCJub2RlX2JveCI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6InRzWUc2ZmZVcGJqczkwUnp3RlF5RUZxS194a3piTzJYZkFVLXk3M01KTXciLCJ5IjoicVNsd2Y4a2xSR1BVU3BTQXdvR1d2eEZoZU9HTktWa200YXhPclplVUpZUSJ9LCJub2RlX2lkIjoia2wtYzJ1YmQ2ampxdW1hbHp0NSIsIm5vZGVfbmFtZSI6IndlYi0wMSIsIm5vbmNlIjoiZkxuWEtUNnJSQjRILWc1emtkdDVlUmxfYjgwbk9QeUJfclBGaGpvcXdBRSIsInJlcXVlc3RfaWQiOiI5NTJjYzk4My0xNWVkLTQ0YjQtOTFiOS1jNzFiODI1YTU3NDAiLCJzZWFsZWQiOnsiY3QiOiI4ODM5UUhtUWdvaXhIU1QyRXNwYW0wakkwQ3hnUk82aHZfd2hkeWRmTWRBb3BMVWJYLUhuLVI0YmhVUzNQcTBuQjR6N3M2MEM3RC1pVTZhSFJlQy1uVXVFS21iTWE2OVAxUTFEUFpjNldRTl9UaG1CQm90ZE9lMXNGck5lTHcxMFI5N0lWaVN0d0xueGNFNDVZNFpxVXF2NTF6Mnk2cjFyblZaWnk0UmxlbmU4WE56WXl4N1V0ektYRjAyTnhhNkhLYzBUOGRLSVZaOFl6Zmw5TUg1QVZ0N1d1WDd2OXBFMEJVTml1NTUzQ1ZqSVNvRDNTSlJhVGhtUThjUkpRYTdzSWZnZXR4RmdFb2tRVllkbzFMbU45c2xlckxmVkFGd2Q4bVhYekJQY0FaUGhiS09naWRNXzg1eGdzREpCYlhMR0F0SnVCcmx1V0NSN3FYY1RjbFQ5NXVNZElhZ2steUQwbDVkRlRaZUhiYzNhSXRCWWNDQWNzQUZmdFYwcmxYb05feXhLeUFrZFA3TnJyNHR3UHE2SDZfa1hYWkhfa2VkRnBMYWFLenpOZFkzYUpXRGVBdGV5YkhMVGdJcWNEdk5Ma2RfeGdVQkhvQU16aWpvTnJxZ3hicHNXM25UbFluMXdFSDFhUjdpTTdKcDZFeU9rUGg5UzlfSjFkMzhQRzZnY05leXJLNl94ZE5sREZ1ZEQyVjdqd1BMa2NtZWhHdU9aUnVadU4tbi1NVnlCUEpsU1daaFBiNlJxWFRfVnp1cmdyYXM0bDNtQWx6TXJaY3o3el9HOXVNdmVXNHpFeDFkUDVRMTQtV2FENXc2MncxUG1PaTJJR3FnTXBPUDhLTUk1Uml0dTIzTUhxSFJDR1dCQmthVFc2YlVsZDIwenczSGhhMVVOTU9sOFZjbk82MjZQcFRyTThnMCIsImVwayI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6Im1zQjNSSmJSbnpkXzRnUmY5bUlic3JEU2J3WTRGOUpwSHJvZVpsVXRfUUEiLCJ5IjoiS0FFX0w5RTdIaUlmaE1WbUNoUnZiVzJBd3ZlZzdBZURSNFplUnRxWVA5VSJ9LCJpdiI6IjhXX2VjcEJ0UkFFMnQ3bEIiLCJrZXlzIjp7ImQtM3Ztd3JpaGhkYm5pdDRvaSI6ImZuNjNBdzhKRXZvLS04NjJTS3FnZEdBZHVvYlRzWDdSREdOUEVhNmZiTm03XzcwMmJVcVdPd2NzVUw2eDQteVIiLCJkLTZ4ZGxieGdsaG52ZmEzbHciOiJSMno1bUoxdVVaNVhZTWpGamc2S3VzS3pQVjBWbFFMeDE4Ukt0UDNaZ0Vndjc3ajU1d2JVS2V0dU13a05SQVZlIiwia2wtYzJ1YmQ2ampxdW1hbHp0NSI6InRqbDV3RHZiQ1NvaDQyVTNZZmhRMmZzREZLeFh5M0s3N3RRSmFsLTZUYTNsVkpnLU5GOUlISTdhUGhNM2hqLWsifSwidiI6MX0sInR5cGUiOiJrbC5sZWFzZS5yZXF1ZXN0IiwidiI6MX0",
+    "sig": "5i_ZgoAXHpobWMDo-Abq4-NTCCLIxz7TqPX5HDhev0_Cp3pwmcAaShT80QKmi2Rl2bGvLkAiIdiMFhT5F-4dCQ"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "status": {
+      "lease": {
+        "kind": "computer_use",
+        "job_id": "job-1758650651201-a1b2c3",
+        "apps": [
+          {
+            "id": "calculator",
+            "name": "Calculator",
+            "path": "C:\\Windows\\System32\\calc.exe",
+            "processes": [
+              "CalculatorApp.exe"
+            ]
+          },
+          {
+            "id": "notepad",
+            "name": "Notepad",
+            "path": "C:\\Windows\\System32\\notepad.exe",
+            "processes": []
+          }
+        ],
+        "max_minutes": 15,
+        "reason": "Enter the totals",
+        "resumes": null,
+        "limits": []
+      },
+      "origin": {
+        "client": "claude.ai",
+        "session": "mcp-session-1",
+        "job_id": "job-1758650651201-a1b2c3"
+      },
+      "salt": "RGQc-jdnKH44ge_KN-YB6AZN8t4ZOCI4A7sXizIXzGU",
+      "lease_hash": "LrTsB52T20PTQQhhxcbJvkFBPQVbLdk3FoPVbA8EYhw"
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "name": "status-sealed",
+  "consumers": [
+    "node"
+  ],
+  "check": null,
+  "given": {
+    "node": {
+      "id": "kl-c2ubd6jjqumalzt5",
+      "name": "web-01",
+      "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+    },
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    }
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-c2ubd6jjqumalzt5",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiI1OXkxMlowbHFOWnNtX3RLcEQzZHhRIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MjQ6MTEuMjAxWiIsImdyYW50ZWRfYnkiOnsiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwibmFtZSI6Ik93bmVyIHBob25lIn0sImtpbmQiOiJ0YXNrIiwibGVhc2VfaWQiOiJiNTVlNDExNi1iMWU3LTRkZGItYmJhMi1hZTQzOTg3MGFkOWQiLCJsb2NrZWQiOmZhbHNlLCJub2RlX2lkIjoia2wtYzJ1YmQ2ampxdW1hbHp0NSIsInJlYXNvbiI6bnVsbCwic2VhbGVkIjp7ImN0IjoiZ0JONEtIWk5JWW9Wd3FFZE9YMDZmMHltZllkZmM1Mmo1VnFvQ1Jaay10MlJuR25aU2pCSzVWMCIsImVwayI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6IkE0cDZXeHk1OTBGbHE5M1BVWHVMOHJ0blI0dFlpUm5BQXQ2SmVtU19oUWsiLCJ5IjoieGlDVlNaZ0JRLW5ZT3VLN0F6dzhjUTZGNjVLLUluSmxZUVMyZDNVT1hwTSJ9LCJpdiI6IlRUUlVTRlVORXNUck5KeVUiLCJrZXlzIjp7ImQtM3Ztd3JpaGhkYm5pdDRvaSI6IlVwaGsyc1NwdmZ4MUVtOUdnaDZYQ0Q4LU5CUktSTUxSNkxfam9qZU4tcGl6RFF5Q0FKYXNPYzF1UG9QdHlsamIiLCJkLTZ4ZGxieGdsaG52ZmEzbHciOiI5eFRxSS1MS0lBakZkX1RFcVpqYWtHS0YxcGVOaE1iazNlbnFYSWgwUFlHcHlTOGNfX1NhOEZJcnptRFVGYnI2Iiwia2wtYzJ1YmQ2ampxdW1hbHp0NSI6InpVdjhQSlVLMUNKWWJGQTF4YnRWRmR1b2tzS0NoUW1SRzlxZWI1UEh3eWhXNzJFOGdDcTc4MEVlczZlRm9ldUcifSwidiI6MX0sInNlcSI6NSwic3RhdGUiOiJhY3RpdmUiLCJ0eXBlIjoia2wubGVhc2Uuc3RhdHVzIiwidW5hdHRlbmRlZCI6dHJ1ZSwidiI6MX0",
+    "sig": "Yy1Itara-7xmZsZUlDb3E4whaIv2EsdRFtxcAn_MHmfEldG2S42N4niqXvBhZLAK5ZUYmzkuG5QbyYiB0GLcDw"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "status": {
+      "lease_id": "b55e4116-b1e7-4ddb-bba2-ae439870ad9d",
+      "seq": 5,
+      "state": "active",
+      "contact_token": "59y12Z0lqNZsm_tKpD3dxQ",
+      "granted_by": {
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Owner phone"
+      },
+      "kind": "task",
+      "unattended": true,
+      "name": "Find a dentist"
+    }
+  }
+}

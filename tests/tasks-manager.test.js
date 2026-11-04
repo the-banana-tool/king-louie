@@ -98,7 +98,7 @@ describe('a task is a chat', () => {
 
     assert.deepEqual(t.pushes, [{ kind: 'task_ended', id: rec.task_id }]);
     assert.deepEqual(t.audits.map((a) => a.kind), ['task.requested', 'task.ended']);
-    assert.deepEqual(t.audits[0].data, { task_id: rec.task_id, client: rec.client, node: 'node-a' });
+    assert.deepEqual(t.audits[0].data, { task_id: rec.task_id, origin: { kind: 'frontdoor' }, node: 'node-a' });
     assert.deepEqual(t.audits[1].data, { task_id: rec.task_id, reason: 'done', usd: 0 });
     assert.ok(!JSON.stringify(t.audits).includes('dentist'), 'the audit never holds the text');
   });

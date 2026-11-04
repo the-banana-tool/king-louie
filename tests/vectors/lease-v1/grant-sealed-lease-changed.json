@@ -1,0 +1,159 @@
+{
+  "name": "grant-sealed-lease-changed",
+  "consumers": [
+    "node"
+  ],
+  "check": 12,
+  "given": {
+    "now": "2026-09-23T18:04:17.201Z",
+    "node": {
+      "id": "kl-c2ubd6jjqumalzt5",
+      "name": "web-01",
+      "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-futyo75nn4w4reil",
+        "name": "Test phone futy",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w",
+          "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": "2026-09-20T00:00:00.000Z",
+        "revoked_by": "console",
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-qspcgdp3ecibkogw",
+        "name": "Test phone qspc",
+        "platform": "demo",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "ZWZ0CFs5J3aGstu0p5ekzB8RVFjxHFNkKVArmQGBZFE",
+          "y": "4E7pC8plxIpQrs88JPZVThXMJcG09vM8A0zZbeeJzP8"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "allow_test_keys": true,
+    "used": [],
+    "gui_apps": {
+      "calculator": {
+        "name": "Calculator",
+        "path": "C:\\Windows\\System32\\calc.exe",
+        "processes": [
+          "CalculatorApp.exe"
+        ]
+      },
+      "notepad": {
+        "name": "Notepad",
+        "path": "C:\\Windows\\System32\\notepad.exe",
+        "processes": []
+      }
+    },
+    "jobs_open": [
+      "job-1758650651201-a1b2c3"
+    ],
+    "gui_max_minutes": 60,
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    },
+    "pending": [
+      {
+        "request_id": "274fc79f-d891-4f57-89c6-b513626ddc10",
+        "lease_id": "eab35291-8ce4-4f69-af0f-feacb850a33f",
+        "nonce": "B_7mWf25Eg890ppADDLAJcGVNWynufkxrIdtO_TKZs4",
+        "lease_hash": "emCv51x-G1l60IUa3w3Xv7PCmHm0Ypi30Py2cKBgvYo",
+        "expires_at": "2026-09-23T18:09:11.201Z",
+        "lease": {
+          "kind": "computer_use",
+          "job_id": "job-1758650651201-a1b2c3",
+          "apps": [
+            {
+              "id": "calculator",
+              "name": "Calculator",
+              "path": "C:\\Windows\\System32\\calc.exe",
+              "processes": [
+                "CalculatorApp.exe"
+              ]
+            },
+            {
+              "id": "notepad",
+              "name": "Notepad",
+              "path": "C:\\Windows\\System32\\notepad.exe",
+              "processes": []
+            }
+          ],
+          "max_minutes": 15,
+          "reason": "Something else",
+          "resumes": null,
+          "limits": []
+        },
+        "salt": "O6hp0z3N7UZWCMY9nkvSPvhs_pumWtP3EpNIgoSSH8Q"
+      }
+    ],
+    "request": {
+      "alg": "Ed25519",
+      "kid": "kl-c2ubd6jjqumalzt5",
+      "payload": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsImxlYXNlX2hhc2giOiJlbUN2NTF4LUcxbDYwSVVhM3czWHY3UENtSG0wWXBpMzBQeTJjS0JndllvIiwibGVhc2VfaWQiOiJlYWIzNTI5MS04Y2U0LTRmNjktYWYwZi1mZWFjYjg1MGEzM2YiLCJub2RlX2JveCI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6InRzWUc2ZmZVcGJqczkwUnp3RlF5RUZxS194a3piTzJYZkFVLXk3M01KTXciLCJ5IjoicVNsd2Y4a2xSR1BVU3BTQXdvR1d2eEZoZU9HTktWa200YXhPclplVUpZUSJ9LCJub2RlX2lkIjoia2wtYzJ1YmQ2ampxdW1hbHp0NSIsIm5vZGVfbmFtZSI6IndlYi0wMSIsIm5vbmNlIjoiQl83bVdmMjVFZzg5MHBwQURETEFKY0dWTld5bnVma3hySWR0T19US1pzNCIsInJlcXVlc3RfaWQiOiIyNzRmYzc5Zi1kODkxLTRmNTctODljNi1iNTEzNjI2ZGRjMTAiLCJzZWFsZWQiOnsiY3QiOiJiaDdkVklSdFpfbWh3Z1RLelhqbGJ1eUxkZkJReTNyMW1mSXZQMXlTMjdhV241LXFzZzR1UzlKeWJuRm5xcTFHcElQVVphdW5Sek1jWjVCbHdfOEEzdmxncldWVzh5bklZSXUxYnF5cm9ZQlpIbTJITjV2R1NCNnlSSzVZMFlGVzl0c3VJMTZkc3FWN1dVajRuQ01ESUt6OU1KdkNGNjQzSzJnLWFDZjFNVE93WFhROWU0R3B4aDIyZzVhc1R5VWY5eW5GZUZRYlFUQ1lBc2RoN0xZZC1aTTdmYmEzS3dQLXRMdjRYYUR2cFRYSDJ6N0RIcHdpTzN5aXZzRVkySkllMXJRa0l1TXp0YWwxVjBuTm9WblgxQ2FCWUNaUTNWTnJqQjNUemNsZjBwREdKd08wZHpndzRNdjcxbmJrSERHaGRuYzZrUXJXMVlOLVdSRHRBS0JUeHdkemIzVDRqbFRMbldsS1gyYkdjYU5yN0hXdERRUUZyekFtZ3VsNzhRN1JYT1FiMmFUVjJaTG5kOE1SYXZ4VURETEhNZlBjRHVfbm54a0tfejJoeGZUYlJ0dHItbHJSb1BuSk1hWXgwWEstckdDV0l5bWRhdndUa3ZZNENFdEVCdmJiSHJ2M3BqVnJUWHhJT0EzSTlSdmxYU0N1R1NqaHc0ZnJ0Mm5CUTBxYVBJbi14MGZWWjFLZXlHbkN1RUE4WldicVpmRk1BVHR6OWxFT2czRUpabWpkUVdad1pFMjE3VlpCbW1rNV9MZmtzeHd5Wm1RaTRsRy1SUEpBYjBJaVYwNExHRERaY0FXMzBmcGVtMW16UW0ta3NZRTA4QUI3NHNOSmJQTHpCNE1xUDRXOWFaVHNlSVQ0S2hVOVFsZ2tzdkZPMnRoc1VTdlhueVhsU3hVcW1aNGdMYUs3QmhpVkRObyIsImVwayI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6ImpkR250d0Z4d09VVTNSRUltbXNTTlhyM3N3anp5ek1ENDFwSlhVRDNGdEUiLCJ5IjoielZycTdudjlaOEFkUWVBR251WWdHR2hmTU1wYlpTOFhfSGR2QWM0N0Z4VSJ9LCJpdiI6Im0tZGZuWldNanVLTE81bEciLCJrZXlzIjp7ImQtM3Ztd3JpaGhkYm5pdDRvaSI6Ik5OdEswdk9IRXZ5bWpyanZRMmFiQ1ZLOWxwSmdhTjk4S2RxT0dwSkJveElJVVRybGF6WnBpWl9LWUFPWlBXNDgiLCJkLTZ4ZGxieGdsaG52ZmEzbHciOiJlTVJJdVo1eVRzVTZMY2Rmc2Q4czZlYUZYTnF3cHdKNzRYRzdGc3FDN01uQWg1V2ZxMWFlMzA2dlE0NjVndEw1Iiwia2wtYzJ1YmQ2ampxdW1hbHp0NSI6InJEakpsNTNSb2NxaURxWUM1azZ5MHFWTm5lWjJaeHFrMzdReDNCd0J1dTgxX3diNU5kNHdPQ3JqdHNhR3ZBUzUifSwidiI6MX0sInR5cGUiOiJrbC5sZWFzZS5yZXF1ZXN0IiwidiI6MX0",
+      "sig": "NoJv93rRs_-2ReBpUlNxpiD3kKSCQONo8qLp58YsM09k_zT7QdKJn6eOL3-66W6oXgbBpeqUaa5WYJFQEmJICA"
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJkZWNpc2lvbiI6ImdyYW50IiwiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsImdyYW50Ijp7ImFwcHMiOlsiY2FsY3VsYXRvciIsIm5vdGVwYWQiXSwibWludXRlcyI6MTB9LCJsZWFzZV9oYXNoIjoiZW1DdjUxeC1HMWw2MElVYTN3M1h2N1BDbUhtMFlwaTMwUHkyY0tCZ3ZZbyIsImxlYXNlX2lkIjoiZWFiMzUyOTEtOGNlNC00ZjY5LWFmMGYtZmVhY2I4NTBhMzNmIiwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub25jZSI6IkJfN21XZjI1RWc4OTBwcEFERExBSmNHVk5XeW51Zmt4cklkdE9fVEtaczQiLCJyZXF1ZXN0X2lkIjoiMjc0ZmM3OWYtZDg5MS00ZjU3LTg5YzYtYjUxMzYyNmRkYzEwIiwic2lnbmVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxNi4yMDFaIiwidHlwZSI6ImtsLmxlYXNlLmdyYW50IiwidiI6MX0",
+    "sig": "kbGk9FzRoMqbooCS1s2atONLfEO63AJdfI-S2YW2UW-MHJcfTH31ia3-VkFCCAwgzpeNbW-L37qiDc4f5sKvFg"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "lease_changed"
+  }
+}

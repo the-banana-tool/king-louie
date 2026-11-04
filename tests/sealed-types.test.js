@@ -19,7 +19,7 @@ const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 // this list and SEAL_SPLIT together.
 const CONTENT_TYPES = ['kl.approval.request', 'kl.lease.request', 'kl.lease.status', 'kl.lease.view', 'kl.question.ask', 'kl.question.answer'];
 // The types whose sealed shape a later task's validator takes.
-const NOT_YET = { 'kl.lease.request': 'Task 7', 'kl.lease.status': 'Task 7', 'kl.lease.view': 'Task 7' };
+const NOT_YET = {};
 
 const node = testNodeIdentity({ box: true });
 const phone = createFakePhone({ boxKey: true });

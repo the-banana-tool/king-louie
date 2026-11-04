@@ -10,6 +10,7 @@
 // write the record themselves, at once, so the policy refuses from that instant; a spend or
 // duration cut is written when the turn has unwound.
 
+const { auditOriginOf } = require('../approvals/audit-fields');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -91,7 +92,8 @@ class TaskManager {
       spend: { usd: 0, calls: 0, cap_usd: DEFAULT_USD, unpriced: 0 },
     });
     const taskId = created.task_id;
-    this._audit('task.requested', { task_id: taskId, client, node: this.nodeConfig.name });
+    // The ledger is mirrored: the kind of client, never its self-declared name (the record keeps that).
+    this._audit('task.requested', { task_id: taskId, origin: auditOriginOf(client), node: this.nodeConfig.name });
     let seq;
     try {
       const workDir = this._workDir(taskId);

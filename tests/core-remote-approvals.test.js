@@ -438,7 +438,7 @@ describe("createCore remoteApprovals: 'phone'", () => {
       assert.deepEqual(await executor.execute(DENIED_TOOL, {}), { success: false, error: 'Denied by node policy.', deniedBy: 'policy' });
       await new Promise((r) => setImmediate(r));
       const start = audit.find((e) => e.kind === 'exec.start');
-      assert.deepEqual(start.data.origin, { client: 'desktop', deviceId: 'kld-testdesktop00001', session: 'chat-1', job_id: null });
+      assert.deepEqual(start.data.origin, { kind: 'desktop' });
       assert.ok(audit.some((e) => e.kind === 'tier.decision' && e.data.tier === 'denied'));
     } finally {
       await core.shutdown();
@@ -632,9 +632,7 @@ describe("createCore remoteApprovals: 'phone'", () => {
         assert.equal(probeRuns, before + 1);
         const start = audit.find((e) => e.kind === 'exec.start' && e.data.name === PROBE_TOOL);
         assert.ok(start, 'the child tool call was audited');
-        assert.deepEqual(start.data.origin, {
-          client: 'desktop', deviceId: 'kld-testdesktop00001', session: 'chat-1', job_id: null
-        });
+        assert.deepEqual(start.data.origin, { kind: 'desktop' }, 'the mirrored ledger holds the kind alone');
       } finally {
         await core.shutdown();
       }

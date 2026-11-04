@@ -1,0 +1,179 @@
+{
+  "name": "grant-to-sealed",
+  "consumers": [
+    "node"
+  ],
+  "check": null,
+  "given": {
+    "now": "2026-09-23T18:04:17.201Z",
+    "node": {
+      "id": "kl-c2ubd6jjqumalzt5",
+      "name": "web-01",
+      "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-futyo75nn4w4reil",
+        "name": "Test phone futy",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w",
+          "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": "2026-09-20T00:00:00.000Z",
+        "revoked_by": "console",
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-qspcgdp3ecibkogw",
+        "name": "Test phone qspc",
+        "platform": "demo",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "ZWZ0CFs5J3aGstu0p5ekzB8RVFjxHFNkKVArmQGBZFE",
+          "y": "4E7pC8plxIpQrs88JPZVThXMJcG09vM8A0zZbeeJzP8"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "allow_test_keys": true,
+    "used": [],
+    "gui_apps": {
+      "calculator": {
+        "name": "Calculator",
+        "path": "C:\\Windows\\System32\\calc.exe",
+        "processes": [
+          "CalculatorApp.exe"
+        ]
+      },
+      "notepad": {
+        "name": "Notepad",
+        "path": "C:\\Windows\\System32\\notepad.exe",
+        "processes": []
+      }
+    },
+    "jobs_open": [
+      "job-1758650651201-a1b2c3"
+    ],
+    "gui_max_minutes": 60,
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    },
+    "pending": [
+      {
+        "request_id": "952cc983-15ed-44b4-91b9-c71b825a5740",
+        "lease_id": "517cf185-6b0a-4701-9ae2-745a1c2bfa71",
+        "nonce": "fLnXKT6rRB4H-g5zkdt5eRl_b80nOPyB_rPFhjoqwAE",
+        "lease_hash": "LrTsB52T20PTQQhhxcbJvkFBPQVbLdk3FoPVbA8EYhw",
+        "expires_at": "2026-09-23T18:09:11.201Z",
+        "lease": {
+          "kind": "computer_use",
+          "job_id": "job-1758650651201-a1b2c3",
+          "apps": [
+            {
+              "id": "calculator",
+              "name": "Calculator",
+              "path": "C:\\Windows\\System32\\calc.exe",
+              "processes": [
+                "CalculatorApp.exe"
+              ]
+            },
+            {
+              "id": "notepad",
+              "name": "Notepad",
+              "path": "C:\\Windows\\System32\\notepad.exe",
+              "processes": []
+            }
+          ],
+          "max_minutes": 15,
+          "reason": "Enter the totals",
+          "resumes": null,
+          "limits": []
+        },
+        "salt": "RGQc-jdnKH44ge_KN-YB6AZN8t4ZOCI4A7sXizIXzGU"
+      }
+    ],
+    "request": {
+      "alg": "Ed25519",
+      "kid": "kl-c2ubd6jjqumalzt5",
+      "payload": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsImxlYXNlX2hhc2giOiJMclRzQjUyVDIwUFRRUWhoeGNiSnZrRkJQUVZiTGRrM0ZvUFZiQThFWWh3IiwibGVhc2VfaWQiOiI1MTdjZjE4NS02YjBhLTQ3MDEtOWFlMi03NDVhMWMyYmZhNzEiLCJub2RlX2JveCI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6InRzWUc2ZmZVcGJqczkwUnp3RlF5RUZxS194a3piTzJYZkFVLXk3M01KTXciLCJ5IjoicVNsd2Y4a2xSR1BVU3BTQXdvR1d2eEZoZU9HTktWa200YXhPclplVUpZUSJ9LCJub2RlX2lkIjoia2wtYzJ1YmQ2ampxdW1hbHp0NSIsIm5vZGVfbmFtZSI6IndlYi0wMSIsIm5vbmNlIjoiZkxuWEtUNnJSQjRILWc1emtkdDVlUmxfYjgwbk9QeUJfclBGaGpvcXdBRSIsInJlcXVlc3RfaWQiOiI5NTJjYzk4My0xNWVkLTQ0YjQtOTFiOS1jNzFiODI1YTU3NDAiLCJzZWFsZWQiOnsiY3QiOiI4ODM5UUhtUWdvaXhIU1QyRXNwYW0wakkwQ3hnUk82aHZfd2hkeWRmTWRBb3BMVWJYLUhuLVI0YmhVUzNQcTBuQjR6N3M2MEM3RC1pVTZhSFJlQy1uVXVFS21iTWE2OVAxUTFEUFpjNldRTl9UaG1CQm90ZE9lMXNGck5lTHcxMFI5N0lWaVN0d0xueGNFNDVZNFpxVXF2NTF6Mnk2cjFyblZaWnk0UmxlbmU4WE56WXl4N1V0ektYRjAyTnhhNkhLYzBUOGRLSVZaOFl6Zmw5TUg1QVZ0N1d1WDd2OXBFMEJVTml1NTUzQ1ZqSVNvRDNTSlJhVGhtUThjUkpRYTdzSWZnZXR4RmdFb2tRVllkbzFMbU45c2xlckxmVkFGd2Q4bVhYekJQY0FaUGhiS09naWRNXzg1eGdzREpCYlhMR0F0SnVCcmx1V0NSN3FYY1RjbFQ5NXVNZElhZ2steUQwbDVkRlRaZUhiYzNhSXRCWWNDQWNzQUZmdFYwcmxYb05feXhLeUFrZFA3TnJyNHR3UHE2SDZfa1hYWkhfa2VkRnBMYWFLenpOZFkzYUpXRGVBdGV5YkhMVGdJcWNEdk5Ma2RfeGdVQkhvQU16aWpvTnJxZ3hicHNXM25UbFluMXdFSDFhUjdpTTdKcDZFeU9rUGg5UzlfSjFkMzhQRzZnY05leXJLNl94ZE5sREZ1ZEQyVjdqd1BMa2NtZWhHdU9aUnVadU4tbi1NVnlCUEpsU1daaFBiNlJxWFRfVnp1cmdyYXM0bDNtQWx6TXJaY3o3el9HOXVNdmVXNHpFeDFkUDVRMTQtV2FENXc2MncxUG1PaTJJR3FnTXBPUDhLTUk1Uml0dTIzTUhxSFJDR1dCQmthVFc2YlVsZDIwenczSGhhMVVOTU9sOFZjbk82MjZQcFRyTThnMCIsImVwayI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6Im1zQjNSSmJSbnpkXzRnUmY5bUlic3JEU2J3WTRGOUpwSHJvZVpsVXRfUUEiLCJ5IjoiS0FFX0w5RTdIaUlmaE1WbUNoUnZiVzJBd3ZlZzdBZURSNFplUnRxWVA5VSJ9LCJpdiI6IjhXX2VjcEJ0UkFFMnQ3bEIiLCJrZXlzIjp7ImQtM3Ztd3JpaGhkYm5pdDRvaSI6ImZuNjNBdzhKRXZvLS04NjJTS3FnZEdBZHVvYlRzWDdSREdOUEVhNmZiTm03XzcwMmJVcVdPd2NzVUw2eDQteVIiLCJkLTZ4ZGxieGdsaG52ZmEzbHciOiJSMno1bUoxdVVaNVhZTWpGamc2S3VzS3pQVjBWbFFMeDE4Ukt0UDNaZ0Vndjc3ajU1d2JVS2V0dU13a05SQVZlIiwia2wtYzJ1YmQ2ampxdW1hbHp0NSI6InRqbDV3RHZiQ1NvaDQyVTNZZmhRMmZzREZLeFh5M0s3N3RRSmFsLTZUYTNsVkpnLU5GOUlISTdhUGhNM2hqLWsifSwidiI6MX0sInR5cGUiOiJrbC5sZWFzZS5yZXF1ZXN0IiwidiI6MX0",
+      "sig": "5i_ZgoAXHpobWMDo-Abq4-NTCCLIxz7TqPX5HDhev0_Cp3pwmcAaShT80QKmi2Rl2bGvLkAiIdiMFhT5F-4dCQ"
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJkZWNpc2lvbiI6ImdyYW50IiwiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsImdyYW50Ijp7ImFwcHMiOlsiY2FsY3VsYXRvciIsIm5vdGVwYWQiXSwibWludXRlcyI6MTB9LCJsZWFzZV9oYXNoIjoiTHJUc0I1MlQyMFBUUVFoaHhjYkp2a0ZCUFFWYkxkazNGb1BWYkE4RVlodyIsImxlYXNlX2lkIjoiNTE3Y2YxODUtNmIwYS00NzAxLTlhZTItNzQ1YTFjMmJmYTcxIiwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub25jZSI6ImZMblhLVDZyUkI0SC1nNXprZHQ1ZVJsX2I4MG5PUHlCX3JQRmhqb3F3QUUiLCJyZXF1ZXN0X2lkIjoiOTUyY2M5ODMtMTVlZC00NGI0LTkxYjktYzcxYjgyNWE1NzQwIiwic2lnbmVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxNi4yMDFaIiwidHlwZSI6ImtsLmxlYXNlLmdyYW50IiwidiI6MX0",
+    "sig": "i8dLC_kC1oC1FxbzHZlYYNs_vTozG8ONo4udMg2trm1PaVlvWPE6e-dxAye5bizlNaq4rMdSS944ZXEF8rx05w"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "message": {
+      "v": 1,
+      "type": "kl.lease.grant",
+      "request_id": "952cc983-15ed-44b4-91b9-c71b825a5740",
+      "lease_id": "517cf185-6b0a-4701-9ae2-745a1c2bfa71",
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "lease_hash": "LrTsB52T20PTQQhhxcbJvkFBPQVbLdk3FoPVbA8EYhw",
+      "nonce": "fLnXKT6rRB4H-g5zkdt5eRl_b80nOPyB_rPFhjoqwAE",
+      "decision": "grant",
+      "grant": {
+        "apps": [
+          "calculator",
+          "notepad"
+        ],
+        "minutes": 10
+      },
+      "expires_at": "2026-09-23T18:09:11.201Z",
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "signed_at": "2026-09-23T18:04:16.201Z"
+    }
+  }
+}

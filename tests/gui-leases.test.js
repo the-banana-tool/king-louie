@@ -9,6 +9,10 @@ const { setLogLevel } = require('../src/logging');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
 const L = require('../src/gui/lease-protocol');
+const path = require('path');
+const { validateMessage } = require('../src/approvals/messages');
+const { saltedHash } = require('../src/approvals/seal');
+const { createSealPolicy } = require('../src/approvals/seal-policy');
 
 setLogLevel('fatal');
 const stores = [];
@@ -88,13 +92,15 @@ beforeEach(async () => {
 });
 
 // A fresh relay, broker, audit list and LeaseManager over a store holding `records`.
-async function buildLeases(records) {
+async function buildLeases(records, { wrapPolicy = null } = {}) {
   const store = await approverStoreWith(records, { now: () => clock.now() });
   stores.push(store);
   relay = new FakeRelay();
   broker = { calls: [], releaseAll: async () => { broker.calls.push('releaseAll'); }, focusApp: async (ids) => { broker.calls.push(['focus', ids]); }, capability: () => ({ limits: ['no_human_yield'] }), leaseChanged: () => {} };
   audits = [];
+  const sealPolicy = wrapPolicy ? wrapPolicy(createSealPolicy({ approverStore: store, identity, dataDir: path.join(store.baseDir, 'data') })) : null;
   leases = new LeaseManager({
+    sealPolicy,
     approvals: { identity, approverStore: store, relayClient: relay, phoneApprover: { isAvailable: () => true } },
     guiConfig, broker, audit: { append: async (e) => { audits.push(e); } }, nodeName: 'gpu-box', clock: () => clock.now(), timers,
     jobOpen: (jobId) => openJobs.has(jobId)
@@ -1933,12 +1939,13 @@ describe('task leases (tasks stage 1, spec §4.6)', () => {
     }
   });
 
-  it('audit: lease.requested and lease.granted hold name, sites, allows and usd, never the reason', async () => {
+  it('audit: lease.requested and lease.granted hold allows and usd, never the name, the sites or the reason', async () => {
     await grantedTask();
     for (const k of ['lease.requested', 'lease.granted']) {
       const a = audits.find((x) => x.kind === k);
       assert.equal(a.data.kind, 'task', k);
-      assert.deepEqual([a.data.name, a.data.sites, a.data.allows, a.data.usd], ['File the permit', ['*.example.com'], ['browser-act', 'logins'], 25], k);
+      assert.deepEqual([a.data.allows, a.data.usd], [['browser-act', 'logins'], 25], k);
+      assert.ok(!('name' in a.data) && !('sites' in a.data), k);
       assert.ok(!JSON.stringify(a.data).includes('the permit form'), `${k} does not hold the reason`);
       assert.ok(!('credentials' in a.data), k);
     }
@@ -2065,5 +2072,288 @@ describe('the read key signs watches and nothing else', () => {
     const lease = await granted();
     assert.deepEqual(leases.verifyWatch(asRead(phone, watchFrom(phone, lease))), { accepted: false, reason: 'bad_signature' });
     assert.equal(watchAudits().length, 0);
+  });
+});
+
+describe('sealed leases (sealed phones, R-SP-2, R-SP-4, R-SP-5, R-SP-7)', () => {
+  const TAKE = { name: 'BSEOA demo', sites: ['*.example.com'], browser: true, credentials: true, unattended: true };
+  const TASK = { name: 'File the permit', sites: ['*.example.com'], allows: ['browser-act', 'logins'], usd: 25 };
+  const NONCE = 'n'.repeat(43);
+  let policy;
+  let canSeal;
+  let sealing;
+
+  // A node that has its box key, one phone that holds one and one that does not.
+  beforeEach(async () => {
+    identity = testNodeIdentity({ box: true });
+    phone = createFakePhone({ name: 'Owner phone', boxKey: true });
+    other = createFakePhone({ name: 'Second phone' });
+    canSeal = null;
+    sealing = null;
+    await buildLeases([phone.approverRecord({ boxKey: true }), other.approverRecord()], {
+      wrapPolicy: (real) => {
+        policy = real;
+        return {
+          ...real,
+          sealing: () => (sealing === null ? real.sealing() : sealing),
+          canSeal: () => (canSeal === null ? real.canSeal() : canSeal),
+          whyNot: () => (canSeal === false ? 'no active phone holds a box key. Enroll a phone or apply its box key' : real.whyNot())
+        };
+      }
+    });
+  });
+
+  const requestLease = () => leases.request({ jobId: 'job-1', origin: { ...ORIGIN, job_id: 'job-1' }, appIds: ['calculator'], minutes: 15, reason: 'Enter the totals' });
+  const opened = (sent) => phone.open(sent.envelope, sent.message.type).message;
+  const requestAs = (kind, extra = {}) => leases.request({ jobId: 'job-1', origin: ORIGIN, minutes: 30, reason: 'the hidden reason', kind, ...(kind === 'take' ? { appIds: ['notepad'], take: { ...TAKE } } : { task: { ...TASK } }), ...extra });
+  const nodeKey = () => identity.publicKey.toString('hex');
+
+  async function running(by = phone, apps = undefined) {
+    const p = requestLease();
+    const reply = leases.onGrant(by.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 10, ...(apps ? { apps } : {}) }));
+    assert.equal(reply.state, 'active');
+    return p;
+  }
+
+  it('a sealing node\'s request holds no lease or origin in clear, and its lease_hash is salted', async () => {
+    requestLease().catch(() => {});
+    const req = relay.last('kl.lease.request');
+    for (const key of ['lease', 'origin', 'salt']) assert.ok(!(key in req.message), key);
+    assert.ok(req.message.sealed);
+    assert.deepEqual(req.message.node_box, identity.box.jwk);
+    assert.equal(validateMessage('kl.lease.request', req.message), null);
+    assert.deepEqual(Object.keys(req.message.sealed.keys).sort(), [phone.deviceId, identity.nodeId].sort(), 'a phone with no box key has no wrap');
+    assert.doesNotMatch(Buffer.from(req.envelope.payload, 'base64url').toString('utf8'), /calc\.exe|Enter the totals|claude\.ai/);
+
+    const full = opened(req);
+    assert.equal(full.lease.apps[0].id, 'calculator');
+    assert.deepEqual(full.origin, { client: 'claude.ai', session: 's-1', job_id: 'job-1' });
+    assert.equal(full.lease_hash, saltedHash(full.salt, full.lease));
+    assert.notEqual(full.lease_hash, L.leaseHash(full.lease));
+    assert.equal(L.leaseHash(full.lease, full.salt), full.lease_hash);
+    assert.equal(L.validateOpenedLeaseRequest(full), null);
+    assert.equal(L.validateOpenedLeaseRequest({ ...full, lease_hash: L.leaseHash(full.lease) }), 'lease_hash_mismatch');
+    assert.equal(L.validateOpenedLeaseRequest({ ...full, salt: 'short' }), 'malformed');
+    leases.stopAll();
+  });
+
+  it('the phone that opens it is granted; a grant over the unsalted hash is lease_hash_mismatch', async () => {
+    const p = requestLease();
+    const req = relay.last('kl.lease.request');
+    const full = opened(req);
+    const unsalted = phone.leaseGrant(req.envelope, { minutes: 10, overrides: { lease_hash: L.leaseHash(full.lease) } });
+    assert.equal(leases.onGrant(unsalted).reason, 'lease_hash_mismatch');
+    const reply = leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 10 }));
+    assert.equal(reply.state, 'active');
+    const lease = await p;
+    assert.equal(leases.assertUsable('job-1'), lease);
+  });
+
+  it('every status is sealed: its clear part has no name, and a listing over it passes with nothing opened', async () => {
+    requestAs('task').catch(() => {});
+    leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 30, apps: [] }));
+    const sent = relay.last('kl.lease.status');
+    assert.ok(!('name' in sent.message));
+    assert.ok(sent.message.sealed);
+    assert.equal(validateMessage('kl.lease.status', sent.message), null);
+    assert.deepEqual([sent.message.kind, sent.message.unattended, sent.message.state], ['task', true, 'active']);
+    assert.equal(opened(sent).name, 'File the permit');
+    assert.equal(validateMessage('kl.lease.status', opened(sent)), null);
+
+    const { statuses, listing } = leases.listingFor(phone.deviceId, NONCE);
+    const check = { nodeId: identity.nodeId, nodePublicKeyHex: nodeKey(), nonce: NONCE, deviceId: phone.deviceId, statuses };
+    const r = L.verifyLeaseListing(listing, check);
+    assert.equal(r.accepted, true, r.reason);
+    assert.equal(r.statuses[0].lease_id, sent.message.lease_id);
+    assert.equal(r.statuses[0].name, undefined, 'nothing opened, no name');
+    assert.equal(r.statuses[0].sealed, undefined);
+    // With a way to open it, the same listing reads the name.
+    const read = L.verifyLeaseListing(listing, { ...check, open: phone.open });
+    assert.equal(read.statuses[0].name, 'File the permit');
+    // A phone that is not a recipient is still told about the lease.
+    assert.equal(L.openNodeStatus(statuses[0], { nodeId: identity.nodeId, nodePublicKeyHex: nodeKey() }).state, 'active');
+    leases.stopAll();
+  });
+
+  it('a take request seals the same way: name, sites, browser and credentials are only inside', async () => {
+    requestAs('take').catch(() => {});
+    const req = relay.last('kl.lease.request');
+    assert.doesNotMatch(Buffer.from(req.envelope.payload, 'base64url').toString('utf8'), /BSEOA demo|example\.com|hidden reason/);
+    const { lease } = opened(req);
+    assert.deepEqual([lease.kind, lease.name, lease.sites, lease.browser, lease.credentials, lease.unattended, lease.reason], ['take', 'BSEOA demo', ['*.example.com'], true, true, true, 'the hidden reason']);
+    const reply = leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 30 }));
+    assert.equal(reply.state, 'active');
+    const held = leases.current();
+    // An unattended take never pauses, sealed or not (R-D1-7).
+    leases.suspend(held.leaseId, 'foreground_changed');
+    assert.equal(held.state, 'active');
+    assert.equal(opened(relay.last('kl.lease.status')).name, 'BSEOA demo');
+    leases.stopAll();
+  });
+
+  it('a task\'s card seals the same way: name, sites, allows and usd are only inside', async () => {
+    requestAs('task').catch(() => {});
+    const req = relay.last('kl.lease.request');
+    assert.doesNotMatch(Buffer.from(req.envelope.payload, 'base64url').toString('utf8'), /File the permit|example\.com|browser-act|hidden reason/);
+    const { lease } = opened(req);
+    assert.deepEqual([lease.kind, lease.name, lease.sites, lease.allows, lease.usd, lease.max_minutes, lease.unattended], ['task', 'File the permit', ['*.example.com'], ['browser-act', 'logins'], 25, 30, true]);
+    assert.equal(leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 30, apps: [] })).state, 'active');
+    leases.stopAll();
+  });
+
+  it('the audit\'s lease.requested and lease.granted hold no name and no sites (R-SP-7)', async () => {
+    for (const [kind, extra] of [['take', { credentials: true }], ['task', { allows: ['browser-act', 'logins'], usd: 25 }]]) {
+      audits.length = 0;
+      requestAs(kind).catch(() => {});
+      leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 30, apps: kind === 'task' ? [] : null }));
+      for (const k of ['lease.requested', 'lease.granted']) {
+        const { data } = audits.find((a) => a.kind === k);
+        for (const key of ['name', 'sites', 'reason']) assert.ok(!(key in data), `${k} has no ${key}`);
+        assert.doesNotMatch(JSON.stringify(data), /BSEOA demo|File the permit|example\.com|hidden reason/, k);
+        for (const key of ['job_id', 'lease_id', 'kind', 'request_id', 'apps', 'minutes', 'resumes']) assert.ok(key in data, `${k} has ${key}`);
+        for (const [key, value] of Object.entries(extra)) assert.deepEqual(data[key], value, `${k} ${key}`);
+      }
+      leases.stopAll();
+    }
+  });
+
+  it('contact still works: a watch echoes the token in a sealed status\'s clear part, and no_contact resumes on it', async () => {
+    const lease = await running();
+    timers.advance(121000);
+    assert.equal(lease.state, 'suspended');
+    assert.equal(lease.suspendReason, 'no_contact');
+    assert.equal(relay.last('kl.lease.status').message.reason, 'no_contact');
+    assert.ok(relay.last('kl.lease.status').message.sealed);
+    const reply = leases.verifyWatch(watchFrom(phone, lease));
+    assert.equal(reply.contact, true);
+    assert.equal(lease.state, 'active');
+    leases.stopAll();
+  });
+
+  it('sealing turning on while a clear request is out: its own hash rule answers it, and what follows is sealed', async () => {
+    sealing = false;
+    const p = requestLease();
+    const req = relay.last('kl.lease.request');
+    assert.ok(req.message.lease, 'clear while nobody has a box key');
+    assert.equal(req.message.lease_hash, L.leaseHash(req.message.lease));
+    sealing = null;
+    assert.equal(leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 10 })).state, 'active');
+    await p;
+    assert.ok(relay.last('kl.lease.status').message.sealed);
+    leases.stopAll();
+  });
+
+  it('with sealing off the clear shape is what it was, name included', async () => {
+    sealing = false;
+    requestAs('task').catch(() => {});
+    const req = relay.last('kl.lease.request');
+    assert.equal(req.message.lease.name, 'File the permit');
+    assert.ok(!('node_box' in req.message));
+    leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 30, apps: [] }));
+    assert.equal(relay.last('kl.lease.status').message.name, 'File the permit');
+    leases.stopAll();
+  });
+
+  describe('latched, and nobody left to seal to', () => {
+    it('a new request is refused capability_unavailable with the cause, and nothing is sent', async () => {
+      canSeal = false;
+      await assert.rejects(requestLease(), (e) => e.code === 'capability_unavailable' && /no_sealed_recipient/.test(e.message) && /no active phone holds a box key/.test(e.message));
+      assert.equal(relay.sent.length, 0);
+      assert.equal(leases.current(), null);
+    });
+
+    it('so is a take\'s and a task\'s', async () => {
+      canSeal = false;
+      for (const kind of ['take', 'task']) await assert.rejects(requestAs(kind), (e) => e.code === 'capability_unavailable' && /no_sealed_recipient/.test(e.message), kind);
+      assert.equal(relay.sent.length, 0);
+    });
+
+    it('it says so even when no phone is left at all, not approval_unavailable', async () => {
+      canSeal = false;
+      leases.approvals.phoneApprover.isAvailable = () => false;
+      await assert.rejects(requestLease(), (e) => e.code === 'capability_unavailable');
+    });
+
+    it('the real policy: the only box key revoked, a clear phone\'s running lease ends no_sealed_recipient, and the end is still told', async () => {
+      const lease = await running(other, ['calculator']);
+      leases.approvals.approverStore.addToOverlay(phone.deviceId);
+      assert.equal(policy.canSeal(), false);
+      assert.equal(policy.sealing(), true);
+      leases.checkGrantingDevices();
+      assert.deepEqual([lease.state, lease.endReason], ['ended', 'no_sealed_recipient']);
+      const sent = relay.last('kl.lease.status');
+      assert.deepEqual([sent.message.state, sent.message.reason, sent.message.lease_id], ['ended', 'no_sealed_recipient', lease.leaseId]);
+      assert.ok(!('name' in sent.message), 'never in clear');
+      assert.deepEqual(Object.keys(sent.message.sealed.keys), [identity.nodeId], 'sealed to the node alone');
+      assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'capability_unavailable' && /no_sealed_recipient/.test(e.message));
+    });
+
+    it('the five-second look finds it, for a revoke written by a command', async () => {
+      const lease = await running();
+      canSeal = false;
+      timers.advance(5000);
+      assert.deepEqual([lease.state, lease.endReason], ['ended', 'no_sealed_recipient']);
+    });
+
+    it('input finds it first: assertUsable ends the lease before it acts', async () => {
+      const lease = await running();
+      canSeal = false;
+      assert.throws(() => leases.assertUsable('job-1'), (e) => e.code === 'capability_unavailable');
+      assert.equal(lease.endReason, 'no_sealed_recipient');
+    });
+
+    it('in the moment before the look, Stop and the listing still work, and no status goes clear', async () => {
+      const lease = await running();
+      canSeal = false;
+      const { statuses, listing } = leases.listingFor(phone.deviceId, NONCE);
+      assert.equal(statuses.length, 1);
+      assert.ok(statuses.every((s) => open(s).message.sealed && !('name' in open(s).message)));
+      assert.equal(L.verifyLeaseListing(listing, { nodeId: identity.nodeId, nodePublicKeyHex: nodeKey(), nonce: NONCE, deviceId: phone.deviceId, statuses }).accepted, true);
+      const reply = leases.onRevoke(phone.leaseRevoke(identity.nodeId, lease.leaseId));
+      assert.equal(reply.state, 'ended');
+      assert.equal(lease.endReason, 'revoked');
+      assert.ok(open(reply.status).message.sealed);
+    });
+
+    it('a take\'s status goes with its name sealed away from every phone, not in clear', async () => {
+      requestAs('take').catch(() => {});
+      leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 30 }));
+      canSeal = false;
+      leases.setLocked(true);
+      const sent = relay.last('kl.lease.status');
+      assert.equal(sent.message.locked, true);
+      assert.doesNotMatch(Buffer.from(sent.envelope.payload, 'base64url').toString('utf8'), /BSEOA demo/);
+      assert.deepEqual(Object.keys(sent.message.sealed.keys), [identity.nodeId]);
+      leases.stopAll();
+    });
+
+    it('a node with no box key of its own seals a status away from everyone', async () => {
+      const bare = testNodeIdentity({});
+      const envelope = L.buildLeaseStatus({
+        identity: bare, leaseId: '11111111-1111-4111-8111-111111111111', seq: 2, state: 'ended', reason: 'no_sealed_recipient', kind: 'take', unattended: true, name: 'BSEOA demo',
+        sealPolicy: { senderId: bare.nodeId, nodeBox: null, sealing: () => true, canSeal: () => false, recipients: () => ({}) }
+      });
+      const { message } = open(envelope);
+      assert.equal(validateMessage('kl.lease.status', message), null);
+      assert.ok(!('name' in message));
+      assert.deepEqual(Object.keys(message.sealed.keys), [bare.nodeId]);
+    });
+
+    it('a resume the node would send by itself ends the lease instead, and goes nowhere', async () => {
+      const lease = await running();
+      relay.down();
+      assert.equal(lease.suspendReason, 'relay_unreachable');
+      canSeal = false;
+      const before = relay.all('kl.lease.request').length;
+      relay.up();
+      assert.equal(relay.all('kl.lease.request').length, before);
+      assert.deepEqual([lease.state, lease.endReason], ['ended', 'no_sealed_recipient']);
+    });
+
+    it('a policy that throws counts as nobody to seal to', async () => {
+      leases.sealPolicy.sealing = () => { throw new Error('unreadable'); };
+      await assert.rejects(requestLease(), (e) => e.code === 'capability_unavailable');
+      assert.equal(relay.sent.length, 0);
+    });
   });
 });

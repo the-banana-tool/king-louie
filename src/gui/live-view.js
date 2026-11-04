@@ -9,6 +9,9 @@ const L = require('./lease-protocol');
 const ACTIONS_KEPT = 200;
 const ACTIONS_PER_VIEW = 50;
 const MIN_FRAME_GAP_MS = 1000;
+// R-SP-8: a sealed view carries the JPEG as base64 inside JSON inside base64url,
+// 16/9 of its raw size, so under sealing a raw frame gets this much of the 256 KiB.
+const SEALED_FRAME_MAX_BYTES = 138240;
 
 class LiveView {
   constructor({ leases, broker, identity, relayClient, guiConfig, clock = Date.now, log = createLogger('gui/live-view'), watchMs = 60000, tickMs = 250 } = {}) {
@@ -62,12 +65,13 @@ class LiveView {
   async _capture() {
     const cfg = this.guiConfig.liveView;
     const lease = this.leases.current();
+    const maxBytes = this.leases.sealing() ? Math.min(cfg.maxFrameBytes, SEALED_FRAME_MAX_BYTES) : cfg.maxFrameBytes;
     let shot = await this.broker.captureFrame({ appIds: lease.apps, maxWidth: cfg.maxWidth, quality: cfg.quality });
     if (!shot || !shot.appId) return { appId: null, frame: null, dropped: false };
-    if (shot.bytes > cfg.maxFrameBytes) {
+    if (shot.bytes > maxBytes) {
       shot = await this.broker.captureFrame({ appIds: lease.apps, maxWidth: cfg.maxWidth, quality: Math.max(10, cfg.quality - 20) });
       if (!shot || !shot.appId) return { appId: null, frame: null, dropped: false };
-      if (shot.bytes > cfg.maxFrameBytes) return { appId: shot.appId, frame: null, dropped: true };
+      if (shot.bytes > maxBytes) return { appId: shot.appId, frame: null, dropped: true };
     }
     return { appId: shot.appId, frame: { mime: 'image/jpeg', width: shot.width, height: shot.height, sha256: shot.sha256, data: shot.data }, dropped: false };
   }
@@ -78,9 +82,16 @@ class LiveView {
       identity: this.identity, leaseId: lease.leaseId, seq: this.leases.nextSeq(lease), toDevice: deviceId, state: lease.state,
       locked: lease.locked, remainingS: Math.floor(this.leases.remainingMs(lease) / 1000),
       foreground: { app_id: captured.appId, matches: captured.appId !== null }, frame, frameDropped: dropped, actions: list,
-      contactToken: this.leases.mintContactToken(lease), now: this.clock()
+      contactToken: this.leases.mintContactToken(lease), now: this.clock(), sealPolicy: this.leases.sealPolicy
     });
-    let envelope = make(captured.frame, captured.dropped);
+    let envelope;
+    try {
+      envelope = make(captured.frame, captured.dropped);
+    } catch (err) {
+      // Nobody can read it since the look in tick(): it is not sent, and never in clear.
+      if (err.reason === 'no_sealed_recipient') return null;
+      throw err;
+    }
     // The payload is the JCS bytes, so its length is the view's size.
     if (Buffer.from(envelope.payload, 'base64url').length > L.VIEW_MAX_BYTES) envelope = make(null, true);
     return { envelope, lastSeq: list.length ? list[list.length - 1].seq : w.cursor };
@@ -99,6 +110,12 @@ class LiveView {
       const afterInput = this.inputPending.has(lease.leaseId);
       const due = [...this.watchers].filter(([, w]) => w.leaseId === lease.leaseId && (afterInput || now - w.lastFrameAt >= intervalMs));
       if (due.length === 0) return;
+      // R-SP-5: this node seals and no phone can read it: no frame is taken or sent,
+      // and the lease does not go on with its owner unable to see it (SEAL_REASON).
+      if (this.leases.sealProblem()) {
+        this.leases.checkGrantingDevices();
+        return;
+      }
       this.lastCaptureAt = now;
       this.inputPending.delete(lease.leaseId);
       let captured;
@@ -109,7 +126,9 @@ class LiveView {
         captured = { appId: null, frame: null, dropped: false };
       }
       for (const [deviceId, w] of due) {
-        const { envelope, lastSeq } = this._build(lease, deviceId, w, captured);
+        const built = this._build(lease, deviceId, w, captured);
+        if (!built) continue;
+        const { envelope, lastSeq } = built;
         w.lastFrameAt = now;
         w.cursor = lastSeq;
         this.relayClient.send(envelope, { to_device: deviceId }).catch((err) => this.log.debug(`view not sent: ${err.message}`));
@@ -120,4 +139,4 @@ class LiveView {
   }
 }
 
-module.exports = { LiveView, ACTIONS_KEPT, ACTIONS_PER_VIEW };
+module.exports = { LiveView, ACTIONS_KEPT, ACTIONS_PER_VIEW, SEALED_FRAME_MAX_BYTES };

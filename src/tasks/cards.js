@@ -87,6 +87,9 @@ class TaskCards {
       this._endByOwner(taskId, turn, raise || 'grant_denied');
     } else if (kind === 'stopped') {
       this._endByOwner(taskId, turn, 'stopped');
+    } else if (kind === 'unsealable') {
+      manager._end(taskId, 'failed', 'no_sealed_recipient');
+      if (turn) manager._cut(turn, 'no_sealed_recipient');
     } else if (kind === 'expired') {
       // The deadline is the lease's end and cuts at the same moment, or a send has run past it.
       if (turn) manager._cut(turn, 'duration');

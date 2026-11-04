@@ -19,6 +19,7 @@ const { TAKE_CODES } = require('../src/gui/take-policy');
 const { REFUSE_UNSAFE_MESSAGE } = require('../src/approvals/executor-options');
 const { setLogLevel } = require('../src/logging');
 const { CHROME_FLAGS } = require('../src/browser/chrome-flags');
+const { generateBoxKey } = require('../src/approvals/node-box-key');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
 
@@ -197,6 +198,55 @@ async function started(params = {}, extra = {}) {
   leases.onGrant(phone.leaseGrant(req.envelope, { minutes: params.minutes || 30 }));
   return p;
 }
+
+describe('a take on a node that seals', () => {
+  let canSeal;
+  beforeEach(() => {
+    canSeal = true;
+    leases.sealPolicy = {
+      senderId: identity.nodeId, nodeBox: generateBoxKey().jwk, sealing: () => true, canSeal: () => canSeal,
+      recipients: () => ({ [phone.deviceId]: generateBoxKey().jwk }), whyNot: () => 'no active phone holds a box key'
+    };
+  });
+
+  async function sealedTake() {
+    const p = begin();
+    await tick();
+    const req = relay.last('kl.lease.request');
+    assert.doesNotMatch(Buffer.from(req.envelope.payload, 'base64url').toString('utf8'), /BSEOA demo|example\.com/);
+    leases.onGrant(phone.leaseGrant(req.envelope, { minutes: 30, apps: [guiConfig.browser] }));
+    return p;
+  }
+
+  it('it starts and runs as any take does, and no status or request names it', async () => {
+    const out = await sealedTake();
+    assert.deepEqual(names(broker.calls), ['launchBrowser', 'recordStart', 'keepAwake']);
+    assert.equal(store.get(out.take_id).state, 'live');
+    assert.equal(leases.current().kind, 'take');
+    for (const sent of relay.all('kl.lease.status')) assert.ok(!('name' in sent.message));
+    assert.ok(!JSON.stringify(audits).includes('BSEOA demo'));
+    assert.ok(!JSON.stringify(audits).includes('example.com'));
+    await takes.end(out.take_id, 'take_done');
+    assert.equal(store.get(out.take_id).ended.reason, 'take_done');
+  });
+
+  it('nobody left to seal to ends it no_sealed_recipient, and the recording is stopped and kept', async () => {
+    const out = await sealedTake();
+    canSeal = false;
+    leases.checkGrantingDevices();
+    await tick();
+    await tick();
+    assert.equal(store.get(out.take_id).ended.reason, 'no_sealed_recipient');
+    assert.ok(names(broker.calls).includes('recordStop'));
+  });
+
+  it('with nobody to seal to a new take is refused before anything starts', async () => {
+    canSeal = false;
+    await assert.rejects(begin(), (e) => e.code === 'capability_unavailable' && /no_sealed_recipient/.test(e.message));
+    assert.deepEqual(broker.calls, []);
+    assert.equal(relay.all('kl.lease.request').length, 0);
+  });
+});
 
 describe('TakeManager.start', () => {
   it('start: request → grant → browser → recorder → keep awake → live', async () => {
@@ -455,15 +505,14 @@ describe('final review fixes', () => {
     assert.equal(store.get(out.take_id).ended.reason, 'helper_lost');
   });
 
-  it('I-4: a take\'s lease.requested and lease.granted carry kind, name, sites, credentials and minutes, and no reason text', async () => {
+  it('I-4: a take\'s lease.requested and lease.granted carry kind, credentials and minutes, and no name, sites or reason text (R-SP-7)', async () => {
     await started({ credentials: true, reason: 'Record the demo for the launch' });
     await tick();
     const requested = audits.find((a) => a.kind === 'lease.requested').data;
     const granted = audits.find((a) => a.kind === 'lease.granted').data;
     for (const data of [requested, granted]) {
       assert.equal(data.kind, 'take');
-      assert.equal(data.name, 'BSEOA demo');
-      assert.deepEqual(data.sites, ['*.example.com']);
+      assert.ok(!('name' in data) && !('sites' in data));
       assert.equal(data.credentials, true);
       assert.equal(data.minutes, 30);
       assert.ok(!JSON.stringify(data).includes('Record the demo'), 'the reason is not in the ledger');

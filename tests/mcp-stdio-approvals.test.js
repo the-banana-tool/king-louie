@@ -227,7 +227,7 @@ describe('run_runbook with a phone approver', () => {
     await settle(s, unsafe.job_id);
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(ledger.entries.filter((e) => e.kind === 'request.inbound').map((e) => e.data.name), ['site.status', 'nope', 'site.touch']);
-    assert.ok(ledger.entries.every((e) => e.kind !== 'request.inbound' || e.data.client === 'stdio-mcp'));
+    assert.ok(ledger.entries.every((e) => e.kind !== 'request.inbound' || (e.data.origin.kind === 'stdio' && !('client' in e.data))));
   });
 
   // Fix round 1, Important (plan-mandated, reproduced): a cancel_job that

@@ -32,6 +32,7 @@ const { toolRegistry } = require('../src/tools');
 const { Tool } = require('../src/tools/tool-schema');
 const browserRegistry = require('../src/tools/builtin/browser-registry');
 const { setLogLevel } = require('../src/logging');
+const { createSealPolicy } = require('../src/approvals/seal-policy');
 const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 const { approverStoreWith } = require('./helpers/approver-set');
 const { createFakeNode, createFakeHub, createFakeRegistry } = require('./helpers/fake-node');
@@ -159,13 +160,14 @@ async function until(what, check) {
 }
 
 class World {
-  constructor() {
-    Object.assign(this, { turns: [], proposals: [], turnMessages: [], ran: [], audit: [], page: { url: 'about:blank' } });
+  // sealed: the phone holds a box key and the node seals (sealed phones, R-SP-5).
+  constructor({ sealed = false } = {}) {
+    Object.assign(this, { sealed, canSeal: null, turns: [], proposals: [], turnMessages: [], ran: [], audit: [], page: { url: 'about:blank' } });
     this.dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-tasks-e2e-'));
     this.cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-tasks-e2e-cache-'));
     this.cipherKey = crypto.randomBytes(32);
-    this.phone = createFakePhone({ name: 'Owner phone' });
-    this.identity = testNodeIdentity({ nodeName: NODE_NAME });
+    this.phone = createFakePhone({ name: 'Owner phone', boxKey: sealed });
+    this.identity = testNodeIdentity({ nodeName: NODE_NAME, box: sealed });
     this.link = new FakeLink();
     this.ledger = { append: async (entry) => { this.audit.push(entry); return entry; } };
     this.nodeConfig = {
@@ -177,7 +179,7 @@ class World {
   }
 
   async start() {
-    this.approvers = await approverStoreWith([this.phone.approverRecord()]);
+    this.approvers = await approverStoreWith([this.phone.approverRecord({ boxKey: this.sealed })]);
     this.fleetNode = createFakeNode({ name: NODE_NAME, profile: 'agent' });
     this.fleetNode.service.stop();
     const nodes = [this.fleetNode];
@@ -194,7 +196,12 @@ class World {
   // past it is on disk.
   async bootNode() {
     const { identity, link, ledger, dataDir, nodeConfig, approvers } = this;
-    const phoneApprover = new PhoneApprover({ identity, nodeName: NODE_NAME, approverStore: approvers, link, auditLedger: ledger });
+    let sealPolicy = null;
+    if (this.sealed) {
+      const real = createSealPolicy({ approverStore: approvers, identity, dataDir });
+      sealPolicy = { ...real, canSeal: () => (this.canSeal === null ? real.canSeal() : this.canSeal), whyNot: () => 'no active phone holds a box key' };
+    }
+    const phoneApprover = new PhoneApprover({ identity, nodeName: NODE_NAME, approverStore: approvers, link, auditLedger: ledger, sealPolicy });
     const core = createCore({
       paths: { dataDir },
       store: new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: { chats: [], activeChatId: null, apiTokens: {}, apiStatus: {}, toolApprovals: { alwaysApproveTools: {} } } }),
@@ -218,6 +225,7 @@ class World {
     pushQueue.start();
     const guiConfig = parseGuiConfig({ enabled: true, apps: { chrome: { name: 'Chrome', path: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', processes: ['chrome.exe'] } } }, { platform: 'win32' });
     const leases = new LeaseManager({
+      sealPolicy,
       approvals: { identity, approverStore: approvers, relayClient: link, phoneApprover }, guiConfig, nodeName: NODE_NAME, pushQueue, audit: ledger,
       jobOpen: (jobId) => jobId.startsWith('chat:') && Boolean(core.context.getChat(jobId.slice('chat:'.length), { messages: false })),
     });
@@ -268,9 +276,13 @@ class World {
     return this.link.cards()[n - 1];
   }
 
+  // A card as the phone reads it.
+  read(card) {
+    return this.sealed ? this.phone.open(card, 'kl.lease.request').message : open(card).message;
+  }
+
   press(card, decision = 'grant') {
-    const { message } = open(card);
-    const minutes = message.lease.max_minutes;
+    const minutes = this.read(card).lease.max_minutes;
     this.up.leases.onGrant(this.phone.leaseGrant(card, { decision, minutes, apps: [], signedAt: new Date().toISOString() }));
   }
 
@@ -410,7 +422,100 @@ describe('the dentist task', () => {
     assert.equal(world.audit.filter((e) => e.kind === 'task.refused').length, 0, 'an approved call is no refusal');
     // The lease's entries say what the phone was asked.
     const granted = world.audit.find((e) => e.kind === 'lease.granted');
-    assert.deepEqual([granted.data.kind, granted.data.sites, granted.data.allows, granted.data.usd], ['task', PROPOSAL.sites, PROPOSAL.allows, PROPOSAL.usd]);
+    assert.deepEqual([granted.data.kind, granted.data.allows, granted.data.usd], ['task', PROPOSAL.allows, PROPOSAL.usd]);
+    assert.ok(!('name' in granted.data) && !('sites' in granted.data));
+  });
+});
+
+describe('the dentist task on a node that seals', () => {
+  beforeEach(async () => {
+    await world.finish();
+    world = new World({ sealed: true });
+    await world.start();
+  });
+
+  it('runs the same from one press to its answer, and the relay reads none of it', async () => {
+    world.proposals.push(PROPOSAL);
+    world.turns.push(
+      browser({ action: 'navigate', url: GRANTED_PAGE }),
+      browser({ action: 'click', selector: '#first-result' }),
+      browser({ action: 'click', selector: '#start-route-off-list', url: OFF_LIST_PAGE }),
+      said(TABLE),
+    );
+    const started = await world.call('run_task', { task: DENTIST });
+    assert.equal(started.state, 'requested');
+
+    const card = await world.cardNumber(1);
+    const signed = open(card).message;
+    for (const key of ['lease', 'origin', 'salt']) assert.ok(!(key in signed), key);
+    assert.ok(signed.sealed);
+    const inClear = Buffer.from(card.payload, 'base64url').toString('utf8');
+    for (const planted of ['dentist', 'reviews.example.com', 'browser-act', 'Example Client']) assert.ok(!inClear.includes(planted), planted);
+    assert.deepEqual(phoneLines(world.read(card), NODE_NAME), [
+      `Task: ${DENTIST.slice(0, 60).trim()}`,
+      'Sites: *.reviews.example.com',
+      'May: click and type in your signed-in browser',
+      'For: 20 minutes',
+      'Spend up to $2',
+      `Node: ${NODE_NAME}`,
+    ]);
+    await until('the reading to run', () => world.ran.includes(`navigate ${GRANTED_PAGE}`));
+    assert.ok(!world.ran.includes('click #first-result'), 'the click waits for the press');
+
+    world.press(card);
+    await until('the click on the granted site', () => world.ran.includes('click #first-result'));
+
+    world.page.url = OFF_LIST_PAGE;
+    const request = await world.approvalNumber(1);
+    const asked = world.phone.open(request, 'kl.approval.request').message;
+    assert.equal(asked.action.name, 'BrowserPage');
+    await world.answer(request, 'approve');
+    const done = await world.waitFor(started.task_id, ['done']);
+    assert.ok(done.answer.text.lines.join('\n').includes('+15550100'));
+    assert.equal(done.grant.by_device, world.phone.deviceId);
+
+    const statuses = world.link.leaseSends.map((e) => open(e).message).filter((m) => m.type === 'kl.lease.status');
+    assert.ok(statuses.length > 1);
+    for (const m of statuses) {
+      assert.ok(m.sealed);
+      assert.ok(!('name' in m));
+    }
+    assert.ok(statuses.some((m) => m.state === 'ended'), 'the end is told');
+
+    const ledger = JSON.stringify(world.audit);
+    assert.ok(!ledger.includes('reviews.example.com') && !ledger.includes('Example Client') && !ledger.includes('#first-result') && !ledger.includes('dentist'), ledger);
+    const tier = world.audit.find((e) => e.kind === 'tier.decision').data;
+    assert.match(tier.params_hmac, /^[A-Za-z0-9_-]{43}$/);
+    assert.ok(!('params_sha256' in tier));
+  });
+
+  it('a running task whose phones can no longer read it fails no_sealed_recipient, cut off, and the lease ends', async () => {
+    world.proposals.push(PROPOSAL);
+    world.turns.push(browser({ action: 'navigate', url: GRANTED_PAGE }), hangs);
+    const started = await world.call('run_task', { task: DENTIST });
+    const card = await world.cardNumber(1);
+    world.press(card);
+    await until('the turn to hang', () => world.turnMessages.length >= 2);
+    world.canSeal = false;
+    world.up.leases.checkGrantingDevices();
+    const over = await world.waitFor(started.task_id, ['failed']);
+    assert.equal(over.ended.reason, 'no_sealed_recipient');
+    assert.equal(world.up.leases.find(open(card).message.lease_id).endReason, 'no_sealed_recipient');
+    assert.equal(world.link.leaseSends.map((e) => open(e).message).filter((m) => m.type === 'kl.lease.status').pop().state, 'ended');
+  });
+
+  it('with nobody to seal to no card goes, and an acting call is refused at the approval, not sent', async () => {
+    world.canSeal = false;
+    world.proposals.push(PROPOSAL);
+    world.turns.push(
+      browser({ action: 'click', selector: '#first-result' }),
+      said('I could not act on that page.'),
+    );
+    const started = await world.call('run_task', { task: DENTIST });
+    await world.waitFor(started.task_id, ['done', 'failed']);
+    assert.equal(world.link.cards().length, 0);
+    assert.equal(world.link.approvals.length, 0);
+    assert.ok(!world.ran.includes('click #first-result'));
   });
 });
 

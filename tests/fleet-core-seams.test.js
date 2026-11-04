@@ -83,7 +83,7 @@ describe('core seams for delegate turns', () => {
       const res = await adapter.execute(core.context.getAgent('main'), 'go', { workingDirectory: dataDir, executorOptions: { origin: ORIGIN, chatId: 'delegate:job-1' } });
       assert.equal(res.content, 'finished');
       assert.deepEqual(calls, [{ tool: GATED, origin: ORIGIN }]);
-      assert.ok(audit.some((e) => e.kind === 'exec.start' && e.data.origin.job_id === 'job-1'), JSON.stringify(audit));
+      assert.ok(audit.some((e) => e.kind === 'exec.start' && e.data.job_id === 'job-1'), JSON.stringify(audit));
     } finally {
       await core.shutdown();
     }
