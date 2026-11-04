@@ -934,7 +934,8 @@ class DesktopImporter {
       const held = this.context.vault.holds(k);
       const blocker = held ? null : this.context.vault.blockedBy(k);
       if (blocker) add('vault', k, 'needs-attention', vaultBlockedNote(k, blocker, where));
-      else secret('vault', k, held);
+      else if (held) add('vault', k, 'skip-present', `already on this ${where}: the value there was left as it is, and the two were not compared`);
+      else secret('vault', k, false);
     }
     if (inventory.anthropicOAuth) {
       const stored = this.context.getStore().get('anthropicOAuth');

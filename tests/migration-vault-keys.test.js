@@ -174,7 +174,10 @@ describe('a dotted key landing on a node', () => {
     assert.strictEqual(fresh.get(LOGIN), LOGIN_VALUE);
     assert.strictEqual(fresh.get('github'), 'plain-github');
     // A second plan finds it where it landed, and sends nothing.
-    assert.strictEqual(itemOf(await importer.plan({ installId: source.installId, inventory: source.inventory }), LOGIN).action, 'skip-present');
+    const again = itemOf(await importer.plan({ installId: source.installId, inventory: source.inventory }), LOGIN);
+    assert.strictEqual(again.action, 'skip-present');
+    assert.match(again.note, /already on this node/);
+    assert.match(again.note, /not compared/);
   });
 
   it('never overwrites a secret the key would have to nest under, and says so', async () => {
