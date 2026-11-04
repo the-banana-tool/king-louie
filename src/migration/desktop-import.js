@@ -141,8 +141,12 @@ const SECOND_CASE_NOTE = 'the node has this case under another folder; it lands 
 const PERSONAL_EXCLUDED = Object.freeze({
   skills: 'Skills, their pins and customizations do not move: they stay on this computer, and the node starts without them. Install them again in Settings > Skills on the node.',
   workflows: 'Workflows do not move: they stay on this computer, and the node starts with none. Set them up again in Settings > Workflows on the node.',
-  webhooks: 'Webhooks do not move: they stay on this computer. Set them up again in Settings > Webhooks on the node.'
+  webhooks: 'Webhooks do not move: they stay on this computer. Set them up again in Settings > Webhooks on the node.',
+  apiStatus: 'provider status is recomputed by the node'
 });
+const OLD_MODEL_KEYS = new Set(['settings.activeProvider', 'settings.providerModels', 'settings.inference']);
+const OLD_MODELS_REPLACED = 'The old model settings (active provider, provider models and tiers) do not move: your model profiles replaced them.';
+const OLD_MODELS_SET_UP = 'The old model settings (active provider, provider models and tiers) do not move, and this profile has no model profile to move: set the models up under Settings > Models on the node.';
 const overCapNote = (c) => `chat "${String(c.title || c.id).slice(0, 80)}" is ${(c.overCapBytes / (1024 * 1024)).toFixed(1)} MB, over the ${MAX_CHAT_BYTES / (1024 * 1024)} MB a chat can move in. It does not move: it stays in this computer's copy and in the backup.`;
 const tooLargeNote = (c, exists) => `chat "${String(c.title || c.id).slice(0, 80)}" has a message of ${(c.tooLargeBytes / (1024 * 1024)).toFixed(1)} MB, too large to send to the node. ${exists ? 'The node already holds this chat, and it is left as it is.' : 'The chat moves without what that message holds, with a line saying so in its place.'} The whole message stays in this computer's copy and in the backup.`;
 
@@ -595,6 +599,7 @@ class DesktopImporter {
     this.maxChatBytes = maxChatBytes;
     this.context = context;
     this.personal = hosting === 'personal';
+    this.where = this.personal ? 'node' : 'service';
     this.settingsKeys = importedSettingsKeys(hosting);
     this.targets = targets;
     this.dataDir = dataDir;
@@ -609,11 +614,18 @@ class DesktopImporter {
     if (cleanupStaging) this.cleanupOrphanedStaging();
   }
 
+  // Why something the desktop holds stays behind: the fleet's words, or the node's.
+  excludedNote(key, inventory) {
+    if (!this.personal) return EXCLUDED[key] || 'stays with the desktop';
+    if (OLD_MODEL_KEYS.has(key)) return arr(inventory.modelProfileIds).length ? OLD_MODELS_REPLACED : OLD_MODELS_SET_UP;
+    return PERSONAL_EXCLUDED[key] || EXCLUDED[key] || 'stays with the desktop';
+  }
+
   // Why a setting the desktop holds does not move.
-  settingStaysNote(key) {
+  settingStaysNote(key, inventory) {
     if (!this.personal) return EXCLUDED[`settings.${key}`] || 'this setting is managed on the service';
     if (Object.hasOwn(PERSONAL_SETTING_LINES, key)) return PERSONAL_SETTING_LINES[key];
-    return EXCLUDED[`settings.${key}`] || `The setting ${key} does not move: it stays on this computer.`;
+    return Object.hasOwn(EXCLUDED, `settings.${key}`) ? this.excludedNote(`settings.${key}`, inventory) : `The setting ${key} does not move: it stays on this computer.`;
   }
 
   // Whether the node still holds its own default for a setting, so an import
@@ -747,7 +759,7 @@ class DesktopImporter {
     const settings = this.context.getSettings();
     const defaults = mergeSettings(DEFAULT_SETTINGS);
     for (const key of arr(inventory.settingsKeys)) {
-      if (!this.settingsKeys.includes(key)) { add('settings', key, 'skip-excluded', this.settingStaysNote(key)); continue; }
+      if (!this.settingsKeys.includes(key)) { add('settings', key, 'skip-excluded', this.settingStaysNote(key, inventory)); continue; }
       // What landed, or what was never different: nothing to write.
       const digests = isPlainObject(inventory.settingDigests) ? inventory.settingDigests : {};
       if (Object.hasOwn(digests, key) && digests[key] === settingDigest(key, settings[key], { profiles: arr(inventory.modelProfileIds).length > 0 })) { add('settings', key, 'skip-present'); continue; }
@@ -795,7 +807,7 @@ class DesktopImporter {
       if (desktopNormalized.includes(normalized) || serviceNormalized.includes(normalized)) { add('allowedDirectory', dir, 'skip-present'); continue; }
       const check = await this.checkPath(normalized);
       if (check.readable && check.isDirectory) add('allowedDirectory', dir, 'new', 'applies only to runs started from the desktop');
-      else add('allowedDirectory', dir, 'needs-attention', `the service cannot read ${dir}`);
+      else add('allowedDirectory', dir, 'needs-attention', `the ${this.where} cannot read ${dir}`);
     }
 
     const chats = this.context.listChats({ messages: false });
@@ -905,18 +917,18 @@ class DesktopImporter {
       return add(category, key, 'new');
     };
     for (const p of arr(inventory.providerTokens)) {
-      if (!knownTokens.has(p)) { add('providerToken', p, 'skip-excluded', 'not a provider key this service uses'); continue; }
+      if (!knownTokens.has(p)) { add('providerToken', p, 'skip-excluded', `not a provider key this ${this.where} uses`); continue; }
       secret('providerToken', p, Boolean(tokens[p]));
     }
     for (const p of arr(inventory.searchKeys)) {
-      if (!KNOWN_SEARCH_KEYS.has(p)) { add('searchKey', p, 'skip-excluded', 'not a search provider key this service uses'); continue; }
+      if (!KNOWN_SEARCH_KEYS.has(p)) { add('searchKey', p, 'skip-excluded', `not a search provider key this ${this.where} uses`); continue; }
       secret('searchKey', p, Boolean(settings.webSearch && settings.webSearch[p] && settings.webSearch[p].apiKey));
     }
     for (const p of arr(inventory.imageKeys)) {
-      if (!KNOWN_IMAGE_KEYS.has(p)) { add('imageKey', p, 'skip-excluded', 'not an image provider key this service uses'); continue; }
+      if (!KNOWN_IMAGE_KEYS.has(p)) { add('imageKey', p, 'skip-excluded', `not an image provider key this ${this.where} uses`); continue; }
       secret('imageKey', p, Boolean(settings.imageGeneration && settings.imageGeneration[p] && settings.imageGeneration[p].apiKey));
     }
-    const where = this.personal ? 'node' : 'service';
+    const where = this.where;
     for (const k of arr(inventory.vault)) {
       if (isReservedVaultKey(k)) { add('vault', k, 'skip-excluded', reservedVaultNote(k, where)); continue; }
       if (hasPrototypePart(k)) { add('vault', k, 'skip-excluded', `Vault entry ${k} stays on this computer: its name cannot be stored.`); continue; }
@@ -947,7 +959,7 @@ class DesktopImporter {
     }
     for (const key of arr(inventory.excluded)) {
       if (this.personal && PERSONAL_CARRIED.has(key)) continue;
-      add('excluded', key, 'skip-excluded', (this.personal && PERSONAL_EXCLUDED[key]) || EXCLUDED[key] || 'stays with the desktop');
+      add('excluded', key, 'skip-excluded', this.excludedNote(key, inventory));
     }
 
     items.sort((a, b) => CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category));
@@ -1020,7 +1032,7 @@ class DesktopImporter {
     switch (item.category) {
       case 'settings': {
         const s = ctx.getSettings();
-        if (!this.settingUntouched(item.key, s, mergeSettings(DEFAULT_SETTINGS))) return { note: 'already set on the service; left unchanged' };
+        if (!this.settingUntouched(item.key, s, mergeSettings(DEFAULT_SETTINGS))) return { note: `already set on the ${this.where}; left unchanged` };
         if (PERSONAL_SETTINGS_KEYS.includes(item.key) && !isPlainObject(value)) throw new ImportError('BAD_VALUE', `settings.${item.key} is not an object`);
         let next = value;
         if (item.key === 'cases') next = { ...withoutRoot(value), ...(s.cases && s.cases.root !== undefined ? { root: s.cases.root } : {}) };
@@ -1039,7 +1051,7 @@ class DesktopImporter {
         // (fix round 1, I4): re-checked here, not just at plan time, since
         // the owner could have filled it in between plan() and apply().
         if (stable(this.targets.userProfile.get()) !== stable(UserProfile.getDefaultProfile())) {
-          return { note: 'a profile was set on the service after the plan was made; not overwritten' };
+          return { note: `a profile was set on the ${this.where} after the plan was made; not overwritten` };
         }
         this.targets.userProfile.update(value && typeof value === 'object' ? value : {});
         return {};
@@ -1066,7 +1078,7 @@ class DesktopImporter {
         return {};
       case 'allowedDirectory': {
         const check = await this.checkPath(item.key);
-        if (!check.readable || !check.isDirectory) throw new ImportError('PATH_NOT_ACCESSIBLE', `the service cannot read ${item.key}`);
+        if (!check.readable || !check.isDirectory) throw new ImportError('PATH_NOT_ACCESSIBLE', `the ${this.where} cannot read ${item.key}`);
         this.scope.addDirectory(item.key);
         return {};
       }
@@ -1085,7 +1097,7 @@ class DesktopImporter {
         if (value.system === true) throw new ImportError('BAD_VALUE', 'a system job is not imported; the service makes its own');
         // Written only if the id is still absent (fix round 1, I4).
         if (this.targets.cron.has(item.key)) {
-          return { note: 'a cron job with this id was added to the service after the plan was made; not overwritten' };
+          return { note: `a cron job with this id was added to the ${this.where} after the plan was made; not overwritten` };
         }
         await this.targets.cron.addJob({ ...value, enabled: false });
         return { note: 'imported disabled' };
@@ -1098,7 +1110,7 @@ class DesktopImporter {
         const tokens = { ...(ctx.getApiTokens() || {}) };
         // Written only if still absent (fix round 1, I4).
         if (tokens[item.key]) {
-          return { note: 'a token for this provider was added to the service after the plan was made; not overwritten' };
+          return { note: `a token for this provider was added to the ${this.where} after the plan was made; not overwritten` };
         }
         tokens[item.key] = ctx.encryptToken(value);
         ctx.setApiTokens(tokens);
@@ -1113,7 +1125,7 @@ class DesktopImporter {
         const current = { ...(s[section] || {}) };
         // Written only if still absent (fix round 1, I4).
         if (current[item.key] && current[item.key].apiKey) {
-          return { note: 'a key for this provider was added to the service after the plan was made; not overwritten' };
+          return { note: `a key for this provider was added to the ${this.where} after the plan was made; not overwritten` };
         }
         current[item.key] = { ...(current[item.key] || {}), apiKey: ctx.encryptToken(value) };
         ctx.setSettings({ ...s, [section]: current });
@@ -1124,7 +1136,7 @@ class DesktopImporter {
         this.requireSecretString(value);
         // Written only if still absent (fix round 1, I4).
         if (ctx.vault.has(item.key) || ctx.vault.blockedBy(item.key)) {
-          return { note: 'a secret with this name was added to the service after the plan was made; not overwritten' };
+          return { note: `a secret with this name was added to the ${this.where} after the plan was made; not overwritten` };
         }
         ctx.vault.set(item.key, value);
         if (ctx.vault.get(item.key) !== value) throw new ImportError('VERIFY_FAILED', 'the secret did not read back as written');
@@ -1137,7 +1149,7 @@ class DesktopImporter {
         // Written only if still absent (fix round 1, I4).
         const stored = store.get('anthropicOAuth');
         if (stored && stored.accessToken) {
-          return { note: 'an Anthropic OAuth connection was added to the service after the plan was made; not overwritten' };
+          return { note: `an Anthropic OAuth connection was added to the ${this.where} after the plan was made; not overwritten` };
         }
         store.set('anthropicOAuth', {
           accessToken: ctx.encryptToken(value.accessToken),
@@ -1186,7 +1198,7 @@ class DesktopImporter {
       const collision = liveChats.find((c) => c.id === item.targetKey);
       if (collision) {
         return {
-          note: 'a chat with this id was added to the service after the plan was made; not overwritten',
+          note: `a chat with this id was added to the ${this.where} after the plan was made; not overwritten`,
           record: { sourceUpdatedAt: value.updatedAt || null, targetKey: collision.id, targetUpdatedAt: collision.updatedAt || null }
         };
       }
@@ -1195,7 +1207,7 @@ class DesktopImporter {
       const expected = plan.chatExpected.get(item.targetKey);
       if (!target || target.updatedAt !== expected) {
         return {
-          note: 'the chat changed on the service after the plan was made; import again to pick up the current version',
+          note: `the chat changed on the ${this.where} after the plan was made; import again to pick up the current version`,
           attention: true,
           incomplete: true
         };
@@ -1244,7 +1256,7 @@ class DesktopImporter {
       // write built from a snapshot taken before the wait.
       const check = await this.checkPath(chat.workingDirectory);
       if (!check.readable || !check.isDirectory) {
-        note = `the service cannot read the working directory ${chat.workingDirectory}; it was dropped`;
+        note = `the ${this.where} cannot read the working directory ${chat.workingDirectory}; it was dropped`;
         chat.workingDirectory = null;
       }
     }
@@ -1388,7 +1400,7 @@ class DesktopImporter {
     }
     plan.caseFiles.set(item.key, files);
 
-    if (!land) return { note: 'not imported: git internals are recreated by the service, not carried over' };
+    if (!land) return { note: `not imported: git internals are recreated by the ${this.where}, not carried over` };
     if (unstorableOnHost(rel)) {
       files.unstorable = files.unstorable || new Set();
       files.unstorable.add(rel);
@@ -1468,7 +1480,7 @@ class DesktopImporter {
         continue;
       }
       if (fs.existsSync(dest)) {
-        plan.results.set(k, { ok: false, error: 'a case with this directory appeared on the service during the import' });
+        plan.results.set(k, { ok: false, error: `a case with this directory appeared on the ${this.where} during the import` });
         continue;
       }
       // The case's own git config is never imported (isSkippedCaseFile's

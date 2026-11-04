@@ -153,3 +153,43 @@ describe('a value already there plans as already there', () => {
     assert.strictEqual(itemOf(plan, 'userProfile', 'userProfile').action, 'new');
   });
 });
+
+describe('the words on a personal node', () => {
+  const excluded = Object.keys(EXCLUDED);
+  // The node's service.json and the Local service pane are their real names.
+  const saysFleet = (text) => /\bservice\b/.test(String(text).replace(/service\.json/g, '').replace(/Local service/g, ''));
+
+  it('no stays-behind line sends the owner to "the service"', async () => {
+    const { importer } = await nodeService();
+    const plan = await planOf(importer, { excluded, settingsKeys: ['activeProvider', 'providerModels', 'inference'], modelProfileIds: ['p1'] });
+    for (const item of plan.items) assert.ok(!saysFleet(item.note), `${item.category} ${item.key}: ${item.note}`);
+  });
+
+  it('with profiles moving, the old model settings are said to be replaced by them', async () => {
+    const { importer } = await nodeService();
+    const plan = await planOf(importer, { excluded, modelProfileIds: ['p1'] });
+    const note = itemOf(plan, 'excluded', 'settings.activeProvider').note;
+    assert.match(note, /profile/);
+    assert.doesNotMatch(note, /set the models up/i);
+  });
+
+  it('with no profile to move, the same line says to set the models up on the node', async () => {
+    const { importer } = await nodeService();
+    const plan = await planOf(importer, { excluded, modelProfileIds: [] });
+    assert.match(itemOf(plan, 'excluded', 'settings.inference').note, /Settings > Models on the node/);
+  });
+
+  it('a directory the node cannot read says the node', async () => {
+    const { importer } = await nodeService();
+    const plan = await planOf(importer, { allowedDirectories: [path.join(tmp(), 'gone')] });
+    assert.match(plan.items.find((i) => i.category === 'allowedDirectory').note, /the node cannot read/);
+  });
+
+  it('a fleet import keeps its words', async () => {
+    const { importer } = await nodeService({ hosting: 'service' });
+    const plan = await planOf(importer, { excluded });
+    for (const key of excluded) assert.strictEqual(itemOf(plan, 'excluded', key).note, EXCLUDED[key], key);
+    const dir = await planOf(importer, { allowedDirectories: [path.join(tmp(), 'gone')] });
+    assert.match(dir.items.find((i) => i.category === 'allowedDirectory').note, /the service cannot read/);
+  });
+});
