@@ -9,6 +9,7 @@ const { createCore } = require('../src/core');
 const { isLocalDesktopEvent } = require('../src/core/origin');
 const { openDesktopState } = require('../src/ipc/desktop-state');
 const { startStandaloneHost, markingIpcMain } = require('../src/ipc/standalone-host');
+const { createDesktopController } = require('../src/ipc/desktop-controller');
 const CronScheduler = require('../src/cron/cron-scheduler');
 const CronExecutor = require('../src/cron/cron-executor');
 const SkillLoader = require('../src/skills/skill-loader');
@@ -29,7 +30,7 @@ function fakeIpcMain() {
   return { handlers, listeners, handle: (ch, fn) => { assert.ok(!handlers.has(ch), `duplicate ${ch}`); handlers.set(ch, fn); }, on: (ch, fn) => listeners.set(ch, fn), removeHandler: (ch) => handlers.delete(ch) };
 }
 
-function startHost({ standaloneOnce, dialog = undefined }) {
+function startHost({ standaloneOnce, dialog = undefined, hostDeps = {} }) {
   const userData = tmp();
   const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(`sealed:${s}`), decryptString: (b) => Buffer.from(b).toString().replace(/^sealed:/, '') };
   class StoreClass extends JsonFileStore {
@@ -48,6 +49,7 @@ function startHost({ standaloneOnce, dialog = undefined }) {
     appDir: path.join(__dirname, '..'),
     standaloneOnce,
     ...(dialog ? { dialog } : {}),
+    ...hostDeps,
     StoreClass,
     // Webhooks and app discovery off only to keep the test quick and port-free.
     createCoreFn: (deps) => { captured = deps; return createCore({ ...deps, features: { ...(deps.features || {}), webhooks: false, appDiscovery: false, ...(standaloneOnce ? {} : { gateway: false, mesh: false, channels: false }) } }); }
@@ -163,6 +165,16 @@ describe('startStandaloneHost', () => {
     assert.deepStrictEqual(await bare.ipc.handlers.get('history:import.pick')({ sender: {} }), { ok: false, canceled: true });
   });
 
+  it('hands the launch to its controller', () => {
+    const launch = { host: 'standalone', why: 'platform', degraded: false };
+    const passed = [];
+    startHost({
+      standaloneOnce: false,
+      hostDeps: { launch, controllerFactory: (o) => { passed.push(o.launch); return createDesktopController({ ...o, nodeRunner: null }); } }
+    });
+    assert.deepStrictEqual(passed, [launch]);
+  });
+
   it('--kl-standalone-once starts with channels, gateway and mesh off and cron paused', async () => {
     const { host, captured } = startHost({ standaloneOnce: true });
     assert.deepStrictEqual(captured().features, { channels: false, gateway: false, mesh: false, webhooks: false });
@@ -276,7 +288,8 @@ describe('main.js', () => {
     assert.match(main, /openDesktopState\(/);
     assert.match(main, /startAttachedHost/);
     assert.match(main, /startStandaloneHost/);
-    assert.match(main, /--kl-standalone-once/);
+    assert.match(main, /resolveLaunchMode\(\{ argv: process\.argv, platform: process\.platform, stateMode: state\.mode \}\)/);
+    assert.match(main, /const deps = \{[^}]*\blaunch\b[^}]*\}/);
     assert.ok(main.split('\n').length < 130, `main.js has ${main.split('\n').length} lines`);
   });
 });

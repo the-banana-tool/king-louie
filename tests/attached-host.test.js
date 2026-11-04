@@ -55,7 +55,7 @@ class FakeClient extends EventEmitter {
 
 const SERVICE = (channels, extra = {}) => ({ version: '26.9.0', protocol: 1, nodeId: 'kl-abcdefghijklmnop', account: 'LOCAL SERVICE', profile: 'agent', providersConfigured: true, channels, ...extra });
 
-function setup() {
+function setup(hostDeps = {}) {
   const handlers = new Map();
   const listeners = new Map();
   const ipcMain = {
@@ -73,7 +73,7 @@ function setup() {
   state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, pairedAt: '2026-09-23T14:02:11Z' } });
   const client = new FakeClient();
   const app = { getPath: () => userDataDir, relaunch() {}, exit() {}, quit() {} };
-  const host = startAttachedHost({ app, ipcMain, safeStorage, dialog, getWindow: () => window, state, env: {}, platform: 'linux', clientFactory: () => client });
+  const host = startAttachedHost({ app, ipcMain, safeStorage, dialog, getWindow: () => window, state, env: {}, platform: 'linux', clientFactory: () => client, ...hostDeps });
   return { host, handlers, listeners, sent, client, dialogAnswers };
 }
 
@@ -83,6 +83,13 @@ describe('attached host', () => {
     const inv = listIpcChannels();
     assert.deepStrictEqual([...handlers.keys()].sort(), [...inv.handle].sort());
     assert.deepStrictEqual([...listeners.keys()].sort(), [...inv.on, 'canvas:executeJsResult'].sort());
+  });
+
+  it('hands the launch to its controller', async () => {
+    const launch = { host: 'attached', why: 'needs-node', degraded: false };
+    const { host } = setup({ launch });
+    assert.deepStrictEqual((await host.controller.status()).launch, launch);
+    await host.shutdown();
   });
 
   it('routes proxy, deny, local and service-too-old channels', async () => {

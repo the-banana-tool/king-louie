@@ -180,6 +180,34 @@ describe('desktop controller', () => {
     assert.strictEqual(state.mode, 'attached', 'the mode is not changed');
   });
 
+  it('relaunch strips both flags', async () => {
+    const argv = ['electron', '.', '--kl-standalone', '--kl-standalone-once', '--user-data-dir=x'];
+    const { controller, state, app } = controllerFor({ readBridgeFile: () => ({ ok: false }), extra: { argv } });
+    state.setMode('attached');
+    await controller.detach({ confirmed: true });
+    assert.deepStrictEqual(app.calls, [['relaunch', { args: ['.', '--user-data-dir=x'] }], ['exit', 0]]);
+    app.calls.length = 0;
+    await controller.standaloneOnce();
+    assert.deepStrictEqual(app.calls, [['relaunch', { args: ['.', '--user-data-dir=x', '--kl-standalone-once'] }], ['exit', 0]], 'the one session asks for its own flag again');
+    controller.dispose();
+  });
+
+  it('status().launch echoes what was passed', async () => {
+    const launch = { host: 'attached', why: 'needs-node', degraded: false };
+    const { controller } = controllerFor({ mode: 'attached', readBridgeFile: () => ({ ok: false }), extra: { launch } });
+    assert.deepStrictEqual((await controller.status()).launch, launch);
+    controller.dispose();
+  });
+
+  it('status().launch without one says what the mode says', async () => {
+    const standalone = controllerFor({ readBridgeFile: () => ({ ok: false }) });
+    assert.deepStrictEqual((await standalone.controller.status()).launch, { host: 'standalone', why: 'dev', degraded: false });
+    standalone.controller.dispose();
+    const attached = controllerFor({ mode: 'attached', readBridgeFile: () => ({ ok: false }) });
+    assert.deepStrictEqual((await attached.controller.status()).launch, { host: 'attached', why: 'attached', degraded: false });
+    attached.controller.dispose();
+  });
+
   it('shows unavailable tabs and approvals when attached and connected', async () => {
     const svc = await startService();
     const { controller, state } = controllerFor({ mode: 'attached', readBridgeFile: () => ({ ok: false }) });

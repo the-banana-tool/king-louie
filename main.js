@@ -23,17 +23,20 @@ const { createLogger } = require('./src/logging');
 const { openDesktopState } = require('./src/ipc/desktop-state');
 const { startStandaloneHost } = require('./src/ipc/standalone-host');
 const { startAttachedHost } = require('./src/ipc/attached-host');
+const { resolveLaunchMode } = require('./src/desktop-bridge/launch-mode');
 
 const log = createLogger('main');
 
 let mainWindow = null;
 const getWindow = () => mainWindow;
 
-// Attached or standalone is decided here, before any core exists (fleet stage 7 §3.7).
+// Attached or standalone is decided here, before any core exists (spec
+// 2026-11-03-attach-stage2-design §6.1).
 const state = openDesktopState(app.getPath('userData'), safeStorage);
-const standaloneOnce = process.argv.includes('--kl-standalone-once');
-const attached = state.mode === 'attached' && !standaloneOnce;
-const deps = { app, ipcMain, safeStorage, shell, dialog, Notification, getWindow, state, appDir: __dirname, standaloneOnce };
+const launch = resolveLaunchMode({ argv: process.argv, platform: process.platform, stateMode: state.mode });
+const attached = launch.host === 'attached';
+const standaloneOnce = launch.degraded;
+const deps = { app, ipcMain, safeStorage, shell, dialog, Notification, getWindow, state, appDir: __dirname, standaloneOnce, launch };
 const host = attached ? startAttachedHost(deps) : startStandaloneHost(deps);
 
 function createWindow() {

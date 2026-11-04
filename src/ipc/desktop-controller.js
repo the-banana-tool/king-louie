@@ -14,11 +14,11 @@ const { ATTACHED_UNAVAILABLE_TABS } = require('../desktop-bridge/allowlist');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
 const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
 const { shown } = require('../service/commands/io');
+const { STANDALONE_FLAG, STANDALONE_ONCE_FLAG: STANDALONE_ONCE } = require('../desktop-bridge/launch-mode');
 
 const log = createLogger('desktop-controller');
 
 const DETACH_WARNING = 'After detaching, this app runs its own King Louie again next to the service; its cron jobs and channels may act twice. Stop the service if you no longer want it.';
-const STANDALONE_ONCE = '--kl-standalone-once';
 // Spec 2026-10-28 §6.2, §7.3 (C-12).
 const PAIR_CLI_TIMEOUT_MS = 120000;
 const NODE_START_WAIT_MS = 60000;
@@ -97,6 +97,8 @@ function createDesktopController({
   userDataDir, safeStorage, stdout = process.stdout, argv = process.argv,
   readBridgeFile = null, clientFactory = null, pollMs = 3000, pollWindowMs = 10 * 60 * 1000,
   now = () => new Date(), username = null,
+  // resolveLaunchMode's answer (spec 2026-11-03 §6.1), for desktop:status.
+  launch = { host: mode, why: mode === 'attached' ? 'attached' : 'dev', degraded: false },
   // The personal node (spec 2026-10-28): the runner that reads and starts it,
   // and the clock and timers of the §7.3 wait (tests inject a fake clock).
   nodeRunner = platform === 'win32' ? createPersonalNodeRunner({ env, platform }) : null,
@@ -185,7 +187,7 @@ function createDesktopController({
       app.quit();
       return { ok: true, relaunching: true };
     }
-    const args = argv.slice(1).filter((a) => a !== STANDALONE_ONCE).concat(extraArgs);
+    const args = argv.slice(1).filter((a) => a !== STANDALONE_ONCE && a !== STANDALONE_FLAG).concat(extraArgs);
     app.relaunch({ args });
     app.exit(0);
     return { ok: true, relaunching: true };
@@ -349,6 +351,7 @@ function createDesktopController({
       mode,
       view: current,
       standaloneOnce: argv.includes(STANDALONE_ONCE),
+      launch: { ...launch },
       bridgeFile: bridgeFile(),
       bridge,
       pairing: pairing ? {

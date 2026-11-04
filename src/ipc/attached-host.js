@@ -16,11 +16,11 @@ function startAttachedHost(deps) {
   const {
     app, ipcMain, safeStorage, dialog, getWindow, state,
     env = process.env, platform = process.platform,
-    listChannels = listIpcChannels, clientFactory = null, controllerFactory = createDesktopController
+    listChannels = listIpcChannels, clientFactory = null, controllerFactory = createDesktopController, launch
   } = deps;
   const controller = controllerFactory({
     state, mode: 'attached', app, getWindow, env, platform,
-    userDataDir: app.getPath('userData'), safeStorage, clientFactory
+    userDataDir: app.getPath('userData'), safeStorage, clientFactory, launch
   });
   const client = controller.createClient();
   controller.setClient(client);
