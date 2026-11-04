@@ -108,6 +108,7 @@ const ALLOWLIST_LEFT_BEHIND = 'this node already has a list for this bot; the de
 const profilesNotMoved = (n) => `your ${n} model ${n === 1 ? 'profile was' : 'profiles were'} not moved: this node's models were already set up, so they were left as they are; set the ${n === 1 ? 'profile' : 'profiles'} up again under Settings > Models`;
 const landedIncomplete = (dir) => `${dir} is on this node but an earlier import landed it incomplete, so it does not count as moved. Stop the node, remove that folder from its cases folder, and try again.`;
 const caseOnNodeDiffers = (dir) => `a folder named ${dir} is already on this node and is not this case as the desktop has it (its history or files differ), so it does not count as moved. Compare the two; to move the desktop's, stop the node, remove that folder from its cases folder, and try again.`;
+const MOVED_OUT_NOTE = 'moved to this node by hand and closed on the desktop as moved elsewhere; the copy on this node is the live one and was left as it is';
 const LANDED_NO_RECORD = 'already on this node, its history and files as the desktop has them';
 const RESTART_NOTE = 'MCP servers, channel bots and hook choices that moved take effect when the node next starts.';
 
@@ -305,15 +306,65 @@ async function rebuildIndexFromHead(dir) {
   }
 }
 
-// Whether a case directory already on the node is the desktop's: the commit the
-// source's HEAD names is its HEAD or in its history (the node may have gone on),
-// and its tree is clean. Any doubt is a no.
-async function landedAsSource(dir, head) {
-  if (typeof head !== 'string' || !head) return false;
+// What a case's working tree is counted over, on the desktop and on the node
+// alike: not .git, not what never lands (.kl/lock, .kl/no-hooks, a name this host
+// cannot store), and not the .gitattributes the host itself writes to.
+function caseTreeCounted(rel) {
+  const first = String(rel).split('/')[0];
+  if (isDotGitSegment(first) || String(rel).toLowerCase() === '.gitattributes' || unstorableOnHost(String(rel))) return false;
   try {
-    const nodeHead = (await git(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).trim();
-    if (nodeHead !== head) await git(dir, ['merge-base', '--is-ancestor', head, nodeHead]);
-    return (await git(dir, ['status', '--porcelain'])).trim() === '';
+    return !isSkippedCaseFile(String(rel));
+  } catch {
+    return false;
+  }
+}
+
+async function nodeTreeTotals(dir) {
+  const totals = { files: 0, bytes: 0 };
+  const walk = async (rel) => {
+    for (const entry of await fs.promises.readdir(path.join(dir, ...rel.split('/').filter(Boolean)), { withFileTypes: true })) {
+      const child = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!(rel === '' && isDotGitSegment(entry.name))) await walk(child);
+      } else if (entry.isFile() && caseTreeCounted(child)) {
+        totals.files += 1;
+        totals.bytes += (await fs.promises.lstat(path.join(dir, ...child.split('/')))).size;
+      }
+    }
+  };
+  await walk('');
+  return totals;
+}
+
+// Whether a case directory already on the node is the desktop's. Its repository
+// must be whole (fsck reaches every object, an old blob included). At the
+// source's HEAD its files must count and weigh what the source's do, which also
+// proves a dirty source landed as it stood and sees a missing ignored file; a
+// source known clean also needs a clean tree here. Ahead of the source's HEAD
+// (the node went on) the tree has moved, so the only proof is that the source had
+// nothing beyond that commit: a source not known clean is a no. Any doubt is a no.
+async function caseMatchesSource(dir, source) {
+  const { head, tree, clean } = source;
+  if (!tree || !Number.isInteger(tree.files) || !Number.isInteger(tree.bytes)) return false;
+  const sameTree = async () => {
+    const totals = await nodeTreeTotals(dir);
+    return totals.files === tree.files && totals.bytes === tree.bytes;
+  };
+  const cleanHere = async () => (await git(dir, ['status', '--porcelain'])).trim() === '';
+  try {
+    let nodeHead = null;
+    try {
+      nodeHead = (await git(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).trim();
+    } catch {
+      nodeHead = null;
+    }
+    if (typeof head !== 'string' || !head) return nodeHead === null && sameTree();
+    if (nodeHead === null) return false;
+    await git(dir, ['fsck', '--connectivity-only', '--no-dangling', '--no-progress']);
+    if (nodeHead === head) return (await sameTree()) && (clean !== true || cleanHere());
+    if (clean !== true) return false;
+    await git(dir, ['merge-base', '--is-ancestor', head, nodeHead]);
+    return cleanHere();
   } catch {
     return false;
   }
@@ -509,10 +560,18 @@ class DesktopImporter {
     return plan;
   }
 
-  copyId(id, chats) {
-    let next;
-    do { next = `${id}-${this.randomId().slice(0, 4)}`; } while (chats.some((c) => c.id === next));
-    return next;
+  // A copy's id is fixed by the desktop, the chat and the version being copied, so
+  // a retry after a cut-off (the manifest is written only at finish) finds its
+  // own copy and writes no second one. A chat at that id with another stamp is the
+  // node's by now, and is never overwritten: the next id is taken.
+  copyTarget(installId, chat, chats) {
+    for (let n = 0; ; n += 1) {
+      const digest = crypto.createHash('sha256').update(`${installId}\0${chat.id}\0${chat.updatedAt}\0${n}`).digest('hex');
+      const id = `${chat.id}-${digest.slice(0, 8)}`;
+      const held = chats.find((c) => c.id === id);
+      if (!held) return { id, landed: false };
+      if (held.updatedAt === chat.updatedAt) return { id, landed: true };
+    }
   }
 
   async plan({ installId, inventory, source = 'bridge', connectionId = null } = {}) {
@@ -582,6 +641,10 @@ class DesktopImporter {
     // so apply() can tell whether the service's copy is still the one the
     // plan looked at (fix round 1, I4) before overwriting it.
     const chatExpected = new Map();
+    const addCopy = (c, note) => {
+      const { id, landed } = this.copyTarget(installId, c, chats);
+      add('chat', c.id, landed ? 'skip-present' : 'copy', landed ? 'its copy from an earlier try is already on this node' : note, id);
+    };
     for (const c of arr(inventory.chats)) {
       if (!c || typeof c.id !== 'string' || !c.id) continue;
       const entry = done('chat', c.id);
@@ -591,13 +654,13 @@ class DesktopImporter {
         const targetChanged = !target || target.updatedAt !== entry.targetUpdatedAt;
         if (!sourceChanged) add('chat', c.id, 'skip-present', null, entry.targetKey);
         else if (!targetChanged) { add('chat', c.id, 'update', null, entry.targetKey); chatExpected.set(entry.targetKey, target.updatedAt); }
-        else add('chat', c.id, 'copy', 'changed on both sides; imported as a copy', this.copyId(c.id, chats));
+        else addCopy(c, 'changed on both sides; imported as a copy');
         continue;
       }
       const existing = chats.find((x) => x.id === c.id);
       if (!existing) add('chat', c.id, 'new');
       else if (existing.updatedAt === c.updatedAt) add('chat', c.id, 'skip-present');
-      else add('chat', c.id, 'copy', 'a different chat with this id exists; imported as a copy', this.copyId(c.id, chats));
+      else addCopy(c, 'a different chat with this id exists; imported as a copy');
     }
 
     for (const id of arr(inventory.memory)) {
@@ -629,11 +692,16 @@ class DesktopImporter {
       } else if (done('case', dir)?.incomplete) {
         add('case', dir, 'needs-attention', landedIncomplete(dir));
         items[items.length - 1].incomplete = true;
-      } else if (done('case', dir)) add('case', dir, 'skip-present');
-      else if (!this.personal) add('case', dir, 'needs-attention', 'a case with this directory already exists on the service');
-      // A try that stopped after the rename and before the manifest, or a case
+      } else if (!this.personal) {
+        if (done('case', dir)) add('case', dir, 'skip-present');
+        else add('case', dir, 'needs-attention', 'a case with this directory already exists on the service');
+      // The owner moved this one by hand and closed the desktop's copy: the node
+      // has the live one, and the two are meant to differ.
+      } else if (c.movedElsewhere === true) add('case', dir, 'needs-attention', MOVED_OUT_NOTE);
+      // A landing on record, one a try stopped short of recording, or a case
       // moved by hand: what is there is compared with the source, never assumed.
-      else if (await landedAsSource(path.join(root, dir), c.head)) add('case', dir, 'skip-present', LANDED_NO_RECORD);
+      // A record says it landed once, not that the source has not gone on since.
+      else if (await caseMatchesSource(path.join(root, dir), c)) add('case', dir, 'skip-present', done('case', dir) ? null : LANDED_NO_RECORD);
       else {
         add('case', dir, 'needs-attention', caseOnNodeDiffers(dir));
         items[items.length - 1].incomplete = true;
@@ -1131,7 +1199,13 @@ class DesktopImporter {
     const at = this.now().toISOString();
     const root = this.casesRoot();
     const staging = path.join(root, `.import-${plan.planId}`);
+    // dropPlan (expiry, the connection closing) removes the staging directory
+    // and can run at any await below: never rename what it may have half removed.
+    const stillOpen = () => {
+      if (!this.plans.has(plan.planId)) throw new ImportError('PLAN_EXPIRED', 'The import plan expired; plan the import again.');
+    };
     for (const [dir, files] of plan.caseFiles) {
+      stillOpen();
       const k = itemKey('case', dir);
       if (files.failed) { plan.results.set(k, { ok: false, error: files.failed }); continue; }
       const stagedDir = path.join(staging, dir);
@@ -1161,6 +1235,7 @@ class DesktopImporter {
         assertGitDirSafe(stagedDir);
         await initRepo(stagedDir);
       } catch (err) {
+        stillOpen();
         try {
           fs.rmSync(stagedDir, { recursive: true, force: true });
         } catch (rmErr) {
@@ -1179,7 +1254,9 @@ class DesktopImporter {
       // until the index is rebuilt (only .git/index is written). A HEAD that
       // names a commit which is not there is a case that did not land whole.
       // A personal node's move only (attach stage 2 §6.5); a fleet import is as it was.
+      stillOpen();
       const headProblem = this.personal ? await rebuildIndexFromHead(stagedDir) : null;
+      stillOpen();
       try {
         fs.renameSync(stagedDir, dest);
         // After initRepo (fix round 2), so onPathWritten sees the files
@@ -1216,6 +1293,7 @@ class DesktopImporter {
         plan.results.set(k, { ok: false, error: err.message });
       }
     }
+    stillOpen();
     // Best-effort: a removal failure (e.g. a file still briefly open on
     // Windows) is logged, not thrown — finish() has already recorded every
     // case's outcome above, and cleanupOrphanedStaging() sweeps anything
@@ -1333,6 +1411,7 @@ module.exports = {
   INSTALL_ID_RE,
   CASE_DIR_RE,
   isSkippedCaseFile,
+  caseTreeCounted,
   safeRelPath,
   isValidCaseDir
 };

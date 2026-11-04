@@ -14,7 +14,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { parseCaseYaml } = require('../cases/case-store');
-const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS } = require('./desktop-import');
+const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS } = require('./desktop-import');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 // A desktop store file or a case file bigger than this is refused rather
@@ -267,12 +267,15 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
   if (!casesRootSetting) {
     const listed = reader.listDir('cases');
     if (listed.refused.length) everyCaseRead = false;
-    for (const r of listed.refused) attention.push({ category: 'case', key: r.relPath, note: r.reason });
+    // wholeCase: the case stays behind whole, so it can never show up as missing
+    // from the plan, and a move that says it is done must refuse. A dot directory
+    // is the store's own (.index, .contact.lock), never a case.
+    for (const r of listed.refused) attention.push({ category: 'case', key: r.relPath, note: r.reason, wholeCase: true });
     for (const dir of listed.dirs) {
       if (dir === '.index') continue; // cases stage 5: the cross-case index cache, not a case (M9)
       if (!CASE_DIR_RE.test(dir)) {
         everyCaseRead = false;
-        attention.push({ category: 'case', key: dir, note: 'not a valid case directory name; it was not copied' });
+        attention.push({ category: 'case', key: dir, note: 'not a valid case directory name; it was not copied', ...(dir.startsWith('.') ? {} : { wholeCase: true }) });
         continue;
       }
       const mark = readCaseMark(reader, dir);
@@ -283,10 +286,19 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
       for (const r of refused) attention.push({ category: 'case', key: `${dir}/${r.relPath}`, note: r.reason });
       const held = refusedCaseNote(files);
       if (held) {
-        attention.push({ category: 'case', key: dir, note: held });
+        attention.push({ category: 'case', key: dir, note: held, wholeCase: true });
         continue;
       }
-      cases.push({ dir, files: files.length, bytes: files.reduce((n, f) => n + f.size, 0), head: readCaseHead(reader, dir), ...(casePrivate ? { private: true } : {}) });
+      const counted = files.filter((f) => caseTreeCounted(f.relPath));
+      cases.push({
+        dir,
+        files: files.length,
+        bytes: files.reduce((n, f) => n + f.size, 0),
+        head: readCaseHead(reader, dir),
+        tree: { files: counted.length, bytes: counted.reduce((n, f) => n + f.size, 0) },
+        ...(casePrivate ? { private: true } : {}),
+        ...(mark.movedElsewhere ? { movedElsewhere: true } : {})
+      });
     }
   }
   for (const c of chats) {
@@ -371,7 +383,7 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
 // does not parse gives no id and counts as private; a `private` that is not
 // exactly false is private (CaseRuntime#isPrivate).
 function readCaseMark(reader, dir) {
-  const unread = { id: null, private: true };
+  const unread = { id: null, private: true, movedElsewhere: false };
   const r = reader.readFile(path.join('cases', dir, 'case.yaml'));
   if (!r.ok) return unread;
   let meta;
@@ -383,7 +395,8 @@ function readCaseMark(reader, dir) {
   if (!meta) return unread;
   return {
     id: String(meta.id),
-    private: Object.prototype.hasOwnProperty.call(meta, 'private') && meta.private !== false
+    private: Object.prototype.hasOwnProperty.call(meta, 'private') && meta.private !== false,
+    movedElsewhere: meta.status === 'abandoned' && Boolean(meta.statusReason) && meta.statusReason.kind === 'moved'
   };
 }
 

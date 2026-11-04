@@ -951,6 +951,15 @@ describe('readBackupManifest', () => {
     assert.strictEqual(await readBackupManifest(dest), null);
   });
 
+  it('answers null when a listed file has the same size and other bytes', async () => {
+    const dest = await made();
+    const budget = path.join(dest, 'cases', 'x', '.kl', 'budget.json');
+    const bytes = fs.readFileSync(budget);
+    bytes[0] ^= 0xff;
+    fs.writeFileSync(budget, bytes);
+    assert.strictEqual(await readBackupManifest(dest), null);
+  });
+
   it('answers null when a listed file is gone or a different size', async () => {
     const dest = await made();
     const budget = path.join(dest, 'cases', 'x', '.kl', 'budget.json');

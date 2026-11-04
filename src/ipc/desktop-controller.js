@@ -1023,12 +1023,16 @@ function createDesktopController({
         if (problem) return moveSourceRefusal(`The old profile did not read whole, so nothing was moved: ${problem}`);
         closeImportSession();
         const plan = withSourceFacts(await planImport({ client: target.client, source }), source);
+        // A case the reader holds back whole is in no plan, so nothing could ever
+        // find it missing: the apply refuses while there is one.
+        const heldCases = shownEntries(source.attention.filter((a) => a.category === 'case' && a.wholeCase === true));
+        const refusedFiles = source.attention.filter((a) => a.category === 'case' && a.wholeCase !== true && String(a.key).includes('/')).length;
         importSession = {
           client: target.client,
           temporary: false,
           plan,
           source,
-          move: { backup, service: target.service, customCasesRoot: old.customCasesRoot, customCases: old.customCases }
+          move: { backup, service: target.service, customCasesRoot: old.customCasesRoot, customCases: old.customCases, heldCases, refusedFiles }
         };
         return {
           ok: true,
@@ -1040,7 +1044,13 @@ function createDesktopController({
             customCasesRoot: old.customCasesRoot ? shown(old.customCasesRoot, 400) : null,
             customCases: old.customCases
           },
-          plan: { ...plan, items: plan.items.map(shownEntry) },
+          plan: {
+            ...plan,
+            items: plan.items.map(shownEntry),
+            dirtyCases: plan.dirtyCases.map((d) => ({ key: shown(d.key), note: shown(d.note, 400) }))
+          },
+          heldCases,
+          refusedFiles,
           attention: shownEntries(source.attention),
           staysBehind: staysBehindLines(plan),
           leftBehind: leftBehindOf({ plan, source })
@@ -1060,11 +1070,15 @@ function createDesktopController({
       if (state.migration) return profileMigrated();
       const session = importSession && importSession.move ? importSession : null;
       if (!session) return { ok: false, code: 'PLAN_EXPIRED', error: 'The plan for this move expired; plan it again.' };
-      const { backup, service, customCasesRoot, customCases } = session.move;
+      const { backup, service, customCasesRoot, customCases, heldCases, refusedFiles } = session.move;
       // The move carries only the profile's own cases folder, so marking it
       // would leave these behind with no way back to them from this profile.
       if (customCasesRoot && customCases !== 0) {
         return moveSourceRefusal(`Cases under ${customCasesRoot} are outside this profile and would not move. Move them into the profile's cases folder, or out of use, and plan again.`);
+      }
+      if (heldCases.length) {
+        const names = heldCases.map((h) => h.key).join(', ');
+        return moveSourceRefusal(`${heldCases.length === 1 ? 'A case cannot' : 'Cases cannot'} be moved as ${heldCases.length === 1 ? 'it stands' : 'they stand'}: ${names}. Nothing was moved. Sort ${heldCases.length === 1 ? 'it' : 'them'} out on the desktop and plan again.`);
       }
       try {
         const report = await applyImport({
@@ -1091,6 +1105,21 @@ function createDesktopController({
             error: `${verified.missing.length} ${verified.missing.length === 1 ? 'item' : 'items'} could not be found on the node, so this profile was not marked as moved. Nothing was removed; try again.`,
             report: shownOut,
             leftBehind,
+            refusedFiles,
+            verified
+          };
+        }
+        // The mark is what stops the old profile opening, so the backup it names
+        // must still be whole at that moment.
+        if (!(await readBackupManifest(backup.dest))) {
+          backupMade = null;
+          return {
+            ok: false,
+            code: 'BACKUP_FAILED',
+            error: `The move is on the node, but its backup at ${shown(backup.dest, 400)} no longer reads whole, so this profile was not marked as moved. Try again: a new backup is made first.`,
+            report: shownOut,
+            leftBehind,
+            refusedFiles,
             verified
           };
         }
@@ -1105,10 +1134,10 @@ function createDesktopController({
           });
         } catch (err) {
           log.warn(`the migration marker was not written: ${err.message}`);
-          return { ok: false, code: 'MIGRATION_MARK_FAILED', error: `The move is on the node, but this profile could not be marked as moved (${shown(err.message, 300)}). Try again.`, report: shownOut, leftBehind, verified };
+          return { ok: false, code: 'MIGRATION_MARK_FAILED', error: `The move is on the node, but this profile could not be marked as moved (${shown(err.message, 300)}). Try again.`, report: shownOut, leftBehind, refusedFiles, verified };
         }
         log.info('this profile was moved into the node and verified', verified.checked);
-        return { ok: true, report: shownOut, leftBehind, verified };
+        return { ok: true, report: shownOut, leftBehind, refusedFiles, verified };
       } catch (err) {
         return { ok: false, code: err.code || 'IMPORT_FAILED', error: shown(err.message, 600) };
       } finally {

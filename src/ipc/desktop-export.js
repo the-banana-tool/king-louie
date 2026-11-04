@@ -6,6 +6,8 @@ const { createSafeReader, readDesktopSource, planBatches } = require('../migrati
 const { readHistoryChats } = require('../migration/desktop-history');
 const { createSafeStorageCipher } = require('../platform/cipher');
 const { secureStorageUsable } = require('./desktop-state');
+const path = require('path');
+const { git } = require('../cases/git');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 // A failed import.apply with one of these codes means no later batch can
@@ -20,18 +22,52 @@ const failuresFor = (batch, error, code) => batch.map((e) => ({
   category: e.category, key: e.key, ok: false, error, ...(code ? { code } : {})
 }));
 
+// Whether a case's tree matches its HEAD, with plumbing that writes no index into
+// the old profile: `git status` rewrites it, and the hardened runner passes no
+// --no-optional-locks. The asynchronous twin of the CLI's sourceChanges (import.js),
+// for the desktop's main process: diff-index does not refresh, so an all-zero id
+// is a changed stat, and is hashed (hash-object without -w writes nothing).
+async function caseIsClean(dir) {
+  const fields = (await git(dir, ['diff-index', '-z', 'HEAD', '--'])).split('\0');
+  const statOnly = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const meta = fields[i].replace(/^:/, '').split(' ');
+    const [, , headSha, workSha, status] = meta;
+    if (status !== 'M' || !/^0+$/.test(workSha || '') || meta[0] !== meta[1]) return false;
+    statOnly.push({ rel: fields[i + 1], headSha });
+  }
+  if (statOnly.length) {
+    const hashes = (await git(dir, ['hash-object', '--', ...statOnly.map((s) => s.rel)])).trim().split(/\r?\n/);
+    if (statOnly.some((s, n) => hashes[n] !== s.headSha)) return false;
+  }
+  return (await git(dir, ['ls-files', '-z', '--others', '--exclude-standard'])).split('\0').every((rel) => !rel);
+}
+
+// For the plan's words and the comparison a retry makes: clean true or false, or
+// no key when git cannot say. Here and not in the walker, which is synchronous and
+// also serves the CLI.
+async function addCaseCleanliness(source, userDataDir) {
+  for (const entry of source.inventory.cases) {
+    if (!entry.head) continue;
+    try {
+      entry.clean = await caseIsClean(path.join(userDataDir, 'cases', entry.dir));
+    } catch { /* unknown: a retry treats it as not clean */ }
+  }
+  return source;
+}
+
 async function loadDesktopSource({ userDataDir, safeStorage, platform = process.platform }) {
   const usable = secureStorageUsable(safeStorage, platform);
   const cipher = usable ? createSafeStorageCipher(safeStorage) : null;
   const reader = createSafeReader({ root: userDataDir, platform });
   const history = await readHistoryChats({ reader });
-  return readDesktopSource({
+  return addCaseCleanliness(readDesktopSource({
     userDataDir,
     reader,
     decrypt: cipher ? (encrypted) => cipher.decryptString(encrypted) : null,
     secrets: usable ? 'included' : 'unavailable',
     history
-  });
+  }), userDataDir);
 }
 
 async function planImport({ client, source }) {

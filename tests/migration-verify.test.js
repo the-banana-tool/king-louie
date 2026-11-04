@@ -760,7 +760,12 @@ describe('landing a private chat and case on the node', () => {
     walk('');
     return { dir, id, name: path.basename(dir), files, head: (await git.git(dir, ['rev-parse', 'HEAD'])).trim() };
   }
-  const entry = (src, extra = {}) => ({ dir: src.name, head: src.head, files: src.files.length, bytes: src.files.reduce((a, f) => a + Buffer.from(f.b64, 'base64').length, 0), ...extra });
+  const entry = (src, extra = {}) => {
+    const { caseTreeCounted } = require('../src/migration/desktop-import');
+    const counted = src.files.filter((f) => caseTreeCounted(f.relPath));
+    const sizeOf = (list) => list.reduce((a, f) => a + Buffer.from(f.b64, 'base64').length, 0);
+    return { dir: src.name, head: src.head, clean: true, files: src.files.length, bytes: sizeOf(src.files), tree: { files: counted.length, bytes: sizeOf(counted) }, ...extra };
+  };
   async function landCase(imp, src, { extra = {}, chats = [] } = {}) {
     const inventory = { installId: 'install-0009', chats: chats.map((c) => ({ id: c.id, updatedAt: c.updatedAt, title: c.title })), cases: [entry(src, extra)], secrets: 'included' };
     const plan = await imp.plan({ installId: 'install-0009', inventory });
@@ -849,5 +854,402 @@ describe('landing a private chat and case on the node', () => {
     const item = retry.plan.items.find((i) => i.category === 'case');
     assert.strictEqual(item.action, 'needs-attention');
     assert.strictEqual('incomplete' in item, false);
+  });
+});
+
+// Fix round 1: the reviewer's measured false yeses on cases.
+describe('fix round 1: a case on the node is compared with the source', () => {
+  const { caseTreeCounted } = require('../src/migration/desktop-import');
+  const { createSafeReader, readDesktopSource } = require('../src/migration/desktop-source');
+  const { readHistoryChats } = require('../src/migration/desktop-history');
+  const { loadDesktopSource } = require('../src/ipc/desktop-export');
+
+  async function node({ hosting = 'personal' } = {}) {
+    const dataDir = tmp();
+    process.env.KL_CASES_ROOT = path.join(dataDir, 'cases');
+    const core = createCore({
+      paths: { dataDir },
+      store: new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: { chats: [], activeChatId: null, apiTokens: {}, apiStatus: {}, toolApprovals: { alwaysApproveTools: {} } } }),
+      vaultStore: new JsonFileStore({ dir: dataDir, name: 'config' }),
+      cipher: createAesGcmCipher(crypto.randomBytes(32)),
+      prompter: createHeadlessPrompter(),
+      builtinSkillsDir: path.join(__dirname, '..', 'skills'),
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false }
+    });
+    cores.push(core);
+    await core.start();
+    const importer = async () => new DesktopImporter({
+      context: core.context, targets: await buildImportTargets({ context: core.context, dataDir }), dataDir, checkPath,
+      scope: createDesktopScope({ dataDir, context: core.context }), hosting
+    });
+    const root = path.join(dataDir, 'cases');
+    const invoke = async (channel) => {
+      if (channel === 'chat:load') return { ok: true, data: { chats: core.context.listChats({ messages: false }), history: { available: true } } };
+      if (channel === 'case:list') return { ok: true, cases: new CaseStore({ root }).list() };
+      throw new Error(`unexpected ${channel}`);
+    };
+    return { core, dataDir, root, importer, invoke };
+  }
+  async function realCase() {
+    const runtime = new CaseRuntime({ root: tmp() });
+    const made = await runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot', force: true });
+    const { dir } = runtime.getCase(made.id);
+    fs.writeFileSync(path.join(dir, 'notes.md'), '# Notes\n');
+    await git.commitAll(dir, 'notes');
+    return { dir, name: path.basename(dir) };
+  }
+  // Every file as the walker sends it, and the inventory entry it reports, now.
+  async function snap(dir, name) {
+    const files = [];
+    const walk = (rel) => {
+      for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+        const child = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) walk(child);
+        else files.push({ relPath: child, mode: 0o644, offset: 0, b64: fs.readFileSync(path.join(dir, child)).toString('base64') });
+      }
+    };
+    walk('');
+    const sized = files.map((f) => ({ relPath: f.relPath, size: Buffer.from(f.b64, 'base64').length }));
+    const counted = sized.filter((f) => caseTreeCounted(f.relPath));
+    const clean = (await git.git(dir, ['status', '--porcelain'])).trim() === '';
+    return {
+      files,
+      entry: {
+        dir: name,
+        files: files.length,
+        bytes: sized.reduce((a, f) => a + f.size, 0),
+        head: (await git.git(dir, ['rev-parse', 'HEAD'])).trim(),
+        clean,
+        tree: { files: counted.length, bytes: counted.reduce((a, f) => a + f.size, 0) }
+      }
+    };
+  }
+  async function land(imp, { files, entry }, { chats = [] } = {}) {
+    const inventory = { installId: 'install-0011', chats: chats.map((c) => ({ id: c.id, updatedAt: c.updatedAt, title: c.title })), cases: [entry], secrets: 'included' };
+    const plan = await imp.plan({ installId: 'install-0011', inventory });
+    const batch = chats.map((c) => ({ category: 'chat', key: c.id, value: c }));
+    if (plan.items.find((i) => i.category === 'case').action === 'new') for (const f of files) batch.push({ category: 'case', key: entry.dir, value: f });
+    if (batch.length) await imp.apply({ planId: plan.planId, batch });
+    return {
+      plan: withSourceFacts(plan, { inventory, getValue: (_c, id) => chats.find((c) => c.id === id) || null }),
+      report: { ...(await imp.finish({ planId: plan.planId })), skipped: [], sendFailures: [] }
+    };
+  }
+  const caseItemOf = (moved) => moved.plan.items.find((i) => i.category === 'case');
+  const forget = (n) => fs.rmSync(path.join(n.dataDir, 'imports'), { recursive: true, force: true });
+  const looseObject = (dir, id) => path.join(dir, '.git', 'objects', id.slice(0, 2), id.slice(2));
+
+  it('finding 1: a recorded case and a source that went on is not skipped', async () => {
+    const n = await node();
+    const src = await realCase();
+    await land(await n.importer(), await snap(src.dir, src.name));
+    fs.writeFileSync(path.join(src.dir, 'later-desktop-work.md'), 'only on the desktop\n');
+    await git.commitAll(src.dir, 'the desktop went on');
+    const retry = await land(await n.importer(), await snap(src.dir, src.name));
+    assert.strictEqual(caseItemOf(retry).action, 'needs-attention');
+    assert.strictEqual(caseItemOf(retry).incomplete, true);
+    assert.strictEqual(fs.existsSync(path.join(n.root, src.name, 'later-desktop-work.md')), false);
+    const out = await verifyMigration({ ...retry, invoke: n.invoke });
+    assert.strictEqual(out.code, 'MIGRATION_UNVERIFIED');
+    assert.deepStrictEqual(out.missing.map((m) => m.key), [src.name]);
+  });
+
+  it('finding 1: a recorded case that still matches is skipped, and verifies', async () => {
+    const n = await node();
+    const src = await realCase();
+    await land(await n.importer(), await snap(src.dir, src.name));
+    const retry = await land(await n.importer(), await snap(src.dir, src.name));
+    assert.strictEqual(caseItemOf(retry).action, 'skip-present');
+    assert.strictEqual((await verifyMigration({ ...retry, invoke: n.invoke })).ok, true);
+  });
+
+  it('a fleet import\'s recorded case stays skip-present, as it was', async () => {
+    const n = await node({ hosting: 'service' });
+    const src = await realCase();
+    await land(await n.importer(), await snap(src.dir, src.name));
+    fs.writeFileSync(path.join(src.dir, 'later.md'), 'x\n');
+    await git.commitAll(src.dir, 'went on');
+    assert.strictEqual(caseItemOf(await land(await n.importer(), await snap(src.dir, src.name))).action, 'skip-present');
+  });
+
+  for (const recorded of [true, false]) {
+    const how = recorded ? 'recorded' : 'no record';
+    it(`finding 2: a dirty source and a node clean at the same HEAD is a no (${how})`, async () => {
+      const n = await node();
+      const src = await realCase();
+      await land(await n.importer(), await snap(src.dir, src.name));
+      if (!recorded) forget(n);
+      fs.writeFileSync(path.join(src.dir, 'uncommitted.md'), 'uncommitted\n');
+      const retry = await land(await n.importer(), await snap(src.dir, src.name));
+      assert.strictEqual(caseItemOf(retry).incomplete, true);
+      assert.strictEqual((await verifyMigration({ ...retry, invoke: n.invoke })).ok, false);
+    });
+
+    it(`finding 2: an ignored file missing on the node is a no (${how})`, async () => {
+      const n = await node();
+      const src = await realCase();
+      fs.mkdirSync(path.join(src.dir, '.kl', 'runs'), { recursive: true });
+      fs.writeFileSync(path.join(src.dir, '.kl', 'runs', 'chk.txt'), 'a kept output tail\n');
+      await land(await n.importer(), await snap(src.dir, src.name));
+      if (!recorded) forget(n);
+      fs.rmSync(path.join(n.root, src.name, '.kl', 'runs', 'chk.txt'));
+      const retry = await land(await n.importer(), await snap(src.dir, src.name));
+      assert.strictEqual(caseItemOf(retry).incomplete, true);
+      assert.strictEqual((await verifyMigration({ ...retry, invoke: n.invoke })).ok, false);
+    });
+
+    it(`finding 2: an older commit's blob missing on the node is a no (${how})`, async () => {
+      const n = await node();
+      const src = await realCase();
+      fs.writeFileSync(path.join(src.dir, 'notes.md'), '# Notes, later\n');
+      await git.commitAll(src.dir, 'notes again');
+      const old = (await git.git(src.dir, ['rev-parse', 'HEAD~1:notes.md'])).trim();
+      await land(await n.importer(), await snap(src.dir, src.name));
+      if (!recorded) forget(n);
+      const object = looseObject(path.join(n.root, src.name), old);
+      assert.ok(fs.existsSync(object), 'a loose object');
+      fs.chmodSync(object, 0o666);
+      fs.rmSync(object);
+      const retry = await land(await n.importer(), await snap(src.dir, src.name));
+      assert.strictEqual(caseItemOf(retry).incomplete, true);
+      assert.strictEqual((await verifyMigration({ ...retry, invoke: n.invoke })).ok, false);
+    });
+  }
+
+  it('finding 2: a node ahead of the source counts only for a clean source', async () => {
+    const n = await node();
+    const src = await realCase();
+    await land(await n.importer(), await snap(src.dir, src.name));
+    const landed = path.join(n.root, src.name);
+    fs.writeFileSync(path.join(landed, 'later.md'), 'later\n');
+    await git.commitAll(landed, 'the node went on');
+    const clean = await land(await n.importer(), await snap(src.dir, src.name));
+    assert.strictEqual(caseItemOf(clean).action, 'skip-present');
+    fs.writeFileSync(path.join(src.dir, 'uncommitted.md'), 'x\n');
+    const dirty = await land(await n.importer(), await snap(src.dir, src.name));
+    assert.strictEqual(caseItemOf(dirty).incomplete, true);
+    const unknown = await snap(src.dir, src.name);
+    fs.rmSync(path.join(src.dir, 'uncommitted.md'));
+    const sameTree = await snap(src.dir, src.name);
+    delete sameTree.entry.clean;
+    assert.strictEqual(caseItemOf(await land(await n.importer(), sameTree)).incomplete, true, 'unknown is not clean');
+    assert.ok(unknown);
+  });
+
+  it('finding 3: a dirty source lands as it stands, is recognised on a retry, and the plan says so', async () => {
+    const n = await node();
+    const src = await realCase();
+    fs.writeFileSync(path.join(src.dir, 'uncommitted.md'), 'mid-turn\n');
+    fs.writeFileSync(path.join(src.dir, 'notes.md'), '# Notes, edited\n');
+    const first = await land(await n.importer(), await snap(src.dir, src.name));
+    assert.deepStrictEqual(first.report.incomplete, []);
+    assert.strictEqual(fs.readFileSync(path.join(n.root, src.name, 'uncommitted.md'), 'utf8'), 'mid-turn\n');
+    assert.strictEqual(fs.readFileSync(path.join(n.root, src.name, 'notes.md'), 'utf8'), '# Notes, edited\n');
+    assert.deepStrictEqual(first.plan.dirtyCases.map((d) => d.key), [src.name]);
+    assert.match(first.plan.dirtyCases[0].note, /uncommitted/);
+    assert.strictEqual((await verifyMigration({ ...first, invoke: n.invoke })).ok, true);
+
+    const retry = await land(await n.importer(), await snap(src.dir, src.name));
+    assert.strictEqual(caseItemOf(retry).action, 'skip-present');
+    assert.strictEqual((await verifyMigration({ ...retry, invoke: n.invoke })).ok, true);
+  });
+
+  it('a clean plan has no dirty cases', async () => {
+    const out = withSourceFacts({ items: [{ category: 'case', key: 'lot', action: 'new' }] }, { inventory: { cases: [{ dir: 'lot', clean: true }] }, getValue: () => null });
+    assert.deepStrictEqual(out.dirtyCases, []);
+  });
+
+  it('a case moved out by hand (Moved elsewhere) stays a plain needs-attention: the desktop\'s copy is the old one', async () => {
+    const n = await node();
+    const src = await realCase();
+    const snapped = await snap(src.dir, src.name);
+    await land(await n.importer(), snapped);
+    fs.writeFileSync(path.join(src.dir, 'closing.md'), 'closed here\n');
+    await git.commitAll(src.dir, 'status: abandoned');
+    const later = await snap(src.dir, src.name);
+    later.entry.movedElsewhere = true;
+    const retry = await land(await n.importer(), later);
+    assert.strictEqual(caseItemOf(retry).action, 'needs-attention');
+    assert.strictEqual('incomplete' in caseItemOf(retry), false);
+    assert.strictEqual((await verifyMigration({ ...retry, invoke: n.invoke })).ok, true);
+  });
+
+  describe('the walker', () => {
+    async function read(root) {
+      const reader = createSafeReader({ root });
+      const history = await readHistoryChats({ reader });
+      return readDesktopSource({ userDataDir: root, reader, secrets: 'needs-desktop', history });
+    }
+    const put = (root, rel, text) => {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), text);
+    };
+
+    it('the tree on the inventory leaves out .git, what never lands and the .gitattributes the host writes', async () => {
+      const root = tmp();
+      put(root, 'cases/lot/case.yaml', 'id: a\nslug: lot\ntitle: Lot\n');
+      put(root, 'cases/lot/notes.md', '12345');
+      put(root, 'cases/lot/.gitattributes', '* -text\n');
+      put(root, 'cases/lot/.git/HEAD', 'ref: refs/heads/main\n');
+      put(root, 'cases/lot/.kl/lock', 'held');
+      put(root, 'cases/lot/.kl/runs/chk.txt', '12');
+      const { inventory } = await read(root);
+      const { tree } = inventory.cases[0];
+      assert.strictEqual(tree.files, 3);
+      assert.strictEqual(tree.bytes, 'id: a\nslug: lot\ntitle: Lot\n'.length + 5 + 2);
+    });
+
+    it('a case with status abandoned for the reason moved says so', async () => {
+      const root = tmp();
+      put(root, 'cases/lot/case.yaml', 'id: a\nslug: lot\ntitle: Lot\nstatus: abandoned\nstatusReason:\n  kind: moved\n');
+      put(root, 'cases/open/case.yaml', 'id: b\nslug: open\ntitle: Open\nstatus: abandoned\nstatusReason:\n  kind: owner\n');
+      const { inventory } = await read(root);
+      assert.strictEqual(inventory.cases.find((c) => c.dir === 'lot').movedElsewhere, true);
+      assert.strictEqual('movedElsewhere' in inventory.cases.find((c) => c.dir === 'open'), false);
+    });
+
+    it('finding 4: a nested repository or an invalid name is a held case; a dot directory is not', async () => {
+      const root = tmp();
+      put(root, 'cases/held-case/case.yaml', 'id: a\nslug: held\ntitle: Held\n');
+      put(root, 'cases/held-case/clone/.git/HEAD', 'ref: refs/heads/main\n');
+      put(root, 'cases/bad name/case.yaml', 'id: b\nslug: bad\ntitle: Bad\n');
+      put(root, 'cases/.contact.lock/x', '1');
+      const { attention, inventory } = await read(root);
+      assert.deepStrictEqual(inventory.cases, []);
+      const held = attention.filter((a) => a.wholeCase === true).map((a) => a.key).sort();
+      assert.deepStrictEqual(held, ['bad name', 'held-case']);
+      assert.ok(attention.some((a) => a.key === '.contact.lock' && a.wholeCase !== true));
+    });
+
+    it('the desktop reads whether a case is clean, and the read writes nothing into it', async () => {
+      const root = path.join(tmp(), 'king-louie');
+      fs.mkdirSync(root);
+      const runtime = new CaseRuntime({ root: path.join(root, 'cases') });
+      const a = runtime.getCase((await runtime.createCase({ title: 'Clean one', objective: 'x', force: true })).id).dir;
+      const b = runtime.getCase((await runtime.createCase({ title: 'Dirty one', objective: 'y', force: true })).id).dir;
+      fs.writeFileSync(path.join(b, 'uncommitted.md'), 'x');
+      // A changed stat on a file whose bytes are HEAD's is still clean.
+      const touched = path.join(a, 'brief.md');
+      fs.utimesSync(touched, new Date(Date.UTC(2026, 0, 1)), new Date(Date.UTC(2026, 0, 1)));
+      const stamp = (d) => fs.statSync(path.join(d, '.git', 'index')).mtimeMs;
+      const before = [stamp(a), stamp(b)];
+      const safeStorage = { isEncryptionAvailable: () => false };
+      const { inventory } = await loadDesktopSource({ userDataDir: root, safeStorage, platform: 'win32' });
+      assert.strictEqual(inventory.cases.find((c) => c.dir === path.basename(a)).clean, true);
+      assert.strictEqual(inventory.cases.find((c) => c.dir === path.basename(b)).clean, false);
+      assert.deepStrictEqual([stamp(a), stamp(b)], before);
+    });
+  });
+
+  it('the real walker and the real node count a landed case alike: a retry recognises it', async () => {
+    const { planBatches } = require('../src/migration/desktop-source');
+    const n = await node();
+    const profile = path.join(tmp(), 'king-louie');
+    fs.mkdirSync(profile);
+    const runtime = new CaseRuntime({ root: path.join(profile, 'cases') });
+    const { dir } = runtime.getCase((await runtime.createCase({ title: 'North field', objective: 'Survey it', force: true })).id);
+    fs.mkdirSync(path.join(dir, '.kl', 'runs'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.kl', 'runs', 'chk.txt'), 'kept\n');
+    fs.writeFileSync(path.join(dir, '.kl', 'lock'), 'held');
+    const source = await loadDesktopSource({ userDataDir: profile, safeStorage: { isEncryptionAvailable: () => false }, platform: 'win32' });
+    assert.strictEqual(source.inventory.cases[0].clean, true);
+    const imp = await n.importer();
+    const plan = await imp.plan({ installId: source.installId, inventory: source.inventory });
+    for (const batch of planBatches(plan.items, source, {})) await imp.apply({ planId: plan.planId, batch });
+    const report = await imp.finish({ planId: plan.planId });
+    assert.deepStrictEqual(report.incomplete, []);
+    const again = await (await n.importer()).plan({ installId: source.installId, inventory: source.inventory });
+    assert.strictEqual(again.items.find((i) => i.category === 'case').action, 'skip-present');
+    forget(n);
+    const noRecord = await (await n.importer()).plan({ installId: source.installId, inventory: source.inventory });
+    assert.strictEqual(noRecord.items.find((i) => i.category === 'case').action, 'skip-present');
+  });
+
+  it('finding 5: a copy cut off three times leaves one copy', async () => {
+    const n = await node();
+    const stamp = (s) => `2026-09-${s}T10:00:00.000Z`;
+    const message = (t) => ({ id: `m-${t}`, sender: 'user', text: t, timestamp: stamp(20) });
+    n.core.context.upsertChat({ id: 'd1', title: 'd', createdAt: stamp(1), updatedAt: stamp(19), messages: [message('node')] });
+    const chat = { id: 'd1', title: 'd', createdAt: stamp(1), updatedAt: stamp(20), messages: [message('desk')] };
+    const inventory = { installId: 'install-0012', chats: [{ id: 'd1', updatedAt: chat.updatedAt, title: 'd' }], cases: [], secrets: 'included' };
+    let last = null;
+    for (let i = 0; i < 3; i += 1) {
+      const imp = await n.importer();
+      last = await imp.plan({ installId: inventory.installId, inventory });
+      const item = last.items[0];
+      if (item.action === 'copy') await imp.apply({ planId: last.planId, batch: [{ category: 'chat', key: 'd1', value: chat }] });
+      // Cut off: no finish, so no manifest.
+    }
+    const ids = n.core.context.listChats({ messages: false }).map((c) => c.id);
+    assert.strictEqual(ids.length, 2, JSON.stringify(ids));
+    assert.strictEqual(last.items[0].action, 'skip-present');
+    assert.ok(ids.includes(last.items[0].targetKey));
+  });
+
+  it('finding 5: a copy the node changed since gets another id, never overwritten', async () => {
+    const n = await node();
+    const stamp = (s) => `2026-09-${s}T10:00:00.000Z`;
+    const message = (t) => ({ id: `m-${t}`, sender: 'user', text: t, timestamp: stamp(20) });
+    n.core.context.upsertChat({ id: 'd1', title: 'd', createdAt: stamp(1), updatedAt: stamp(19), messages: [message('node')] });
+    const chat = { id: 'd1', title: 'd', createdAt: stamp(1), updatedAt: stamp(20), messages: [message('desk')] };
+    const inventory = { installId: 'install-0012', chats: [{ id: 'd1', updatedAt: chat.updatedAt, title: 'd' }], cases: [], secrets: 'included' };
+    const imp = await n.importer();
+    const first = await imp.plan({ installId: inventory.installId, inventory });
+    await imp.apply({ planId: first.planId, batch: [{ category: 'chat', key: 'd1', value: chat }] });
+    const copyId = first.items[0].targetKey;
+    n.core.context.updateChat(copyId, { updatedAt: stamp(25) });
+    const again = await (await n.importer()).plan({ installId: inventory.installId, inventory });
+    assert.strictEqual(again.items[0].action, 'copy');
+    assert.notStrictEqual(again.items[0].targetKey, copyId);
+  });
+
+  it('finding 7: a plan dropped while finish waits on git lands nothing and writes no manifest', async () => {
+    const n = await node();
+    const src = await realCase();
+    const { files, entry } = await snap(src.dir, src.name);
+    const inventory = { installId: 'install-0013', chats: [], cases: [entry], secrets: 'included' };
+    const imp = await n.importer();
+    const plan = await imp.plan({ installId: inventory.installId, inventory });
+    await imp.apply({ planId: plan.planId, batch: files.map((value) => ({ category: 'case', key: entry.dir, value })) });
+    const finishing = imp.finish({ planId: plan.planId });
+    // finish is parked on its first await: git, on the staged directory.
+    imp.dropPlan(plan.planId);
+    await assert.rejects(finishing, (err) => err.code === 'PLAN_EXPIRED');
+    assert.strictEqual(fs.existsSync(path.join(n.root, entry.dir)), false, 'nothing was renamed into place');
+    assert.strictEqual(fs.existsSync(path.join(n.dataDir, 'imports', `desktop-${inventory.installId}.json`)), false);
+  });
+});
+
+describe('fix round 1: a chat\'s content check', () => {
+  const at = (s) => `2026-09-${s}T10:00:00.000Z`;
+
+  it('finding 8: withSourceFacts takes the time of the last message a list shows', () => {
+    const chat = { id: 'c1', messages: [{ sender: 'user', timestamp: at(10) }, { sender: 'assistant', timestamp: at(11) }, { sender: 'status', timestamp: at(12) }] };
+    const out = withSourceFacts({ items: [chatItem('c1')] }, { getValue: () => chat });
+    assert.strictEqual(out.items[0].lastMessageAt, at(11));
+  });
+
+  it('finding 8: the same count and another last message is unverified', async () => {
+    const item = chatItem('c1', 2, { lastMessageAt: at(11) });
+    const swapped = await verifyMigration({ plan: { items: [item] }, report: cleanReport(), invoke: nodeAnswers({ chats: [{ id: 'c1', messageCount: 2, lastMessageAt: at(9) }] }).invoke });
+    assert.strictEqual(swapped.code, 'MIGRATION_UNVERIFIED');
+    assert.match(swapped.missing[0].why, /last message/);
+    const same = await verifyMigration({ plan: { items: [item] }, report: cleanReport(), invoke: nodeAnswers({ chats: [{ id: 'c1', messageCount: 2, lastMessageAt: at(11) }] }).invoke });
+    assert.strictEqual(same.ok, true);
+    const none = await verifyMigration({ plan: { items: [item] }, report: cleanReport(), invoke: nodeAnswers({ chats: [{ id: 'c1', messageCount: 2 }] }).invoke });
+    assert.strictEqual(none.ok, false, 'a node that says nothing proves nothing');
+  });
+
+  it('finding 8: skip-present compares only at the same count; a node that went on has later messages', async () => {
+    const present = chatItem('c1', 2, { action: 'skip-present', lastMessageAt: at(11) });
+    const onward = await verifyMigration({ plan: { items: [present] }, report: cleanReport(), invoke: nodeAnswers({ chats: [{ id: 'c1', messageCount: 5, lastMessageAt: at(20) }] }).invoke });
+    assert.strictEqual(onward.ok, true);
+    const swapped = await verifyMigration({ plan: { items: [present] }, report: cleanReport(), invoke: nodeAnswers({ chats: [{ id: 'c1', messageCount: 2, lastMessageAt: at(9) }] }).invoke });
+    assert.strictEqual(swapped.ok, false);
+  });
+
+  it('finding 8: a source message with no time compares nothing', async () => {
+    const out = withSourceFacts({ items: [chatItem('c1')] }, { getValue: () => ({ id: 'c1', messages: [{ sender: 'user' }] }) });
+    assert.strictEqual('lastMessageAt' in out.items[0], false);
   });
 });

@@ -1696,6 +1696,7 @@ class FakeNodeClient extends EventEmitter {
     this.chats = new Map();
     this.cases = new Set();
     this.marked = new Set();
+    this.lastAt = new Map();
     this.loseMark = false;
     this.attentionItems = [];
     this.plans = 0;
@@ -1725,6 +1726,8 @@ class FakeNodeClient extends EventEmitter {
           const n = entry.value.messages.length;
           this.chats.set(entry.key, entry.key === this.shortChat ? n - 1 : n);
           if (entry.value.private === true && !this.loseMark) this.marked.add(entry.key);
+          const shownMessages = entry.value.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant');
+          this.lastAt.set(entry.key, shownMessages.length ? shownMessages[shownMessages.length - 1].timestamp : null);
         }
         if (entry.category === 'case') this.cases.add(entry.key);
         results.push({ category: entry.category, key: entry.key, ok: true });
@@ -1739,7 +1742,7 @@ class FakeNodeClient extends EventEmitter {
     throw new Error(`unexpected ${method}`);
   }
   async invoke(channel) {
-    if (channel === 'chat:load') return { ok: true, data: { chats: [...this.chats].map(([id, messageCount]) => ({ id, messageCount, ...(this.marked.has(id) ? { private: true } : {}) })), history: { available: true } } };
+    if (channel === 'chat:load') return { ok: true, data: { chats: [...this.chats].map(([id, messageCount]) => ({ id, messageCount, lastMessageAt: this.lastAt.get(id) || null, ...(this.marked.has(id) ? { private: true } : {}) })), history: { available: true } } };
     if (channel === 'case:list') return { ok: true, cases: [...this.cases].map((dir) => ({ dir: path.join('C:', 'node', 'cases', dir) })) };
     throw new Error(`unexpected ${channel}`);
   }
@@ -2099,6 +2102,64 @@ describe('desktop controller: the one-time move', () => {
     assert.ok(out.leftBehind.needsAttention.some((a) => a.key === 'c1'));
     assert.deepStrictEqual(state.migration.leftBehind, out.leftBehind);
     assert.deepStrictEqual((await controller.status()).migration.leftBehind, out.leftBehind);
+    controller.dispose();
+  });
+
+  it('finding 4: a case the reader holds back refuses the move, named; its chats do not land', async () => {
+    const client = new FakeNodeClient();
+    const { controller, state, userDataDir } = moveController({ client });
+    fs.mkdirSync(path.join(userDataDir, 'cases', 'held-case', 'clone', '.git'), { recursive: true });
+    fs.writeFileSync(path.join(userDataDir, 'cases', 'held-case', 'clone', '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(path.join(userDataDir, 'cases', 'held-case', 'case.yaml'), 'id: held-1\nslug: held-case\ntitle: Held\n');
+    const planned = await controller.migrationPlan();
+    assert.strictEqual(planned.ok, true, JSON.stringify(planned));
+    assert.deepStrictEqual(planned.heldCases.map((h) => h.key), ['held-case']);
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.code, 'MIGRATION_SOURCE');
+    assert.match(out.error, /held-case/);
+    assert.strictEqual(state.migration, null);
+    assert.strictEqual(client.finishes, 0);
+    assert.strictEqual(client.chats.size, 0);
+    controller.dispose();
+  });
+
+  it('finding 4: per-file refusals are counted on the plan and the result, and do not refuse the move', async () => {
+    const realLoad = require('../src/ipc/desktop-export').loadDesktopSource;
+    const { controller, state } = moveController({
+      extra: { migrationDeps: { loadDesktopSource: async (args) => {
+        const source = await realLoad(args);
+        source.attention.push({ category: 'case', key: 'lakeside-lot/.kl/odd.bin', note: 'has 2 hard links' });
+        return source;
+      } } }
+    });
+    const planned = await controller.migrationPlan();
+    assert.strictEqual(planned.refusedFiles, 1);
+    assert.ok(planned.leftBehind.needsAttention.some((a) => a.key.endsWith('odd.bin')));
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.ok, true, JSON.stringify(out));
+    assert.strictEqual(out.refusedFiles, 1);
+    assert.ok(state.migration);
+    controller.dispose();
+  });
+
+  it('finding 6: a backup that no longer reads whole refuses the mark, and the next plan makes a new one', async () => {
+    let tick = 0;
+    const { controller, state, parent } = moveController({ extra: { now: () => new Date(Date.UTC(2026, 10, 4, 10, 0, tick++)) } });
+    const first = await controller.migrationPlan();
+    const store = path.join(parent, backupsIn(parent)[0], 'history.sqlite');
+    const bytes = fs.readFileSync(store);
+    bytes[bytes.length - 1] ^= 0xff;
+    fs.writeFileSync(store, bytes);
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'BACKUP_FAILED');
+    assert.match(out.error, /backup/i);
+    assert.strictEqual(out.verified.ok, true);
+    assert.strictEqual(state.migration, null);
+    const second = await controller.migrationPlan();
+    assert.notStrictEqual(second.backup.dest, first.backup.dest);
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).ok, true);
+    assert.strictEqual(state.migration.backupDir.endsWith(path.basename(second.backup.dest)), true);
     controller.dispose();
   });
 

@@ -373,9 +373,10 @@ async function backupProfile({
   }
 }
 
-// The manifest of a backup that is still whole by the sizes it recorded, or
-// null: an UNFINISHED marker, no backup.json, one that is not a manifest, a
-// listed file gone or a different size, a listed path that leaves the backup.
+// The manifest of a backup that is still whole by the sizes and hashes it
+// recorded, or null: an UNFINISHED marker, no backup.json, one that is not a
+// manifest, a listed file gone, a different size or other bytes, a listed path
+// that leaves the backup. Sizes first, so a file gone answers without hashing.
 async function readBackupManifest(dest) {
   if (await fs.promises.lstat(path.join(dest, UNFINISHED)).then(() => true, () => false)) return null;
   let manifest;
@@ -391,6 +392,14 @@ async function readBackupManifest(dest) {
     try {
       const stat = await fs.promises.lstat(path.join(dest, ...entry.path.split('/')));
       if (!stat.isFile() || stat.size !== entry.bytes) return null;
+    } catch {
+      return null;
+    }
+  }
+  for (const entry of manifest.files) {
+    try {
+      const { sha256 } = await hashFile(path.join(dest, ...entry.path.split('/')), { createReadStream: fs.createReadStream });
+      if (sha256 !== entry.sha256) return null;
     } catch {
       return null;
     }

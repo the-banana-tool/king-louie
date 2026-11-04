@@ -30,9 +30,20 @@ function privateNote(chats, cases) {
   return `${what} move and stay private. They answer only on a local model: until this node has a local server, which goes in the localInference block of its admin service.json, they answer PRIVATE_NO_LOCAL_MODEL.`;
 }
 
+// The time a chat list shows for a chat: its last user or assistant message, else
+// its last message (LIST_SQL in history-store.js). Null when that has no time.
+function lastMessageTime(messages) {
+  const shown = messages.filter((m) => m && (m.sender === 'user' || m.sender === 'assistant'));
+  const last = shown.length ? shown[shown.length - 1] : messages[messages.length - 1];
+  return last && typeof last.timestamp === 'string' && last.timestamp ? last.timestamp : null;
+}
+
+const dirtyNote = (dir) => `${dir} has uncommitted changes on the desktop. They move as they stand, and stay uncommitted on the node.`;
+
 // What only the desktop knows, on each item the verification compares with the
-// node: a chat's message count and private mark, a case's mark. A chat that
-// cannot be read counts as private. plan.private is what the owner is told.
+// node: a chat's message count, last message time and private mark, a case's
+// mark. A chat that cannot be read counts as private. plan.private and
+// plan.dirtyCases are what the owner is told.
 function withSourceFacts(plan, source) {
   const caseEntries = new Map(arr(source.inventory && source.inventory.cases).map((c) => [c && c.dir, c]));
   const facts = (item) => {
@@ -42,6 +53,7 @@ function withSourceFacts(plan, source) {
       return {
         ...item,
         ...(Array.isArray(chat.messages) ? { messageCount: chat.messages.length } : {}),
+        ...(Array.isArray(chat.messages) && lastMessageTime(chat.messages) ? { lastMessageAt: lastMessageTime(chat.messages) } : {}),
         ...(chat.private === true ? { private: true } : {})
       };
     }
@@ -52,7 +64,10 @@ function withSourceFacts(plan, source) {
   const moving = (category) => items.filter((i) => i.category === category && i.private === true && CHECKED_ACTIONS.has(i.action)).length;
   const chats = moving('chat');
   const cases = moving('case');
-  return { ...plan, items, private: { chats, cases, note: privateNote(chats, cases) } };
+  const dirtyCases = items
+    .filter((i) => i.category === 'case' && CHECKED_ACTIONS.has(i.action) && caseEntries.get(i.key)?.clean === false)
+    .map((i) => ({ key: i.key, note: dirtyNote(i.key) }));
+  return { ...plan, items, private: { chats, cases, note: privateNote(chats, cases) }, dirtyCases };
 }
 
 function reportProblems(report, note) {
@@ -75,6 +90,8 @@ function unwrapped(answer) {
   if (answer.ok === false) return { error: answer.error || 'the node refused' };
   return Object.prototype.hasOwnProperty.call(answer, 'data') ? answer.data : answer;
 }
+
+const sameTime = (a, b) => a === b || (Boolean(a) && Boolean(b) && Date.parse(a) === Date.parse(b));
 
 async function checkChats(items, invoke, note) {
   let load;
@@ -99,6 +116,9 @@ async function checkChats(items, invoke, note) {
       note('chat', item.key, 'the node did not say how many messages it holds');
     } else if (WRITE_ACTIONS.has(item.action) ? onNode.messageCount !== item.messageCount : onNode.messageCount < item.messageCount) {
       note('chat', item.key, `the node holds ${onNode.messageCount} messages where the desktop has ${item.messageCount}`);
+    } else if (item.lastMessageAt && onNode.messageCount === item.messageCount && !sameTime(onNode.lastMessageAt, item.lastMessageAt)) {
+      // The same count with another last message: the node's chat is not this one.
+      note('chat', item.key, 'the last message on the node is not the desktop\'s');
     } else if (item.private === true && onNode.private !== true) {
       note('chat', item.key, 'it is private on the desktop and not private on the node; mark it private on the node and try again');
     }
