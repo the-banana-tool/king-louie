@@ -114,6 +114,38 @@ describe('createCore', () => {
     await core.shutdown();
   });
 
+  // A background child of start() that outlives shutdown() holds its working
+  // directory, so on Windows a test's temp dir cannot be removed (EBUSY on the
+  // directory, which rmSync reports as EPERM on the path it was given).
+  it('shutdown() waits for the first index: no git child of start() outlives it', async () => {
+    const { ChildProcess } = require('child_process');
+    const spawn = ChildProcess.prototype.spawn;
+    const live = new Set();
+    let spawned = 0;
+    ChildProcess.prototype.spawn = function tracked(options) {
+      const result = spawn.call(this, options);
+      if (String(options.file).includes('git')) {
+        spawned += 1;
+        live.add(this);
+        this.once('exit', () => live.delete(this));
+      }
+      return result;
+    };
+    try {
+      const { deps } = makeDeps();
+      const core = createCore(deps);
+      await core.start();
+      await core.shutdown();
+      assert.ok(spawned > 0, 'the first index read the git context');
+      assert.equal(live.size, 0, 'no git child is still running');
+      const atShutdown = spawned;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(spawned, atShutdown, 'and none starts afterwards');
+    } finally {
+      ChildProcess.prototype.spawn = spawn;
+    }
+  });
+
   it('finishes shutdown() within shutdownTimeoutMs when the SessionEnd hook never resolves', async () => {
     const { deps } = makeDeps();
     const handlerPath = path.join(deps.paths.dataDir, 'hang-hook.js');

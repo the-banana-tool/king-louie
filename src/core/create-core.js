@@ -3626,7 +3626,10 @@ function createCore(deps = {}) {
       ['Channel shutdown', channelRegistry && (() => channelRegistry.shutdownAll())],
       ['Webhook server stop', webhookServer && (() => webhookServer.stop())],
       ['Mesh shutdown', meshContext && (() => meshContext.shutdown())],
-      ['Gateway server stop', gatewayServer && (() => gatewayServer.stop())]
+      ['Gateway server stop', gatewayServer && (() => gatewayServer.stop())],
+      // start()'s background index runs git and command lookups in the working
+      // directory; a live child holds that directory on Windows.
+      ['First index', contextAssembler && (() => contextAssembler.firstIndexSettled())]
     ].filter(([, fn]) => fn);
     const results = await Promise.allSettled(
       stops.map(([label, fn]) => withTimeout(fn(), shutdownTimeoutMs, label, warnTimeout))
