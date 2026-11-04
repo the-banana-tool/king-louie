@@ -197,7 +197,7 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
 
   try {
     const ports = deps.ports || buildServicePorts({ dataDir });
-    const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeConfig.name);
+    const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeConfig.name, { fillBox: true });
     const frontdoorId = identity.nodeId;
     log.info(`front door ${frontdoorId} (${nodeFingerprint(frontdoorId)}) for ${domain}`);
 

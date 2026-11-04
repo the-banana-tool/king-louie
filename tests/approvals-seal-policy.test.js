@@ -6,10 +6,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { PassThrough } = require('stream');
-const { createSealPolicy, readLatch, writeLatch, latchFile } = require('../src/approvals/seal-policy');
+const { createSealPolicy, readLatch, writeLatch, latchFile, latchWriteProblem } = require('../src/approvals/seal-policy');
 const { createRelayDispatcher } = require('../src/approvals/service-wiring');
 const { ApproverStore } = require('../src/approvals/approver-store');
 const { runDevice, DEVICE_HELP } = require('../src/service/commands/devices');
+const { startMcpApprovals } = require('../src/approvals/service-wiring');
+const { buildServicePorts } = require('../src/service/ports');
+const { getOrGenerateNodeIdentity } = require('../src/mesh/node-identity');
 const { main } = require('../src/service/cli');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
@@ -209,6 +212,7 @@ describe('sealing and the latch', () => {
     assert.equal(policy.sealing(), true);
     assert.equal(policy.canSeal(), false);
     assert.equal(fs.existsSync(latchFile(dataDir)), false);
+    assert.deepEqual(policy.recipients(), {}, 'no device key is handed out before the latch is on disk');
     assert.ok(writes.length >= 2, 'tried again at each read');
     // The device goes while the write still fails: never clear.
     put(revoked(a));
@@ -220,6 +224,41 @@ describe('sealing and the latch', () => {
     const b = boxPhone();
     put(b.approverRecord({ boxKey: true }));
     assert.equal(policy.canSeal(), true);
+    assert.deepEqual(policy.recipients(), { [b.deviceId]: b.boxJwk, [identity.nodeId]: identity.box.jwk });
+  });
+
+  it('a bad file with no device hands out nothing, not even the node', async () => {
+    const { policy, dataDir } = await setup();
+    fs.mkdirSync(path.dirname(latchFile(dataDir)), { recursive: true });
+    fs.writeFileSync(latchFile(dataDir), 'garbage');
+    assert.deepEqual(policy.recipients(), {});
+  });
+
+  it('syncs the directory after the rename, where a directory can be synced', { skip: !POSIX }, async (t) => {
+    const { dataDir } = await setup();
+    const sync = t.mock.method(fs, 'fsyncSync');
+    writeLatch(dataDir);
+    assert.equal(sync.mock.callCount(), 2, 'the file, then its directory');
+  });
+
+  it('reports each path it creates, so a root process can hand them back at once', async () => {
+    const a = boxPhone();
+    const { store, dataDir, identity } = await setup([a.approverRecord({ boxKey: true })]);
+    const paths = [];
+    const policy = createSealPolicy({ approverStore: store, identity, dataDir, onPathWritten: (p) => paths.push(p) });
+    assert.equal(policy.canSeal(), true);
+    assert.deepEqual(paths, [path.dirname(latchFile(dataDir)), latchFile(dataDir)]);
+    paths.length = 0;
+    policy.canSeal();
+    assert.deepEqual(paths, [], 'written once');
+  });
+
+  it('latchWriteProblem says why the latch could not be written, and leaves nothing', async () => {
+    const { dataDir } = await setup();
+    assert.equal(latchWriteProblem(dataDir), null);
+    assert.deepEqual(fs.readdirSync(dataDir), []);
+    const denied = { ...fs, existsSync: () => true, openSync() { throw Object.assign(new Error('denied'), { code: 'EACCES' }); } };
+    assert.equal(latchWriteProblem(dataDir, denied), 'EACCES');
   });
 
   it('a node identity with no box cannot seal, and fails closed', async () => {
@@ -235,6 +274,53 @@ describe('sealing and the latch', () => {
   it('the policy has no way to clear the latch', async () => {
     const { policy } = await setup();
     assert.deepEqual(Object.keys(policy).sort(), ['canSeal', 'nodeBox', 'recipients', 'sealing', 'senderId']);
+  });
+});
+
+describe('a process that is not the service', () => {
+  function standalone() {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-standalone-'));
+    cleanups.push(() => fs.rmSync(base, { recursive: true, force: true }));
+    const dataDir = path.join(base, 'data');
+    const configDir = path.join(base, 'config');
+    fs.mkdirSync(path.join(configDir, 'approvers'), { recursive: true, mode: 0o755 });
+    fs.mkdirSync(dataDir, { recursive: true });
+    if (POSIX) for (const d of [base, configDir, path.join(configDir, 'approvers')]) fs.chmodSync(d, 0o755);
+    return { dataDir, configDir };
+  }
+  const options = { geteuid: () => UID, adminUid: UID, platform: 'linux' };
+
+  it('standalone mcp fills nothing, cannot seal without a box, and reports what it writes', async () => {
+    const { dataDir, configDir } = standalone();
+    const a = boxPhone();
+    fs.writeFileSync(path.join(configDir, 'approvers', `${a.deviceId}.json`), JSON.stringify(a.approverRecord({ boxKey: true })), { mode: 0o644 });
+    const ports = buildServicePorts({ dataDir });
+    getOrGenerateNodeIdentity(ports.store, ports.cipher, 'web-01');
+    const before = ports.store.get('mesh.identity');
+    const paths = [];
+    const approvals = await startMcpApprovals({ dataDir, configDir, nodeConfig: { name: 'web-01' }, ports, approverStoreOptions: options, onPathWritten: (p) => paths.push(p) });
+    assert.equal(approvals.identity.box, null);
+    assert.deepEqual(ports.store.get('mesh.identity'), before);
+    assert.equal(approvals.sealPolicy.sealing(), true, 'never clear with a device holding a box key');
+    assert.equal(approvals.sealPolicy.canSeal(), false);
+    assert.ok(paths.includes(latchFile(dataDir)));
+    approvals.stop();
+  });
+
+  it('runMcp gives what it writes back at once, not when it returns', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'service', 'commands', 'mcp.js'), 'utf8');
+    assert.match(source, /onPathWritten: \(p\) => restoreDataDirOwnership\(dataDir, \[p\], io\.ownership\)/);
+  });
+
+  it('device revoke on a node with no box key adds none', async () => {
+    const n = node();
+    const ports = buildServicePorts({ dataDir: n.dataDir });
+    getOrGenerateNodeIdentity(ports.store, ports.cipher, 'web-01');
+    const a = createFakePhone();
+    n.put(a.approverRecord());
+    assert.equal(await runDevice({ sub: 'revoke', arg: a.deviceId, flags: {}, dataDir: n.dataDir, configDir: n.configDir, io: streamIo(), deps }), 0);
+    const record = JSON.parse(fs.readFileSync(path.join(n.dataDir, 'chat-data.json'), 'utf8')).mesh.identity;
+    assert.equal(Object.hasOwn(record, 'encryptedBoxKey'), false);
   });
 });
 
@@ -424,6 +510,69 @@ describe('device unseal', () => {
     io.stdin.write('y\n');
     assert.equal(await running, 1);
     assert.equal(readLatch(n.dataDir).state, 'good');
+  });
+
+  it('says when it takes effect, and that a running service with a holder latches again', async () => {
+    const n = node();
+    n.latch();
+    const io = streamIo();
+    assert.equal(await unseal(n, io), 0);
+    assert.match(io.text.out, /next build/);
+    assert.match(io.text.out, /latches again/);
+  });
+
+  it('refuses a non-file at the latch path before any audit entry', async () => {
+    const n = node();
+    fs.mkdirSync(latchFile(n.dataDir), { recursive: true });
+    const io = streamIo();
+    assert.equal(await unseal(n, io), 1);
+    assert.match(io.text.err, /not a file/);
+    assert.equal(fs.statSync(latchFile(n.dataDir)).isDirectory(), true);
+    assert.deepEqual(entries(n), []);
+  });
+
+  it('runs the owner check on Windows: an approvers dir of another owner refuses', async () => {
+    const n = node();
+    n.latch();
+    const readOwners = () => ({ approvers: 'S-1-5-21-1-2-3-1001', config: 'S-1-5-32-544' });
+    const io = streamIo();
+    assert.equal(await unseal(n, io, { extra: { storeOptions: { ...deps.storeOptions, platform: 'win32', readOwners } } }), 1);
+    assert.match(io.text.err, /cannot be trusted/);
+    assert.equal(readLatch(n.dataDir).state, 'good');
+    const fine = () => ({ approvers: 'S-1-5-32-544', config: 'S-1-5-32-544' });
+    assert.equal(await unseal(n, streamIo(), { extra: { storeOptions: { ...deps.storeOptions, platform: 'win32', readOwners: fine } } }), 0);
+  });
+
+  describe('under hosting: personal', () => {
+    const personal = () => {
+      const n = node();
+      fs.writeFileSync(path.join(n.configDir, 'node.yaml'), 'name: web-01\nprofile: agent\nhosting: personal\n', { mode: 0o644 });
+      n.latch();
+      return n;
+    };
+    const owners = (me, owner = me) => ({ platform: 'win32', inspectOwners: (paths) => ({ me, entries: paths.map(() => ({ owner, link: false })) }) });
+
+    it('refuses an elevated prompt', async () => {
+      const n = personal();
+      const io = streamIo();
+      assert.equal(await unseal(n, io, { extra: { isAdmin: () => true, personalOwner: owners('PC\\owner') } }), 1);
+      assert.match(io.text.err, /not elevated/);
+      assert.equal(readLatch(n.dataDir).state, 'good');
+    });
+
+    it('refuses an account that does not own the dirs', async () => {
+      const n = personal();
+      const io = streamIo();
+      assert.equal(await unseal(n, io, { extra: { isAdmin: () => false, personalOwner: owners('PC\\owner', 'PC\\other') } }), 1);
+      assert.match(io.text.err, /PC\\other/);
+      assert.equal(readLatch(n.dataDir).state, 'good');
+    });
+
+    it('goes ahead for the owner, unelevated', async () => {
+      const n = personal();
+      assert.equal(await unseal(n, streamIo(), { extra: { isAdmin: () => false, personalOwner: owners('PC\\owner') } }), 0);
+      assert.equal(readLatch(n.dataDir).state, 'none');
+    });
   });
 
   it('with no latch there is nothing to do, and nothing is audited', async () => {

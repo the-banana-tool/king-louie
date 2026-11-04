@@ -307,6 +307,16 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
   return results;
 }
 
+// The file read as `readNodeIdentity` reads it: only whether the record holds one.
+function identityHoldsBoxKey(dataDir) {
+  try {
+    const record = JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8')).mesh.identity;
+    return Boolean(record.boxKeyJwk && record.encryptedBoxKey);
+  } catch {
+    return false;
+  }
+}
+
 // Fleet stage 3: the approver set must be admin-only, the relay linked when
 // one is configured, and the audit chain intact.
 async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = null }) {
@@ -355,7 +365,9 @@ async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = nul
   await attempt('sealing to phones', async () => {
     // A node that has sealed sends no content with no phone to seal to (the
     // latch, R-SP-5): that is a fault, and never the same row as "off".
-    const { latched } = require('../approvals/seal-policy').readLatch(dataDir);
+    const { readLatch, latchWriteProblem } = require('../approvals/seal-policy');
+    const latch = readLatch(dataDir);
+    const { latched } = latch;
     if (problem) {
       return latched
         ? { ok: false, detail: 'on, but no phone can read it: the set is not trusted' }
@@ -367,6 +379,11 @@ async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = nul
         ? { ok: false, detail: 'on, but no phone can read it: enroll or apply a box key' }
         : { ok: true, detail: 'off: no phone has a box key yet' };
     }
+    // The two things canSeal() needs besides a phone. Each refuses every send, so
+    // neither may read as "on".
+    if (!identityHoldsBoxKey(dataDir)) return { ok: false, detail: 'on, but this node has no box key: restart the service' };
+    const unwritable = latch.state === 'bad' ? 'it is there and cannot be read' : (latch.state === 'none' ? latchWriteProblem(dataDir) : null);
+    if (unwritable) return { ok: false, detail: `on, but the latch cannot be written (${unwritable}): nothing goes to the phones until it can` };
     return { ok: true, detail: `on (${sealing} ${sealing === 1 ? 'phone' : 'phones'})` };
   });
   await attempt('phones without a box key', async () => {

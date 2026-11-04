@@ -386,10 +386,12 @@ function describeAge(createdAt, now) {
 // clear only here, at the console. Refused while a record not revoked by an
 // administrator holds a box key. That is stricter than the policy's set, which
 // also leaves out a device whose relayed revoke waits on the overlay: such a
-// revoke is `device apply`'s to make final, first.
+// revoke is `device apply`'s to make final, first. `device apply` and `device
+// revoke` do not yet make the personal node's checks made here; that is a
+// follow-up.
 async function runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, storeOptions, admin }) {
   const { ApproverStore } = require('../../approvals/approver-store');
-  const { readLatch, clearLatch, latchDirProblem, latchFile } = require('../../approvals/seal-policy');
+  const { readLatch, clearLatch, latchPathProblem, latchFile } = require('../../approvals/seal-policy');
   const { getOrGenerateNodeIdentity } = require('../../mesh/node-identity');
   // Off a terminal nobody can be asked, so only --yes goes on. Checked before
   // anything is resolved or read.
@@ -397,6 +399,26 @@ async function runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, 
   if (!flags.yes && !isTTY()) {
     io.stderr.write('Refusing to stop sealing without confirmation on a non-interactive terminal; pass --yes.\n');
     return 2;
+  }
+  // A personal node's owner runs this as himself, as `desktop pair` does.
+  let hosting = 'service';
+  try {
+    ({ hosting } = loadNodeConfig({ dataDir, adminConfigDir: configDir, ...storeOptions }));
+  } catch {
+    hosting = 'service';
+  }
+  if (hosting === 'personal') {
+    const platform = deps.platform || process.platform;
+    const isAdmin = deps.isAdmin || (() => require('./admin-check').isAdmin({ platform }));
+    if (await isAdmin()) {
+      io.stderr.write('device unseal on a personal node runs as you, not elevated: open a normal prompt. Nothing changed.\n');
+      return 1;
+    }
+    const owner = require('../personal-host').checkPersonalOwner({ dataDir, configDir, platform, ...(deps.personalOwner || {}) });
+    if (!owner.ok) {
+      io.stderr.write(`${shown(owner.problem, 500)}. Nothing changed.\n`);
+      return 1;
+    }
   }
   try {
     admin.assertWritable();
@@ -406,7 +428,11 @@ async function runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, 
   }
   // Why not, right now; asked again after the question, which can wait a while.
   const blocked = async () => {
-    const store = new ApproverStore({ dir, stagedDir, ...storeOptions, serviceProbe: false });
+    // serviceProbe false: an administrator can always write there, so a probe from
+    // here proves nothing. hosting 'personal' is the store's one way to keep the
+    // Windows owner check without the probe, which this answer rests on, so it
+    // applies to a fleet node here too.
+    const store = new ApproverStore({ dir, stagedDir, ...storeOptions, serviceProbe: false, hosting: 'personal' });
     const ready = await store.ready();
     if (!ready.ok) return `The approver set cannot be trusted, so what holds a box key cannot be told: ${ready.problem}\n`;
     const holders = store.list().filter((r) => r.box_key && store.isAdminApplied(r.device_id));
@@ -418,7 +444,7 @@ async function runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, 
     io.stderr.write(`${why}Nothing changed.\n`);
     return 1;
   }
-  const problem = latchDirProblem(dataDir);
+  const problem = latchPathProblem(dataDir);
   if (problem) {
     io.stderr.write(`${problem} Nothing changed.\n`);
     return 1;
@@ -430,6 +456,7 @@ async function runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, 
   const nodeCfg = loadNodeConfig({ dataDir, adminConfigDir: configDir, ...storeOptions });
   io.stdout.write(`Node "${shown(nodeCfg.name, 64)}" has sealed what it sends to phones, and refuses to send anything now that no phone can read it.\n`);
   io.stdout.write('  this clears the latch: until a phone next has a box key, what it sends goes in clear, and the relay can read it\n');
+  io.stdout.write('  it takes effect at the next build of a message; a running service with a phone holding a box key latches again\n');
   io.stdout.write('  the audit ledger records this\n');
   if (!flags.yes) {
     io.stdout.write('Send in clear again? [y/N] ');
@@ -456,7 +483,7 @@ async function runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, 
       io.stderr.write(`Could not remove ${latchFile(dataDir)} (${err.code || err.message}), so the node stays latched. The audit ledger says device.unsealed all the same. Remove it by hand and run this again.\n`);
       return 1;
     }
-    io.stdout.write(`The latch is cleared. ${shown(nodeCfg.name, 64)} sends in clear until a phone next has a box key.\n`);
+    io.stdout.write(`The latch is cleared. From the next build, ${shown(nodeCfg.name, 64)} sends in clear until a phone next has a box key; a running service with a phone holding one latches again.\n`);
     return 0;
   } finally {
     restoreDataDirOwnership(dataDir, written, io.ownership);

@@ -33,6 +33,9 @@ function recordWithoutBox({ store, cipher }) {
   return store.get(IDENTITY_STORE_KEY);
 }
 
+// What the service's start does; every other path loads without filling.
+const fill = (store, cipher) => getOrGenerateNodeIdentity(store, cipher, 'web-01', { fillBox: true });
+
 const hasKey = (value, key) => {
   if (!value || typeof value !== 'object') return false;
   return Object.hasOwn(value, key) || Object.values(value).some((v) => hasKey(v, key));
@@ -75,9 +78,9 @@ describe('a box', () => {
 describe('getOrGenerateNodeIdentity and the box key', () => {
   it('a fresh identity has a box key, and a second load returns the same one', () => {
     const f = fresh();
-    const first = getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01');
+    const first = fill(f.store, f.cipher);
     assert.equal(isDeviceJwk(first.box.jwk), true);
-    const second = getOrGenerateNodeIdentity(new JsonFileStore({ dir: f.dir, name: 'chat-data' }), f.cipher, 'web-01');
+    const second = fill(new JsonFileStore({ dir: f.dir, name: 'chat-data' }), f.cipher);
     assert.deepEqual(second.box.jwk, first.box.jwk);
     const { epk } = ephemeralFor(first.box.jwk);
     assert.deepEqual(second.box.agree(epk), first.box.agree(epk));
@@ -85,7 +88,7 @@ describe('getOrGenerateNodeIdentity and the box key', () => {
 
   it('holds the private half under the cipher: the stored record has no d, in clear or as a key', () => {
     const f = fresh();
-    const identity = getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01');
+    const identity = fill(f.store, f.cipher);
     const onDisk = fs.readFileSync(path.join(f.dir, 'chat-data.json'), 'utf8');
     const record = JSON.parse(onDisk).mesh.identity;
     assert.deepEqual(record.boxKeyJwk, identity.box.jwk);
@@ -99,7 +102,7 @@ describe('getOrGenerateNodeIdentity and the box key', () => {
   it('an identity with no box key gets one and nothing else in the record moves', () => {
     const f = fresh();
     const before = recordWithoutBox(f);
-    const identity = getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01');
+    const identity = fill(f.store, f.cipher);
     const afterRecord = f.store.get(IDENTITY_STORE_KEY);
     const { boxKeyJwk, encryptedBoxKey, ...rest } = afterRecord;
     assert.deepEqual(rest, before, 'the Ed25519 and TLS fields, ciphertext included, are as they were');
@@ -110,18 +113,18 @@ describe('getOrGenerateNodeIdentity and the box key', () => {
     const signature = identity.sign('data');
     assert.equal(MeshIdentity.verify('data', signature, before.publicKey), true);
     // And it stays that key.
-    assert.deepEqual(getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01').box.jwk, identity.box.jwk);
+    assert.deepEqual(fill(f.store, f.cipher).box.jwk, identity.box.jwk);
     assert.deepEqual(f.store.get(IDENTITY_STORE_KEY), afterRecord);
   });
 
   it('does not write when the record already holds a box key', () => {
     const f = fresh();
-    getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01');
+    fill(f.store, f.cipher);
     const file = path.join(f.dir, 'chat-data.json');
     const before = fs.readFileSync(file);
     const writes = [];
     const store = new JsonFileStore({ dir: f.dir, name: 'chat-data', onWrite: (p) => writes.push(p) });
-    getOrGenerateNodeIdentity(store, f.cipher, 'web-01');
+    fill(store, f.cipher);
     assert.deepEqual(writes, []);
     assert.deepEqual(fs.readFileSync(file), before);
   });
@@ -131,7 +134,7 @@ describe('getOrGenerateNodeIdentity and the box key', () => {
     const plain = new MeshIdentity({ displayName: 'web-01' }).serialize();
     f.store.set(IDENTITY_STORE_KEY, plain);
     const unavailable = { isEncryptionAvailable: () => false, encryptString() { throw new Error('no'); }, decryptString() { throw new Error('no'); } };
-    const identity = getOrGenerateNodeIdentity(f.store, unavailable, 'web-01');
+    const identity = fill(f.store, unavailable);
     assert.equal(identity.box, null);
     assert.equal(identity.peerId, plain.peerId);
     assert.deepEqual(f.store.get(IDENTITY_STORE_KEY), plain);
@@ -143,40 +146,130 @@ describe('getOrGenerateNodeIdentity and the box key', () => {
     const reader = new JsonFileStore({ dir: f.dir, name: 'chat-data' });
     const before = reader.get(IDENTITY_STORE_KEY);
     const readOnly = { get: (...a) => reader.get(...a), set() { throw Object.assign(new Error('denied'), { code: 'EACCES' }); } };
-    const identity = getOrGenerateNodeIdentity(readOnly, f.cipher, 'web-01');
+    const identity = fill(readOnly, f.cipher);
     assert.equal(identity.box, null, 'never a key that the next start would not have');
     assert.equal(identity.boxKeyD, undefined);
     assert.equal(identity.publicKey.toString('hex'), before.publicKey);
-    assert.equal(isDeviceJwk(getOrGenerateNodeIdentity(reader, f.cipher, 'web-01').box.jwk), true);
+    assert.equal(isDeviceJwk(fill(reader, f.cipher).box.jwk), true);
   });
 
   it('a box key that will not decrypt, or is not its public key\'s, refuses and leaves the record alone', () => {
     const f = fresh();
-    getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01');
+    fill(f.store, f.cipher);
     const good = f.store.get(IDENTITY_STORE_KEY);
     f.store.set(IDENTITY_STORE_KEY, { ...good, encryptedBoxKey: createAesGcmCipher(crypto.randomBytes(32)).encryptString('x') });
     const bad = f.store.get(IDENTITY_STORE_KEY);
-    assert.throws(() => getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01'), /mesh private key/);
+    assert.throws(() => fill(f.store, f.cipher), /mesh private key/);
     assert.deepEqual(f.store.get(IDENTITY_STORE_KEY), bad);
     const other = generateBoxKey();
     f.store.set(IDENTITY_STORE_KEY, { ...good, encryptedBoxKey: f.cipher.encryptString(other.d) });
     const mismatched = f.store.get(IDENTITY_STORE_KEY);
-    assert.throws(() => getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01'), /box key/);
+    assert.throws(() => fill(f.store, f.cipher), /box key/);
     assert.deepEqual(f.store.get(IDENTITY_STORE_KEY), mismatched);
+  });
+});
+
+describe('only the service start fills', () => {
+  it('any other load of a record with no box key gets box null and writes nothing', () => {
+    const f = fresh();
+    recordWithoutBox(f);
+    const file = path.join(f.dir, 'chat-data.json');
+    const bytes = fs.readFileSync(file);
+    const writes = [];
+    const store = new JsonFileStore({ dir: f.dir, name: 'chat-data', onWrite: (p) => writes.push(p) });
+    const identity = getOrGenerateNodeIdentity(store, f.cipher, 'web-01');
+    assert.equal(identity.box, null);
+    assert.deepEqual(writes, []);
+    assert.deepEqual(fs.readFileSync(file), bytes);
+  });
+
+  it('a first identity made by any other path has no box key either, and the start fills it', () => {
+    const f = fresh();
+    const cli = getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01');
+    assert.equal(cli.box, null);
+    assert.equal(Object.hasOwn(f.store.get(IDENTITY_STORE_KEY), 'encryptedBoxKey'), false);
+    const started = fill(f.store, f.cipher);
+    assert.equal(started.nodeId, cli.nodeId);
+    assert.equal(isDeviceJwk(started.box.jwk), true);
+  });
+
+  it('any other load of a record with a box key has it', () => {
+    const f = fresh();
+    const started = fill(f.store, f.cipher);
+    assert.deepEqual(getOrGenerateNodeIdentity(new JsonFileStore({ dir: f.dir, name: 'chat-data' }), f.cipher, 'web-01').box.jwk, started.box.jwk);
+  });
+
+  it('the fill re-reads the record and adopts a key already there, with no write', () => {
+    const f = fresh();
+    recordWithoutBox(f);
+    const stale = new JsonFileStore({ dir: f.dir, name: 'chat-data' });
+    assert.equal(Object.hasOwn(stale.get(IDENTITY_STORE_KEY), 'boxKeyJwk'), false, 'this instance has read the record');
+    const first = fill(f.store, f.cipher);
+    const file = path.join(f.dir, 'chat-data.json');
+    const bytes = fs.readFileSync(file);
+    const second = fill(stale, f.cipher);
+    assert.deepEqual(second.box.jwk, first.box.jwk);
+    assert.deepEqual(fs.readFileSync(file), bytes);
+  });
+
+  it('a stale instance\'s later ordinary set neither loses nor replaces the key', () => {
+    const f = fresh();
+    recordWithoutBox(f);
+    const stale = new JsonFileStore({ dir: f.dir, name: 'chat-data' });
+    assert.equal(Object.hasOwn(stale.get(IDENTITY_STORE_KEY), 'boxKeyJwk'), false);
+    const first = fill(f.store, f.cipher);
+    const stored = f.store.get(IDENTITY_STORE_KEY);
+    stale.set('settings.anything', 1);
+    const onDisk = JSON.parse(fs.readFileSync(path.join(f.dir, 'chat-data.json'), 'utf8'));
+    assert.equal(onDisk.settings.anything, 1);
+    assert.deepEqual(onDisk.mesh.identity, stored);
+    assert.deepEqual(fill(new JsonFileStore({ dir: f.dir, name: 'chat-data' }), f.cipher).box.jwk, first.box.jwk);
+  });
+
+  it('a stale instance does not bring in the box key of another identity', () => {
+    const f = fresh();
+    recordWithoutBox(f);
+    const stale = new JsonFileStore({ dir: f.dir, name: 'chat-data' });
+    const held = stale.get(IDENTITY_STORE_KEY);
+    saveIdentity(f.store, new NodeIdentity({ nodeName: 'other' }), f.cipher);
+    fill(f.store, f.cipher);
+    stale.set('settings.anything', 1);
+    const onDisk = JSON.parse(fs.readFileSync(path.join(f.dir, 'chat-data.json'), 'utf8'));
+    assert.equal(onDisk.mesh.identity.publicKey, held.publicKey);
+    assert.equal(Object.hasOwn(onDisk.mesh.identity, 'encryptedBoxKey'), false);
+  });
+
+  it('only the service\'s start paths ask for a fill', () => {
+    const root = path.join(__dirname, '..', 'src');
+    const files = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.js')) files.push(full);
+      }
+    };
+    walk(root);
+    const asking = files.filter((f) => /fillBox: true/.test(fs.readFileSync(f, 'utf8'))).map((f) => path.relative(root, f).split(path.sep).join('/')).sort();
+    assert.deepEqual(asking, ['approvals/service-wiring.js', 'frontdoor/profile.js', 'service/run.js']);
+    const wiring = fs.readFileSync(path.join(root, 'approvals', 'service-wiring.js'), 'utf8');
+    assert.equal(wiring.match(/fillBox: true/g).length, 1);
+    const mcp = wiring.slice(wiring.indexOf('async function startMcpApprovals'));
+    assert.equal(mcp.includes('fillBox'), false);
   });
 });
 
 describe('what else reads or writes the record', () => {
   it('the mesh keeps the box key through a load and a save', () => {
     const f = fresh();
-    const node = getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01');
+    const node = fill(f.store, f.cipher);
     const mesh = loadIdentity(f.store, f.cipher);
     mesh.displayName = 'renamed';
     saveIdentity(f.store, mesh, f.cipher);
     const record = f.store.get(IDENTITY_STORE_KEY);
     assert.equal(record.displayName, 'renamed');
     assert.equal(hasKey(record, 'boxKeyD'), false);
-    assert.deepEqual(getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01').box.jwk, node.box.jwk);
+    assert.deepEqual(fill(f.store, f.cipher).box.jwk, node.box.jwk);
   });
 
   it('a mesh identity loaded before the box key existed does not wipe it when it saves', () => {
@@ -184,18 +277,18 @@ describe('what else reads or writes the record', () => {
     const f = fresh();
     recordWithoutBox(f);
     const stale = loadIdentity(f.store, f.cipher);
-    const node = getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01');
+    const node = fill(f.store, f.cipher);
     stale.displayName = 'renamed';
     saveIdentity(f.store, stale, f.cipher);
     const record = f.store.get(IDENTITY_STORE_KEY);
     assert.equal(record.displayName, 'renamed');
     assert.deepEqual(record.boxKeyJwk, node.box.jwk);
-    assert.deepEqual(getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01').box.jwk, node.box.jwk);
+    assert.deepEqual(fill(f.store, f.cipher).box.jwk, node.box.jwk);
   });
 
   it('saving another identity does not take over the box key stored for this one', () => {
     const f = fresh();
-    getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01');
+    fill(f.store, f.cipher);
     saveIdentity(f.store, new MeshIdentity({ displayName: 'other' }), f.cipher);
     const record = f.store.get(IDENTITY_STORE_KEY);
     assert.equal(Object.hasOwn(record, 'boxKeyJwk'), false);
@@ -218,7 +311,7 @@ describe('what else reads or writes the record', () => {
     const without = readNodeIdentity(f.dir, f.cipher);
     assert.equal(without.publicKey, before.publicKey);
     assert.equal(Object.hasOwn(f.store.get(IDENTITY_STORE_KEY), 'boxKeyJwk'), false, 'a read-only caller fills nothing');
-    const identity = getOrGenerateNodeIdentity(f.store, f.cipher, 'web-01');
+    const identity = fill(f.store, f.cipher);
     const bytes = fs.readFileSync(file);
     assert.deepEqual(readNodeIdentity(f.dir, f.cipher), without);
     assert.deepEqual(fs.readFileSync(file), bytes);

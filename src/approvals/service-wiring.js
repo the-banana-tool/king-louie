@@ -160,7 +160,7 @@ function trackDeviceStates({ approverStore, relayClient, intervalMs = 5000 }) {
 async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir }), nodeConfig, ports, profile = 'agent',
   serviceConfig = {}, identity = null, useTls = true, allowTestKeys = false, transportFactory, reconnectDelays,
   approverStoreOptions = {} } = {}) {
-  const nodeIdentity = identity || getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeConfig.name);
+  const nodeIdentity = identity || getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeConfig.name, { fillBox: true });
   const retentionDays = (serviceConfig.audit && serviceConfig.audit.retentionDays) || 365;
   const auditLedger = new AuditLedger({ dir: path.join(dataDir, 'audit'), identity: nodeIdentity, nodeId: nodeIdentity.nodeId, writer: 'service', retentionDays });
   const pruned = auditLedger.prune();
@@ -290,7 +290,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
 // its audit entries say writer 'mcp'. With the service stopped every unsafe
 // runbook is refused at once with that reason.
 async function startMcpApprovals({ dataDir, configDir = adminConfigDir({ dataDir }), nodeConfig, ports, identity = null,
-  approverStoreOptions = {}, pollMs } = {}) {
+  approverStoreOptions = {}, pollMs, onPathWritten = null } = {}) {
   const { FileCourier } = require('./courier');
   const nodeIdentity = identity || getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeConfig.name);
   const auditLedger = new AuditLedger({ dir: path.join(dataDir, 'audit'), identity: nodeIdentity, nodeId: nodeIdentity.nodeId, writer: 'mcp' });
@@ -301,7 +301,9 @@ async function startMcpApprovals({ dataDir, configDir = adminConfigDir({ dataDir
     serviceProbe: true
   });
   await approverStore.ready();
-  const sealPolicy = createSealPolicy({ approverStore, identity: nodeIdentity, dataDir });
+  // It can write the latch (a device holds a box key and no service is running),
+  // perhaps as root: onPathWritten hands what it creates back at once.
+  const sealPolicy = createSealPolicy({ approverStore, identity: nodeIdentity, dataDir, onPathWritten });
   const courier = new FileCourier({ dataDir, identity: nodeIdentity, ...(pollMs ? { pollMs } : {}) }).start();
   const approvers = nodeConfig.approvers || { requestTtlS: 300 };
   const approver = new PhoneApprover({

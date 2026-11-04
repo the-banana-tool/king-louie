@@ -69,10 +69,15 @@ class NodeIdentity extends MeshIdentity {
   }
 }
 
-// An identity from before the box key gets one, and the record gains it. A key
-// that could not be stored is not used: the next start would have another, so
-// `box` stays null and the seal policy refuses (canSeal() false), and the
-// identity itself, which some hosts only read, goes on as it was.
+// An identity with no box key gets one, and the record gains it. A key that
+// could not be stored is not used: the next start would have another, so `box`
+// stays null and the seal policy refuses (canSeal() false), and the identity
+// itself goes on as it was.
+function freshBoxKey() {
+  const { jwk, d } = generateBoxKey();
+  return { boxKeyJwk: jwk, boxKeyD: d };
+}
+
 function fillBoxKey(identity, store, cipher) {
   const { jwk, d } = generateBoxKey();
   try {
@@ -86,11 +91,16 @@ function fillBoxKey(identity, store, cipher) {
   identity.box = createBox(jwk, d);
 }
 
-function getOrGenerateNodeIdentity(store, cipher, nodeName = 'unnamed-node') {
+// `fillBox` is for the service's start and nothing else. One service runs per
+// data dir (its pidfile), so one process makes the key; two fillers could each
+// keep a different one. Every other path (the admin CLI, standalone `mcp`, a
+// relay) loads what is stored, and has `box: null` when the record has none.
+// The fill reads the record from disk first, so a key already there is adopted.
+function getOrGenerateNodeIdentity(store, cipher, nodeName = 'unnamed-node', { fillBox = false } = {}) {
+  if (fillBox && typeof store.reload === 'function') store.reload();
   let identity = loadIdentity(store, cipher);
   if (!identity) {
-    const { jwk, d } = generateBoxKey();
-    identity = new NodeIdentity({ nodeName, boxKeyJwk: jwk, boxKeyD: d });
+    identity = new NodeIdentity({ nodeName, ...(fillBox ? freshBoxKey() : {}) });
     saveIdentity(store, identity, cipher);
     log.info(`Generated new Node Identity ${identity.nodeId} for node "${nodeName}"`);
   } else if (!(identity instanceof NodeIdentity)) {
@@ -106,7 +116,7 @@ function getOrGenerateNodeIdentity(store, cipher, nodeName = 'unnamed-node') {
       boxKeyJwk: identity.boxKeyJwk,
       boxKeyD: identity.boxKeyD
     });
-    if (!identity.box) fillBoxKey(identity, store, cipher);
+    if (fillBox && !identity.box) fillBoxKey(identity, store, cipher);
   }
   return identity;
 }

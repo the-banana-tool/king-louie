@@ -65,7 +65,7 @@ function adminDirApprovalOptions({ adminUid, configDir }) {
 // deps.identityRecord: tests only (how a temp dir's record is read).
 function checkRecordedIdentity({ servicePorts, nodeConfig, dataDir, adminUid, configDir, hosting = 'service', deps = {} }) {
   const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');
-  const identity = getOrGenerateNodeIdentity(servicePorts.store, servicePorts.cipher, nodeConfig.name);
+  const identity = getOrGenerateNodeIdentity(servicePorts.store, servicePorts.cipher, nodeConfig.name, { fillBox: true });
   if (hosting === 'personal') {
     return { identity, record: { state: 'personal', file: null, problem: null, recorded: null } };
   }

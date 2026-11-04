@@ -804,6 +804,8 @@ describe('doctor', () => {
       return { kty, crv, x, y };
     };
     const put = (n, record) => fs.writeFileSync(path.join(n.configDir, 'approvers', `${record.device_id}.json`), JSON.stringify(record), { mode: 0o644 });
+    // The identity record as the service's start leaves it (doctor reads only whether it holds a box key).
+    const boxRecord = (n) => fs.writeFileSync(path.join(n.dataDir, 'chat-data.json'), JSON.stringify({ mesh: { identity: { publicKey: 'ab', boxKeyJwk: boxJwk(), encryptedBoxKey: 'x' } } }));
     const rows = async (n) => {
       const results = await runDoctor({ dataDir: n.dataDir, platform: 'win32' });
       return { sealing: results.find((r) => r.check === 'sealing to phones'), without: results.find((r) => r.check === 'phones without a box key') };
@@ -832,6 +834,7 @@ describe('doctor', () => {
       put(n, c.approverRecord());
       put(n, d.approverRecord());
       put(n, gone.approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' }));
+      boxRecord(n);
       const { sealing, without } = await rows(n);
       assert.equal(sealing.detail, 'on (2 phones)');
       assert.deepEqual(without.detail.split(', ').sort(), [fingerprintGroups(c.deviceId), fingerprintGroups(d.deviceId)].sort());
@@ -843,6 +846,7 @@ describe('doctor', () => {
       const b = createFakePhone();
       put(n, { ...a.approverRecord(), box_key: boxJwk() });
       put(n, { ...b.approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' }), box_key: boxJwk() });
+      boxRecord(n);
       const { sealing, without } = await rows(n);
       assert.equal(sealing.detail, 'on (1 phone)');
       assert.equal(without.detail, 'none');
@@ -873,8 +877,42 @@ describe('doctor', () => {
       const n = node();
       latch(n);
       put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      boxRecord(n);
       const { sealing } = await rows(n);
       assert.deepEqual([sealing.ok, sealing.detail], [true, 'on (1 phone)']);
+    });
+
+    it('a phone to seal to and no box key in the identity record fails the row', async () => {
+      const n = node();
+      latch(n);
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      let { sealing } = await rows(n);
+      assert.deepEqual([sealing.ok, sealing.detail], [false, 'on, but this node has no box key: restart the service']);
+      fs.writeFileSync(path.join(n.dataDir, 'chat-data.json'), JSON.stringify({ mesh: { identity: { publicKey: 'ab' } } }));
+      ({ sealing } = await rows(n));
+      assert.equal(sealing.ok, false);
+    });
+
+    it('a phone to seal to and a latch that cannot be written fails the row', async () => {
+      const n = node();
+      fs.mkdirSync(path.join(n.dataDir, 'approvals', 'sealing.json'), { recursive: true });
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      boxRecord(n);
+      const { sealing } = await rows(n);
+      assert.equal(sealing.ok, false);
+      assert.match(sealing.detail, /^on, but the latch cannot be written/);
+    });
+
+    it('a latch this account cannot create fails the row', { skip: !POSIX || UID === 0 }, async () => {
+      const n = node({ linked: false });
+      fs.mkdirSync(path.join(n.dataDir, 'approvals'));
+      fs.chmodSync(path.join(n.dataDir, 'approvals'), 0o555);
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      boxRecord(n);
+      const { sealing } = await rows(n);
+      fs.chmodSync(path.join(n.dataDir, 'approvals'), 0o755);
+      assert.equal(sealing.ok, false);
+      assert.match(sealing.detail, /^on, but the latch cannot be written/);
     });
 
     it('latched with an untrusted set: on, and nobody can read it', { skip: !POSIX }, async () => {
