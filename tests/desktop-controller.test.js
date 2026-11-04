@@ -1140,7 +1140,7 @@ describe('desktop controller: the attached start of a personal node', () => {
     const client = new FakeAttachedClient({ liveOnRetry: 1 });
     const { controller } = attachedController({ runner, client });
     await controller.startAttached();
-    assert.ok(!runner.calls.some(([c]) => c === 'runTask' || c === 'queryTask'));
+    assert.ok(!runner.calls.some(([c]) => c === 'runTask'));
     assert.strictEqual((await controller.status()).view, 'attached-connected');
     controller.dispose();
   });
@@ -2526,22 +2526,53 @@ describe('desktop controller: the setup walk', () => {
     assert.ok(state.setup.completedAt);
     assert.strictEqual((await controller.setupStep()).step, 'done');
     assert.strictEqual((await controller.status()).setup.step, 'done');
-    assert.ok(runner.calls.length);
+    assert.ok(!runner.calls.some(([c]) => c === 'stopNode' || c === 'runTask'), 'nothing was restarted unasked');
     controller.dispose();
   });
 
-  it('a verified apply restarts the node, so its channels and MCP servers come up; a failed one does not', async () => {
-    const good = attachedWalk();
+  it('a verified apply restarts nothing by itself: what needs a restart waits for the press, and a move of chats alone asks nothing', async () => {
+    const stops = (made) => made.runner.calls.filter(([c]) => c === 'stopNode' || c === 'runTask').length;
+    const chatsOnly = attachedWalk();
+    await chatsOnly.controller.migrationPlan();
+    assert.strictEqual((await chatsOnly.controller.migrationApply({ confirmed: true })).ok, true);
+    await chatsOnly.controller.startIdle();
+    assert.strictEqual(stops(chatsOnly), 0);
+    assert.strictEqual(chatsOnly.state.migration.restartDue, undefined);
+    assert.ok(!ids(await chatsOnly.controller.setupStep()).includes('restartLater'));
+    chatsOnly.controller.dispose();
+
+    const good = attachedWalk({ client: nodeClient({ finish: { needsRestart: true } }) });
     await good.controller.migrationPlan();
     assert.strictEqual((await good.controller.migrationApply({ confirmed: true })).ok, true);
     await good.controller.startIdle();
+    assert.strictEqual(stops(good), 0, 'a live take or task must not end without the press');
+    assert.strictEqual(good.state.migration.restartDue, true);
+    const asked = await good.controller.setupStep();
+    assert.deepStrictEqual(asked.actions.slice(0, 2), [{ id: 'nodeRestart', label: 'Restart King Louie Node now' }, { id: 'restartLater', label: 'Later' }]);
+    assert.match(asked.lines.join(' '), /ends a turn, take or task/);
+    await good.controller.nodeRestart();
+    await good.controller.startIdle();
     assert.strictEqual(good.runner.calls.filter(([c]) => c === 'stopNode').length, 1);
     assert.strictEqual(good.runner.calls.filter(([c]) => c === 'runTask').length, 1);
+    assert.strictEqual(good.state.migration.restartDue, undefined);
     good.controller.dispose();
+
+    const later = attachedWalk({ client: nodeClient({ finish: { needsRestart: true } }) });
+    await later.controller.migrationPlan();
+    await later.controller.migrationApply({ confirmed: true });
+    assert.strictEqual((await later.controller.restartLater()).ok, true);
+    assert.strictEqual(later.state.migration.restartDue, undefined);
+    assert.strictEqual(stops(later), 0);
+    assert.ok(!ids(await later.controller.setupStep()).includes('restartLater'));
+    assert.ok(later.state.migration.backupDir, 'Later leaves the rest of the mark');
+    later.controller.dispose();
 
     const bad = attachedWalk({ client: nodeClient({ dropChat: 'c1' }) });
     await bad.controller.migrationPlan();
-    assert.strictEqual((await bad.controller.migrationApply({ confirmed: true })).code, 'MIGRATION_UNVERIFIED');
+    const refused = await bad.controller.migrationApply({ confirmed: true });
+    assert.strictEqual(refused.code, 'MIGRATION_UNVERIFIED');
+    assert.doesNotMatch(refused.error, /lands if you move again/, 'not every item does');
+    assert.match(refused.error, /sends what did not arrive/);
     await bad.controller.startIdle();
     assert.ok(!bad.runner.calls.some(([c]) => c === 'stopNode' || c === 'runTask'));
     bad.controller.dispose();
@@ -2718,26 +2749,27 @@ describe('desktop controller: the setup walk', () => {
     moved.controller.dispose();
   });
 
-  it('an apply pressed twice moves once and restarts once', async () => {
+  it('an apply pressed twice moves once', async () => {
     const made = attachedWalk();
     await made.controller.migrationPlan();
     const [a, b] = await Promise.all([made.controller.migrationApply({ confirmed: true }), made.controller.migrationApply({ confirmed: true })]);
     assert.strictEqual(a, b);
     assert.strictEqual(a.ok, true);
     await made.controller.startIdle();
-    assert.strictEqual(made.runner.calls.filter(([c]) => c === 'stopNode').length, 1);
+    assert.strictEqual(made.client.finishes, 1);
     made.controller.dispose();
   });
 
-  it('while the node restarts after the move the step has no press, and a restart that fails says what it means', async () => {
+  it('while the pressed restart runs the step has no press, and a restart that fails says what it means', async () => {
     let release;
     const held = new Promise((r) => { release = r; });
     const runner = fakeRunner({ running: true, stop: () => ({ ok: false, code: 'NODE_STOP_FAILED', message: 'stop did not finish' }) });
     const stopNode = runner.stopNode.bind(runner);
     runner.stopNode = async (a) => { await held; return stopNode(a); };
-    const made = attachedWalk({ runner });
+    const made = attachedWalk({ runner, client: nodeClient({ finish: { needsRestart: true } }) });
     await made.controller.migrationPlan();
     assert.strictEqual((await made.controller.migrationApply({ confirmed: true })).ok, true);
+    await made.controller.nodeRestart();
     const during = await made.controller.setupStep();
     assert.deepStrictEqual(during.actions, []);
     assert.match(during.lines.join(' '), /[Rr]estart/);
@@ -3103,12 +3135,13 @@ describe('desktop controller: the setup walk', () => {
   });
 
   it('a restart that fails after the move offers its press on the step that follows', async () => {
-    const client = nodeClient();
+    const client = nodeClient({ finish: { needsRestart: true } });
     const made = attachedWalk({ client });
     await made.controller.setupStep();
     await made.controller.migrationPlan();
     made.runner.runTask = async () => ({ ok: false, error: 'the task would not run' });
     await made.controller.migrationApply({ confirmed: true });
+    await made.controller.nodeRestart();
     await made.controller.startIdle();
     const answer = await made.controller.setupStep();
     assert.ok(answer.actions.some((a) => a.id === 'nodeRestart' || a.id === 'nodeStart'), JSON.stringify(answer));
@@ -3116,38 +3149,106 @@ describe('desktop controller: the setup walk', () => {
     made.controller.dispose();
   });
 
-  it('a move whose restart was lost to an app death restarts once at the next launch', async () => {
+  it('a restart still owed at a later launch is offered, never done unprompted', async () => {
     const client = nodeClient();
     const made = attachedWalk({ client });
     made.state.setMigration({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\b', nodeId: 'kl-abc', restartDue: true });
-    const launch1 = made.build();
-    await launch1.startAttached();
-    await launch1.startIdle();
-    assert.strictEqual(made.runner.calls.filter(([c]) => c === 'stopNode').length, 1);
+    made.state.setSetup({ completedAt: '2026-11-04T10:00:00.000Z' });
+    const launch = made.build();
+    await launch.startAttached();
+    await launch.startIdle();
+    assert.ok(!made.runner.calls.some(([c]) => c === 'stopNode' || c === 'runTask'));
+    assert.strictEqual(made.state.migration.restartDue, true);
+    const { describeAttachedBanner } = require('../src/desktop-bridge/pane-model');
+    const banner = describeAttachedBanner(await launch.status());
+    assert.deepStrictEqual(banner.actions.map((a) => a.id), ['nodeRestart', 'restartLater']);
+    assert.match(banner.line, /ends a turn, take or task/);
+    await launch.nodeRestart();
+    await launch.startIdle();
     assert.strictEqual(made.runner.calls.filter(([c]) => c === 'runTask').length, 1);
     assert.strictEqual(made.state.migration.restartDue, undefined);
     assert.ok(made.state.migration.backupDir);
-    launch1.dispose();
-    const launch2 = made.build();
-    await launch2.startAttached();
-    await launch2.startIdle();
-    assert.strictEqual(made.runner.calls.filter(([c]) => c === 'stopNode').length, 1, 'once');
-    launch2.dispose();
+    launch.dispose();
     made.controller.dispose();
   });
 
-  it('a verified apply writes restartDue with the mark and clears it as the restart goes', async () => {
-    const seen = [];
-    const made = attachedWalk();
-    const stopNode = made.runner.stopNode.bind(made.runner);
-    made.runner.stopNode = async (a) => { seen.push(made.state.migration.restartDue); return stopNode(a); };
-    const setMigration = made.state.setMigration;
-    made.state.setMigration = (entry) => { seen.push(entry.restartDue); return setMigration(entry); };
-    await made.controller.migrationPlan();
-    await made.controller.migrationApply({ confirmed: true });
+  it('a task whose program is gone: nothing is run, the screen says so, and Install registers it again', async () => {
+    const gone = 'C:\\work\\king-louie\\bin\\king-louie-service.js';
+    const runner = fakeRunner({ running: false, cli: (args) => {
+      if (args.includes('--yes')) runner.taskAnswer = { state: 'registered', runs: 'app' };
+      return { code: 0, stdout: 'would do this\n', stderr: '', json: null };
+    } });
+    runner.taskAnswer = { state: 'registered', program: 'C:\\node\\node.exe', entry: gone, runs: 'folder', gone };
+    runner.queryTask = async (a) => { runner.calls.push(['queryTask', a]); return runner.taskAnswer; };
+    const client = nodeClient();
+    client.connected = false;
+    const made = attachedWalk({ runner, client });
+    await made.controller.startAttached();
     await made.controller.startIdle();
-    assert.deepStrictEqual(seen, [true, undefined]);
+    assert.ok(!runner.calls.some(([c]) => c === 'runTask'), '/Run succeeds for a program that is gone');
+    const status = await made.controller.status();
+    assert.strictEqual(status.node.programGone, gone);
+    const answer = await made.controller.setupStep();
+    assert.strictEqual(answer.step, 'start');
+    assert.ok(answer.lines.join(' ').includes(gone));
+    assert.ok(ids(answer).includes('nodeInstallPreview'));
+    assert.strictEqual((await made.controller.nodeInstall({ confirmed: true })).ok, true);
+    assert.ok(runner.calls.some(([c, a]) => c === 'runCli' && a.includes('--yes')));
+    assert.strictEqual((await made.controller.status()).node.programGone, undefined);
     made.controller.dispose();
+  });
+
+  it('Install still refuses a task whose program is there, and another account\'s whatever it runs', async () => {
+    for (const [answer, code] of [[{ state: 'registered', runs: 'app' }, 'NODE_TASK_REGISTERED'], [{ state: 'other-account', gone: 'C:\\x' }, 'NODE_TASK_OTHER_ACCOUNT'], [{ state: 'disabled', gone: 'C:\\x' }, 'NODE_TASK_DISABLED']]) {
+      const runner = fakeRunner({ running: true });
+      runner.queryTask = async () => answer;
+      const made = attachedWalk({ runner });
+      assert.strictEqual((await made.controller.nodeInstall({ confirmed: true })).code, code);
+      assert.ok(!runner.calls.some(([c]) => c === 'runCli'));
+      made.controller.dispose();
+    }
+  });
+
+  it('the version row goes by what the task runs', async () => {
+    for (const runs of ['app', 'folder']) {
+      const runner = fakeRunner({ running: true });
+      runner.queryTask = async () => ({ state: 'registered', runs, entry: 'C:\\work\\k\\bin\\king-louie-service.js' });
+      const client = nodeClient();
+      client.service.version = '1.0.0';
+      const made = attachedWalk({ runner, client, extra: { appVersion: '2.0.0' } });
+      await made.controller.startAttached();
+      await made.controller.startIdle();
+      assert.deepStrictEqual((await made.controller.status()).versionMismatch, { node: '1.0.0', app: '2.0.0', runs });
+      made.controller.dispose();
+    }
+  });
+
+  it('stays behind names the three stores, and an outreach case says its agent needs setting up', async () => {
+    const made = attachedWalk();
+    fs.mkdirSync(path.join(made.userDataDir, 'executors', 'phone-agent'), { recursive: true });
+    fs.writeFileSync(path.join(made.userDataDir, 'executors', 'phone-agent', 'package.json'), JSON.stringify({ name: 'kl-executor-phone-agent', kingLouie: { executor: { id: 'phone-agent' } } }));
+    const dir = path.join(made.userDataDir, 'cases', 'north-field');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'case.yaml'), 'id: case-north\nslug: north-field\ntitle: North field\ntype: outreach\n');
+    const planned = await made.controller.migrationPlan();
+    assert.strictEqual(planned.ok, true, JSON.stringify(planned));
+    const behind = planned.staysBehind.join('\n');
+    assert.match(behind, /ops-memory\.jsonl/);
+    assert.match(behind, /contact folder/);
+    assert.match(behind, /executors folder/);
+    assert.match(behind, /Case north-field: its agent phone-agent .*Set it up on the node/);
+    assert.doesNotMatch(behind, /Case lakeside-lot/, 'a case that names no agent says nothing');
+    made.controller.dispose();
+  });
+
+  it('a verified apply writes restartDue only when the report says needsRestart', async () => {
+    for (const [finish, due] of [[{ needsRestart: true }, true], [{}, undefined]]) {
+      const made = attachedWalk({ client: nodeClient({ finish }) });
+      await made.controller.migrationPlan();
+      await made.controller.migrationApply({ confirmed: true });
+      assert.strictEqual(made.state.migration.restartDue, due);
+      made.controller.dispose();
+    }
   });
 
   it('a file of the launcher\'s name that is not ours is not offered as the launcher', async () => {

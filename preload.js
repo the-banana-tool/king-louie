@@ -1210,7 +1210,7 @@ contextBridge.exposeInMainWorld(
       install: (payload) => ipcRenderer.invoke('skill:install', payload),
       remove: (payload) => ipcRenderer.invoke('skill:remove', payload),
       checkDeps: (payload) => ipcRenderer.invoke('skill:checkDeps', payload),
-      checkUpdates: () => ipcRenderer.invoke('skill:checkUpdates'),
+      checkUpdates: (payload = {}) => ipcRenderer.invoke('skill:checkUpdates', { fetch: Boolean(payload && payload.fetch === true) }),
       update: (payload) => ipcRenderer.invoke('skill:update', payload)
     },
     webhook: {
@@ -1402,6 +1402,7 @@ contextBridge.exposeInMainWorld(
       // skip: the step the Skip was pressed on, or nothing to finish.
       setupFinish: (payload = {}) => ipcRenderer.invoke('desktop:setupFinish', payload && typeof payload.skip === 'string' ? { skip: payload.skip } : {}),
       nodeRestart: () => ipcRenderer.invoke('desktop:nodeRestart'),
+      restartLater: () => ipcRenderer.invoke('desktop:restartLater'),
       importPlan: () => ipcRenderer.invoke('desktop:importPlan'),
       importApply: () => ipcRenderer.invoke('desktop:importApply'),
       onStatusChanged: (callback) => registerOnce('desktop:statusChanged', callback),

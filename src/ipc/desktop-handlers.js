@@ -28,7 +28,8 @@ const DESKTOP_METHODS = Object.freeze({
   [IPC.DESKTOP_SETUP_STEP]: 'setupStep',
   [IPC.DESKTOP_SETUP_LATER]: 'setupLater',
   [IPC.DESKTOP_SETUP_FINISH]: 'setupFinish',
-  [IPC.DESKTOP_NODE_RESTART]: 'nodeRestart'
+  [IPC.DESKTOP_NODE_RESTART]: 'nodeRestart',
+  [IPC.DESKTOP_RESTART_LATER]: 'restartLater'
 });
 
 const unavailable = () => ({ ok: false, code: 'ATTACHED_UNAVAILABLE', error: 'Not available here.' });

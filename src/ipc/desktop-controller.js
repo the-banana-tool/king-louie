@@ -64,8 +64,13 @@ const NOT_PERSONAL_TEXT = 'No King Louie Node on this computer is paired with th
 const STAYS_BEHIND_FIXED = Object.freeze([
   'Browser profiles: log in again in the node\'s browser.',
   'Local servers: add them to the node\'s service.json.',
-  'The typesafe.ai key: enter it again on the node.'
+  'The typesafe.ai key: enter it again on the node.',
+  'Case memory (ops-memory.jsonl): what King Louie noted about how your cases run. The node starts its own.',
+  'Contact state (the contact folder): your replies to case questions and where each question had got to. The node keeps its own from now on.',
+  'External agents (the executors folder): agent packages you installed and their daily contact counts. An agent a case uses needs setting up again on the node.'
 ]);
+const agentLine = ({ dir, agents }) => `Case ${dir}: its agent ${agents.join(', ')} is in the executors folder and does not move. Set it up on the node before this case sends anything.`;
+const capitalised = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 const MIGRATION_STORE_FILES = new Set(['history.sqlite', 'chat-data.json']);
 const MOVE_RUNNING = { ok: false, code: 'MIGRATION_BUSY', error: 'The move of this profile is running; wait for it to finish.' };
 // §6.3: how long a step waits for the old profile before it answers with a line,
@@ -78,6 +83,8 @@ const OLD_PROFILE_UNKNOWN = Object.freeze({ found: true });
 const BEFORE_THE_FORM = new Set(['install', 'pair', 'start', 'migrate']);
 const INSTALL_ELEVATED = /runs as you, not elevated/;
 const RESTARTING_AFTER_MOVE = 'Restarting King Louie Node, so what moved starts…';
+// The task's program is gone (§6.8): nothing `/Run` could start.
+const programGoneText = (file) => `King Louie Node's logon task runs ${file}, which is no longer there, so the node cannot start. Install registers the task again from this app.`;
 
 // A data dir as the disk names it and as the pairing recorded it: Windows
 // paths compare without case and without a trailing separator.
@@ -102,7 +109,7 @@ const withoutLogLines = (text) => String(text || '').split(/\r?\n/).filter((l) =
 
 // A start refused for its task is about the task as it was. Read as registered
 // now, that refusal is over, whatever else the error says stands.
-const TASK_ERROR_CODES = new Set(['NODE_TASK_MISSING', 'NODE_TASK_DISABLED', 'NODE_TASK_OTHER_ACCOUNT', 'NODE_TASK_UNREADABLE']);
+const TASK_ERROR_CODES = new Set(['NODE_TASK_MISSING', 'NODE_TASK_DISABLED', 'NODE_TASK_OTHER_ACCOUNT', 'NODE_TASK_UNREADABLE', 'NODE_TASK_PROGRAM_GONE']);
 function withoutStaleTaskError(startError, taskState) {
   return startError && taskState === 'registered' && TASK_ERROR_CODES.has(startError.code) ? null : startError;
 }
@@ -363,6 +370,8 @@ function createDesktopController({
       task: nodeState.task, running: nodeState.running, pid: nodeState.pid,
       starting: nodeState.starting, startError: nodeState.startError,
       defaultDataDir: cliDefaultDataDir(),
+      ...(nodeState.programGone ? { programGone: nodeState.programGone } : {}),
+      ...(nodeState.taskEntry ? { taskEntry: nodeState.taskEntry } : {}),
       ...(cli && cliExists(cli) ? { serviceCli: shown(cli, 400) } : {})
     };
   }
@@ -379,6 +388,17 @@ function createDesktopController({
   }
 
   const setRunning = (r) => { nodeState = { ...nodeState, ...runningFields(r) }; };
+
+  // What a read of the task says beside its state, through shown: what it runs, for
+  // the version row and the phone step, and a program that is gone.
+  function taskFields(task) {
+    return {
+      task: task.state,
+      programGone: task.gone ? shown(task.gone, 400) : null,
+      ...(task.runs ? { runs: task.runs } : {}),
+      ...(task.runs === 'folder' && task.entry ? { taskEntry: shown(task.entry, 400) } : {})
+    };
+  }
 
   const detachWarning = () => (platform === 'win32' ? DETACH_WARNING_WINDOWS : DETACH_WARNING);
 
@@ -717,7 +737,7 @@ function createDesktopController({
     if (!liveService || service.hosting !== 'personal') return null;
     const node = service.version;
     if (!node || !appVersion || node === appVersion) return null;
-    return { node, app: appVersion };
+    return { node, app: appVersion, ...(nodeState.runs ? { runs: nodeState.runs } : {}) };
   }
 
   // The unpaired view's node: what the inspector said, plus the task and
@@ -736,7 +756,7 @@ function createDesktopController({
       nodeRunner.queryTask({ me: local.me }).catch(() => ({ state: 'unknown' })),
       nodeRunner.nodeRunning({ dataDir: local.dataDir }).catch(() => ({ running: false, pid: null }))
     ]);
-    nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+    nodeState = { ...nodeState, ...taskFields(task), ...runningFields(running) };
     return nodeView(local);
   }
 
@@ -810,8 +830,9 @@ function createDesktopController({
   async function runNodeTask({ dataDir, me, restart = false, isCurrent, onStarting = null }) {
     const task = await nodeRunner.queryTask({ me }).catch(() => ({ state: 'unknown' }));
     if (!isCurrent()) return { cancelled: true };
-    nodeState = { ...nodeState, task: task.state };
+    nodeState = { ...nodeState, ...taskFields(task) };
     if (task.state !== 'registered') return { ok: false, ...(TASK_REFUSALS[task.state] || TASK_REFUSALS.unknown) };
+    if (task.gone) return { ok: false, code: 'NODE_TASK_PROGRAM_GONE', message: programGoneText(shown(task.gone, 400)) };
     if (onStarting) onStarting();
     if (restart) {
       const running = await nodeRunner.nodeRunning({ dataDir });
@@ -1301,16 +1322,19 @@ function createDesktopController({
     return null;
   }
 
-  function staysBehindLines(plan) {
-    const named = (plan.items || []).filter((i) => i.action === 'skip-excluded' && i.note).map((i) => i.note);
-    return [...new Set([...named, ...STAYS_BEHIND_FIXED])].map((line) => shown(line, 400));
+  function staysBehindLines(plan, source) {
+    const items = plan.items || [];
+    const named = items.filter((i) => i.action === 'skip-excluded' && i.note).map((i) => i.note);
+    const tooLarge = items.filter((i) => i.category === 'chat' && i.action === 'needs-attention' && i.note).map((i) => capitalised(i.note));
+    const agents = (source && Array.isArray(source.agentCases) ? source.agentCases : []).map(agentLine);
+    return [...new Set([...tooLarge, ...agents, ...named, ...STAYS_BEHIND_FIXED])].map((line) => shown(line, 600));
   }
 
   // What the owner reads of a plan or a report; the session keeps the real one.
   const shownEntry = (entry) => {
     const out = { ...entry };
     for (const key of ['category', 'key', 'targetKey', 'note', 'error']) {
-      if (out[key] !== null && out[key] !== undefined) out[key] = shown(out[key], key === 'note' || key === 'error' ? 400 : 200);
+      if (out[key] !== null && out[key] !== undefined) out[key] = shown(out[key], key === 'note' || key === 'error' ? 1200 : 200);
     }
     return out;
   };
@@ -1380,17 +1404,17 @@ function createDesktopController({
       // An apply that never began left the store as it was; anything that ran may
       // have changed what there is to move.
       if (answer.code !== 'PLAN_EXPIRED') invalidateOldProfile();
-      if (answer.ok === true) restartAfterMove();
     });
   }
 
-  // What landed (MCP servers, bots, hooks) starts only when the node does, and
-  // otherwise stays down until the next logon. A restart the node refuses shows
-  // on its row; the move is done either way.
-  function restartAfterMove() {
-    restartedAfterMove = true;
+  // What landed (MCP servers, bots, hooks) starts only when the node does, and a
+  // restart ends a turn, a take or a task, so it is the owner's press: `restartDue`
+  // on the marker offers it until he answers, at this launch or a later one. Later
+  // is an answer: the note that says when it takes effect stays on screen.
+  async function restartLater() {
     state.clearRestartDue();
-    nodeStartNow({ restart: true }).catch((err) => log.warn(`restarting King Louie Node after the move failed: ${err.message}`));
+    notify();
+    return { ok: true };
   }
 
   function runMigrationPlan() {
@@ -1450,7 +1474,7 @@ function createDesktopController({
           heldCases,
           refusedFiles,
           attention: shownEntries(source.attention),
-          staysBehind: staysBehindLines(plan),
+          staysBehind: staysBehindLines(plan, source),
           leftBehind: leftBehindOf({ plan, source })
         };
       } catch (err) {
@@ -1513,7 +1537,7 @@ function createDesktopController({
           return {
             ok: false,
             code: 'MIGRATION_UNVERIFIED',
-            error: `${verified.missing.length} ${verified.missing.length === 1 ? 'item' : 'items'} on the node do not match the desktop, so this profile was not marked as moved. Nothing was removed. Each one says what it needs; what is only missing lands if you move again.`,
+            error: `${verified.missing.length} ${verified.missing.length === 1 ? 'item' : 'items'} on the node do not match the desktop, so this profile was not marked as moved. Nothing was removed. Moving again sends what did not arrive; each line says what else it needs.`,
             report: shownOut,
             leftBehind,
             refusedFiles,
@@ -1539,8 +1563,8 @@ function createDesktopController({
         try {
           state.setMigration({
             at: now().toISOString(),
-            // Cleared as the restart goes; an app death before that leaves it for the next launch.
-            restartDue: true,
+            // Only when something moved that starts with the node; the owner's press clears it.
+            ...(report.needsRestart === true ? { restartDue: true } : {}),
             backupDir: backup.dest,
             nodeDataDir: service.dataDir || null,
             nodeId: service.nodeId,
@@ -1548,7 +1572,7 @@ function createDesktopController({
             leftBehind,
             // Both outlast the plan: the setup keeps them on screen up to Done.
             private: session.plan.private || null,
-            staysBehind: staysBehindLines(session.plan),
+            staysBehind: staysBehindLines(session.plan, session.source),
             notes: shownOut.notes
           });
         } catch (err) {
@@ -1648,7 +1672,7 @@ function createDesktopController({
       ]);
       // A start begun meanwhile owns the state.
       if (disposed || startRun || nodeState.starting) return false;
-      nodeState = { ...nodeState, task: task.state, ...runningFields(running), startError: withoutStaleTaskError(nodeState.startError, task.state) };
+      nodeState = { ...nodeState, ...taskFields(task), ...runningFields(running), startError: withoutStaleTaskError(nodeState.startError, task.state) };
       return true;
     })();
     refreshRun = run;
@@ -1694,6 +1718,13 @@ function createDesktopController({
       if (!current()) return;
       setRunning(running);
       run = !running.running;
+      // A node already up runs no task here, and the version row and the phone step
+      // ask what it runs.
+      if (!run) {
+        const task = await nodeRunner.queryTask({ me: local.me }).catch(() => ({ state: 'unknown' }));
+        if (!current()) return;
+        nodeState = { ...nodeState, ...taskFields(task) };
+      }
     }
     if (run) {
       // A restart stops only a node that runs: with none, it is a start.
@@ -1780,13 +1811,7 @@ function createDesktopController({
       connectNow();
       return;
     }
-    // A move marked by a launch that died before its restart: owed once.
-    const owed = Boolean(state.migration && state.migration.restartDue);
-    if (owed) {
-      state.clearRestartDue();
-      restartedAfterMove = true;
-    }
-    await launchStart(dataDir, owed);
+    await launchStart(dataDir, false);
   }
 
   // §7.4's Start/Restart buttons: only on a press. Answers once the start
@@ -1794,8 +1819,11 @@ function createDesktopController({
   // each step), so the pane is not held for up to 60 s.
   async function nodeStart({ restart = false } = {}) {
     clearAnswers();
+    const answersMove = restart === true && Boolean(state.migration && state.migration.restartDue);
+    if (answersMove) restartedAfterMove = true;
     const out = await nodeStartNow({ restart });
     if (out && out.ok === false) answers = { setupError: out };
+    else if (answersMove) state.clearRestartDue();
     return out;
   }
 
@@ -1891,10 +1919,11 @@ function createDesktopController({
     }
     const target = await installTarget();
     if (!target) return notPersonalInstall();
-    // §8: only while no task is registered.
+    // §8: only while no task is registered, or the owner's task runs a program that
+    // is gone (§6.8): the CLI's /Create /F registers it again.
     const before = await nodeRunner.queryTask({ me: target.me }).catch(() => ({ state: 'unknown' }));
-    if (before.state !== 'missing') {
-      nodeState = { ...nodeState, task: before.state };
+    if (before.state !== 'missing' && !(before.state === 'registered' && before.gone)) {
+      nodeState = { ...nodeState, ...taskFields(before) };
       notify();
       const refusal = INSTALL_REFUSALS[before.state] || INSTALL_REFUSALS.unknown;
       return { ok: false, code: refusal.code, message: refusal.message, error: refusal.message, lines: [] };
@@ -1905,7 +1934,7 @@ function createDesktopController({
       nodeRunner.queryTask({ me: target.me }).catch(() => ({ state: 'unknown' })),
       nodeRunner.nodeRunning({ dataDir: target.dataDir }).catch(() => ({ running: false, pid: null }))
     ]);
-    nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+    nodeState = { ...nodeState, ...taskFields(task), ...runningFields(running) };
     notify();
     return installResult(cli);
   }
@@ -1914,7 +1943,7 @@ function createDesktopController({
 
   return {
     status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
-    importPlan, importApply, migrationPlan, migrationApply, dismissServiceCommand, createClient, setClient, dispose,
+    importPlan, importApply, migrationPlan, migrationApply, restartLater, dismissServiceCommand, createClient, setClient, dispose,
     startAttached, startIdle, refreshIdle, nodeStart, nodeRestart, nodeInstallPreview, nodeInstall,
     setupStep, setupLater, setupFinish, finishedForNow: () => finishedForNow,
     on: (event, fn) => emitter.on(event, fn)

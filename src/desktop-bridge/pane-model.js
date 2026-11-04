@@ -38,6 +38,7 @@ const NODE_LINES = {
   NODE_TASK_MISSING: 'King Louie Node has no logon task on this computer, so this app cannot start it.',
   NODE_TASK_DISABLED: `The logon task "${PERSONAL_TASK_NAME}" is disabled in Task Scheduler. Enable it there to let this app start the node.`,
   NODE_TASK_OTHER_ACCOUNT: `The logon task "${PERSONAL_TASK_NAME}" belongs to another account; this app does not run it.`,
+  NODE_TASK_PROGRAM_GONE: 'King Louie Node\'s logon task runs a program that is no longer there, so the node cannot start. Install registers the task again from this app.',
   NOT_RUNNING: 'King Louie Node is not running.',
   STARTING: 'Starting King Louie Node…'
 };
@@ -52,16 +53,28 @@ const PAIR_ELEVATED_LINE = 'This app is running as administrator. Close it and o
 const PERSONAL_PAIR_WARNING = 'Every paired desktop sees every chat, setting and secret name in the node.';
 const INSTALL_ACTION = { id: 'nodeInstallPreview', label: 'Install…' };
 const VERSION_ACTION = { id: 'nodeRestart', label: 'Restart King Louie Node to update it' };
+// What a move carried that starts with the node: the owner's press (final review 3).
+const RESTART_DUE_LINE = 'Bots, MCP servers and hook choices that moved start when King Louie Node next starts. Restarting now ends a turn, take or task in progress.';
+const RESTART_DUE_ACTIONS = Object.freeze([
+  Object.freeze({ id: 'nodeRestart', label: 'Restart King Louie Node now' }),
+  Object.freeze({ id: 'restartLater', label: 'Later' })
+]);
+const restartDue = (s) => Boolean(s.migration && s.migration.restartDue === true);
 
-// §6.8, C-12: the row for a node on another version. The node runs the app's own
-// binary, so a restart is the update, and it stays a press: a restart ends a turn
-// or a take. A node that is down is updated by the Start already on offer.
+// §6.8, C-12: the row for a node on another version, by what its task runs. The
+// app's own binary: a restart is the update, and it stays a press, since a restart
+// ends a turn or a take. A folder (a checkout): a restart runs the same files, so no
+// press is offered. Not known: nothing that could turn out false. A node that is down
+// is updated by the Start already on offer.
 function versionLine(s) {
   const v = s.versionMismatch;
-  return v ? `King Louie Node runs ${plain(v.node)}; this app is ${plain(v.app)}.` : null;
+  if (!v) return null;
+  if (v.runs === 'folder') return `King Louie Node runs ${plain(v.node)} from a folder; this app is ${plain(v.app)}. Restarting does not change that: update that folder, then restart the node.`;
+  return `King Louie Node runs ${plain(v.node)}; this app is ${plain(v.app)}.`;
 }
-function withVersionPress(actions) {
-  if (actions.some((a) => a.id === 'nodeStart')) return actions;
+const versionPress = (s) => Boolean(s.versionMismatch && s.versionMismatch.runs === 'app');
+function withVersionPress(actions, s) {
+  if (!versionPress(s) || actions.some((a) => a.id === 'nodeStart')) return actions;
   return [...actions.filter((a) => a.id !== 'nodeRestart'), VERSION_ACTION];
 }
 
@@ -75,7 +88,7 @@ function isPersonal(s) {
 }
 function installOffered(s) {
   const n = personalNode(s);
-  return Boolean(n && n.task === 'missing');
+  return Boolean(n && (n.task === 'missing' || n.programGone));
 }
 function errorText(error) {
   if (!error) return '';
@@ -101,6 +114,8 @@ function refusalLine(error) {
 // the pane). Null: nothing found to say, so today's line stands.
 function disconnectedRow(n, { install }) {
   const err = n.startError;
+  // §6.8: first, whatever a start said: /Run would succeed and start nothing.
+  if (n.programGone) return { line: `King Louie Node's logon task runs ${plain(n.programGone)}, which is no longer there, so the node cannot start. Install registers the task again from this app.`, action: install };
   if (err && err.code === 'NODE_START_FAILED') return { line: START_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
   if (err && err.code === 'NODE_START_TIMEOUT') return { line: plain(errorText(err)), action: null };
   if (err && err.code === 'NODE_TASK_RUN_FAILED') return { line: RUN_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
@@ -210,7 +225,7 @@ function describeServicePane(status = {}) {
       if (installOffered(s)) actions.push(INSTALL_ACTION);
       if (versionLine(s)) {
         lines.push(versionLine(s));
-        actions.push(VERSION_ACTION);
+        if (versionPress(s)) actions.push(VERSION_ACTION);
       }
       break;
     case 'attached-starting':
@@ -230,7 +245,7 @@ function describeServicePane(status = {}) {
       if (row && row.action) actions.push(row.action);
       if (versionLine(s)) {
         lines.push(versionLine(s));
-        const pressed = withVersionPress(actions);
+        const pressed = withVersionPress(actions, s);
         actions.length = 0;
         actions.push(...pressed);
       }
@@ -290,7 +305,14 @@ function describeAttachedBanner(status) {
   const s = status || {};
   if (s.view === 'attached-starting') return { line: NODE_LINES.STARTING, actions: [] };
   const version = versionLine(s);
-  if (s.view === 'attached-connected') return version ? { line: version, actions: [VERSION_ACTION] } : null;
+  if (s.view === 'attached-connected') {
+    const due = restartDue(s);
+    if (!version && !due) return null;
+    const words = [version, due ? RESTART_DUE_LINE : null].filter(Boolean).join(' ');
+    // One restart answers both, so one press says what it does for the move.
+    if (due) return { line: words, actions: RESTART_DUE_ACTIONS.map((a) => ({ ...a })) };
+    return { line: words, actions: versionPress(s) ? [VERSION_ACTION] : [] };
+  }
   if (s.view !== 'attached-disconnected') return null;
   const n = personalNode(s);
   const row = n ? disconnectedRow(n, { install: { id: 'openServiceSettings', label: 'Install…' } }) : null;
@@ -303,7 +325,7 @@ function describeAttachedBanner(status) {
   if (row && row.action) actions.push(row.action);
   const c = s.connection || {};
   const line = row ? row.line : (c.error || 'The local King Louie service is not reachable.');
-  return version ? { line: `${line} ${version}`, actions: withVersionPress(actions) } : { line, actions };
+  return version ? { line: `${line} ${version}`, actions: withVersionPress(actions, s) } : { line, actions };
 }
 
 // §8: `install --personal --dry-run`'s output (lines for a <pre>), then the
@@ -383,5 +405,6 @@ module.exports = {
   describeServicePane, describeApprovals, describeImportReport, describeServiceCommand,
   describeAttachedBanner, describeInstallPreview, describeInstallResult, describeLocalInferenceBlock,
   decideDetachClick, paneShapeChanged, DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE,
-  plain, nodeHosting, nodeVersion, disconnectedRow, refusalLine, NODE_LINES, PERSONAL_PAIR_WARNING
+  plain, nodeHosting, nodeVersion, disconnectedRow, refusalLine, NODE_LINES, PERSONAL_PAIR_WARNING,
+  RESTART_DUE_LINE, RESTART_DUE_ACTIONS
 };

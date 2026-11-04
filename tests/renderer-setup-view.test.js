@@ -97,10 +97,23 @@ describe('the setup view', () => {
 
   it('every way out of the first status shows the shell again', () => {
     const refresh = block('async function refreshServiceStatus(', '\nif (window.electron.desktop) {');
-    assert.match(refresh, /status\.ok === false\) \{\n\s*revealShell\(\);/);
+    assert.match(refresh, /status\.ok === false\) \{[\s\S]*?drawSetupAnswer\(\{ ok: false[\s\S]*?finally \{\n\s*revealShell\(\);[\s\S]*?\n\s*revealShell\(\);\n\s*return;\n\s*\}\n\s*serviceStatusRead = true;/);
     const setup = block('async function refreshSetupView(', 'async function drawSetupAnswer(');
     assert.strictEqual((setup.match(/revealShell\(\)/g) || []).length, 3);
     assert.match(setup, /finally \{\n\s*revealShell\(\);/);
+  });
+
+  it('a status that fails before any good read draws the failure screen, not an empty shell', () => {
+    const refresh = block('async function refreshServiceStatus(', '\nif (window.electron.desktop) {');
+    assert.match(refresh, /if \(!serviceStatusRead\) \{/);
+    assert.match(refresh, /drawSetupAnswer\(\{ ok: false, error: status && status\.error \}, \{\}, \+\+setupView\.generation\)/);
+  });
+
+  it('the skills pane fetches on a press, and loading it does not', () => {
+    assert.match(html, /id="skills-check-updates-btn"/);
+    assert.match(src, /checkUpdates\(\{ fetch: true \}\)/);
+    assert.match(src, /window\.electron\.skill\.checkUpdates\(\)\.then/, 'the load compares with what is known');
+    assert.match(preload, /checkUpdates: \(payload = \{\}\) => ipcRenderer\.invoke\('skill:checkUpdates', \{ fetch: Boolean\(payload && payload\.fetch === true\) \}\)/);
   });
 
   it('a press leaves re-enabling to the draw, which honours a disabled action', () => {

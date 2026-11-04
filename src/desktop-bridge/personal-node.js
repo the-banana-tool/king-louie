@@ -59,6 +59,7 @@ function createPersonalNodeRunner(deps = {}) {
   const readFile = deps.readFile || readTail;
   const now = deps.now || Date.now;
   const execPath = deps.execPath || process.execPath;
+  const statFile = deps.statFile || ((p) => fs.promises.stat(p));
   const entryPath = deps.entryPath || ENTRY_PATH;
   const readPidfile = deps.readPidfile || (async (dataDir) => pidfile.readPidfile(dataDir));
   const isRunning = deps.isRunning || ((pid) => pidfile.isRunning(pid));
@@ -201,7 +202,29 @@ function createPersonalNodeRunner(deps = {}) {
     }
     if (typeof sid !== 'string' || !sid.trim()) return { state: 'unknown' };
     if (task.userId.toUpperCase() !== sid.trim().toUpperCase()) return { state: 'other-account', userId: shown(task.userId) };
-    return { state: task.enabled ? 'registered' : 'disabled' };
+    return { state: task.enabled ? 'registered' : 'disabled', ...await taskProgramFacts(task) };
+  }
+
+  // What the task runs, read and never run (attach stage 2 §6.8). `/Run` succeeds for
+  // a program that is gone, so this is the only way to tell. The entry script counts:
+  // a removed checkout leaves node.exe standing. Only ENOENT is gone: a path inside
+  // the app's asar reads ENOTDIR to plain Node.
+  async function taskProgramFacts(task) {
+    if (!task.program) return {};
+    const facts = {
+      program: task.program,
+      runs: sameFile(task.program, execPath) ? 'app' : 'folder',
+      ...(task.entry ? { entry: task.entry } : {})
+    };
+    for (const file of [task.program, task.entry]) {
+      if (!file || !path.win32.isAbsolute(file)) continue;
+      try {
+        await statFile(file);
+      } catch (err) {
+        if (err && err.code === 'ENOENT') return { ...facts, gone: file };
+      }
+    }
+    return facts;
   }
 
   // §7.1: the pidfile names a live pid whose command line is
@@ -334,7 +357,14 @@ function decodeOutput(out) {
 
 const unescapeXml = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 
-// The principal's UserId and <Settings>' own <Enabled> (absent: enabled).
+const sameFile = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+const fromPsQuote = (s) => s.replace(/''/g, "'");
+// The call renderPersonalTaskXml writes into the PowerShell arguments.
+const TASK_CALL = /&\s+'((?:[^']|'')*)'\s+'((?:[^']|'')*)'\s+run\s+--data-dir\s+'((?:[^']|'')*)'/;
+
+// The principal's UserId and <Settings>' own <Enabled> (absent: enabled), and what
+// the action runs: the program and entry inside PowerShell's arguments when it is the
+// call we write, else the <Command> itself.
 function parseTaskXml(xml) {
   const principal = /<Principal\b[^>]*>([\s\S]*?)<\/Principal>/.exec(xml);
   const user = principal && /<UserId>\s*([^<]*?)\s*<\/UserId>/.exec(principal[1]);
@@ -343,9 +373,15 @@ function parseTaskXml(xml) {
     ? settings[1].replace(/<(IdleSettings|NetworkSettings|MaintenanceSettings|RestartOnFailure)\b[\s\S]*?<\/\1>/g, '')
     : '';
   const enabled = /<Enabled>\s*([^<]*?)\s*<\/Enabled>/.exec(own);
+  const command = /<Exec>[\s\S]*?<Command>\s*([^<]*?)\s*<\/Command>/.exec(xml);
+  const args = /<Exec>[\s\S]*?<Arguments>\s*([^<]*?)\s*<\/Arguments>/.exec(xml);
+  const call = args ? TASK_CALL.exec(unescapeXml(args[1])) : null;
   return {
     userId: user && user[1] ? unescapeXml(user[1]) : null,
-    enabled: !(enabled && enabled[1].toLowerCase() === 'false')
+    enabled: !(enabled && enabled[1].toLowerCase() === 'false'),
+    program: call ? fromPsQuote(call[1]) : (command && command[1] ? unescapeXml(command[1]) : null),
+    entry: call ? fromPsQuote(call[2]) : null,
+    dataDir: call ? fromPsQuote(call[3]) : null
   };
 }
 
@@ -426,5 +462,6 @@ module.exports = {
   DEFAULT_CLI_TIMEOUT_MS,
   FAILED_TO_START,
   firstLine,
-  parseTaskXml
+  parseTaskXml,
+  decodeOutput
 };

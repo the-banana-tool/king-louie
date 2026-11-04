@@ -316,7 +316,7 @@ describe('describeAttachedBanner: the platform and the version (attach stage 2 Â
   });
 
   it('versionMismatch while connected: the line and one press', () => {
-    const b = describeAttachedBanner({ view: 'attached-connected', pairing: personalPairing, versionMismatch: { node: '1.0.0', app: '1.0.1' } });
+    const b = describeAttachedBanner({ view: 'attached-connected', pairing: personalPairing, versionMismatch: { node: '1.0.0', app: '1.0.1', runs: 'app' } });
     assert.deepStrictEqual(b, {
       line: 'King Louie Node runs 1.0.0; this app is 1.0.1.',
       actions: [{ id: 'nodeRestart', label: 'Restart King Louie Node to update it' }]
@@ -324,7 +324,7 @@ describe('describeAttachedBanner: the platform and the version (attach stage 2 Â
   });
 
   it('versionMismatch while down: added to the row\'s line; a node to start is updated by Start, so no second press', () => {
-    const running = describeAttachedBanner(down({ node: node({ running: true, pid: 7 }), versionMismatch: { node: '1.0.0', app: '1.0.1' } }));
+    const running = describeAttachedBanner(down({ node: node({ running: true, pid: 7 }), versionMismatch: { node: '1.0.0', app: '1.0.1', runs: 'app' } }));
     assert.match(running.line, /bridge is not open\. King Louie Node runs 1\.0\.0; this app is 1\.0\.1\.$/);
     assert.deepStrictEqual(running.actions.filter((a) => a.id === 'nodeRestart'), [{ id: 'nodeRestart', label: 'Restart King Louie Node to update it' }]);
     const stopped = describeAttachedBanner(down({ versionMismatch: { node: '1.0.0', app: '1.0.1' } }));
@@ -353,7 +353,14 @@ describe('describeServicePane: the platform and the version row', () => {
   });
 
   it('versionMismatch adds the row and the press where the node is attached', () => {
-    const m = describeServicePane({ view: 'attached-connected', pairing: personalPairing, service: { version: '1.0.0' }, versionMismatch: { node: '1.0.0', app: '1.0.1' } });
+    const folder = describeServicePane({ view: 'attached-connected', pairing: personalPairing, service: { version: '1.0.0' }, versionMismatch: { node: '1.0.0', app: '1.0.1', runs: 'folder' } });
+    assert.ok(folder.lines.some((l) => /from a folder.*update that folder/.test(l)));
+    assert.ok(!ids(folder).includes('nodeRestart'), 'a restart there runs the same files');
+    const folderBanner = describeAttachedBanner({ view: 'attached-connected', pairing: personalPairing, versionMismatch: { node: '1.0.0', app: '1.0.1', runs: 'folder' } });
+    assert.deepStrictEqual(folderBanner.actions, []);
+    const unknown = describeServicePane({ view: 'attached-connected', pairing: personalPairing, service: { version: '1.0.0' }, versionMismatch: { node: '1.0.0', app: '1.0.1' } });
+    assert.ok(!ids(unknown).includes('nodeRestart'), 'not known to help, not offered');
+    const m = describeServicePane({ view: 'attached-connected', pairing: personalPairing, service: { version: '1.0.0' }, versionMismatch: { node: '1.0.0', app: '1.0.1', runs: 'app' } });
     assert.ok(m.lines.includes('King Louie Node runs 1.0.0; this app is 1.0.1.'));
     assert.deepStrictEqual(m.actions.find((a) => a.id === 'nodeRestart'), { id: 'nodeRestart', label: 'Restart King Louie Node to update it' });
     const none = describeServicePane({ view: 'attached-connected', pairing: personalPairing, service: { version: '1.0.0' }, versionMismatch: null });

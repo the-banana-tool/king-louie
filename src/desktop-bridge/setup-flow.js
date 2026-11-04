@@ -19,7 +19,7 @@
 // says what the owner can do, and Not now is only ever a press, never a fallback.
 const {
   plain, describeServicePane, describeImportReport, disconnectedRow, refusalLine,
-  nodeHosting, NODE_LINES, PERSONAL_PAIR_WARNING
+  nodeHosting, NODE_LINES, PERSONAL_PAIR_WARNING, RESTART_DUE_LINE, RESTART_DUE_ACTIONS
 } = require('./pane-model');
 
 const SETUP_STEPS = Object.freeze(['install', 'pair', 'start', 'migrate', 'provider', 'profile', 'phone', 'done']);
@@ -52,7 +52,7 @@ const TASK_HELP = {
   }
 };
 
-const TASK_ERROR_CODES = new Set(['NODE_TASK_MISSING', 'NODE_TASK_DISABLED', 'NODE_TASK_OTHER_ACCOUNT', 'NODE_TASK_UNREADABLE']);
+const TASK_ERROR_CODES = new Set(['NODE_TASK_MISSING', 'NODE_TASK_DISABLED', 'NODE_TASK_OTHER_ACCOUNT', 'NODE_TASK_UNREADABLE', 'NODE_TASK_PROGRAM_GONE']);
 
 // The bridge codes waiting will not change (the client's FATAL set).
 const BRIDGE_HELP = {
@@ -89,7 +89,7 @@ const own = (table, key) => (typeof key === 'string' && Object.hasOwn(table, key
 // Required here, as in pane-model: the preload loads this module.
 function long(value) {
   const { shown } = require('../service/commands/io');
-  return shown(value, 800);
+  return shown(value, 1200);
 }
 
 const isCount = (n) => Number.isInteger(n) && n >= 0;
@@ -122,7 +122,8 @@ function setupFacts(status) {
     fresh: s.node.fresh === true,
     personal: s.node.personal === true || s.node.hosting === 'personal',
     task: s.node.task,
-    running: s.node.running === true
+    running: s.node.running === true,
+    programGone: Boolean(s.node.programGone)
   } : null;
   return {
     launch: s.launch || null,
@@ -164,7 +165,7 @@ function nextSetupStep(facts) {
   if (f.pendingPair) return 'pair';
   if (!f.paired) {
     const n = f.node;
-    return n && !n.fresh && n.personal && n.task === 'registered' ? 'pair' : 'install';
+    return n && !n.fresh && n.personal && n.task === 'registered' && !n.programGone ? 'pair' : 'install';
   }
   if (f.attached === false) return 'pair';
   // The phone step's first instruction stops the node, and its other commands are
@@ -206,6 +207,16 @@ function installAnswer(s) {
   return null;
 }
 
+// §6.8: the task is the owner's, and what it runs is gone (a checkout removed, an
+// app moved). Install registers it again.
+function programGoneBody(node) {
+  return {
+    lines: [`King Louie Node's logon task runs ${long(node.programGone)}, which is no longer there, so the node cannot start. Install registers the task again from this app. You see what it does before anything changes.`],
+    error: { code: 'NODE_TASK_PROGRAM_GONE', message: NODE_LINES.NODE_TASK_PROGRAM_GONE },
+    actions: [{ id: 'nodeInstallPreview', label: 'Install…' }]
+  };
+}
+
 function installStep(s, f) {
   const n = f.node;
   if (!n || (!n.fresh && !n.personal)) {
@@ -222,6 +233,7 @@ function installStep(s, f) {
   }
   const help = !n.fresh && own(TASK_HELP, n.task);
   if (help) return { lines: [help.help], error: { code: help.code, message: help.message }, actions: [CHECK_AGAIN] };
+  if (n.programGone) return installAnswer(s) || programGoneBody(s.node);
   return installAnswer(s) || {
     lines: [
       'King Louie now runs as King Louie Node, a background program on this computer that runs as you. This window is how you reach it.',
@@ -276,10 +288,11 @@ function startStep(s) {
       actions: [...(bridge.action ? [bridge.action] : []), CHECK_AGAIN, SERVICE_SETTINGS]
     };
   }
-  if (n && n.task === 'missing') {
+  if (n && (n.task === 'missing' || n.programGone)) {
     const answer = installAnswer(s);
     if (answer) return answer;
   }
+  if (n && n.programGone) return programGoneBody(n);
   const help = n && own(TASK_HELP, n.task);
   if (help) return { lines: [help.help], error: { code: help.code, message: help.message }, actions: [CHECK_AGAIN] };
   const row = n ? disconnectedRow(n, { install: { id: 'nodeInstallPreview', label: 'Install…' } }) : null;
@@ -426,7 +439,7 @@ function migrateStep(s, f) {
   if (plan && !plan.ok) return moveFailure(plan);
   if (plan) return planScreen(plan, s.profileDir, old);
   const custom = customRootRefusal(old, 'Check again', s.profileDir);
-  const found = `Your earlier King Louie is on this computer: ${counted(old.chats, 'chat')}, ${counted(old.messages, 'message')}, ${counted(old.cases, 'case')}${sizeOf(old.bytes) ? ` (${sizeOf(old.bytes)})` : ''}.`;
+  const found = `Your earlier King Louie is on this computer: ${counted(old.chats, 'chat')}, ${counted(old.messages, 'message')}, ${counted(old.cases, 'case')}${old.keysOrSettings ? ', and your keys and settings' : ''}${sizeOf(old.bytes) ? ` (${sizeOf(old.bytes)})` : ''}.`;
   if (custom) return { lines: [found], error: custom, actions: [CHECK_AGAIN] };
   return {
     lines: [found, 'It can move into King Louie Node. A backup is made first, you see what will move before anything does, and nothing is removed from this computer.'],
@@ -458,9 +471,11 @@ function movedLines(s, f) {
 
 function phoneCommands(s) {
   // A window-installed node's launcher, whole and quoted; `pair` and the rest are
-  // not on any PATH for that owner. A checkout install has the package's own name.
+  // not on any PATH for that owner. A checkout install's bin script, by the path its
+  // task runs when that was read, else from the checkout's own folder.
   const serviceCli = s.node && s.node.serviceCli;
-  const cli = serviceCli ? `"${long(serviceCli)}"` : 'king-louie-service';
+  const taskEntry = s.node && s.node.taskEntry;
+  const cli = serviceCli ? `"${long(serviceCli)}"` : (taskEntry ? `node "${long(taskEntry)}"` : 'node bin\\king-louie-service.js');
   const dataDir = (s.pairing && s.pairing.service && s.pairing.service.dataDir) || (s.node && s.node.dataDir) || null;
   const atDefault = s.node && s.node.defaultDataDir && sameDir(dataDir, s.node.defaultDataDir);
   const flag = dataDir && !atDefault ? ` --data-dir "${long(dataDir)}"` : '';
@@ -476,7 +491,7 @@ function phoneStep(s, f) {
   const n = s.node || null;
   const lines = [
     'A phone lets you approve what King Louie does while you are away from this window. It is optional, and this app runs nothing for it.',
-    'To set one up, open Command Prompt and stop the node first, since pairing refuses while it runs. Then run one of the two pair commands (wss for a relay, https for a front door, with your own address in place of the part in angle brackets), then enroll-device.',
+    `To set one up, open Command Prompt${s.node && (s.node.serviceCli || s.node.taskEntry) ? '' : ' in the folder King Louie Node was installed from'} and stop the node first, since pairing refuses while it runs. Then run one of the two pair commands (wss for a relay, https for a front door, with your own address in place of the part in angle brackets), then enroll-device.`,
     'If you use a Telegram or Discord bot with King Louie: with no phone enrolled it still answers, but anything needing a phone\'s approval is refused.'
   ];
   const enrolled = list(s.approvals && s.approvals.devices).some((d) => d && d.active);
@@ -532,6 +547,12 @@ function describeSetup(status) {
   const lines = [...list(body.lines)];
   if (['provider', 'profile', 'phone', 'done'].includes(step)) lines.push(...movedLines(s, f));
   const actions = [...list(body.actions)];
+  // What moved starts with the node, and a restart is the owner's press. It waits on
+  // the marker, so it is here until he answers, and in the banner once setup is done.
+  if (f.migration && f.migration.restartDue === true && f.connected && ['provider', 'profile', 'phone', 'done'].includes(step)) {
+    lines.push(RESTART_DUE_LINE);
+    actions.unshift(...RESTART_DUE_ACTIONS.map((a) => ({ ...a })));
+  }
   // A restart that failed after the move: the move stands, and what moved is not up
   // until the node starts, so the screen that says so has the press.
   if (s.setupError && s.setupError.offerRestart && !actions.some((a) => a.id === 'nodeRestart' || a.id === 'nodeStart')) actions.unshift({ ...RESTART_NODE });

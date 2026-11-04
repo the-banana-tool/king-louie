@@ -9,7 +9,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createPersonalNodeRunner } = require('../src/desktop-bridge/personal-node');
+const { createPersonalNodeRunner, parseTaskXml } = require('../src/desktop-bridge/personal-node');
 
 const ME = 'S-1-5-21-1000-2000-3000-1001';
 const OTHER = 'S-1-5-21-1000-2000-3000-1002';
@@ -307,6 +307,48 @@ function exits(code, stdout = '', stderr = '') {
   };
 }
 
+describe('what the task runs (attach stage 2 §6.8; read, never run)', () => {
+  const xml = ({ node = 'C:\\Program Files\\nodejs\\node.exe', entry = 'C:\\work\\k\\bin\\king-louie-service.js', dir = 'C:\\Users\\owner\\node\\data', prefix = '' } = {}) => `<Task><Principals><Principal id="Author"><UserId>${ME}</UserId></Principal></Principals><Settings></Settings><Actions Context="Author"><Exec><Command>C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe</Command><Arguments>-WindowStyle Hidden -NoProfile -NonInteractive -Command ${prefix}&amp; '${node}' '${entry}' run --data-dir '${dir}'</Arguments></Exec></Actions></Task>`;
+  const missing = (...files) => async (file) => { if (files.includes(file)) throw Object.assign(new Error('gone'), { code: 'ENOENT' }); return {}; };
+  const runnerOver = (stdout, extra) => createPersonalNodeRunner({ platform: 'win32', env: ENV, execFile: fakeExecFile(() => ({ stdout })), execPath: 'C:\\Programs\\King Louie\\King Louie.exe', ...extra });
+
+  it('reads the program and the entry out of the PowerShell call', () => {
+    const task = parseTaskXml(xml({ dir: "C:\\o'brien\\data" }).replace(/o'brien/, "o''brien"));
+    assert.strictEqual(task.program, 'C:\\Program Files\\nodejs\\node.exe');
+    assert.strictEqual(task.entry, 'C:\\work\\k\\bin\\king-louie-service.js');
+    assert.strictEqual(task.dataDir, "C:\\o'brien\\data");
+  });
+
+  it('a removed checkout: node.exe stands, the entry is gone, and that is said', async () => {
+    const entry = 'C:\\work\\k\\bin\\king-louie-service.js';
+    const out = await runnerOver(xml(), { statFile: missing(entry) }).queryTask({ me: ME });
+    assert.strictEqual(out.state, 'registered');
+    assert.strictEqual(out.gone, entry);
+    assert.strictEqual(out.runs, 'folder');
+  });
+
+  it('an app moved: the program is gone', async () => {
+    const app = 'C:\\Programs\\King Louie\\King Louie.exe';
+    const out = await runnerOver(xml({ node: app, prefix: "$env:ELECTRON_RUN_AS_NODE='1'; " }), { execPath: app, statFile: missing(app) }).queryTask({ me: ME });
+    assert.strictEqual(out.gone, app);
+    assert.strictEqual(out.runs, 'app');
+  });
+
+  it('only ENOENT is gone: a path inside the asar reads ENOTDIR to plain Node, and an unreadable one is not gone', async () => {
+    for (const code of ['ENOTDIR', 'EACCES']) {
+      const out = await runnerOver(xml(), { statFile: async () => { throw Object.assign(new Error('x'), { code }); } }).queryTask({ me: ME });
+      assert.ok(!('gone' in out), code);
+    }
+  });
+
+  it('another account\'s task is not read further', async () => {
+    let stats = 0;
+    const out = await runnerOver(xml().replace(ME, 'S-1-5-21-9-9-9-9'), { statFile: async () => { stats += 1; return {}; } }).queryTask({ me: ME });
+    assert.strictEqual(out.state, 'other-account');
+    assert.strictEqual(stats, 0);
+  });
+});
+
 describe('queryTask (C-10: the task XML, never the localised text)', () => {
   const runner = (answer, extra = {}) => {
     const execFile = fakeExecFile(answer);
@@ -315,7 +357,7 @@ describe('queryTask (C-10: the task XML, never the localised text)', () => {
 
   it('queries the one task as XML, by schtasks\'s absolute path, with no shell', async () => {
     const { execFile, r } = runner(() => ({ stdout: fixture('enabled') }));
-    assert.deepStrictEqual(await r.queryTask({ me: ME }), { state: 'registered' });
+    assert.strictEqual((await r.queryTask({ me: ME })).state, 'registered');
     assert.strictEqual(execFile.calls.length, 1);
     assert.strictEqual(execFile.calls[0].file, SCHTASKS);
     assert.deepStrictEqual(execFile.calls[0].args, ['/Query', '/TN', 'KingLouie Node', '/XML', 'ONE']);
@@ -324,7 +366,7 @@ describe('queryTask (C-10: the task XML, never the localised text)', () => {
 
   it('reads <Settings><Enabled>false</Enabled> as disabled', async () => {
     const { r } = runner(() => ({ stdout: fixture('disabled') }));
-    assert.deepStrictEqual(await r.queryTask({ me: ME }), { state: 'disabled' });
+    assert.strictEqual((await r.queryTask({ me: ME })).state, 'disabled');
   });
 
   it('refuses another account\'s task, whatever its state', async () => {
@@ -335,7 +377,7 @@ describe('queryTask (C-10: the task XML, never the localised text)', () => {
   it('reads UTF-16 output too', async () => {
     const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(fixture('enabled'), 'utf16le')]);
     const { r } = runner(() => ({ stdout: utf16 }));
-    assert.deepStrictEqual(await r.queryTask({ me: ME }), { state: 'registered' });
+    assert.strictEqual((await r.queryTask({ me: ME })).state, 'registered');
   });
 
   it('says missing on a non-zero exit, unknown when schtasks could not run or the XML says nothing', async () => {
@@ -353,9 +395,9 @@ describe('queryTask (C-10: the task XML, never the localised text)', () => {
     const r = createPersonalNodeRunner({ platform: 'win32', env: ENV, execFile, bridgeFile: file, inspectOwners: recording([mine, null, mine, mine]), whoAmI: async () => null });
     assert.deepStrictEqual(await r.queryTask(), { state: 'unknown' });
     await r.detectPersonalNode();
-    assert.deepStrictEqual(await r.queryTask(), { state: 'registered' });
+    assert.strictEqual((await r.queryTask()).state, 'registered');
     const viaWhoAmI = createPersonalNodeRunner({ platform: 'win32', env: ENV, execFile, whoAmI: async () => ME });
-    assert.deepStrictEqual(await viaWhoAmI.queryTask(), { state: 'registered' });
+    assert.strictEqual((await viaWhoAmI.queryTask()).state, 'registered');
   });
 
   it('is unknown off Windows, and runs nothing', async () => {

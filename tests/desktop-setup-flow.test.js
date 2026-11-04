@@ -683,10 +683,40 @@ describe('describeSetup: provider, profile, phone, done', () => {
     const m = describeSetup(attachedUp({ userProfileDefault: false }));
     assert.strictEqual(m.step, 'phone');
     assert.deepStrictEqual(m.actions, [{ id: 'skip', label: 'Skip' }]);
-    assert.match(m.pre, /king-louie-service stop/);
-    assert.match(m.pre, /king-louie-service pair wss:\/\/<relay>/);
-    assert.match(m.pre, /king-louie-service pair https:\/\/mcp\.<domain>/);
-    assert.match(m.pre, /king-louie-service enroll-device/);
+    assert.match(m.pre, /^node bin\\king-louie-service\.js stop/m);
+    assert.match(m.pre, /^node bin\\king-louie-service\.js pair wss:\/\/<relay>/m);
+    assert.match(m.pre, /^node bin\\king-louie-service\.js pair https:\/\/mcp\.<domain>/m);
+    assert.match(m.pre, /^node bin\\king-louie-service\.js enroll-device/m);
+    assert.match(m.lines.join(' '), /in the folder King Louie Node was installed from/);
+    assert.doesNotMatch(m.pre, /^king-louie-service/m, 'that name is on no PATH');
+  });
+
+  it('phone: a checkout install whose task was read names its script in full', () => {
+    const entry = 'C:\\work\\my checkout\\bin\\king-louie-service.js';
+    const m = describeSetup(attachedUp({ userProfileDefault: false, node: { ...NODE, taskEntry: entry, defaultDataDir: NODE.dataDir } }));
+    assert.strictEqual(m.pre.split('\n')[0], `node "${entry}" stop`);
+    assert.doesNotMatch(m.lines.join(' '), /installed from/);
+  });
+
+  it('a restart the move left owed is a press with Later, on the steps after the move', () => {
+    const migration = { at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\b', restartDue: true };
+    const m = describeSetup(attachedUp({ userProfileDefault: false, migration }));
+    assert.deepStrictEqual(m.actions.slice(0, 2), [{ id: 'nodeRestart', label: 'Restart King Louie Node now' }, { id: 'restartLater', label: 'Later' }]);
+    const none = describeSetup(attachedUp({ userProfileDefault: false, migration: { ...migration, restartDue: undefined } }));
+    assert.ok(!none.actions.some((a) => a.id === 'restartLater'));
+  });
+
+  it('a task whose program is gone goes to install, unpaired, with the words and the press', () => {
+    const m = describeSetup(base({ launch: { host: 'attached', why: 'needs-node', degraded: false }, node: { ...NODE, personal: true, programGone: 'C:\\gone\\node.exe' } }));
+    assert.strictEqual(m.step, 'install');
+    assert.ok(m.lines.join(' ').includes('C:\\gone\\node.exe'));
+    assert.deepStrictEqual(m.actions.map((a) => a.id).filter((id) => id !== 'setupLater'), ['nodeInstallPreview']);
+    assert.strictEqual(m.error.code, 'NODE_TASK_PROGRAM_GONE');
+  });
+
+  it('a profile found for its keys and settings says so', () => {
+    const m = describeSetup(attachedUp({ oldProfile: { ...OLD, chats: 0, messages: 0, cases: 0, keysOrSettings: true } }));
+    assert.match(m.lines[0], /and your keys and settings/);
   });
 
   it('phone: the launcher the install wrote, in full and quoted; with none, the plain name', () => {

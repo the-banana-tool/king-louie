@@ -304,6 +304,7 @@ const dom = {
   skillsStatus: document.getElementById('skills-status'),
   skillInstallUrl: document.getElementById('skill-install-url'),
   skillInstallBtn: document.getElementById('skill-install-btn'),
+  skillsCheckUpdatesBtn: document.getElementById('skills-check-updates-btn'),
   skillInstallStatus: document.getElementById('skill-install-status'),
   settingsNavSelect: document.getElementById('settings-nav-select'),
   defaultAgentMode: document.getElementById('default-agent-mode'),
@@ -12012,6 +12013,22 @@ if (dom.skillsList) {
   });
 }
 
+// The fetch from each skill's remote, on this press only; loading the pane compares
+// with what the last one found.
+if (dom.skillsCheckUpdatesBtn) {
+  dom.skillsCheckUpdatesBtn.addEventListener('click', async () => {
+    dom.skillsCheckUpdatesBtn.disabled = true;
+    try {
+      await window.electron.skill.checkUpdates({ fetch: true });
+      await loadSkillSettingsTabs();
+    } catch (err) {
+      if (dom.skillsStatus) dom.skillsStatus.textContent = `Could not check for updates: ${err.message}`;
+    } finally {
+      dom.skillsCheckUpdatesBtn.disabled = false;
+    }
+  });
+}
+
 if (dom.skillInstallBtn) {
   dom.skillInstallBtn.addEventListener('click', () => installSkill());
 }
@@ -14676,6 +14693,7 @@ function attachedBannerAction(id) {
   if (id === 'standaloneOnce') return desktop.standaloneOnce();
   if (id === 'nodeStart') return desktop.nodeStart({ restart: false });
   if (id === 'nodeRestart') return desktop.nodeStart({ restart: true });
+  if (id === 'restartLater') return desktop.restartLater();
   if (id === 'openServiceSettings') {
     document.getElementById('open-settings-btn')?.click();
     switchSettingsTab('service');
@@ -14910,6 +14928,7 @@ function pressSetupAction(id) {
     attach: () => desktop.attach(),
     nodeStart: () => desktop.nodeStart({ restart: false }),
     nodeRestart: () => desktop.nodeRestart(),
+    restartLater: () => desktop.restartLater(),
     nodeInstallPreview: () => desktop.nodeInstallPreview(),
     nodeInstall: () => desktop.nodeInstall({ confirmed: true }),
     pairStart: () => desktop.pairStart(),
@@ -15010,15 +15029,27 @@ document.getElementById('setup-form')?.addEventListener('submit', (event) => {
   if (setupView.formStep) saveSetupForm(setupView.formStep);
 });
 
+let serviceStatusRead = false;
 async function refreshServiceStatus() {
   const status = await window.electron.desktop.status().catch((err) => {
     serviceLog.warn('fetching desktop status failed', { error: err && err.message });
     return null;
   });
   if (!status || status.ok === false) {
+    // Nothing known about this window yet: a screen that says so and offers Check
+    // again, not a shell with no message. Past the first good read, the chat stays.
+    if (!serviceStatusRead) {
+      try {
+        await drawSetupAnswer({ ok: false, error: status && status.error }, {}, ++setupView.generation);
+      } finally {
+        revealShell();
+      }
+      return;
+    }
     revealShell();
     return;
   }
+  serviceStatusRead = true;
   markUnavailableTabs(status.unavailableTabs || []);
   renderAttachedBanner(status);
   await refreshSetupView(status);

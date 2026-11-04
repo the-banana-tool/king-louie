@@ -196,7 +196,7 @@ describe('desktop:* handlers', () => {
       'desktop:attach', 'desktop:detach', 'desktop:dismissServiceCommand', 'desktop:importApply', 'desktop:importPlan',
       'desktop:migrationApply', 'desktop:migrationPlan',
       'desktop:nodeInstall', 'desktop:nodeInstallPreview', 'desktop:nodeRestart', 'desktop:nodeStart',
-      'desktop:pairCancel', 'desktop:pairConfirm', 'desktop:pairRestartConfirm', 'desktop:pairStart', 'desktop:retry',
+      'desktop:pairCancel', 'desktop:pairConfirm', 'desktop:pairRestartConfirm', 'desktop:pairStart', 'desktop:restartLater', 'desktop:retry',
       'desktop:setupFinish', 'desktop:setupLater', 'desktop:setupStep',
       'desktop:standaloneOnce', 'desktop:status', 'desktop:unpair'
     ]);
@@ -213,7 +213,8 @@ describe('desktop:* handlers', () => {
       DESKTOP_SETUP_STEP: ['desktop:setupStep', 'setupStep'],
       DESKTOP_SETUP_LATER: ['desktop:setupLater', 'setupLater'],
       DESKTOP_SETUP_FINISH: ['desktop:setupFinish', 'setupFinish'],
-      DESKTOP_NODE_RESTART: ['desktop:nodeRestart', 'nodeRestart']
+      DESKTOP_NODE_RESTART: ['desktop:nodeRestart', 'nodeRestart'],
+      DESKTOP_RESTART_LATER: ['desktop:restartLater', 'restartLater']
     };
     const inv = listIpcChannels();
     const served = servedChannels(inv).handle;

@@ -66,13 +66,15 @@ describe('preload → window.electron bridge resilience', () => {
     await api.desktop.setupFinish({ skip: 'phone' });
     await api.desktop.setupFinish({ skip: { evil: true } });
     await api.desktop.nodeRestart();
+    await api.desktop.restartLater();
     assert.deepStrictEqual(JSON.parse(JSON.stringify(invoked)), [
       ['desktop:setupStep'],
       ['desktop:setupLater'],
       ['desktop:setupFinish', {}],
       ['desktop:setupFinish', { skip: 'phone' }],
       ['desktop:setupFinish', {}],
-      ['desktop:nodeRestart']
+      ['desktop:nodeRestart'],
+      ['desktop:restartLater']
     ]);
   });
 
