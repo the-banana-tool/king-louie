@@ -18,8 +18,6 @@ const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 // The six of R-SP-4. A new type a node and a phone exchange content in joins
 // this list and SEAL_SPLIT together.
 const CONTENT_TYPES = ['kl.approval.request', 'kl.lease.request', 'kl.lease.status', 'kl.lease.view', 'kl.question.ask', 'kl.question.answer'];
-// The types whose sealed shape a later task's validator takes.
-const NOT_YET = {};
 
 const node = testNodeIdentity({ box: true });
 const phone = createFakePhone({ boxKey: true });
@@ -69,10 +67,8 @@ describe('sealed types', () => {
     assert.deepEqual(Object.keys(SEAL_SPLIT).sort(), [...CONTENT_TYPES].sort());
   });
 
-  // A type a later task owns stays a todo until that task's validator takes it:
-  // node:test runs it and does not fail the suite. The task removes its NOT_YET line.
   for (const type of Object.keys(SEAL_SPLIT)) {
-    it(`${type} has a validator that takes its sealed shape`, NOT_YET[type] ? { todo: NOT_YET[type] } : {}, () => {
+    it(`${type} has a validator that takes its sealed shape`, () => {
       assert.equal(validateMessage(type, sealedForm(type)), null);
     });
   }

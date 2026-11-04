@@ -373,10 +373,11 @@ describe('an unanswered forward is never sent again', () => {
   });
 
   it('get_task and cancel_task on a timeout talk of tasks, never of jobs', async () => {
-    const t = await setup({ timeoutMs: 20 });
+    // A margin of seconds between the router's limit and the node's answer: a Windows runner can stall that long.
+    const t = await setup({ timeoutMs: 200 });
     const node = t.byName['node-a'];
     const id = `node-a:${seedTask(node).task_id}`;
-    t.hub.slowMs.set(node.nodeId, 100);
+    t.hub.slowMs.set(node.nodeId, 3000);
     const read = await t.call('get_task', { task_id: id });
     assert.equal(read.error.code, 'node_timeout');
     assert.ok(!/job/i.test(read.error.message), read.error.message);
