@@ -89,6 +89,24 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
       }, signWith === 'read' ? readSigner : signer);
     },
 
+    // kl.device.box_key (sealed phones, R-SP-10): this phone's statement of a
+    // box key (`boxKey` defaults to a fresh one), signed with the device key
+    // (`signWith: 'read'` signs it with the read key, for refusal tests).
+    boxKeyStatement({ now = Date.now(), ttlMs = 7 * 24 * 60 * 60 * 1000, nonce = null, boxKey = null, signWith = 'device', overrides = {} } = {}) {
+      const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+      const { kty, crv, x, y } = pair.publicKey.export({ format: 'jwk' });
+      return seal({
+        v: 1,
+        type: 'kl.device.box_key',
+        device_id: deviceId,
+        box_key: boxKey || { kty, crv, x, y },
+        created_at: iso(now),
+        expires_at: iso(now + ttlMs),
+        nonce: nonce || randomNonce(),
+        ...overrides
+      }, signWith === 'read' ? readSigner : signer);
+    },
+
     // `readKey: true` adds this phone's read key to the record (android-slim
     // spec §8.2); without it the record is as before the read key.
     approverRecord({ enrolledBy = 'console', enrolledAt = '2026-09-23T18:00:00.000Z', revokedAt = null, revokedBy = null, enrollment = null, readKey = false } = {}) {

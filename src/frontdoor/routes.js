@@ -27,6 +27,8 @@ const ENROLL_STATES = ['staged', 'rejected'];
 // `duplicate`: it is staged, waiting for `device apply`); anything else (an older node with no such method, no answer) is
 // `offline`, which the app re-sends to. None changes the device's state here.
 const READ_KEY_STATES = ['read-key-pending-apply', 'applied', 'duplicate', 'rejected'];
+// The same for device.box_key (sealed phones, R-SP-10). The relay keeps no box key.
+const BOX_KEY_STATES = ['box-key-pending-apply', 'applied', 'duplicate', 'rejected'];
 
 function parseEnvelope(body, type) {
   let message;
@@ -347,6 +349,35 @@ function registerPhoneRoutes(relay) {
         try {
           const result = await nodeHub.rpc(nodeId, 'device.read_key', { envelope: ctx.body });
           if (result && READ_KEY_STATES.includes(result.state)) state = result.state;
+        } catch {
+          state = 'offline';
+        }
+        nodes.push({ node_id: nodeId, state });
+      }
+      return { body: { nodes } };
+    }
+  });
+
+  // A phone states its box key (sealed phones, R-SP-10), signed with its
+  // device key. The relay stores nothing: it forwards the statement to every
+  // node where the device is active, and each node stages it for `device apply`.
+  phoneApi.registerRoute('POST', '/v1/devices/box-key', {
+    auth: 'read',
+    handler: async (req, ctx) => {
+      const message = parseEnvelope(ctx.body, 'kl.device.box_key');
+      if (message.device_id !== ctx.deviceId || ctx.body.kid !== ctx.deviceId || !verifyEs256(ctx.body, ctx.device.jwk)) {
+        throw new ApiError(400, 'bad_box_key', "the statement must be the calling device's, signed with its device key");
+      }
+      const t = now();
+      if (Date.parse(message.created_at) - t > FUTURE_SKEW_MS) throw new ApiError(400, 'from_the_future', 'created_at is in the future');
+      if (Date.parse(message.expires_at) <= t) throw new ApiError(400, 'expired', 'the statement has expired');
+      const nodeIds = requireActive(ctx);
+      const nodes = [];
+      for (const nodeId of nodeIds) {
+        let state = 'offline';
+        try {
+          const result = await nodeHub.rpc(nodeId, 'device.box_key', { envelope: ctx.body });
+          if (result && BOX_KEY_STATES.includes(result.state)) state = result.state;
         } catch {
           state = 'offline';
         }

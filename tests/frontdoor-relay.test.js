@@ -881,6 +881,56 @@ describe('relay: the read key', () => {
     assert.deepEqual(byNode, { [applied.identity.nodeId]: 'applied', [odd.identity.nodeId]: 'offline' });
   });
 
+  it('POST /v1/devices/box-key: forwarded to every active node, each state reported, nothing stored', async () => {
+    const boxed = await linkNode('bk-new', { 'device.box_key': (params) => { received.push(params.envelope); return { state: 'box-key-pending-apply' }; } });
+    const dup = await linkNode('bk-dup', { 'device.box_key': () => ({ state: 'duplicate' }) });
+    const odd = await linkNode('bk-odd', { 'device.box_key': () => ({ state: 'set-somehow' }) });
+    const phone = createFakePhone({ name: 'Boxed phone' });
+    active(phone, quiet, boxed, dup, odd);
+    r.devices.setReadKey(phone.deviceId, phone.readJwk, new Date().toISOString());
+    const before = JSON.stringify(r.devices.get(phone.deviceId));
+    const statement = phone.boxKeyStatement();
+    const sent = received.length;
+    const res = await call(phone, 'POST', '/v1/devices/box-key', statement, { key: 'read' });
+    assert.equal(res.status, 200);
+    const byNode = Object.fromEntries(res.body.nodes.map((n) => [n.node_id, n.state]));
+    assert.deepEqual(byNode, {
+      [quiet.identity.nodeId]: 'offline',
+      [boxed.identity.nodeId]: 'box-key-pending-apply',
+      [dup.identity.nodeId]: 'duplicate',
+      [odd.identity.nodeId]: 'offline'
+    });
+    assert.equal(received.length, sent + 1);
+    assert.deepEqual(received.at(-1), statement, 'the node gets the signed statement unchanged');
+    assert.equal(JSON.stringify(r.devices.get(phone.deviceId)), before, 'the relay stores nothing');
+    assert.equal(JSON.stringify(r.devices.get(phone.deviceId)).includes('box'), false);
+    const list = await call(phone, 'GET', '/v1/devices', undefined, { key: 'read' });
+    assert.equal(JSON.stringify(list.body).includes('box'), false, 'GET /v1/devices echoes no box key');
+  });
+
+  it("box-key refuses a read-key-signed statement, another device's, an expired or future one, a wrong type, and an inactive device", async () => {
+    const phone = createFakePhone({ name: 'Box checked' });
+    const stranger = createFakePhone({ name: 'Box stranger' });
+    active(phone, modern);
+    active(stranger, modern);
+    const sent = received.length;
+    const wrongSigner = await call(phone, 'POST', '/v1/devices/box-key', phone.boxKeyStatement({ signWith: 'read' }));
+    assert.deepEqual([wrongSigner.status, wrongSigner.body.error], [400, 'bad_box_key']);
+    const notCaller = await call(stranger, 'POST', '/v1/devices/box-key', phone.boxKeyStatement());
+    assert.deepEqual([notCaller.status, notCaller.body.error], [400, 'bad_box_key']);
+    const t = Date.now();
+    assert.equal((await call(phone, 'POST', '/v1/devices/box-key', phone.boxKeyStatement({ now: t - 8 * DAY_MS, ttlMs: DAY_MS }))).body.error, 'expired');
+    assert.equal((await call(phone, 'POST', '/v1/devices/box-key', phone.boxKeyStatement({ now: t + 10 * 60000 }))).body.error, 'from_the_future');
+    assert.equal((await call(phone, 'POST', '/v1/devices/box-key', phone.readKeyStatement())).body.error, 'malformed');
+
+    const idle = createFakePhone({ name: 'Box nowhere' });
+    active(idle, modern);
+    r.devices.setNodeState(idle.deviceId, modern.identity.nodeId, 'revoked');
+    const inactive = await call(idle, 'POST', '/v1/devices/box-key', idle.boxKeyStatement());
+    assert.deepEqual([inactive.status, inactive.body.error], [403, 'forbidden']);
+    assert.equal(received.length, sent, 'nothing refused reached a node');
+  });
+
   it('a read-signed request reaches a read route and is refused on a device route', async () => {
     const phone = createFakePhone({ name: 'Reader' });
     active(phone, modern);

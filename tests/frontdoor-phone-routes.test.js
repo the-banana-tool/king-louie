@@ -544,6 +544,7 @@ const ROUTE_AUTH = Object.freeze([
   ['POST', '/v1/devices/enroll', 'read'],
   ['POST', '/v1/devices/revoke', 'read'],
   ['POST', '/v1/devices/read-key', 'read'],
+  ['POST', '/v1/devices/box-key', 'read'],
   ['GET', '/v1/grants/pending', 'device'],
   ['POST', '/v1/alerts/{id}/ack', 'device'],
   ['POST', '/v1/pairing-codes', 'device'],
