@@ -1060,8 +1060,8 @@ class FakeAttachedClient extends EventEmitter {
 
 const personalPairing = () => pairedRecord({ service: { nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), port: 18796, hosting: 'personal', dataDir: PERSONAL_DATA_DIR, name: 'laptop-01' } });
 
-function attachedController({ runner, client = new FakeAttachedClient(), pairingRecord = personalPairing(), timers = fakeTimers() } = {}) {
-  const made = controllerFor({ mode: 'attached', extra: { nodeRunner: runner, ...timers.extra } });
+function attachedController({ runner, client = new FakeAttachedClient(), pairingRecord = personalPairing(), timers = fakeTimers(), extra = {} } = {}) {
+  const made = controllerFor({ mode: 'attached', extra: { nodeRunner: runner, ...timers.extra, ...extra } });
   made.state.setPairing(pairingRecord);
   made.controller.setClient(client);
   return { ...made, client, timers };
@@ -1538,6 +1538,93 @@ describe('desktop controller: Install from the pane (§8)', () => {
     assert.strictEqual(out.code, 'NOT_PERSONAL');
     assert.deepStrictEqual(out.lines, []);
     assert.ok(!runner.calls.some(([c]) => c === 'runCli'));
+    controller.dispose();
+  });
+});
+
+// --- The node's hosting and the version gap (spec 2026-11-03 §6.8, §8, C-12).
+
+describe('desktop controller: hosting and the version gap', () => {
+  const fleetPairing = () => pairedRecord();
+  function connectedTo(service, { pairingRecord = personalPairing(), extra = { appVersion: '1.0.1' } } = {}) {
+    const client = new FakeAttachedClient();
+    const made = attachedController({ runner: fakeRunner({ running: true }), client, pairingRecord, extra });
+    client.connected = true;
+    client.service = service;
+    client.emit('state', { status: 'connected', code: null, error: null, service, nextRetryAt: null });
+    return made;
+  }
+
+  it('a personal node on another version: versionMismatch names both', async () => {
+    const { controller } = connectedTo({ version: '1.0.0', hosting: 'personal' });
+    const status = await controller.status();
+    assert.strictEqual(status.view, 'attached-connected');
+    assert.strictEqual(status.service.hosting, 'personal');
+    assert.deepStrictEqual(status.versionMismatch, { node: '1.0.0', app: '1.0.1' });
+    controller.dispose();
+  });
+
+  it('a fleet service with the same difference: null', async () => {
+    const { controller } = connectedTo({ version: '1.0.0', hosting: 'service' }, { pairingRecord: fleetPairing() });
+    const status = await controller.status();
+    assert.strictEqual(status.service.hosting, 'service');
+    assert.strictEqual(status.versionMismatch, null);
+    controller.dispose();
+  });
+
+  it('a personal node on the same version: null', async () => {
+    const { controller } = connectedTo({ version: '1.0.1', hosting: 'personal' });
+    assert.strictEqual((await controller.status()).versionMismatch, null);
+    controller.dispose();
+  });
+
+  it('a node from before the field: hosting comes from the pairing record, so an older personal node still shows the gap', async () => {
+    const { controller } = connectedTo({ version: '1.0.0' });
+    const status = await controller.status();
+    assert.strictEqual(status.service.hosting, 'personal');
+    assert.deepStrictEqual(status.versionMismatch, { node: '1.0.0', app: '1.0.1' });
+    controller.dispose();
+  });
+
+  it('a fleet node from before the field reads as service', async () => {
+    const { controller } = connectedTo({ version: '1.0.0' }, { pairingRecord: fleetPairing() });
+    const status = await controller.status();
+    assert.strictEqual(status.service.hosting, 'service');
+    assert.strictEqual(status.versionMismatch, null);
+    controller.dispose();
+  });
+
+  it('never connected this launch: hosting from the record, and the version seen at pairing is no gap', async () => {
+    const record = personalPairing();
+    record.service.info = { version: '1.0.0', account: 'owner' };
+    const { controller } = attachedController({ runner: fakeRunner({ running: true }), pairingRecord: record, extra: { appVersion: '1.0.1' } });
+    const status = await controller.status();
+    assert.strictEqual(status.service.account, 'owner');
+    assert.strictEqual(status.service.hosting, 'personal');
+    assert.strictEqual(status.versionMismatch, null);
+    controller.dispose();
+  });
+
+  it('no version on either side is no gap', async () => {
+    const noNode = connectedTo({ version: null, hosting: 'personal' });
+    assert.strictEqual((await noNode.controller.status()).versionMismatch, null);
+    noNode.controller.dispose();
+    const noApp = connectedTo({ version: '1.0.0', hosting: 'personal' }, { extra: { appVersion: null } });
+    assert.strictEqual((await noApp.controller.status()).versionMismatch, null);
+    noApp.controller.dispose();
+  });
+
+  it('appVersion defaults to the app\'s own', async () => {
+    const { controller } = connectedTo({ version: '1.0.0', hosting: 'personal' }, { extra: { app: { ...fakeApp(), getVersion: () => '2.0.0' } } });
+    assert.deepStrictEqual((await controller.status()).versionMismatch, { node: '1.0.0', app: '2.0.0' });
+    controller.dispose();
+  });
+
+  it('with no pairing and no client the service stays null', async () => {
+    const { controller } = controllerFor({ readBridgeFile: () => ({ ok: false, code: 'BRIDGE_FILE_MISSING', error: 'none' }), extra: { appVersion: '1.0.1' } });
+    const status = await controller.status();
+    assert.strictEqual(status.service, null);
+    assert.strictEqual(status.versionMismatch, null);
     controller.dispose();
   });
 });

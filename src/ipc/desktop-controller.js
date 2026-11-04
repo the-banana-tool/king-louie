@@ -99,6 +99,8 @@ function createDesktopController({
   now = () => new Date(), username = null,
   // resolveLaunchMode's answer (spec 2026-11-03 §6.1), for desktop:status.
   launch = { host: mode, why: mode === 'attached' ? 'attached' : 'dev', degraded: false },
+  // What a personal node's version is compared with (spec 2026-11-03 §6.8).
+  appVersion = app && typeof app.getVersion === 'function' ? app.getVersion() : null,
   // The personal node (spec 2026-10-28): the runner that reads and starts it,
   // and the clock and timers of the §7.3 wait (tests inject a fake clock).
   nodeRunner = platform === 'win32' ? createPersonalNodeRunner({ env, platform }) : null,
@@ -346,6 +348,11 @@ function createDesktopController({
       bridge = r.ok ? { ok: true } : { ok: false, code: r.code || null, error: r.error || null };
     }
     const liveService = client && client.service ? client.service : null;
+    const record = pairing && pairing.service;
+    const summary = liveService || (record && record.info) || null;
+    // A node from before `hosting` says nothing: a personal pairing's record
+    // always does, so no word anywhere is a fleet service.
+    const service = summary ? { ...summary, hosting: summary.hosting || (record && record.hosting) || 'service' } : null;
     return {
       ok: true,
       mode,
@@ -375,7 +382,8 @@ function createDesktopController({
         error: foundError
       }) : null,
       node,
-      service: liveService || (pairing && pairing.service && pairing.service.info) || null,
+      service,
+      versionMismatch: versionGap(service, liveService),
       connection: current === 'attached-starting' ? { ...connection, status: 'starting' } : { ...connection },
       approvals,
       lastImport: state.lastImport,
@@ -383,6 +391,16 @@ function createDesktopController({
       detachWarning: DETACH_WARNING,
       pendingServiceCommand: state.pendingServiceCommand
     };
+  }
+
+  // §6.8, C-12: only a node this launch has heard from. The version in the
+  // pairing record is the one it had when paired, and a personal node may have
+  // been updated since. The fleet updates its own service: no gap to show.
+  function versionGap(service, liveService) {
+    if (!liveService || service.hosting !== 'personal') return null;
+    const node = liveService.version;
+    if (!node || !appVersion || node === appVersion) return null;
+    return { node, app: appVersion };
   }
 
   // The unpaired view's node: what the inspector said, plus the task and

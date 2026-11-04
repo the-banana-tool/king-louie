@@ -36,7 +36,7 @@ class DesktopBridgeServer extends EventEmitter {
   constructor({
     core = null, identity, cipher = null, configDir, dataDir = null,
     port = DEFAULT_DESKTOP_BRIDGE_PORT, host = '127.0.0.1', version = null,
-    geteuid = defaultGeteuid, adminUid = 0, approvals = null, profile = 'agent',
+    geteuid = defaultGeteuid, adminUid = 0, approvals = null, profile = 'agent', hosting = 'service',
     account = currentAccount(), createDispatcher = null, limits = {}, now = Date.now
   } = {}) {
     super();
@@ -51,6 +51,7 @@ class DesktopBridgeServer extends EventEmitter {
     this.geteuid = geteuid;
     this.adminUid = adminUid;
     this.profile = profile;
+    this.hosting = hosting;
     this.account = account;
     this.now = now;
     this.limits = { ...LIMITS, ...limits };
@@ -97,6 +98,7 @@ class DesktopBridgeServer extends EventEmitter {
       nodeName: this.identity.nodeName || null,
       account: this.account,
       profile: this.profile,
+      hosting: this.hosting,
       providersConfigured: Boolean(this.dispatcher.providersConfigured()),
       channels: [...served.handle, ...served.on]
     };
