@@ -19,21 +19,32 @@ protocol.registerSchemesAsPrivileged([
 const userDataArg = process.argv.find((a) => a.startsWith('--user-data-dir='));
 if (userDataArg) app.setPath('userData', path.resolve(userDataArg.slice('--user-data-dir='.length)));
 
+// One desktop per profile: a second launch on this userData focuses the first
+// window and stops here, before it reads the profile or acts on its arguments.
+const { claimSingleInstance } = require('./src/ipc/single-instance');
+let mainWindow = null;
+const getWindow = () => mainWindow;
+if (!claimSingleInstance({ app, getWindow })) {
+  require('./src/logging').createLogger('main').info('King Louie is already running on this profile; its window was brought forward, and this launch stops here.');
+  app.exit(0);
+  return;
+}
+
 const { createLogger } = require('./src/logging');
 const { openDesktopState } = require('./src/ipc/desktop-state');
 const { startStandaloneHost } = require('./src/ipc/standalone-host');
 const { startAttachedHost } = require('./src/ipc/attached-host');
+const { resolveLaunchMode } = require('./src/desktop-bridge/launch-mode');
 
 const log = createLogger('main');
 
-let mainWindow = null;
-const getWindow = () => mainWindow;
-
-// Attached or standalone is decided here, before any core exists (fleet stage 7 §3.7).
+// Attached or standalone is decided here, before any core exists (spec
+// 2026-11-03-attach-stage2-design §6.1).
 const state = openDesktopState(app.getPath('userData'), safeStorage);
-const standaloneOnce = process.argv.includes('--kl-standalone-once');
-const attached = state.mode === 'attached' && !standaloneOnce;
-const deps = { app, ipcMain, safeStorage, shell, dialog, Notification, getWindow, state, appDir: __dirname, standaloneOnce };
+const launch = resolveLaunchMode({ argv: process.argv, platform: process.platform, stateMode: state.mode, migrated: Boolean(state.migration) });
+const attached = launch.host === 'attached';
+const standaloneOnce = launch.degraded;
+const deps = { app, ipcMain, safeStorage, shell, dialog, Notification, getWindow, state, appDir: __dirname, standaloneOnce, launch };
 const host = attached ? startAttachedHost(deps) : startStandaloneHost(deps);
 
 function createWindow() {
@@ -55,7 +66,9 @@ function createWindow() {
   });
 
   mainWindow.removeMenu();
-  mainWindow.loadFile('index.html');
+  // An attached launch hides the chat shell until the first status says whether it may
+  // show (renderer-helpers/launch-class.js). A standalone one loads as it always has.
+  mainWindow.loadFile('index.html', attached ? { query: { launch: 'attached' } } : undefined);
   mainWindow.on('closed', function () {
     mainWindow = null;
   });

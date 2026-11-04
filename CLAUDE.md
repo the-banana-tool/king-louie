@@ -29,7 +29,10 @@ shows up on the Node 22 CI leg — the matrix runs both. A file-level timeout is
 a slow file or a leaked handle, never a slow single test; `node --test` keeps
 running until the loop drains, so an unclosed core, child process or server
 hangs the file long after the last test passes. Cores built in a test get
-`await core.shutdown()`.
+`await core.shutdown()`. `shutdown()` waits for `start()`'s background first index
+(`ContextAssembler#firstIndexSettled`): its `git` child holds its working directory, and
+on Windows that fails a temp dir's removal, EBUSY on the directory, which `fs.rmSync`
+reports as EPERM on the path it was given.
 
 The same drain runs the other way: a test that awaits an **unref'd** timer
 (`withTimeout`, `AbortSignal.timeout()`) against a promise nothing else
@@ -58,7 +61,8 @@ loads a `node.yaml` the test process owns, skips itself off Windows.
 
 The Windows legs run `--test-concurrency=2`, since the runner is slow enough
 under load to stall a process for a second or more: give a test that measures
-real time a margin of seconds.
+real time a margin of seconds. They run only on a push to `main`, not on a pull
+request (about 50 minutes each), so run `npm test` on Windows before merging.
 
 To reproduce the first two, run the suite from pwsh with `TEMP`/`TMP` pointed at the
 short name of a long-named folder (`cmd /c for %I in ("<dir>") do @echo %~sI`).
@@ -67,7 +71,9 @@ short name of a long-named folder (`cmd /c for %I in ("<dir>") do @echo %~sI`).
 `_electron` (`tests/e2e/helpers.js`). Every launch gets its own temporary
 `--user-data-dir` (the helper throws `userData isolation failed` otherwise), so
 e2e tests never touch the real profile; give `launchApp({ seed })` any files a
-test needs. The helper deletes `ELECTRON_RUN_AS_NODE` from the child's env
+test needs. `launchApp` appends `--kl-standalone` to every launch (the development
+mode); `launchApp({ attached: true })` does not, and leaves the choice to the launch
+rule (Attached mode). The helper deletes `ELECTRON_RUN_AS_NODE` from the child's env
 (Electron treats an empty value the same as `1`); unset it in the shell too:
 
 ```bash
@@ -82,7 +88,14 @@ or writes your real King Louie profile — chats, settings, the vault.
 
 ## Running the app
 
-`npm start` launches Electron normally. If it dies instantly with
+`npm start` is the product path: on Windows the app attaches to a node, and with
+no node it shows the setup view and nothing else (Attached mode, the launch rule).
+`npm run start:standalone` (`--kl-standalone`) builds a whole standalone core, for
+development. A second launch on one profile focuses the first window and exits 0
+(`src/ipc/single-instance.js`, per `userData`), so `npm start` beside a running
+desktop on the same profile opens nothing.
+
+If it dies instantly with
 `Cannot read properties of undefined (reading 'registerSchemesAsPrivileged')`
 at `main.js:9`, the environment has `ELECTRON_RUN_AS_NODE=1` set — that makes
 the Electron binary run as plain Node, so `app`, `protocol`, and `BrowserWindow`
@@ -107,9 +120,12 @@ launch fails with "Process failed to launch!". Pass
 `--user-data-dir=<temp path>` to get a clean profile instead of mutating real
 chats, settings, and the vault.
 
+Pass `--kl-standalone` for a development core; without it, on Windows, a fresh
+profile shows the setup view.
+
 Click through `page.evaluate(() => document.getElementById(id).click())` rather
 than `locator.click()`, and remember the onboarding wizard appears on a fresh
-profile (`#wizard-skip-btn` dismisses it).
+standalone profile (`#wizard-skip-btn` dismisses it).
 
 ## Browser actions that change something
 
@@ -557,6 +573,9 @@ R-LI-*, Q-L1-*). Electron-free except `src/ipc/`.
   `local.` key (`src/models/local-vault-keys.js`). `adapters` is
   `[{ model, id, job, ref }]` (one id per model, at most 32 per model), the
   only source of adapters there. The pins are made in `start()`.
+- The Models pane on a personal node (attach stage 2, G-5): `describeLocalInferenceBlock`
+  (`src/desktop-bridge/pane-model.js`, read only) gives the config file's path through
+  `shown` and an example block to paste. Null on a fleet node.
 - The built-in `ollama` provider is never local (R-LI-31): its calls cost
   $0 but carry no `local`. "Use this Ollama as a local server"
   (`models:local.fromOllama`) adds a local server beside it.
@@ -960,6 +979,134 @@ attached mode `main.js` builds no core and `src/ipc/attached-host.js` proxies th
 allowlisted channels (`src/desktop-bridge/allowlist.js`; a stage whose domain must
 work while attached appends it to `PROXIED_DOMAINS`).
 
+- **The launch rule** (attach stage 2, spec
+  `docs/superpowers/specs/2026-11-03-attach-stage2-design.md`, plan
+  `docs/superpowers/plans/2026-11-03-attach-stage2.md`; the author's calls C-1 to
+  C-15 and the ledger's `Ruling:` lines in `.superpowers/sdd/2026-11-03-attach-stage2/`).
+  `resolveLaunchMode({ argv, platform, stateMode, migrated })`
+  (`src/desktop-bridge/launch-mode.js`), once in `main.js` before any host. First
+  match wins: `--kl-standalone-once` on a profile not migrated is standalone,
+  degraded (`once`); `--kl-standalone` is standalone, full (`dev`); state
+  `attached` attaches (`attached`); off Windows is standalone (`platform`, until
+  stage 4); anything else attaches with no pairing (`needs-node`), the setup view.
+  `relaunch()` strips both flags. `desktop:status` carries it as `launch`. A
+  migrated profile answers `desktop:standaloneOnce` and `desktop:detach`
+  `PROFILE_MIGRATED`, except under `dev`. `claimSingleInstance`
+  (`src/ipc/single-instance.js`) takes one lock per `userData`, after
+  `--user-data-dir` is applied, and never reads the second launch's argv.
+- **Setup and the move** (spec §6.2 to §6.5). `nextSetupStep(facts)` and
+  `describeSetup(status)` (`src/desktop-bridge/setup-flow.js`, Electron-free, every
+  string through `shown`) give `install`, `pair`, `start`, `migrate`, `provider`,
+  `profile`, `phone`, `done`; the controller's `desktop:setup*` calls press them, and
+  the view stays until `state.setup.completedAt`. An owner installed from the window
+  gets `king-louie-service.cmd` (`PERSONAL_CLI_FILE`) beside the node's config, with
+  its full path on the phone step; no PATH edit.
+  - The move (`migrationPlan`, `migrationApply({ confirmed: true })`): backup, plan,
+    apply, verify, mark, in that order, over the desktop's own bridge import, the
+    only path that carries secrets. `backupProfile`
+    (`src/migration/profile-backup.js`) makes
+    `<parent of userData>\king-louie.backup-<timestamp>`, skipping `EXCLUDED_DIRS`
+    at the top level and `BROWSER_CACHE_DIRS` under `browser-profiles/*` and
+    `browser-profiles/*/*` (a browser profile's logins stay in), refusing up front when
+    `statfs` says the files and a 64 MB margin will not fit, with the numbers, snapshotting
+    `history.sqlite`, refusing a link or an
+    existing `dest`, hashing every file into `backup.json`; a failure
+    (`BACKUP_FAILED`) leaves the half-made directory named. `verifyMigration`
+    (`src/migration/migration-verify.js`) asks the node; whatever cannot be shown to be
+    there is `MIGRATION_UNVERIFIED`, and nothing is marked. Only a verified result
+    writes `state.migration` (the desktop state, never the profile). Nothing in the
+    old profile or the backup is ever deleted.
+  - The refusals, each `MIGRATION_SOURCE` with nothing moved: `schemaProblem` from
+    `detectOldProfile` (a store the reader refuses); a custom `cases.root` that is
+    absent or holds cases, since those cases would not move (`caseRootRefusal`, again
+    before the apply and before the mark); a case the reader holds back whole (a nested
+    repo, a refused directory: `heldCases`). A source reading fewer chats or messages
+    than its backup refuses too. A dirty case lands as it stands, with a note.
+  - Private marks are carried on every importer path: a chat that cannot be marked does
+    not land, and verify fails on a lost mark.
+  - Recorded landings: the node's manifest keeps `landedFrom` for each case, so a retry
+    takes a case the node has since worked on as present while its source still equals
+    what landed and its repository passes `git fsck`
+    (`recordedLandingHolds`, `src/migration/desktop-import.js`).
+  - `restartDue` in the marker, only when the report says `needsRestart` (channels, hooks
+    or MCP servers landed). Nothing restarts by itself, at the move or a later launch: a
+    restart ends a turn, a take or a task. `RESTART_DUE_ACTIONS`, **Restart King Louie
+    Node now** and **Later**, are on the setup's steps after the move and in the attached
+    banner; the press (`nodeRestart`) or Later (`desktop:restartLater`) clears it.
+  - A chat too big for one entry (a personal node's plan says `chatParts: true`):
+    `chatEntries` sends runs of messages under `maxBytes`, in order, a message bigger than
+    that alone in its own batch; `collectChatPart` holds them in memory under the plan and
+    `writeChat` lands the whole chat on the last part, in one transaction with its private
+    mark, so a cut-off lands nothing and the next plan offers it again. A message past
+    `MAX_CHAT_PART_BYTES` (`LIMITS.frameBytes` less 1 MiB): the inventory says
+    `tooLargeBytes`, the plan says `needs-attention` with the chat and the size, and adds
+    it to **Stays on this computer**. The item is `partial`: the chat lands with
+    `TOO_LARGE_TEXT` in that message's place (order, `seq` and the count stay), is
+    `incomplete` in the manifest, and does not block the mark. The source's limit is
+    `MAX_CHAT_PART_BYTES` less the chat's head and 4 KiB, since the node measures the whole
+    batch. A chat over `MAX_CHAT_BYTES` (512 MiB, also the node's own cap while assembling)
+    is `needs-attention` with its size (`overCapBytes`): not landed, in **Stays on this
+    computer**, not blocking the mark. A fleet plan has none of this.
+  - A case on the node that differs (`caseOnNodeDiffers`, `landedIncomplete`) names the
+    ways that keep both first. **Moved elsewhere** in the old standalone mode plans
+    `MOVED_OUT_NOTE`, ahead of the incomplete check. A folder renamed on the desktop lands
+    as a second case: two cases cannot share an id (`CaseStore#get` finds the first), so
+    the plan gives it a new one (`caseExpected.secondId`), `finish` rewrites its `case.yaml`
+    in staging (`slug` the new folder), and its chats follow (`caseIdRemap`).
+  - The read of every message runs in a child (`readHistoryApart`,
+    `src/migration/old-profile-read.js`), one marked line per chat; a child that dies is
+    an attention row the move refuses on, never fewer chats. Decrypting stays in the main
+    process, and needs no chat.
+  - A stored key that will not decrypt (`setAsideUnreadableSecrets`, at the plan): it comes
+    out of the inventory, so no plan holds it and verify cannot miss it; its name goes in
+    **Stays on this computer** and `leftBehind`, it stays sealed in the profile and backup,
+    and the mark goes on. Secure storage unavailable, at any count, or more than half the
+    keys failing with at least 3 stored, is a wrong environment: `MIGRATION_SOURCE`,
+    nothing moved.
+  - `detectOldProfile` is `found` for chats, cases, `apiTokens`, the Anthropic sign-in,
+    search and image keys, a vault key in `config.json`, or a carried setting that is not
+    its default (`settingsWouldMove`; `keysOrSettings` on the answer; `models.kingLouie` is
+    the suggester's and does not count). An empty `history.sqlite` alone is not found.
+  - Under personal the importer also carries `settings.models` (minus `localServers`),
+    `settings.channels` with their tokens, `settings.hooks` and `settings.mcpServers`.
+    The CLI `import --from` on a personal node keeps the fleet's exclusions and carries
+    no secret: only the window's move carries those.
+- **What the task runs** (spec §6.8). `queryTask` reads the program and entry out of the
+  task's PowerShell arguments (`parseTaskXml`, read and never run) and `stat`s them: `gone`
+  on ENOENT alone (a path inside the asar is ENOTDIR to plain Node), `runs` `app` or
+  `folder`. `/Run` succeeds for a program that is gone, so `runNodeTask` refuses
+  `NODE_TASK_PROGRAM_GONE` first, every screen says so and offers Install, and `runInstall`
+  accepts a registered task only then (the CLI's `/Create /F`). The version row's press is
+  there only for `runs: 'app'`. `uninstall --personal` with no `--data-dir` stops the node
+  where the task says it runs. The phone step gives a checkout's script, `node "<entry>"`,
+  or `node bin\king-louie-service.js`.
+- **The personal proxied list is for the same-account loopback bridge only.** Under
+  `hosting: personal`, `classifyChannel(channel, { hosting })` adds
+  `PERSONAL_PROXIED_DOMAINS` and `settings:mcp`, `unavailableTabsFor` is `['mesh']`, and
+  the `/llm` channel actions are allowed. A paired device can therefore run code as the
+  owner through `skill:install`, `settings:mcpSave` and hooks. Stage 3's remote attach
+  must use its own list: this one, over a remote link, is remote code execution.
+- **Stage 2 residuals.** A Telegram or Discord contact question stops until
+  `service.json` has the `contact` block; the phone and the app still get it. A
+  workflow's tool calls go to the phone or are refused, never on-screen, and a workflow
+  outlives the window. `/delegate` stays `ATTACHED_UNAVAILABLE`. A migrated bot's unsafe
+  tools are refused while no phone is enrolled. On-screen task approvals and `RunTask`
+  from the window wait for stage 3. A recorded landing trusts the node's working tree, so
+  a file removed there reads as the node's own work. A same-size edit to a landed file
+  isn't caught. `start:standalone` can poll the same bot as the node. `skill:install` and
+  `skill:checkUpdates` and `skill:update` no longer block (`execFile`, `git fetch` only on
+  the pane's press; `skill:install` refuses a relative path over the bridge). What does not move: skills, workflows and webhooks (each said
+  on the plan, `PERSONAL_EXCLUDED`), `ops-memory.jsonl`, `contact/` and `executors/` (named
+  in `STAYS_BEHIND_FIXED`; a case whose agent is in `executors/` gets its own line). They
+  stay in the old profile and the backup. Skills and workflows do not go through the
+  case-file path: a skill clone is a nested `.git` the importer refuses and whose
+  `.git/config` it drops, a skill installed from a folder is a junction the reader
+  refuses, and both stores load only at the node's start. Sizing messages for the plan
+  stringifies each one in the main process, and the desktop holds every chat of the old
+  profile in memory, in the main process, from the plan until the apply ends (the child
+  moved the read, not the holding). Private
+  chats answer `PRIVATE_NO_LOCAL_MODEL` until a local server is in the admin block. No
+  real install, migration or packaged run has been done.
 - **Pairing:** start from Settings > Local service, then run the command it shows
   as root/Administrator: `king-louie-service desktop pair <request>`. On a
   personal node (`hosting: personal`) the pane's **Pair** runs `desktop pair
@@ -2838,6 +2985,27 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   the process is the account that owns the data dir and the config dir.
   Takes, leases, the take policy, the courier, the audit ledger and the
   phones are unchanged.
+- **Feature defaults (attach stage 2).** Under personal `channels`, `webhooks` and
+  `appDiscovery` default on (`PERSONAL_FEATURE_DEFAULTS`, `src/service/config.js`); an
+  admin value in `service.json` wins either way. None opens anything with nothing
+  configured: a webhook left to the default is `webhooksOnDemand`, whose listener binds,
+  on loopback, only for a webhook or a contact relay, and a failed bind there is a logged
+  warning the Webhooks pane shows (`listening: false`), retried at the next registration;
+  webhooks set on by hand keep the fleet's refused start.
+- **`ELECTRON_RUN_AS_NODE`.** `runService` removes it from the service's env at the start
+  of `run`, so an MCP server, a hook or a model's shell doesn't inherit it; every spawn of
+  `process.execPath` sets its own (`tests/electron-boundary.test.js`). Bare-name discovery
+  lookups go through `src/execution/command-lookup.js`: an absolute path, no shell, a cwd
+  the model cannot write.
+- **Install from nothing (spec §6.4).** `detectPersonalNode` also answers `{ personal:
+  false, fresh: true, dataDir, configDir }` for an empty layout with no fleet layout, and
+  `installTarget` accepts it. `install --personal` with no Chrome found writes
+  `gui: enabled: false` with no `apps`, says so and goes on (`missingLines` doesn't nag for
+  the browser lines). `defaultStartable` also says `ok` when `service.json` has
+  `features.desktopBridge: true`: a node whose client is the window needs no relay.
+  The uninstaller (`build/installer.nsh`, `customUnInstall`) runs `uninstall --personal
+  --yes` through the app's binary, except during an update (`${isUpdated}`), and ignores
+  a failure; the data dir stays.
 - **The key (C-1).** `node.yaml` `hosting: service | personal` (default
   `service`; in `NODE_YAML_KEYS.top`). `personal` needs `profile: agent`
   (`loadNodeConfig` refuses otherwise). Only the key switches the rules: a

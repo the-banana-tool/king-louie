@@ -3,6 +3,10 @@ const { createLogger } = require('../logging');
 
 const log = createLogger('settings');
 
+const { isContactVaultKey } = require('../cases/contact-settings');
+const { isLocalServerVaultKey } = require('../models/local-vault-keys');
+const { createVault, vaultNodeAt, hasPrototypePart } = require('../platform/vault');
+
 function registerSettingsHandlers(ipcMain, context = {}) {
   const {
     safeStorage,
@@ -458,6 +462,9 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
   // ── Vault ────────────────────────────────────────────────
   const VAULT_PREFIX = '__vault_';
+  const blockedText = (key, blocker) => (blocker === key
+    ? `"${key}" has other secrets stored under it, so it cannot be used as a name.`
+    : `"${key}" cannot be used as a name: the secret "${blocker}" is in its way.`);
   let _vaultStore = context.vaultStore || null;
   const getVaultStore = () => {
     if (_vaultStore) return _vaultStore;
@@ -466,18 +473,45 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     return _vaultStore;
   };
 
+  // Reads and refusals only: the writes below encrypt with what they are handed.
+  const paneVault = () => createVault({ store: getVaultStore(), cipher: { encryptString: encryptToken, decryptString: decryptToken } });
+
   ipcMain.handle('settings:vaultList', wrapHandler('settings:vaultList', async () => {
-    const allKeys = Object.keys(getVaultStore().store || {});
-    const vaultKeys = allKeys
-      .filter((k) => k.startsWith(VAULT_PREFIX))
-      .map((k) => k.slice(VAULT_PREFIX.length));
-    return { ok: true, keys: vaultKeys, count: vaultKeys.length };
+    const vaultKeys = paneVault().list();
+    // referable: what a ${vault:<key>} reference may suggest. Contact credentials and
+    // keys with a backslash are what the resolver refuses; a local server's key is the
+    // administrator's, and no reference should hand it to an MCP server.
+    const referable = vaultKeys.filter((k) => !isContactVaultKey(k) && !isLocalServerVaultKey(k) && !k.includes('\\'));
+    return { ok: true, keys: vaultKeys, count: vaultKeys.length, referable };
+  }));
+
+  // Which of these names the store holds a secret under that decrypts, and which it
+  // holds one under that does not: names only, for the move's verifier. A whole key, so a dotted one is asked as itself. Says
+  // nothing of what the Vault tool keeps to itself.
+  ipcMain.handle('settings:vaultHeld', wrapHandler('settings:vaultHeld', async (_event, { keys } = {}) => {
+    const data = getVaultStore().store;
+    const held = [];
+    const unreadable = [];
+    for (const key of Array.isArray(keys) ? keys : []) {
+      if (typeof key !== 'string' || isContactVaultKey(key) || isLocalServerVaultKey(key)) continue;
+      const encrypted = vaultNodeAt(data, key);
+      if (typeof encrypted !== 'string' || !encrypted) continue;
+      let plain = null;
+      try {
+        plain = decryptToken(encrypted);
+      } catch { /* said below */ }
+      (plain ? held : unreadable).push(key);
+    }
+    return { ok: true, held, unreadable };
   }));
 
   ipcMain.handle('settings:vaultStore', wrapHandler('settings:vaultStore', async (_event, { key, value } = {}) => {
     if (!key || typeof key !== 'string') return { ok: false, error: 'Key is required.' };
     if (!value || typeof value !== 'string') return { ok: false, error: 'Value is required.' };
     if (!encryptToken) return { ok: false, error: 'Encryption unavailable.' };
+    if (hasPrototypePart(key.trim())) return { ok: false, error: `"${key.trim()}" cannot be used as a name.` };
+    const blocker = paneVault().blockedBy(key.trim());
+    if (blocker) return { ok: false, error: blockedText(key.trim(), blocker) };
     const encrypted = encryptToken(value);
     getVaultStore().set(`${VAULT_PREFIX}${key.trim()}`, encrypted);
     return { ok: true, message: `Secret "${key.trim()}" saved.` };
@@ -485,9 +519,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
   ipcMain.handle('settings:vaultDelete', wrapHandler('settings:vaultDelete', async (_event, { key } = {}) => {
     if (!key || typeof key !== 'string') return { ok: false, error: 'Key is required.' };
-    const storeKey = `${VAULT_PREFIX}${key}`;
-    if (!getVaultStore().has(storeKey)) return { ok: false, error: `No secret found for "${key}".` };
-    getVaultStore().delete(storeKey);
+    if (!paneVault().delete(key)) return { ok: false, error: `No secret found for "${key}".` };
     return { ok: true, message: `Secret "${key}" deleted.` };
   }));
 
@@ -496,18 +528,24 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     if (!newKey || typeof newKey !== 'string') return { ok: false, error: 'New key is required.' };
     const oldStoreKey = `${VAULT_PREFIX}${oldKey}`;
     const newStoreKey = `${VAULT_PREFIX}${newKey.trim()}`;
+    // Only a stored secret can be updated, and never onto a name a write would destroy.
+    const vault = paneVault();
+    if (!vault.holds(oldKey)) return { ok: false, error: `No secret found for "${oldKey}".` };
+    if (hasPrototypePart(newKey.trim())) return { ok: false, error: `"${newKey.trim()}" cannot be used as a name.` };
+    if (oldStoreKey !== newStoreKey && vault.holds(newKey.trim())) return { ok: false, error: `A secret named "${newKey.trim()}" already exists.` };
+    const blocker = vault.blockedBy(newKey.trim());
+    if (blocker) return { ok: false, error: blockedText(newKey.trim(), blocker) };
 
     if (value && typeof value === 'string') {
       // Update both key name and value
       if (!encryptToken) return { ok: false, error: 'Encryption unavailable.' };
-      if (oldStoreKey !== newStoreKey) getVaultStore().delete(oldStoreKey);
       getVaultStore().set(newStoreKey, encryptToken(value));
+      if (oldStoreKey !== newStoreKey) vault.delete(oldKey);
     } else if (oldStoreKey !== newStoreKey) {
       // Rename key only — move the encrypted blob
-      const existing = getVaultStore().get(oldStoreKey);
-      if (!existing) return { ok: false, error: `No secret found for "${oldKey}".` };
+      const existing = vaultNodeAt(getVaultStore().store, oldKey);
       getVaultStore().set(newStoreKey, existing);
-      getVaultStore().delete(oldStoreKey);
+      vault.delete(oldKey);
     }
 
     return { ok: true, message: `Secret updated.` };

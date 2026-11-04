@@ -130,6 +130,18 @@ class ContextAssembler {
   }
 
   /**
+   * Settles when the first index is no longer being built (at once when none
+   * is). Never rejects. Shutdown waits on it: the work runs child processes
+   * in the host's working directory, and on Windows a live child holds that
+   * directory against removal.
+   *
+   * @returns {Promise<void>}
+   */
+  firstIndexSettled() {
+    return this._firstIndex || Promise.resolve();
+  }
+
+  /**
    * Register all tool definitions and system prompt sections, then embed
    * any that aren't already in the vector store.
    *

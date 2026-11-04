@@ -20,7 +20,16 @@ const DESKTOP_METHODS = Object.freeze({
   [IPC.DESKTOP_NODE_START]: 'nodeStart',
   [IPC.DESKTOP_NODE_INSTALL_PREVIEW]: 'nodeInstallPreview',
   [IPC.DESKTOP_NODE_INSTALL]: 'nodeInstall',
-  [IPC.DESKTOP_PAIR_RESTART_CONFIRM]: 'pairRestartConfirm'
+  [IPC.DESKTOP_PAIR_RESTART_CONFIRM]: 'pairRestartConfirm',
+  // The one-time move (spec 2026-11-03 §6.5, §8).
+  [IPC.DESKTOP_MIGRATION_PLAN]: 'migrationPlan',
+  [IPC.DESKTOP_MIGRATION_APPLY]: 'migrationApply',
+  // The setup flow (spec 2026-11-03 §6.3, §8).
+  [IPC.DESKTOP_SETUP_STEP]: 'setupStep',
+  [IPC.DESKTOP_SETUP_LATER]: 'setupLater',
+  [IPC.DESKTOP_SETUP_FINISH]: 'setupFinish',
+  [IPC.DESKTOP_NODE_RESTART]: 'nodeRestart',
+  [IPC.DESKTOP_RESTART_LATER]: 'restartLater'
 });
 
 const unavailable = () => ({ ok: false, code: 'ATTACHED_UNAVAILABLE', error: 'Not available here.' });

@@ -16,13 +16,17 @@ function startAttachedHost(deps) {
   const {
     app, ipcMain, safeStorage, dialog, getWindow, state,
     env = process.env, platform = process.platform,
-    listChannels = listIpcChannels, clientFactory = null, controllerFactory = createDesktopController
+    listChannels = listIpcChannels, clientFactory = null, controllerFactory = createDesktopController, launch
   } = deps;
+  // Attach stage 2 §6.1: this host also carries a window with no attachment
+  // (`needs-node`): no node yet, or one detached on purpose, whose pairing is kept.
+  // Nothing connects until Attach says so, or the Detach warning would be false.
+  const mode = launch && launch.why === 'needs-node' ? state.mode : 'attached';
   const controller = controllerFactory({
-    state, mode: 'attached', app, getWindow, env, platform,
-    userDataDir: app.getPath('userData'), safeStorage, clientFactory
+    state, mode, app, getWindow, env, platform,
+    userDataDir: app.getPath('userData'), safeStorage, clientFactory, launch
   });
-  const client = controller.createClient();
+  const client = mode === 'attached' ? controller.createClient() : null;
   controller.setClient(client);
   const openRuns = new Map(); // responseId -> chatId
 
@@ -40,6 +44,10 @@ function startAttachedHost(deps) {
   });
   const live = () => Boolean(client && client.connected);
   const served = (channel) => Boolean(client && client.service && Array.isArray(client.service.channels) && client.service.channels.includes(channel));
+  // The pairing record says what the node is (a record with no word is the
+  // fleet); served() still decides per channel from the handshake.
+  const hosting = () => (state.pairing && state.pairing.service && state.pairing.service.hosting === 'personal' ? 'personal' : 'service');
+  const routeOf = (channel) => classifyChannel(channel, { hosting: hosting() });
 
   async function providerReady() {
     if (!client.service || client.service.providersConfigured !== false) return true;
@@ -71,11 +79,20 @@ function startAttachedHost(deps) {
     'history:import.pick': localImport('history:import.pick', () => importPicks.pick()),
     'history:import.preview': localImport('history:import.preview', (payload) => attachedImport.preview(payload)),
     'history:import.commit': localImport('history:import.commit', (payload) => attachedImport.commit(payload)),
-    'wizard:getStatus': async () => ({ ok: true, isFirstRun: false }),
-    'wizard:complete': async () => ({ ok: true }),
+    // §6.3: the wizard is the setup's provider, profile and phone steps. A fleet
+    // pairing has no setup, so it has no first run.
+    'wizard:getStatus': async () => {
+      const setupDone = Boolean(state.setup && state.setup.completedAt) || controller.finishedForNow();
+      const fleet = Boolean(state.pairing && state.pairing.service) && hosting() !== 'personal';
+      return { ok: true, isFirstRun: !setupDone && !fleet && !(launch && launch.why === 'dev') };
+    },
+    'wizard:complete': async () => {
+      const finished = await controller.setupFinish();
+      return finished && finished.ok ? { ok: true } : finished;
+    },
     'wizard:getSteps': async () => {
       const { getWizardSteps } = require('../wizard/onboarding-wizard');
-      return { ok: true, steps: getWizardSteps().map((s) => ({ id: s.id, title: s.title, description: s.description, optional: s.optional })) };
+      return { ok: true, steps: getWizardSteps({ attached: true }).map((s) => ({ id: s.id, title: s.title, description: s.description, optional: s.optional })) };
     },
     'app:quitWindow': async () => {
       const win = getWindow();
@@ -111,18 +128,16 @@ function startAttachedHost(deps) {
 
   const inventory = listChannels();
   for (const channel of inventory.handle) {
-    const route = classifyChannel(channel);
+    const route = routeOf(channel);
     let fn;
     if (route === 'local') fn = channel.startsWith('desktop:') ? createDesktopHandler(channel, () => controller) : (LOCAL[channel] || (async () => unavailable()));
     else if (route === 'prestep') fn = PRESTEP[channel];
-    else if (route === 'proxy') fn = (_event, ...args) => proxyInvoke(channel, args);
-    else fn = async () => unavailable();
+    else fn = async (_event, ...args) => (routeOf(channel) === 'proxy' ? proxyInvoke(channel, args) : unavailable());
     ipcMain.handle(channel, fn);
   }
   for (const channel of inventory.on) {
-    const route = classifyChannel(channel);
     ipcMain.on(channel, (_event, ...args) => {
-      if (route !== 'proxy' || !live() || !served(channel)) {
+      if (routeOf(channel) !== 'proxy' || !live() || !served(channel)) {
         log.debug(`dropped ${channel} while attached`);
         return;
       }
@@ -135,7 +150,7 @@ function startAttachedHost(deps) {
 
   if (client) {
     client.on('event', (channel, payload) => {
-      if (!isRendererEvent(channel)) return;
+      if (!isRendererEvent(channel, { hosting: hosting() })) return;
       if (channel === 'chat:messageStart' && payload) openRuns.set(payload.responseId, payload.chatId);
       if ((channel === 'chat:messageComplete' || channel === 'chat:messageError') && payload) openRuns.delete(payload.responseId);
       send(channel, payload);

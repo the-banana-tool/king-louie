@@ -37,6 +37,12 @@ const PROXIED_DOMAINS = Object.freeze([
   'history'
 ]);
 const PROXIED_CHANNELS = Object.freeze(['agent:userResponse']);
+// Attach stage 2 (spec 2026-11-03 §6.6, G-1, C-15): on a personal node the
+// owner is the administrator and the window is the only way in, so it also
+// reaches these. The fleet never sees them: only hosting === 'personal' widens.
+const PERSONAL_PROXIED_DOMAINS = Object.freeze(['hooks', 'skill', 'webhook', 'workflow', 'apps', 'diagnostics', 'channel']);
+const PERSONAL_PROXIED_PREFIXES = Object.freeze(['settings:mcp']);
+const isPersonal = (hosting) => hosting === 'personal';
 
 const PROMPT_EVENTS = new Set(['tool:approvalRequired', 'tool:directoryAccessRequired', 'agent:askUser']);
 const RENDERER_EVENTS = new Set([
@@ -54,8 +60,17 @@ const RENDERER_EVENTS = new Set([
   'models:proposalChanged'
 ]);
 
+// What the proxied workflow domain's pane and chat lines listen for
+// (create-core.js forwards exactly these). Personal hosting only, as the domain is.
+const PERSONAL_RENDERER_EVENTS = new Set([
+  'workflow:created', 'workflow:started', 'workflow:completed', 'workflow:failed',
+  'workflow:paused', 'workflow:cancelled',
+  'workflow:task:started', 'workflow:task:completed', 'workflow:task:failed'
+]);
+
 // Settings tabs whose domains the service does not serve while attached.
 const ATTACHED_UNAVAILABLE_TABS = Object.freeze(['mcp', 'channels', 'hooks', 'skills', 'webhooks', 'workflows', 'mesh', 'diagnostics', 'system-apps']);
+const PERSONAL_UNAVAILABLE_TABS = Object.freeze(['mesh']);
 
 const TIMEOUT_EXEMPT = new Set(['chat:sendMessage', 'tool:execute', 'cron:run']);
 // Cases stage 6 (ruling T14-bridgetimeout): channels that fetch and validate
@@ -74,7 +89,15 @@ const LONG_CHANNELS = new Set([
   'case:ingestFiles', 'case:ingestExtract', 'case:reviewProposal', 'case:acceptVerified',
   // A local model's probe: a listing (20 s) and steps of up to 60 s each
   // (src/models/local-probe.js, local-servers.js) can pass the default.
-  'models:local.probe'
+  'models:local.probe',
+  // Served by a personal node only. A clone (60 s) then npm install (120 s), a
+  // fetch per skill, a model call, a server's connect (or every server's).
+  'skill:install', 'skill:update', 'skill:checkUpdates',
+  // A skill's own code: it runs as long as it runs, and a 120 s timeout while
+  // it goes on invites a resend.
+  'skill:execute', 'skill:handleMessage',
+  'workflow:plan', 'workflow:planAndExecute',
+  'settings:mcpSave', 'settings:mcpReload'
 ]);
 
 function domainOf(channel) {
@@ -82,25 +105,32 @@ function domainOf(channel) {
   return i === -1 ? channel : channel.slice(0, i);
 }
 
-function classifyChannel(channel) {
+function classifyChannel(channel, { hosting = 'service' } = {}) {
   const ch = String(channel);
+  const personal = isPersonal(hosting);
   if (LOCAL_CHANNELS.includes(ch) || LOCAL_PREFIXES.some((p) => ch.startsWith(p))) return 'local';
   if (PRESTEP_CHANNELS.includes(ch)) return 'prestep';
+  if (personal && PERSONAL_PROXIED_PREFIXES.some((p) => ch.startsWith(p))) return 'proxy';
   if (DENY_CHANNELS.includes(ch) || DENY_PREFIXES.some((p) => ch.startsWith(p))) return 'deny';
   if (PROXIED_CHANNELS.includes(ch) || PROXIED_DOMAINS.includes(domainOf(ch))) return 'proxy';
+  if (personal && PERSONAL_PROXIED_DOMAINS.includes(domainOf(ch))) return 'proxy';
   return 'deny';
 }
 
-function servedChannels({ handle = [], on = [] } = {}) {
+function servedChannels({ handle = [], on = [] } = {}, { hosting = 'service' } = {}) {
   return {
-    handle: handle.filter((ch) => classifyChannel(ch) === 'proxy'),
-    on: on.filter((ch) => classifyChannel(ch) === 'proxy')
+    handle: handle.filter((ch) => classifyChannel(ch, { hosting }) === 'proxy'),
+    on: on.filter((ch) => classifyChannel(ch, { hosting }) === 'proxy')
   };
 }
 
-function isRendererEvent(channel) {
+function unavailableTabsFor(hosting) {
+  return isPersonal(hosting) ? PERSONAL_UNAVAILABLE_TABS : ATTACHED_UNAVAILABLE_TABS;
+}
+
+function isRendererEvent(channel, { hosting = 'service' } = {}) {
   const ch = String(channel);
-  return RENDERER_EVENTS.has(ch);
+  return RENDERER_EVENTS.has(ch) || (isPersonal(hosting) && PERSONAL_RENDERER_EVENTS.has(ch));
 }
 
 function isTimeoutExempt(channel) {
@@ -119,11 +149,13 @@ function channelTimeoutMs(channel, defaultMs) {
 
 module.exports = {
   PROXIED_DOMAINS,
+  PERSONAL_PROXIED_DOMAINS,
   PROXIED_CHANNELS,
   PRESTEP_CHANNELS,
   RENDERER_EVENTS,
   PROMPT_EVENTS,
   ATTACHED_UNAVAILABLE_TABS,
+  unavailableTabsFor,
   classifyChannel,
   servedChannels,
   isRendererEvent,

@@ -8,6 +8,8 @@ const path = require('path');
 const { loadServiceConfig, DEFAULT_PORTS, DEFAULT_FEATURES } = require('../src/service/config');
 const { createDesktopBridgeHost } = require('../src/desktop-bridge/service-wiring');
 const { DesktopBridgeClient } = require('../src/desktop-bridge/bridge-client');
+const { DesktopBridgeServer } = require('../src/desktop-bridge/bridge-server');
+const { NodeIdentity } = require('../src/mesh/node-identity');
 const { buildServicePorts } = require('../src/service/ports');
 const { createCore } = require('../src/core');
 const { CHAT_DATA_DEFAULTS } = require('../src/core/settings');
@@ -110,6 +112,7 @@ describe('createDesktopBridgeHost', () => {
       });
       const service = await client.connect();
       assert.strictEqual(service.profile, 'agent');
+      assert.strictEqual(service.hosting, 'service', 'a node.yaml that does not say is a fleet node');
       assert.ok(service.channels.includes('chat:load'));
       assert.strictEqual(host.coreDeps.host.interactive(), true);
       const events = [];
@@ -126,6 +129,68 @@ describe('createDesktopBridgeHost', () => {
       assert.strictEqual(host.coreDeps.host.interactive(), false);
       client.close();
     } finally {
+      await host.stop();
+      await core.shutdown();
+    }
+  });
+});
+
+describe('hosting in bridge.status', () => {
+  const fakeDispatcher = () => ({ served: { handle: [], on: [] }, providersConfigured: () => false, handleFrame: async () => {}, onDisconnect() {}, forwardAmbient() {} });
+  const serverWith = (extra) => new DesktopBridgeServer({
+    identity: new NodeIdentity({ nodeName: 'laptop-01' }), configDir: layout().configDir, port: 0, createDispatcher: fakeDispatcher, ...extra
+  });
+
+  it('a server built with hosting: personal says personal', () => {
+    assert.strictEqual(serverWith({ hosting: 'personal' }).serviceInfo().hosting, 'personal');
+  });
+
+  it('hands its hosting to the dispatcher it builds', () => {
+    const seen = [];
+    const createDispatcher = (opts) => { seen.push(opts.hosting); return fakeDispatcher(); };
+    serverWith({ hosting: 'personal', createDispatcher });
+    serverWith({ createDispatcher });
+    assert.deepStrictEqual(seen, ['personal', 'service']);
+  });
+
+  it('a server built without says service', () => {
+    assert.strictEqual(serverWith({}).serviceInfo().hosting, 'service');
+  });
+
+  it('the wiring passes the hosting of node.yaml: the handshake and bridge.status both say it', async () => {
+    const { dataDir, configDir } = layout();
+    fs.writeFileSync(path.join(configDir, 'node.yaml'), 'name: laptop-01\nprofile: agent\nhosting: personal\n', { mode: 0o644 });
+    const host = createDesktopBridgeHost({ dataDir, configDir, features: { desktopBridge: true }, ports: { desktopBridge: 0 }, adminUid: selfUid, version: '26.9.0' });
+    const servicePorts = buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS });
+    const core = createCore({
+      ...servicePorts,
+      ...host.coreDeps,
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
+      remoteApprovals: 'deny',
+      workingDirectory: dataDir,
+      builtinSkillsDir: path.join(__dirname, '..', 'skills')
+    });
+    await core.start();
+    let client = null;
+    try {
+      const server = await host.start({ core, ports: servicePorts, approvals: null });
+      const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+      const raw = keys.rawFromPublicKeyObject(publicKey);
+      const deviceId = keys.deriveDeviceId(raw, 'kld-');
+      pairing.writeFileAtomic(path.join(configDir, 'desktop-devices.json'), JSON.stringify(pairing.upsertDevice(pairing.emptyDevices(), { deviceId, publicKey: keys.toB64url(raw), label: 'laptop-01 desk', pairedAt: '2026-09-23T14:02:11Z' })), 0o644);
+      client = new DesktopBridgeClient({
+        port: server.port,
+        pin: { nodeId: server.identity.nodeId, publicKey: server.identity.publicKey.toString('hex') },
+        deviceId,
+        sign: async (bytes) => crypto.sign(null, bytes, privateKey)
+      });
+      const service = await client.connect();
+      assert.strictEqual(service.hosting, 'personal');
+      assert.strictEqual((await client.call('bridge.status')).hosting, 'personal');
+      const plan = await client.call('import.plan', { installId: 'install-0001', inventory: { settingsKeys: ['mcpServers'], channelTokens: ['__telegram_bot_token'] } });
+      assert.deepStrictEqual(plan.items.map((i) => [i.category, i.action]), [['settings', 'new'], ['channelToken', 'new']], 'the importer it builds carries the personal set');
+    } finally {
+      if (client) client.close();
       await host.stop();
       await core.shutdown();
     }

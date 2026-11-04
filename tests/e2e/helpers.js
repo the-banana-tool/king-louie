@@ -11,6 +11,7 @@ const os = require('os');
 const path = require('path');
 const { fork } = require('child_process');
 const { _electron } = require('playwright');
+const { STANDALONE_FLAG } = require('../../src/desktop-bridge/launch-mode');
 
 const APP_PATH = path.resolve(__dirname, '..', '..');
 const DEFAULT_SEED = Object.freeze({ 'chat-data.json': { onboardingComplete: true } });
@@ -54,6 +55,8 @@ const realpath = (p) => {
 /**
  * Launch King Louie on an isolated profile. `seed` (default: onboarding
  * complete) is written into the profile first; `seed: null` writes nothing.
+ * Every launch is the development mode (--kl-standalone) unless
+ * `attached: true`, which leaves the choice to the launch rule.
  * On any failure to reach a usable window (isolation mismatch, no window, no
  * #user-input), the app is closed and, if this call created the profile dir
  * itself, that dir is removed before rethrowing (fix round 1, I1).
@@ -64,7 +67,7 @@ async function launchApp(opts = {}) {
   if (opts.seed !== null) writeSeed(userDataDir, opts.seed === undefined ? DEFAULT_SEED : opts.seed);
   const electronApp = await _electron.launch({
     executablePath: require('electron'),
-    args: [APP_PATH, `--user-data-dir=${userDataDir}`, ...(opts.args || [])],
+    args: [APP_PATH, `--user-data-dir=${userDataDir}`, ...(opts.attached === true ? [] : [STANDALONE_FLAG]), ...(opts.args || [])],
     env: childEnv(launchEnv(userDataDir, opts.env))
   });
   const ctx = { electronApp, userDataDir, ownsDir, extraDirs: [], service: null, closed: false, stdout: '', relaunchRequested: false, exited: false, launchOpts: opts };
@@ -135,8 +138,15 @@ async function removeDir(dir) {
 async function closeApp(ctx) {
   if (!ctx || ctx.closed) return;
   ctx.closed = true;
+  const proc = ctx.electronApp.process();
+  const gone = proc.exitCode !== null || proc.signalCode !== null
+    ? Promise.resolve()
+    : new Promise((r) => proc.once('exit', r));
   await Promise.race([ctx.electronApp.close().catch(() => {}), delay(5000)]);
-  try { ctx.electronApp.process().kill(); } catch { /* already gone */ }
+  try { proc.kill(); } catch { /* already gone */ }
+  // The single-instance lock goes with the process: a next launch on this
+  // profile before then would lose it and exit.
+  await Promise.race([gone, delay(10000)]);
   if (ctx.service) await ctx.service.stop().catch(() => {});
   for (const dir of [ctx.ownsDir ? ctx.userDataDir : null, ...ctx.extraDirs].filter(Boolean)) await removeDir(dir);
 }
@@ -334,6 +344,7 @@ async function launchAttached(opts = {}) {
     await click(ctx, '#service-action-pairConfirm');
     await waitFor(ctx, `!!document.getElementById('service-action-attach')`, 20000);
     await click(ctx, '#service-action-attach');
+    ctx.launchOpts = { ...ctx.launchOpts, attached: true };
     ctx = await relaunchApp(ctx);
     await waitFor(ctx, `window.electron.desktop.status().then((s) => s.view === 'attached-connected')`, 30000);
     return ctx;

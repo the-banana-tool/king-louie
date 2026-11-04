@@ -26,7 +26,8 @@ function markingIpcMain(ipcMain) {
 function startStandaloneHost(deps) {
   const {
     app, ipcMain, safeStorage, shell, Notification, getWindow, state, appDir, dialog = null,
-    standaloneOnce = false, StoreClass = null, createCoreFn = createCore, env = process.env
+    standaloneOnce = false, StoreClass = null, createCoreFn = createCore, env = process.env,
+    controllerFactory = createDesktopController, launch
   } = deps;
   const Store = StoreClass || withReadCache(require('electron-store').default);
   const pendingAskUserResolvers = new Map();
@@ -82,8 +83,8 @@ function startStandaloneHost(deps) {
     ...(standaloneOnce ? { cronStartPaused: true } : {})
   });
 
-  const controller = createDesktopController({
-    state, mode: 'standalone', app, getWindow, userDataDir: app.getPath('userData'), safeStorage
+  const controller = controllerFactory({
+    state, mode: 'standalone', app, getWindow, userDataDir: app.getPath('userData'), safeStorage, launch
   });
 
   registerHandlers(markingIpcMain(ipcMain), {

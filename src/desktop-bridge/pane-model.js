@@ -21,12 +21,24 @@ function plain(value) {
   return shown(value);
 }
 
+// What a node says of itself is data (attach stage 2 §6.8): a hosting is one of
+// two words, a version looks like one, and anything else is no word at all.
+const VERSION_RE = /^[0-9A-Za-z.+-]{1,64}$/;
+function nodeHosting(value) {
+  return value === 'personal' || value === 'service' ? value : null;
+}
+function nodeVersion(value) {
+  return typeof value === 'string' && VERSION_RE.test(value) ? value : null;
+}
+const own = (table, key) => (typeof key === 'string' && Object.hasOwn(table, key) ? table[key] : undefined);
+
 // NODE_START_TIMEOUT has no line here: the controller words it from its own
 // wait (the seconds), and the pane shows that message.
 const NODE_LINES = {
   NODE_TASK_MISSING: 'King Louie Node has no logon task on this computer, so this app cannot start it.',
   NODE_TASK_DISABLED: `The logon task "${PERSONAL_TASK_NAME}" is disabled in Task Scheduler. Enable it there to let this app start the node.`,
   NODE_TASK_OTHER_ACCOUNT: `The logon task "${PERSONAL_TASK_NAME}" belongs to another account; this app does not run it.`,
+  NODE_TASK_PROGRAM_GONE: 'King Louie Node\'s logon task runs a program that is no longer there, so the node cannot start. Install registers the task again from this app.',
   NOT_RUNNING: 'King Louie Node is not running.',
   STARTING: 'Starting King Louie Node…'
 };
@@ -40,6 +52,31 @@ const RUNNING_NO_BRIDGE = (pid) => (Number.isInteger(pid)
 const PAIR_ELEVATED_LINE = 'This app is running as administrator. Close it and open it normally to pair.';
 const PERSONAL_PAIR_WARNING = 'Every paired desktop sees every chat, setting and secret name in the node.';
 const INSTALL_ACTION = { id: 'nodeInstallPreview', label: 'Install…' };
+const VERSION_ACTION = { id: 'nodeRestart', label: 'Restart King Louie Node to update it' };
+// What a move carried that starts with the node: the owner's press (final review 3).
+const RESTART_DUE_LINE = 'Bots, MCP servers and hook choices that moved start when King Louie Node next starts. Restarting now ends a turn, take or task in progress.';
+const RESTART_DUE_ACTIONS = Object.freeze([
+  Object.freeze({ id: 'nodeRestart', label: 'Restart King Louie Node now' }),
+  Object.freeze({ id: 'restartLater', label: 'Later' })
+]);
+const restartDue = (s) => Boolean(s.migration && s.migration.restartDue === true);
+
+// §6.8, C-12: the row for a node on another version, by what its task runs. The
+// app's own binary: a restart is the update, and it stays a press, since a restart
+// ends a turn or a take. A folder (a checkout): a restart runs the same files, so no
+// press is offered. Not known: nothing that could turn out false. A node that is down
+// is updated by the Start already on offer.
+function versionLine(s) {
+  const v = s.versionMismatch;
+  if (!v) return null;
+  if (v.runs === 'folder') return `King Louie Node runs ${plain(v.node)} from a folder; this app is ${plain(v.app)}. Restarting does not change that: update that folder, then restart the node.`;
+  return `King Louie Node runs ${plain(v.node)}; this app is ${plain(v.app)}.`;
+}
+const versionPress = (s) => Boolean(s.versionMismatch && s.versionMismatch.runs === 'app');
+function withVersionPress(actions, s) {
+  if (!versionPress(s) || actions.some((a) => a.id === 'nodeStart')) return actions;
+  return [...actions.filter((a) => a.id !== 'nodeRestart'), VERSION_ACTION];
+}
 
 // A personal node is what the status says now (`node`, read from the disk
 // each time) or what the pairing recorded; a fleet status has neither.
@@ -51,7 +88,7 @@ function isPersonal(s) {
 }
 function installOffered(s) {
   const n = personalNode(s);
-  return Boolean(n && n.task === 'missing');
+  return Boolean(n && (n.task === 'missing' || n.programGone));
 }
 function errorText(error) {
   if (!error) return '';
@@ -67,7 +104,7 @@ function refusalLine(error) {
   if (code === 'NODE_START_FAILED') return START_FAILED(text);
   if (code === 'NODE_TASK_RUN_FAILED') return RUN_FAILED(text);
   if (code === 'NODE_STOP_FAILED') return STOP_FAILED(text);
-  if (NODE_LINES[code]) return NODE_LINES[code];
+  if (own(NODE_LINES, code)) return NODE_LINES[code];
   return plain(text);
 }
 
@@ -77,11 +114,15 @@ function refusalLine(error) {
 // the pane). Null: nothing found to say, so today's line stands.
 function disconnectedRow(n, { install }) {
   const err = n.startError;
+  // §6.8: first, whatever a start said: /Run would succeed and start nothing.
+  if (n.programGone) return { line: `King Louie Node's logon task runs ${plain(n.programGone)}, which is no longer there, so the node cannot start. Install registers the task again from this app.`, action: install };
   if (err && err.code === 'NODE_START_FAILED') return { line: START_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
   if (err && err.code === 'NODE_START_TIMEOUT') return { line: plain(errorText(err)), action: null };
   if (err && err.code === 'NODE_TASK_RUN_FAILED') return { line: RUN_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
   if (err && err.code === 'NODE_STOP_FAILED') return { line: STOP_FAILED(errorText(err)), action: { id: 'nodeRestart', label: 'Restart King Louie Node' } };
-  const taskCode = TASK_CODES[n.task] || (err && Object.values(TASK_CODES).includes(err.code) ? err.code : null);
+  // A task code from a refused start counts only while the task as read now
+  // does not say otherwise: registered means that refusal is over.
+  const taskCode = own(TASK_CODES, n.task) || (err && n.task !== 'registered' && Object.values(TASK_CODES).includes(err.code) ? err.code : null);
   if (taskCode === 'NODE_TASK_MISSING') return { line: NODE_LINES.NODE_TASK_MISSING, action: install };
   if (taskCode) return { line: NODE_LINES[taskCode], action: null };
   if (n.running) return { line: RUNNING_NO_BRIDGE(n.pid), action: { id: 'nodeRestart', label: 'Restart King Louie Node' } };
@@ -120,7 +161,7 @@ function serviceLines(status) {
   if (fp) lines.push(`Service: ${fp}`);
   const svc = status.service;
   if (isPersonal(status)) {
-    if (svc && svc.version) lines.push(`Version ${svc.version}.`);
+    if (svc && svc.version) lines.push(`Version ${plain(svc.version)}.`);
     lines.push(svc && svc.account ? `Running as you (${plain(svc.account)}), in your session.` : 'Running as you, in your session.');
   } else if (svc && svc.account) {
     lines.push(`Version ${svc.version}, running as ${svc.account}.`);
@@ -182,6 +223,10 @@ function describeServicePane(status = {}) {
       lines.push('Chats made while attached live in the service.');
       actions.push({ id: 'import', label: 'Import…' }, { id: 'detach', label: 'Detach' }, { id: 'unpair', label: 'Unpair' });
       if (installOffered(s)) actions.push(INSTALL_ACTION);
+      if (versionLine(s)) {
+        lines.push(versionLine(s));
+        if (versionPress(s)) actions.push(VERSION_ACTION);
+      }
       break;
     case 'attached-starting':
       lines.push(NODE_LINES.STARTING);
@@ -193,8 +238,17 @@ function describeServicePane(status = {}) {
       const row = n ? disconnectedRow(n, { install: INSTALL_ACTION }) : null;
       lines.push(row ? row.line : (c.error || MESSAGES.SERVICE_UNREACHABLE(knownPort || DEFAULT_DESKTOP_BRIDGE_PORT)));
       if (c.nextRetryAt) lines.push(`Next retry at ${new Date(c.nextRetryAt).toLocaleTimeString()}.`);
-      actions.push({ id: 'retry', label: 'Retry now' }, { id: 'standaloneOnce', label: 'Use standalone this time' }, { id: 'detach', label: 'Detach' });
+      actions.push({ id: 'retry', label: 'Retry now' });
+      // C-1, C-3: on Windows a down node is started, not replaced.
+      if (s.platform !== 'win32') actions.push({ id: 'standaloneOnce', label: 'Use standalone this time' });
+      actions.push({ id: 'detach', label: 'Detach' });
       if (row && row.action) actions.push(row.action);
+      if (versionLine(s)) {
+        lines.push(versionLine(s));
+        const pressed = withVersionPress(actions, s);
+        actions.length = 0;
+        actions.push(...pressed);
+      }
       break;
     }
     default: {
@@ -225,20 +279,53 @@ function describeServicePane(status = {}) {
 // `retry`, `standaloneOnce`, `openServiceSettings` (also the Install… row:
 // it opens Settings > Local service, where the preview runs), `nodeStart`,
 // `nodeRestart`.
+// The Models pane on a personal node (attach stage 2 §6.6, G-5). Local servers
+// come only from the admin block there, and on a personal node the owner is the
+// administrator, so the pane says which file and shows a block to paste. Read
+// only: nothing here writes the file. Null for a fleet node, whose file is its
+// administrator's.
+const LOCAL_INFERENCE_EXAMPLE = `"localInference": {
+  "servers": [
+    { "id": "workstation", "name": "Workstation", "kind": "ollama", "baseUrl": "http://127.0.0.1:11434", "maxConcurrent": 2 }
+  ]
+}`;
+function describeLocalInferenceBlock(status = {}) {
+  const node = personalNode(status);
+  if (!node || !node.dataDir) return null;
+  const sep = String(node.dataDir).includes('\\') ? '\\' : '/';
+  const file = [dirOf(node.dataDir), 'config', 'service.json'].join(sep);
+  return {
+    intro: 'To add a local server, add a block like this one to the file below, then restart King Louie Node.',
+    file: plain(file),
+    example: LOCAL_INFERENCE_EXAMPLE
+  };
+}
+
 function describeAttachedBanner(status) {
   const s = status || {};
   if (s.view === 'attached-starting') return { line: NODE_LINES.STARTING, actions: [] };
+  const version = versionLine(s);
+  if (s.view === 'attached-connected') {
+    const due = restartDue(s);
+    if (!version && !due) return null;
+    const words = [version, due ? RESTART_DUE_LINE : null].filter(Boolean).join(' ');
+    // One restart answers both, so one press says what it does for the move.
+    if (due) return { line: words, actions: RESTART_DUE_ACTIONS.map((a) => ({ ...a })) };
+    return { line: words, actions: versionPress(s) ? [VERSION_ACTION] : [] };
+  }
   if (s.view !== 'attached-disconnected') return null;
   const n = personalNode(s);
   const row = n ? disconnectedRow(n, { install: { id: 'openServiceSettings', label: 'Install…' } }) : null;
   const actions = [
     { id: 'retry', label: 'Retry now' },
-    { id: 'standaloneOnce', label: 'Use standalone this time' },
+    // C-1, C-3: on Windows a down node is started, not replaced.
+    ...(s.platform === 'win32' ? [] : [{ id: 'standaloneOnce', label: 'Use standalone this time' }]),
     { id: 'openServiceSettings', label: 'Local service settings' }
   ];
   if (row && row.action) actions.push(row.action);
   const c = s.connection || {};
-  return { line: row ? row.line : (c.error || 'The local King Louie service is not reachable.'), actions };
+  const line = row ? row.line : (c.error || 'The local King Louie service is not reachable.');
+  return version ? { line: `${line} ${version}`, actions: withVersionPress(actions, s) } : { line, actions };
 }
 
 // §8: `install --personal --dry-run`'s output (lines for a <pre>), then the
@@ -269,15 +356,43 @@ function describeServiceCommand(status) {
   return { command: p.command, line: `Run this on the service to finish removing this desktop: ${p.command}` };
 }
 
+// Every category a plan can name (CATEGORY_ORDER in desktop-import.js, which this
+// module cannot load: the preload loads it; a test holds the two together), and what
+// the move's other lines file under. Many, then one.
+const CATEGORY_WORDS = {
+  settings: ['Settings', 'Setting'],
+  userProfile: ['Your profile', 'Your profile'],
+  permissionRule: ['Permission rules', 'Permission rule'],
+  alwaysApprove: ['Tools that never ask', 'Tool that never asks'],
+  allowedDirectory: ['Allowed folders', 'Allowed folder'],
+  chat: ['Chats', 'Chat'],
+  memory: ['Memories', 'Memory'],
+  cron: ['Scheduled jobs', 'Scheduled job'],
+  case: ['Cases', 'Case'],
+  providerToken: ['Provider keys', 'Provider key'],
+  searchKey: ['Search keys', 'Search key'],
+  imageKey: ['Image keys', 'Image key'],
+  vault: ['Vault entries', 'Vault entry'],
+  anthropicOAuth: ['Anthropic sign-in', 'Anthropic sign-in'],
+  channelToken: ['Bot tokens', 'Bot token'],
+  channelAllowlist: ['Who may reach each bot', 'Who may reach this bot'],
+  excluded: ['Other things', 'Other'],
+  source: ['Profile files', 'Profile file']
+};
+const categoryWord = (category, many = true) => {
+  const words = typeof category === 'string' && Object.hasOwn(CATEGORY_WORDS, category) ? CATEGORY_WORDS[category] : null;
+  return words ? words[many ? 0 : 1] : plain(category);
+};
+
 function describeImportReport(report = {}) {
   const lines = [];
   const counts = report.counts || {};
   lines.push(Object.entries(counts).filter(([, n]) => n).map(([action, n]) => `${action}: ${n}`).join(', '));
-  for (const f of report.failures || []) lines.push(`Failed: ${f.category} ${f.key} — ${f.error}`);
-  for (const f of report.sendFailures || []) lines.push(`Not sent: ${f.category} ${f.key} — ${f.error}`);
-  for (const s of report.skipped || []) lines.push(`Not read: ${s.category} ${s.key} — ${s.error}`);
-  if ((report.secretsMissing || []).length) lines.push(`Secrets that did not arrive: ${report.secretsMissing.map((s) => `${s.category} ${s.key}`).join(', ')}`);
-  for (const a of report.attention || []) lines.push(`Needs attention: ${a.category} ${a.key} — ${a.note}`);
+  for (const f of report.failures || []) lines.push(`Failed: ${categoryWord(f.category, false)} ${f.key} — ${f.error}`);
+  for (const f of report.sendFailures || []) lines.push(`Not sent: ${categoryWord(f.category, false)} ${f.key} — ${f.error}`);
+  for (const s of report.skipped || []) lines.push(`Not read: ${categoryWord(s.category, false)} ${s.key} — ${s.error}`);
+  if ((report.secretsMissing || []).length) lines.push(`Secrets that did not arrive: ${report.secretsMissing.map((s) => `${categoryWord(s.category, false)} ${s.key}`).join(', ')}`);
+  for (const a of report.attention || []) lines.push(`Needs attention: ${categoryWord(a.category, false)} ${a.key} — ${a.note}`);
   for (const note of report.notes || []) lines.push(note);
   return lines;
 }
@@ -315,7 +430,10 @@ function paneShapeChanged(prevModel, nextModel) {
 }
 
 module.exports = {
+  categoryWord,
   describeServicePane, describeApprovals, describeImportReport, describeServiceCommand,
-  describeAttachedBanner, describeInstallPreview, describeInstallResult,
-  decideDetachClick, paneShapeChanged, DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE
+  describeAttachedBanner, describeInstallPreview, describeInstallResult, describeLocalInferenceBlock,
+  decideDetachClick, paneShapeChanged, DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE,
+  plain, nodeHosting, nodeVersion, disconnectedRow, refusalLine, NODE_LINES, PERSONAL_PAIR_WARNING,
+  RESTART_DUE_LINE, RESTART_DUE_ACTIONS
 };

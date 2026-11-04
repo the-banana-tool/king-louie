@@ -16,6 +16,7 @@ const { toolRegistry } = require('../src/tools');
 const { registerHandlers } = require('../src/ipc/register');
 const { listIpcChannels } = require('../src/ipc/channel-inventory');
 const { servedChannels } = require('../src/desktop-bridge/allowlist');
+const { registerSkillHandlers } = require('../src/ipc/skill-handlers');
 const { createBridgeDispatcher, approvalsStatus } = require('../src/desktop-bridge/bridge-dispatcher');
 const { createConnection } = require('../src/desktop-bridge/connection');
 const { isLocalDesktopEvent, localDesktopDeviceId } = require('../src/core/origin');
@@ -86,7 +87,7 @@ function connection(label = 'desk a') {
   return conn;
 }
 
-function makeDispatcher({ overrides = {}, coreOverride = null, approvals = null, createImporter = null } = {}) {
+function makeDispatcher({ overrides = {}, coreOverride = null, approvals = null, createImporter = null, hosting = undefined } = {}) {
   let current = null;
   const dispatcher = createBridgeDispatcher({
     core: coreOverride || core,
@@ -94,6 +95,7 @@ function makeDispatcher({ overrides = {}, coreOverride = null, approvals = null,
     dataDir,
     approvals,
     account: 'LOCAL SERVICE',
+    ...(hosting ? { hosting } : {}),
     getServiceInfo: () => ({ version: '26.9.0' }),
     getConnection: () => current,
     registerHandlers: (ipc, ctx) => {
@@ -535,5 +537,113 @@ describe('desktop-scoped permission rules (final review I4)', () => {
     } finally {
       fs.rmSync(scopeDir, { recursive: true, force: true });
     }
+  });
+});
+
+// Attach stage 2 (spec 2026-11-03 §6.6, G-1, G-2).
+describe('a personal node serves the owner\'s panes', () => {
+  const READS = [
+    ['hooks:list', []],
+    ['skill:list', []],
+    ['webhook:list', []],
+    ['workflow:list', []],
+    ['apps:list', []],
+    ['diagnostics:run', []],
+    ['channel:accessGet', [{ channel: 'telegram' }]],
+    ['settings:mcpList', []]
+  ];
+
+  it('serves the personal allowlist; a fleet dispatcher serves what it did', () => {
+    assert.deepStrictEqual(makeDispatcher({ hosting: 'personal' }).dispatcher.served, servedChannels(listIpcChannels(), { hosting: 'personal' }));
+    const fleet = servedChannels(listIpcChannels());
+    assert.deepStrictEqual(makeDispatcher({ hosting: 'service' }).dispatcher.served, fleet);
+    assert.deepStrictEqual(makeDispatcher().dispatcher.served, fleet);
+  });
+
+  it('each pane\'s read answers from the node\'s own stores', async () => {
+    const { dispatcher, use } = makeDispatcher({ hosting: 'personal' });
+    const a = connection();
+    use(a);
+    let id = 900;
+    for (const [channel, args] of READS) {
+      id += 1;
+      await dispatcher.handleFrame(a, { t: 'invoke', id, channel, args });
+      const frame = resultFor(a, id);
+      assert.strictEqual(frame.error, undefined, `${channel}: ${frame.error}`);
+      assert.notStrictEqual(frame.value && frame.value.ok, false, `${channel}: ${JSON.stringify(frame.value)}`);
+    }
+  });
+
+  it('a fleet dispatcher still refuses every one of them', async () => {
+    const { dispatcher, use } = makeDispatcher({ hosting: 'service' });
+    const a = connection();
+    use(a);
+    let id = 950;
+    for (const [channel, args] of READS) {
+      id += 1;
+      await dispatcher.handleFrame(a, { t: 'invoke', id, channel, args });
+      assert.strictEqual(resultFor(a, id).code, 'CHANNEL_NOT_PROXIED', channel);
+    }
+  });
+
+  it('Anthropic OAuth and read-aloud stay out under personal', async () => {
+    const { dispatcher, use } = makeDispatcher({ hosting: 'personal' });
+    const a = connection();
+    use(a);
+    let id = 970;
+    for (const channel of ['settings:anthropicOAuthStart', 'chat:speakLast', 'settings:testVoice']) {
+      id += 1;
+      await dispatcher.handleFrame(a, { t: 'invoke', id, channel, args: [] });
+      assert.strictEqual(resultFor(a, id).code, 'CHANNEL_NOT_PROXIED', channel);
+    }
+  });
+
+  it('a channel command reaches the core under personal and is refused under the fleet', async () => {
+    const seen = [];
+    const spyCore = { ...core, context: { ...core.context, runLlmCommand: async (command) => { seen.push(command); return { ok: true, output: 'ran' }; } } };
+    const command = '/llm telegram add 123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+    const wide = makeDispatcher({ coreOverride: spyCore, hosting: 'personal' });
+    const a = connection();
+    wide.use(a);
+    await wide.dispatcher.handleFrame(a, { t: 'invoke', id: 1, channel: 'settings:runLlmCommand', args: [{ command }] });
+    assert.deepStrictEqual(resultFor(a, 1).value, { ok: true, output: 'ran' });
+    assert.deepStrictEqual(seen, [command]);
+
+    seen.length = 0;
+    const fleet = makeDispatcher({ coreOverride: spyCore, hosting: 'service' });
+    const b = connection();
+    fleet.use(b);
+    await fleet.dispatcher.handleFrame(b, { t: 'invoke', id: 2, channel: 'settings:runLlmCommand', args: [{ command }] });
+    assert.strictEqual(resultFor(b, 2).value.code, 'CHANNELS_NOT_PROXIED');
+    assert.deepStrictEqual(seen, []);
+  });
+
+  it('forwards a workflow\'s events under personal and drops them under the fleet', () => {
+    const wide = makeDispatcher({ hosting: 'personal' });
+    const a = connection();
+    wide.use(a);
+    wide.dispatcher.forwardAmbient('workflow:started', { workflowId: 'w-1', chatId: null });
+    assert.deepStrictEqual(a.sent, [{ t: 'event', channel: 'workflow:started', payload: { workflowId: 'w-1', chatId: null } }]);
+
+    const fleet = makeDispatcher({ hosting: 'service' });
+    const b = connection();
+    fleet.use(b);
+    fleet.dispatcher.forwardAmbient('workflow:started', { workflowId: 'w-1', chatId: null });
+    assert.deepStrictEqual(b.sent, []);
+  });
+
+  it('skill:customize has no shell over the bridge: it names the file and opens nothing', async () => {
+    const handlers = new Map();
+    registerSkillHandlers({ handle: (ch, fn) => handlers.set(ch, fn) }, {
+      skillRegistry: {},
+      ensureSkillCustomizationFile: (skillId) => ({ skillId, path: 'C:\\example\\skill.json', created: true }),
+      getShell: () => null
+    });
+    const out = await handlers.get('skill:customize')({}, { skillId: 'std' });
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'NO_SHELL_HERE');
+    assert.strictEqual(out.path, 'C:\\example\\skill.json');
+    assert.ok(out.error.includes('C:\\example\\skill.json'), out.error);
   });
 });

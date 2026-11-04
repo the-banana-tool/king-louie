@@ -13,13 +13,54 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, safeRelPath } = require('./desktop-import');
+const { parseCaseYaml } = require('../cases/case-store');
+const { BUILTIN_IDS } = require('../cases/executors/builtins');
+const { mergeSettings } = require('../core/settings');
+const { readVaultEntries, hasPrototypePart } = require('../platform/vault');
+const { importedSettingsKeys, settingDigest, userProfileDigest, EXCLUDED, isReservedVaultKey, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS, MAX_CHAT_PART_BYTES, MAX_CHAT_BYTES } = require('./desktop-import');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 // A desktop store file or a case file bigger than this is refused rather
 // than read into memory (fix round 1): the tree is user-controlled.
 const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const arr = (v) => (Array.isArray(v) ? v : []);
+// What takes a message's place on the node when it cannot be sent at all.
+const TOO_LARGE_TEXT = 'This message was too large to move to King Louie Node. The whole message is in the old profile on this computer and in the backup.';
+const jsonBytes = (value) => Buffer.byteLength(JSON.stringify(value));
+// The node measures the whole batch: the message, the entry around it, `chatPart`, and
+// part 0's chat head. What a message may be here leaves room for all of that, or a
+// message just under the limit is refused there and holds the mark back for good.
+const BATCH_WRAPPER_BYTES = 4096;
+function messageLimit(chat, maxMessageBytes) {
+  const { messages: _messages, ...head } = chat;
+  return maxMessageBytes - jsonBytes(head) - BATCH_WRAPPER_BYTES;
+}
+function withoutTooLarge(chat, maxMessageBytes) {
+  const limit = messageLimit(chat, maxMessageBytes);
+  const messages = chat.messages.map((m) => (jsonBytes(m) <= limit ? m : {
+    ...(m.id ? { id: m.id } : {}), sender: m.sender, ...(m.timestamp ? { timestamp: m.timestamp } : {}), text: TOO_LARGE_TEXT
+  }));
+  return { ...chat, messages };
+}
+
+// electron-store nests a key at each dot, so browser_cred:<profile>:<host.tld> is
+// an object under a truncated name (readVaultEntries reads each whole). What is there
+// and cannot be read is said, never dropped unsaid.
+// Each setting that could move, as the node would hold it. None when it will not merge.
+function settingDigests(settings, hosting) {
+  let merged;
+  try {
+    merged = mergeSettings(settings);
+  } catch {
+    return {};
+  }
+  const profiles = arr(settings.models && settings.models.profiles).length > 0;
+  return Object.fromEntries(importedSettingsKeys(hosting).filter((key) => settings[key] !== undefined).map((key) => [key, settingDigest(key, merged[key], { profiles })]));
+}
+
+// What the providers' own keys are named, of everything in apiTokens.
+const isProviderTokenName = (key) => !String(key).startsWith('__') || key === '__elevenlabs_api_key';
+const VAULT_UNREAD_NOTE = 'this stored vault entry is not in a form the move can read; it stays on this computer and in the backup';
 
 // Windows residual (fix round 1, I3): there is no owner check on win32. The
 // owner SID of each file could be read through the installers' handle-based
@@ -164,7 +205,13 @@ function createSafeReader({ root, platform = process.platform, fsImpl = fs, maxF
   return { root: rootPath, readFile, checkFile, listDir, listFiles };
 }
 
-function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null }) {
+// customRootEmpty: the caller counted the setting's cases root and it holds no
+// case, so the profile's own folder is where the cases are. It is how an owner
+// with a custom root gets them moved (attach stage 2 §6.5): the setting cannot be
+// changed from a window with no core, and the desktop never writes this profile's
+// stores. The CLI does not pass it.
+// hosting: what the target is, for what is worth comparing there.
+function readDesktopSource({ hosting = 'service', userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null, customRootEmpty = false, maxMessageBytes = MAX_CHAT_PART_BYTES, maxChatBytes = MAX_CHAT_BYTES }) {
   const attention = [];
   const readJson = (rel) => {
     const r = reader.readFile(rel);
@@ -190,6 +237,8 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     : crypto.createHash('sha256').update(fs.realpathSync.native(userDataDir)).digest('hex').slice(0, 16);
 
   const settings = chatData.settings && typeof chatData.settings === 'object' ? chatData.settings : {};
+  const { entries: vaultEntries, unread: vaultUnread } = readVaultEntries(config);
+  for (const key of vaultUnread) attention.push({ category: 'vault', key, note: VAULT_UNREAD_NOTE });
   // Since history stage H1 a profile's chats live in history.sqlite; any
   // that could not be migrated are still in chat-data.json. The store wins
   // for an id both hold. `history` is readHistoryChats' result, read by the
@@ -202,10 +251,20 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     ...arr(chatData.chats).filter((c) => c && typeof c.id === 'string' && c.id && !historyIds.has(c.id))
   ];
   const tokens = chatData.apiTokens && typeof chatData.apiTokens === 'object' ? chatData.apiTokens : {};
+  // Ids only: a stored default never travels, and a list naming nobody is no
+  // list. Who may reach a bot, for a node that takes the bot.
+  const channelAllowlist = (channel) => {
+    const lists = chatData[CHANNEL_ALLOWLISTS_KEY];
+    const held = ALLOWLIST_CHANNELS.includes(channel) && lists && typeof lists === 'object' ? lists[channel] : null;
+    if (!held || typeof held !== 'object') return null;
+    const users = arr(held.users).map(String);
+    const groups = arr(held.groups).map(String);
+    return users.length || groups.length ? { users, groups } : null;
+  };
   const toolApprovals = chatData.toolApprovals && typeof chatData.toolApprovals === 'object' ? chatData.toolApprovals : {};
   const alwaysApprove = toolApprovals.alwaysApproveTools && typeof toolApprovals.alwaysApproveTools === 'object' ? toolApprovals.alwaysApproveTools : {};
   const oauth = chatData.anthropicOAuth && chatData.anthropicOAuth.accessToken ? chatData.anthropicOAuth : null;
-  const casesRootSetting = settings.cases && typeof settings.cases.root === 'string' ? settings.cases.root.trim() : '';
+  const casesRootSetting = !customRootEmpty && settings.cases && typeof settings.cases.root === 'string' ? settings.cases.root.trim() : '';
   const memoryEntries = arr(memoryDoc.entries).filter((e) => e && typeof e.id === 'string' && e.id);
   // System jobs (cases stage 2's cases:wakeups) are created by every core for
   // itself and can't be written through the cron API, so they are never sent.
@@ -226,7 +285,7 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
       try {
         safeRelPath(f.relPath);
       } catch (err) {
-        return `has a file the service cannot store and cannot be imported (${err.message})`;
+        return `has a file the ${hosting === 'personal' ? 'node' : 'service'} cannot store and cannot be imported (${err.message})`;
       }
       try {
         isSkippedCaseFile(f.relPath);
@@ -239,40 +298,100 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     return null;
   };
 
+  // The private mark (local inference R-LI-10, kept through a move): a chat's
+  // own, its case's, and a case's from any chat of it. What cannot be read is
+  // private: a case.yaml that does not parse, and a chat naming a case when not
+  // every case could be read.
+  for (const c of chats) {
+    if (!Object.prototype.hasOwnProperty.call(c, 'private')) continue;
+    if (c.private === false) delete c.private;
+    else c.private = true;
+  }
+  const chatMarkedCases = new Set(chats.filter((c) => c.private === true && c.caseId).map((c) => String(c.caseId)));
+  const caseIds = new Map(); // case id -> private
+  let everyCaseRead = !casesRootSetting;
+
   const cases = [];
+  // A case whose external agent is in the profile's executors folder, which does not
+  // move: what the plan says of it, never sent to the node.
+  const agentPackages = readAgentPackages(reader);
+  const agentCases = [];
   if (!casesRootSetting) {
     const listed = reader.listDir('cases');
-    for (const r of listed.refused) attention.push({ category: 'case', key: r.relPath, note: r.reason });
+    if (listed.refused.length) everyCaseRead = false;
+    // wholeCase: the case stays behind whole, so it can never show up as missing
+    // from the plan, and a move that says it is done must refuse. A dot directory
+    // with no case.yaml is the store's own (.index, .contact.lock): not a case, and
+    // no doubt about any chat. One with a case.yaml is a case to CaseStore, which
+    // lists every directory that has one, and this move would leave it behind.
+    for (const r of listed.refused) attention.push({ category: 'case', key: r.relPath, note: r.reason, wholeCase: true });
     for (const dir of listed.dirs) {
       if (dir === '.index') continue; // cases stage 5: the cross-case index cache, not a case (M9)
       if (!CASE_DIR_RE.test(dir)) {
-        attention.push({ category: 'case', key: dir, note: 'not a valid case directory name; it was not copied' });
+        const dotMark = dir.startsWith('.') ? readCaseMark(reader, dir) : null;
+        const storeOwn = Boolean(dotMark && dotMark.missing);
+        if (dotMark && dotMark.id !== null) caseIds.set(dotMark.id, dotMark.private || chatMarkedCases.has(dotMark.id));
+        else if (!storeOwn) everyCaseRead = false;
+        attention.push({ category: 'case', key: dir, note: 'not a valid case directory name; it was not copied', ...(storeOwn ? {} : { wholeCase: true }) });
         continue;
       }
+      const mark = readCaseMark(reader, dir);
+      if (mark.id === null) everyCaseRead = false;
+      const casePrivate = mark.private || (mark.id !== null && chatMarkedCases.has(mark.id));
+      if (mark.id !== null) caseIds.set(mark.id, casePrivate || caseIds.get(mark.id) === true);
       const { files, refused } = reader.listFiles(path.join('cases', dir));
       for (const r of refused) attention.push({ category: 'case', key: `${dir}/${r.relPath}`, note: r.reason });
       const held = refusedCaseNote(files);
       if (held) {
-        attention.push({ category: 'case', key: dir, note: held });
+        attention.push({ category: 'case', key: dir, note: held, wholeCase: true });
         continue;
       }
-      cases.push({ dir, files: files.length, bytes: files.reduce((n, f) => n + f.size, 0) });
+      const agents = caseAgents(reader, dir, mark.type, agentPackages);
+      if (agents.length) agentCases.push({ dir, agents });
+      const counted = files.filter((f) => caseTreeCounted(f.relPath));
+      cases.push({
+        dir,
+        files: files.length,
+        bytes: files.reduce((n, f) => n + f.size, 0),
+        head: readCaseHead(reader, dir),
+        tree: { files: counted.length, bytes: counted.reduce((n, f) => n + f.size, 0) },
+        ...(mark.id !== null ? { caseId: mark.id } : {}),
+        ...(casePrivate ? { private: true } : {}),
+        ...(mark.movedElsewhere ? { movedElsewhere: true } : {})
+      });
     }
+  }
+  for (const c of chats) {
+    if (!c.caseId || c.private === true) continue;
+    const known = caseIds.get(String(c.caseId));
+    if (known === true || (known === undefined && !everyCaseRead)) c.private = true;
   }
 
   const inventory = {
     installId,
     sourceVersion: null,
-    chats: chats.map((c) => ({ id: c.id, updatedAt: c.updatedAt || null, title: String(c.title || '') })),
+    chats: chats.map((c) => {
+      // Only past the limit, so every other chat's entry is as it always was.
+      const sizes = arr(c.messages).map(jsonBytes);
+      const whole = sizes.reduce((sum, n) => sum + n, 0);
+      const largest = sizes.reduce((most, n) => Math.max(most, n), 0);
+      const past = whole > maxChatBytes ? { overCapBytes: whole } : (largest > messageLimit(c, maxMessageBytes) ? { tooLargeBytes: largest } : {});
+      return { id: c.id, updatedAt: c.updatedAt || null, title: String(c.title || ''), ...past };
+    }),
     settingsKeys: Object.keys(settings).filter((k) => !['allowedDirectories', 'webSearch', 'imageGeneration'].includes(k)),
+    settingDigests: settingDigests(settings, hosting),
     userProfile: Boolean(chatData.userProfile),
+    ...(chatData.userProfile ? { userProfileDigest: userProfileDigest(chatData.userProfile) } : {}),
     permissionRules: arr(toolApprovals.permissionRules).filter((r) => r && r.tool && r.action).map((r) => ({ tool: r.tool, pattern: r.pattern || '*', action: r.action })),
     alwaysApprove: Object.keys(alwaysApprove).filter((k) => alwaysApprove[k] === true),
-    providerTokens: Object.keys(tokens).filter((k) => tokens[k] && (!k.startsWith('__') || k === '__elevenlabs_api_key')),
+    providerTokens: Object.keys(tokens).filter((k) => tokens[k] && isProviderTokenName(k)),
     searchKeys: Object.keys(settings.webSearch || {}).filter((p) => settings.webSearch[p] && settings.webSearch[p].apiKey),
     imageKeys: Object.keys(settings.imageGeneration || {}).filter((p) => settings.imageGeneration[p] && settings.imageGeneration[p].apiKey),
-    vault: Object.keys(config).filter((k) => k.startsWith('__vault_') && config[k]).map((k) => k.slice('__vault_'.length)),
+    vault: [...vaultEntries.keys()],
     anthropicOAuth: Boolean(oauth),
+    channelTokens: CHANNEL_TOKEN_KEYS.filter((k) => tokens[k]),
+    channelAllowlists: ALLOWLIST_CHANNELS.filter((c) => channelAllowlist(c)),
+    modelProfileIds: arr(settings.models && settings.models.profiles).filter((p) => p && typeof p.id === 'string' && p.id).map((p) => p.id),
     memory: memoryEntries.map((e) => e.id),
     cron: cronJobs.map((j) => ({ id: j.id, name: String(j.name || '') })),
     cases,
@@ -300,10 +419,18 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
       case 'chat': return chats.find((c) => c.id === key) || null;
       case 'memory': return memoryEntries.find((e) => e.id === key) || null;
       case 'cron': return cronJobs.find((j) => j.id === key) || null;
-      case 'providerToken': return secret(tokens[key]);
+      // Only these names, whatever a plan asks for: the typesafe.ai key and a local
+      // server's key sit in the same object and never move.
+      case 'providerToken': return isProviderTokenName(key) ? secret(tokens[key]) : null;
       case 'searchKey': return secret(settings.webSearch && settings.webSearch[key] && settings.webSearch[key].apiKey);
       case 'imageKey': return secret(settings.imageGeneration && settings.imageGeneration[key] && settings.imageGeneration[key].apiKey);
-      case 'vault': return secret(config[`__vault_${key}`]);
+      // Only what may move, whatever a plan asks for: a node's plan is not trusted to
+      // leave a contact credential or a local server's key behind.
+      case 'vault': return isReservedVaultKey(key) || hasPrototypePart(key) ? null : secret(vaultEntries.get(key));
+      // Only these names, whatever a plan asks for: the typesafe.ai key and a
+      // local server's key sit in the same object and never move.
+      case 'channelToken': return CHANNEL_TOKEN_KEYS.includes(key) ? secret(tokens[key]) : null;
+      case 'channelAllowlist': return channelAllowlist(key);
       case 'anthropicOAuth':
         if (!oauth) return null;
         return {
@@ -322,11 +449,146 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     return reader.listFiles(base).files.map((f) => ({ ...f, read: () => reader.readFile(path.join(base, ...f.relPath.split('/'))) }));
   }
 
-  return { installId, inventory, attention, getValue, caseFiles };
+  return { installId, inventory, attention, getValue, caseFiles, maxMessageBytes, agentCases };
+}
+
+// The external agents installed in the profile: each package's executor id.
+function readAgentPackages(reader) {
+  const ids = [];
+  for (const dir of reader.listDir('executors').dirs) {
+    const r = reader.readFile(path.join('executors', dir, 'package.json'));
+    if (!r.ok) continue;
+    try {
+      const id = JSON.parse(r.data.toString('utf8'))?.kingLouie?.executor?.id;
+      if (typeof id === 'string' && id) ids.push(id);
+    } catch { /* not a package */ }
+  }
+  return ids;
+}
+
+// Which of those a case needs: the agents its own executor snapshot names, and for an
+// outreach case, whose sends go through an agent, every one when it names none yet.
+function caseAgents(reader, dir, type, packages) {
+  if (!packages.length) return [];
+  let named = [];
+  const r = reader.readFile(path.join('cases', dir, '.kl', 'executors.json'));
+  if (r.ok) {
+    try {
+      named = Object.keys(JSON.parse(r.data.toString('utf8')) || {}).filter((id) => !BUILTIN_IDS.includes(id) && packages.includes(id));
+    } catch { /* an unreadable snapshot names nobody */ }
+  }
+  if (named.length) return named;
+  return type === 'outreach' ? packages : [];
+}
+
+// A case's id and private mark from its case.yaml. A file that is missing or
+// does not parse gives no id and counts as private; a `private` that is not
+// exactly false is private (CaseRuntime#isPrivate).
+function readCaseMark(reader, dir) {
+  const unread = { id: null, private: true, movedElsewhere: false, missing: false };
+  const r = reader.readFile(path.join('cases', dir, 'case.yaml'));
+  if (!r.ok) return { ...unread, missing: Boolean(r.missing) };
+  let meta;
+  try {
+    meta = parseCaseYaml(r.data.toString('utf8'));
+  } catch {
+    return unread;
+  }
+  if (!meta) return unread;
+  return {
+    id: String(meta.id),
+    type: typeof meta.type === 'string' ? meta.type : null,
+    private: Object.prototype.hasOwnProperty.call(meta, 'private') && meta.private !== false,
+    movedElsewhere: meta.status === 'abandoned' && Boolean(meta.statusReason) && meta.statusReason.kind === 'moved'
+  };
+}
+
+// The commit a case's HEAD names, from its own files, with no git and nothing
+// written into the old profile; null when there is none to read.
+const COMMIT_ID = /^[0-9a-f]{40,64}$/;
+function readCaseHead(reader, dir) {
+  const read = (rel) => {
+    const r = reader.readFile(path.join('cases', dir, '.git', rel));
+    return r.ok ? r.data.toString('utf8') : null;
+  };
+  const head = read('HEAD');
+  if (head === null) return null;
+  const text = head.trim();
+  if (COMMIT_ID.test(text)) return text;
+  const ref = /^ref: (\S+)$/.exec(text);
+  if (!ref || ref[1].split('/').includes('..')) return null;
+  const loose = read(ref[1]);
+  if (loose !== null) return COMMIT_ID.test(loose.trim()) ? loose.trim() : null;
+  for (const line of (read('packed-refs') || '').split(/\r?\n/)) {
+    const [id, name] = line.split(' ');
+    if (name === ref[1] && COMMIT_ID.test(id)) return id;
+  }
+  return null;
+}
+
+// For the one-time move: tries every stored key, and takes the ones that will not
+// decrypt out of the inventory, so no plan holds them and nothing counts them as
+// missing. Only names are kept; a value that does decrypt is dropped at once. They stay
+// sealed in the profile and the backup. Whether so many failing is a wrong environment
+// is the caller's to say, from the counts.
+const SECRET_LISTS = Object.freeze({ providerToken: 'providerTokens', searchKey: 'searchKeys', imageKey: 'imageKeys', vault: 'vault', channelToken: 'channelTokens' });
+function setAsideUnreadableSecrets(source) {
+  const inventory = source.inventory;
+  // A key that never moves is never opened, and says nothing about the environment.
+  const held = Object.entries(SECRET_LISTS).flatMap(([category, list]) => arr(inventory[list]).map((key) => ({ category, key })))
+    .filter(({ category, key }) => category !== 'vault' || !isReservedVaultKey(key));
+  if (inventory.anthropicOAuth) held.push({ category: 'anthropicOAuth', key: 'anthropicOAuth' });
+  const unreadable = held.filter(({ category, key }) => {
+    try {
+      source.getValue(category, key);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  for (const { category, key } of unreadable) {
+    if (category === 'anthropicOAuth') inventory.anthropicOAuth = false;
+    else inventory[SECRET_LISTS[category]] = inventory[SECRET_LISTS[category]].filter((k) => k !== key);
+  }
+  source.unreadableSecrets = unreadable;
+  return { total: held.length, unreadable };
+}
+
+// A chat as entries: one when it fits a batch, as it always went; else one per run of
+// messages under maxBytes, in order, and a message bigger than that alone. Measured
+// message by message: a long chat with its attachments can be more than one string
+// can hold.
+function chatEntries(item, chat, maxBytes) {
+  const { messages, ...head } = chat;
+  const room = maxBytes - jsonBytes(head) - 256;
+  const parts = [];
+  let part = [];
+  let size = 0;
+  let whole = 0;
+  for (const message of messages) {
+    const bytes = jsonBytes(message) + 1;
+    whole += bytes;
+    if (part.length && size + bytes > room) {
+      parts.push(part);
+      part = [];
+      size = 0;
+    }
+    part.push(message);
+    size += bytes;
+  }
+  if (whole <= room) return [{ category: item.category, key: item.key, value: chat }];
+  parts.push(part);
+  return parts.map((run, index) => ({
+    category: item.category,
+    key: item.key,
+    value: { ...(index === 0 ? head : { id: chat.id }), messages: run, chatPart: { index, total: parts.length } }
+  }));
 }
 
 // Apply batches for the plan's write items. Secret values appear only here.
-function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024 * 1024, skipped = [] } = {}) {
+// `chatParts`: the plan said this node takes a chat in parts. Without it, as ever, a
+// chat that overflows a batch is skipped.
+function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024 * 1024, skipped = [], chatParts = false } = {}) {
   let batch = [];
   let size = 2;
   function* push(entry) {
@@ -340,7 +602,7 @@ function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024
     size += s;
   }
   for (const item of planItems) {
-    if (!WRITE_ACTIONS.has(item.action)) continue;
+    if (!WRITE_ACTIONS.has(item.action) && item.partial !== true) continue;
     if (item.category === 'case') {
       for (const f of source.caseFiles(item.key)) {
         const r = f.read();
@@ -362,6 +624,10 @@ function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024
       skipped.push({ category: item.category, key: item.key, error: 'not found in the desktop profile' });
       continue;
     }
+    if (chatParts && item.category === 'chat' && Array.isArray(value.messages)) {
+      for (const entry of chatEntries(item, item.partial === true ? withoutTooLarge(value, source.maxMessageBytes ?? MAX_CHAT_PART_BYTES) : value, maxBytes)) yield* push(entry);
+      continue;
+    }
     const entry = { category: item.category, key: item.key, value };
     // One entry that alone would overflow a batch can never be sent; the
     // service would refuse the whole batch (fix round 1, I6).
@@ -375,4 +641,4 @@ function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024
   if (batch.length) yield batch;
 }
 
-module.exports = { createSafeReader, readDesktopSource, planBatches, MAX_FILE_BYTES };
+module.exports = { createSafeReader, readDesktopSource, planBatches, setAsideUnreadableSecrets, MAX_FILE_BYTES };

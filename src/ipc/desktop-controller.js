@@ -3,22 +3,35 @@
 // never swapped under a live core. The private key is sealed with safeStorage
 // and unsealed only for the moment of a signature.
 const crypto = require('crypto');
+const fs = require('fs');
 const os = require('os');
+const path = require('path');
 const { EventEmitter } = require('events');
 const { createLogger } = require('../logging');
 const { DesktopBridgeClient } = require('../desktop-bridge/bridge-client');
 const { encodePairRequest, defaultDeviceLabel, bridgeFilePath, readTrustedBridgeFile } = require('../desktop-bridge/pairing');
 const { rawFromPublicKeyObject, fingerprintGroups } = require('../desktop-bridge/keys');
 const { MESSAGES } = require('../desktop-bridge/protocol');
-const { ATTACHED_UNAVAILABLE_TABS } = require('../desktop-bridge/allowlist');
+const { unavailableTabsFor } = require('../desktop-bridge/allowlist');
+const { PERSONAL_CLI_FILE, defaultServiceDataDir, isPersonalCli } = require('../platform/paths');
+const { nodeHosting, nodeVersion } = require('../desktop-bridge/pane-model');
+const { describeSetup, nextSetupStep, setupFacts } = require('../desktop-bridge/setup-flow');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
+const { backupProfile, backupDirFor, readBackupManifest, readCaseRoot } = require('../migration/profile-backup');
+const { detectOldProfileApart } = require('../migration/old-profile-read');
+const { verifyMigration, withSourceFacts } = require('../migration/migration-verify');
+const { SECRET_CATEGORIES } = require('../migration/desktop-import');
+const { setAsideUnreadableSecrets } = require('../migration/desktop-source');
 const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
 const { shown } = require('../service/commands/io');
+const { STANDALONE_FLAG, STANDALONE_ONCE_FLAG: STANDALONE_ONCE } = require('../desktop-bridge/launch-mode');
 
 const log = createLogger('desktop-controller');
 
 const DETACH_WARNING = 'After detaching, this app runs its own King Louie again next to the service; its cron jobs and channels may act twice. Stop the service if you no longer want it.';
-const STANDALONE_ONCE = '--kl-standalone-once';
+// §6.1: on Windows a detached app has no core of its own; the launch rule brings
+// it back to the setup screen. Once the profile is moved, Detach is refused.
+const DETACH_WARNING_WINDOWS = 'After detaching, this app has no King Louie to show: it opens on the setup screen until you attach it again. King Louie keeps running in the background, with its cron jobs and channels, and nothing is deleted.';
 // Spec 2026-10-28 §6.2, §7.3 (C-12).
 const PAIR_CLI_TIMEOUT_MS = 120000;
 const NODE_START_WAIT_MS = 60000;
@@ -48,6 +61,42 @@ const PAIR_FATAL = new Set([...BRIDGE_FATAL, 'PAIR_SERVICE_CHANGED', 'PAIR_NOT_F
 const INITIAL_NODE_STATE = Object.freeze({ task: 'unknown', running: false, pid: null, starting: false, startError: null });
 const INSTALL_CLI_TIMEOUT_MS = 120000;
 const NOT_PERSONAL_TEXT = 'No King Louie Node on this computer is paired with this desktop.';
+// §6.5: named beside what the node's plan lists, since the engine walks none of them.
+const STAYS_BEHIND_FIXED = Object.freeze([
+  'Browser profiles: cookies and sessions stay here, so sites may ask you to sign in again in the node\'s browser. Saved logins in the vault move.',
+  'Local servers: add them to the node\'s service.json.',
+  'The typesafe.ai key: enter it again on the node.',
+  'Case memory (ops-memory.jsonl): what King Louie noted about how your cases run. The node starts its own.',
+  'Contact state (the contact folder): your replies to case questions and where each question had got to. The node keeps its own from now on.',
+  'External agents (the executors folder): agent packages you installed and their daily contact counts. An agent a case uses needs setting up again on the node.'
+]);
+const agentLine = ({ dir, agents }) => `Case ${dir}: its agent ${agents.join(', ')} is in the executors folder and does not move. Set it up on the node before this case sends anything.`;
+// A key that can never decrypt must not hold the mark back; a mass failure is the wrong
+// environment, and must not be marked as a move that lost them.
+// One or two keys failing say nothing about the environment.
+const WRONG_ENVIRONMENT_MIN_KEYS = 3;
+const UNREADABLE_KEY_WORDS = Object.freeze({ providerToken: 'Provider key', searchKey: 'Search key', imageKey: 'Image key', vault: 'Vault entry', anthropicOAuth: 'The Anthropic sign-in', channelToken: 'Bot token' });
+const UNREADABLE_KEY_NOTE = 'it can no longer be read on this computer and stays sealed here and in the backup; enter it again on the node';
+const unreadableKeyLine = ({ category, key }) => (category === 'anthropicOAuth'
+  ? `${UNREADABLE_KEY_WORDS[category]}: ${UNREADABLE_KEY_NOTE}.`
+  : `${UNREADABLE_KEY_WORDS[category]} ${key}: ${UNREADABLE_KEY_NOTE}.`);
+const NO_SECURE_STORAGE = 'Secure storage is not available to this app right now, so it cannot read your stored keys, and nothing was moved. That is this session and not your keys: make sure you are signed in to your own Windows account, restart the computer if it goes on, and plan again.';
+const keysUnreadable = (failed, total) => `${failed} of your ${total} stored keys cannot be read right now, and nothing was moved. So many failing together points to this session rather than to the keys: make sure you are signed in to the Windows account that stored them, restart the computer if it goes on, and plan again.`;
+const capitalised = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+const MIGRATION_STORE_FILES = new Set(['history.sqlite', 'chat-data.json']);
+const MOVE_RUNNING = { ok: false, code: 'MIGRATION_BUSY', error: 'The move of this profile is running; wait for it to finish.' };
+// §6.3: how long a step waits for the old profile before it answers with a line,
+// so a big profile does not leave the window blank. The read goes on.
+const OLD_PROFILE_WAIT_MS = 1500;
+const READING_OLD_PROFILE = 'Looking for your earlier King Louie on this computer…';
+// Until the read answers, the walk stops at the move rather than go past it.
+const OLD_PROFILE_UNKNOWN = Object.freeze({ found: true });
+// The steps a Finish cannot jump: after them, the wizard's form takes over.
+const BEFORE_THE_FORM = new Set(['install', 'pair', 'start', 'migrate']);
+const INSTALL_ELEVATED = /runs as you, not elevated/;
+const RESTARTING_AFTER_MOVE = 'Restarting King Louie Node, so what moved starts…';
+// The task's program is gone (§6.8): nothing `/Run` could start.
+const programGoneText = (file) => `King Louie Node's logon task runs ${file}, which is no longer there, so the node cannot start. Install registers the task again from this app.`;
 
 // A data dir as the disk names it and as the pairing recorded it: Windows
 // paths compare without case and without a trailing separator.
@@ -63,6 +112,18 @@ function outputLines(...texts) {
   while (lines.length && !lines[0]) lines.shift();
   while (lines.length && !lines[lines.length - 1]) lines.pop();
   return lines;
+}
+
+// The CLI's own log lines (createLogger's `[subsystem] text`) are not what it
+// says to the owner, so a pane never shows them.
+const LOG_LINE = /^\[[A-Za-z][\w./-]*\]\s/;
+const withoutLogLines = (text) => String(text || '').split(/\r?\n/).filter((l) => !LOG_LINE.test(l)).join('\n');
+
+// A start refused for its task is about the task as it was. Read as registered
+// now, that refusal is over, whatever else the error says stands.
+const TASK_ERROR_CODES = new Set(['NODE_TASK_MISSING', 'NODE_TASK_DISABLED', 'NODE_TASK_OTHER_ACCOUNT', 'NODE_TASK_UNREADABLE', 'NODE_TASK_PROGRAM_GONE']);
+function withoutStaleTaskError(startError, taskState) {
+  return startError && taskState === 'registered' && TASK_ERROR_CODES.has(startError.code) ? null : startError;
 }
 
 // nodeRunning's answer as the status's two fields.
@@ -97,12 +158,20 @@ function createDesktopController({
   userDataDir, safeStorage, stdout = process.stdout, argv = process.argv,
   readBridgeFile = null, clientFactory = null, pollMs = 3000, pollWindowMs = 10 * 60 * 1000,
   now = () => new Date(), username = null,
+  // resolveLaunchMode's answer (spec 2026-11-03 §6.1), for desktop:status.
+  launch = { host: mode, why: mode === 'attached' ? 'attached' : 'dev', degraded: false },
+  cliExists = isPersonalCli,
+  // What a personal node's version is compared with (spec 2026-11-03 §6.8).
+  appVersion = app && typeof app.getVersion === 'function' ? app.getVersion() : null,
   // The personal node (spec 2026-10-28): the runner that reads and starts it,
   // and the clock and timers of the §7.3 wait (tests inject a fake clock).
   nodeRunner = platform === 'win32' ? createPersonalNodeRunner({ env, platform }) : null,
   clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
-  nodeStartWaitMs = NODE_START_WAIT_MS, nodeRetryMs = NODE_RETRY_MS, nodeRefreshMs = NODE_REFRESH_MS
+  nodeStartWaitMs = NODE_START_WAIT_MS, nodeRetryMs = NODE_RETRY_MS, nodeRefreshMs = NODE_REFRESH_MS,
+  oldProfileWaitMs = OLD_PROFILE_WAIT_MS,
+  migrationDeps = {}
 }) {
+  const move = { detectOldProfile: detectOldProfileApart, backupProfile, loadDesktopSource, ...migrationDeps };
   const emitter = new EventEmitter();
   const bridgeFile = () => bridgeFilePath({ env, platform });
   // Async (final review I2): on Windows the trust read is a ~1.5 s
@@ -154,6 +223,26 @@ function createDesktopController({
   let startGeneration = 0;
   let startRun = null;
   let attachWaiting = false;
+  // The one-time move (§6.5): this launch's backup, and the plan or apply
+  // running now, so a second press joins it and nothing drops its session.
+  let backupMade = null;
+  let moveRun = null;
+  // The setup (§6.3). What the last press answered, for describeSetup, and the
+  // line of a step under way; both in memory, so a relaunch reads the facts anew.
+  let answers = {};
+  let setupProgress = null;
+  let moveAnswer = null;
+  let restartedAfterMove = false;
+  let elevated = false;
+  let migrateSkipped = false;
+  let finishedForNow = false;
+  let profileDefault = false;
+  // The old profile, read once per launch and again when asked (§6.5). The read
+  // takes a while on a big profile, so it has one run, and a run overtaken by a
+  // Check again answers nobody.
+  const oldRead = { known: false, value: null, run: null, generation: 0 };
+  // A press arriving twice joins the run in flight.
+  const pressRuns = new Map();
 
   const send = (channel, payload) => {
     const win = getWindow();
@@ -185,7 +274,7 @@ function createDesktopController({
       app.quit();
       return { ok: true, relaunching: true };
     }
-    const args = argv.slice(1).filter((a) => a !== STANDALONE_ONCE).concat(extraArgs);
+    const args = argv.slice(1).filter((a) => a !== STANDALONE_ONCE && a !== STANDALONE_FLAG).concat(extraArgs);
     app.relaunch({ args });
     app.exit(0);
     return { ok: true, relaunching: true };
@@ -285,14 +374,46 @@ function createDesktopController({
 
   // §11's `node`, from what the desktop last learnt of it.
   function nodeView(base) {
+    // The launcher an install from this app wrote, beside the config dir. Only
+    // shown to the owner as words to type; a checkout install has none.
+    const dirPath = base.dataDir && base.dataDir.includes('\\') ? path.win32 : path.posix;
+    const cli = base.dataDir ? dirPath.join(dirPath.dirname(base.dataDir), PERSONAL_CLI_FILE) : null;
     return {
       hosting: 'personal', name: base.name || null, dataDir: base.dataDir || null,
       task: nodeState.task, running: nodeState.running, pid: nodeState.pid,
-      starting: nodeState.starting, startError: nodeState.startError
+      starting: nodeState.starting, startError: nodeState.startError,
+      defaultDataDir: cliDefaultDataDir(),
+      ...(nodeState.programGone ? { programGone: nodeState.programGone } : {}),
+      ...(nodeState.taskEntry ? { taskEntry: nodeState.taskEntry } : {}),
+      ...(cli && cliExists(cli) ? { serviceCli: shown(cli, 400) } : {})
     };
   }
 
+  // Where the CLI looks with no --data-dir, so the phone step's commands name it
+  // only when they must.
+  function cliDefaultDataDir() {
+    if (platform !== 'win32') return null;
+    try {
+      return shown(defaultServiceDataDir({ platform, env }), 400);
+    } catch {
+      return null;
+    }
+  }
+
   const setRunning = (r) => { nodeState = { ...nodeState, ...runningFields(r) }; };
+
+  // What a read of the task says beside its state, through shown: what it runs, for
+  // the version row and the phone step, and a program that is gone.
+  function taskFields(task) {
+    return {
+      task: task.state,
+      programGone: task.gone ? shown(task.gone, 400) : null,
+      ...(task.runs ? { runs: task.runs } : {}),
+      ...(task.runs === 'folder' && task.entry ? { taskEntry: shown(task.entry, 400) } : {})
+    };
+  }
+
+  const detachWarning = () => (platform === 'win32' ? DETACH_WARNING_WINDOWS : DETACH_WARNING);
 
   const pairCommand = (request) => (platform === 'win32'
     ? `king-louie-service desktop pair ${request}`
@@ -344,11 +465,28 @@ function createDesktopController({
       bridge = r.ok ? { ok: true } : { ok: false, code: r.code || null, error: r.error || null };
     }
     const liveService = client && client.service ? client.service : null;
-    return {
+    const record = pairing && pairing.service;
+    const summary = liveService || (record && record.info) || null;
+    // A node from before `hosting` says nothing: a personal pairing's record
+    // always does, so no word anywhere is a fleet service.
+    const service = summary ? {
+      ...summary,
+      hosting: nodeHosting(summary.hosting) || nodeHosting(record && record.hosting) || 'service',
+      version: nodeVersion(summary.version)
+    } : null;
+    return withSetupStep({
       ok: true,
       mode,
+      platform,
       view: current,
-      standaloneOnce: argv.includes(STANDALONE_ONCE),
+      standaloneOnce: mode === 'standalone' && argv.includes(STANDALONE_ONCE),
+      migration: state.migration ? { ...state.migration, backupDir: shown(state.migration.backupDir, 400) } : null,
+      launch: { ...launch },
+      oldProfile: oldRead.known ? oldRead.value : null,
+      elevated,
+      userProfileDefault: profileDefault,
+      setup: setupRecord(),
+      profileDir: userDataDir ? shown(userDataDir, 400) : null,
       bridgeFile: bridgeFile(),
       bridge,
       pairing: pairing ? {
@@ -372,25 +510,266 @@ function createDesktopController({
         error: foundError
       }) : null,
       node,
-      service: liveService || (pairing && pairing.service && pairing.service.info) || null,
+      service,
+      versionMismatch: versionGap(service, liveService),
       connection: current === 'attached-starting' ? { ...connection, status: 'starting' } : { ...connection },
       approvals,
       lastImport: state.lastImport,
-      unavailableTabs: mode === 'attached' ? [...ATTACHED_UNAVAILABLE_TABS] : [],
-      detachWarning: DETACH_WARNING,
+      // The pairing record, as the attached host's routes go by it: the tabs
+      // and the channels behind them cannot disagree.
+      unavailableTabs: mode === 'attached' ? [...unavailableTabsFor(record && record.hosting)] : [],
+      detachWarning: detachWarning(),
       pendingServiceCommand: state.pendingServiceCommand
+    });
+  }
+
+  // --- §6.3: the setup's own state. ---
+
+  function setupRecord() {
+    const stored = state.setup || {};
+    return {
+      completedAt: stored.completedAt || null,
+      phoneOffered: stored.phoneOffered === true,
+      phoneSeen: stored.phoneSeen === true,
+      migrateSkipped,
+      finishedForNow
     };
+  }
+
+  // The step, from the status it goes with. describeSetup reads the same facts.
+  function stepOf(s, oldProfile) {
+    return nextSetupStep(setupFacts({ ...s, oldProfile }));
+  }
+  function withSetupStep(s) {
+    s.setup.step = stepOf(s, oldRead.known ? oldRead.value : OLD_PROFILE_UNKNOWN);
+    return s;
+  }
+
+  function invalidateOldProfile() {
+    oldRead.known = false;
+    oldRead.value = null;
+    oldRead.run = null;
+    oldRead.generation += 1;
+  }
+
+  function setOldProfile(value) {
+    oldRead.generation += 1;
+    oldRead.run = null;
+    oldRead.known = true;
+    oldRead.value = value;
+  }
+
+  // One read per launch. Never rejects: a failure is a problem on screen, never
+  // nothing to move.
+  function readOldProfile() {
+    if (oldRead.known) return Promise.resolve(oldRead.value);
+    if (oldRead.run) return oldRead.run;
+    const generation = ++oldRead.generation;
+    const failed = (err) => ({
+      found: true, chats: 0, messages: 0, cases: 0, bytes: 0, customCasesRoot: null, customCases: 0,
+      schemaProblem: shown(`The old profile could not be read: ${err.message}`, 400)
+    });
+    const run = (async () => {
+      let value;
+      try {
+        value = await move.detectOldProfile(userDataDir, { env });
+      } catch (err) {
+        value = failed(err);
+      }
+      if (generation !== oldRead.generation) return readOldProfile();
+      setOldProfile(value);
+      if (!disposed) notify();
+      return value;
+    })();
+    oldRead.run = run;
+    return run;
+  }
+
+  // What only the node can say, read now, since the wizard's form saves over the
+  // proxied channels and says nothing here. A node that cannot say is not asked
+  // for a name: this reads only to skip a question.
+  async function readNodeFacts() {
+    if (mode !== 'attached' || !client || !client.connected || moveRun) return;
+    if (!personalPairingDir() || (state.setup && state.setup.completedAt)) return;
+    if (client.service && client.service.providersConfigured === false) {
+      try { client.service = await client.call('bridge.status'); } catch { /* keep the old summary */ }
+    }
+    try {
+      const loaded = await client.invoke('settings:load', []);
+      const profile = loaded && (loaded.userProfile || (loaded.data && loaded.data.userProfile));
+      profileDefault = Boolean(profile) && !profile.name && !profile.role && !profile.projectContext
+        && !(Array.isArray(profile.goals) && profile.goals.length);
+    } catch {
+      profileDefault = false;
+    }
+  }
+
+  function setProgress(line) {
+    setupProgress = line;
+    notify();
+  }
+
+  function clearAnswers() {
+    answers = {};
+  }
+
+  // The answer for the window: what the last press said, beside the status.
+  function describeNow(s, extra = {}) {
+    const restarting = restartedAfterMove && (startRun || nodeState.starting);
+    const facts = { ...s, ...answers, setupProgress: setupProgress || (restarting ? RESTARTING_AFTER_MOVE : null), ...extra };
+    // The move is done either way, and the owner is told what is not up yet.
+    const failed = restartedAfterMove && !restarting && nodeState.startError;
+    if (failed && !facts.setupError) {
+      facts.setupError = {
+        code: failed.code,
+        error: `King Louie Node did not restart after the move (${failed.message || failed.code}). Bots and MCP servers that moved start the next time it starts.`,
+        offerRestart: true
+      };
+    }
+    return { ok: true, ...describeSetup(facts) };
+  }
+
+  // The status with the old profile as far as it is known; `wait` is how long to
+  // wait for it (Infinity for a decision the read must make).
+  async function setupStatus(wait) {
+    await readNodeFacts();
+    const s = await status();
+    // No setup to show, whatever the old profile holds: nothing is read for it.
+    if (s.setup.step === 'done' || stepOf(s, OLD_PROFILE_UNKNOWN) === 'done') return { status: s, reading: false };
+    if (!oldRead.known) {
+      const read = readOldProfile();
+      if (wait === Infinity) {
+        await read;
+      } else {
+        const slot = { current: null };
+        await Promise.race([read, sleep(wait, slot)]);
+        wakeSlot(slot);
+      }
+    }
+    if (!oldRead.known) return { status: s, reading: true };
+    s.oldProfile = oldRead.value;
+    s.setup.step = stepOf(s, oldRead.value);
+    return { status: s, reading: false };
+  }
+
+  // §8's desktop:setupStep. Never leaves the walk past the move while it does not
+  // know whether there is one: a line and no press until the read answers.
+  async function setupStep() {
+    const { status: s, reading } = await setupStatus(oldProfileWaitMs);
+    if (reading) {
+      const answer = describeNow({ ...s, oldProfile: OLD_PROFILE_UNKNOWN }, { setupProgress: setupProgress || READING_OLD_PROFILE });
+      // A read can hang for as long as its time limit: Check again joins it, and says what it found.
+      return setupProgress ? answer : { ...answer, actions: [...answer.actions, { id: 'retry', label: 'Check again' }] };
+    }
+    // The phone step's first instruction stops the node: once offered it stays.
+    if (s.setup.step === 'phone' && !s.setup.phoneOffered) {
+      state.noteSetup({ phoneOffered: true });
+      s.setup.phoneOffered = true;
+    }
+    return describeNow(s);
+  }
+
+  // §6.3's Not now: the standalone-once relaunch, while there is something the
+  // owner would be cut off from and nothing is under way.
+  function setupLater() {
+    return joined('later', async () => {
+      clearAnswers();
+      const refused = (answer) => { answers = { setupError: answer }; notify(); return answer; };
+      if (state.migration) return refused(profileMigrated());
+      if (moveRun) return { ...MOVE_RUNNING };
+      const old = await readOldProfile();
+      if (state.migration) return refused(profileMigrated());
+      if (moveRun) return { ...MOVE_RUNNING };
+      if (old && old.found && old.schemaProblem) {
+        return refused({ ok: false, code: 'NOT_POSTPONABLE', error: 'Your earlier King Louie could not be read, so the old standalone mode cannot be relied on to open it. Press Retry, or Skip for now.' });
+      }
+      if (!old || !old.found) {
+        return refused({ ok: false, code: 'NOT_POSTPONABLE', error: 'There is nothing on this computer to keep using, so there is no standalone mode to go back to.' });
+      }
+      return relaunch([STANDALONE_ONCE]);
+    });
+  }
+
+  // §6.3's Done, and the Skip of the step it names: a press arriving twice finds
+  // the walk already past that step and does nothing. Finishing stays closed
+  // until the move has had its turn, and the first completedAt stands.
+  async function setupFinish({ skip = null } = {}) {
+    if (moveRun) return { ...MOVE_RUNNING };
+    const { status: s } = await setupStatus(Infinity);
+    // A window with its own core has no setup to finish.
+    if (launch.host === 'standalone') return describeNow(s);
+    const step = s.setup.step;
+    const answer = async () => {
+      notify();
+      return setupStep();
+    };
+    if (skip !== null) {
+      if (skip !== step) return describeNow(s);
+      if (step === 'migrate') {
+        migrateSkipped = true;
+        clearAnswers();
+        if (importSession && importSession.move && !moveRun) closeImportSession();
+      } else if (step === 'phone') {
+        state.noteSetup({ phoneSeen: true });
+      } else {
+        return { ok: false, code: 'SETUP_CANNOT_SKIP', error: 'This step cannot be skipped.' };
+      }
+      return answer();
+    }
+    if (state.setup && state.setup.completedAt) return answer();
+    if (BEFORE_THE_FORM.has(step)) {
+      answers = { setupError: { ok: false, code: 'SETUP_NOT_DONE', error: 'King Louie Node is not set up yet; this step comes first.' } };
+      notify();
+      return answers.setupError;
+    }
+    if (step === 'phone') state.noteSetup({ phoneSeen: true });
+    // A move skipped and not made is not a setup finished: the window goes on for
+    // this launch, and the move is offered at the next. A read that failed for a
+    // passing reason offers that Skip, so it must not close the move for good.
+    if (migrateSkipped && !state.migration) {
+      finishedForNow = true;
+      return answer();
+    }
+    state.setSetup({ completedAt: now().toISOString() });
+    return answer();
+  }
+
+  function joined(key, work) {
+    if (pressRuns.has(key)) return pressRuns.get(key);
+    const run = Promise.resolve().then(work).finally(() => {
+      if (pressRuns.get(key) === run) pressRuns.delete(key);
+    });
+    pressRuns.set(key, run);
+    return run;
+  }
+
+  // §6.8, C-12: only a node this launch has heard from. The version in the
+  // pairing record is the one it had when paired, and a personal node may have
+  // been updated since. The fleet updates its own service: no gap to show.
+  function versionGap(service, liveService) {
+    if (!liveService || service.hosting !== 'personal') return null;
+    const node = service.version;
+    if (!node || !appVersion || node === appVersion) return null;
+    return { node, app: appVersion, ...(nodeState.runs ? { runs: nodeState.runs } : {}) };
   }
 
   // The unpaired view's node: what the inspector said, plus the task and
   // whether a node runs (§7.1), so the pane can offer Install.
   async function unpairedNode(local) {
+    // §6.4: nothing here yet, so Install is the way on (attach stage 2).
+    if (local && local.fresh === true) {
+      nodeState = { ...nodeState, task: 'missing', ...runningFields(null) };
+      return {
+        fresh: true, personal: false, dataDir: shown(local.dataDir, 400), task: 'missing', running: false, pid: null,
+        starting: false, startError: null, defaultDataDir: cliDefaultDataDir()
+      };
+    }
     if (!local || !local.personal) return null;
     const [task, running] = await Promise.all([
       nodeRunner.queryTask({ me: local.me }).catch(() => ({ state: 'unknown' })),
       nodeRunner.nodeRunning({ dataDir: local.dataDir }).catch(() => ({ running: false, pid: null }))
     ]);
-    nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+    nodeState = { ...nodeState, ...taskFields(task), ...runningFields(running) };
     return nodeView(local);
   }
 
@@ -464,8 +843,9 @@ function createDesktopController({
   async function runNodeTask({ dataDir, me, restart = false, isCurrent, onStarting = null }) {
     const task = await nodeRunner.queryTask({ me }).catch(() => ({ state: 'unknown' }));
     if (!isCurrent()) return { cancelled: true };
-    nodeState = { ...nodeState, task: task.state };
+    nodeState = { ...nodeState, ...taskFields(task) };
     if (task.state !== 'registered') return { ok: false, ...(TASK_REFUSALS[task.state] || TASK_REFUSALS.unknown) };
+    if (task.gone) return { ok: false, code: 'NODE_TASK_PROGRAM_GONE', message: programGoneText(shown(task.gone, 400)) };
     if (onStarting) onStarting();
     if (restart) {
       const running = await nodeRunner.nodeRunning({ dataDir });
@@ -550,15 +930,21 @@ function createDesktopController({
     const dataDir = state.pendingPair.personal.dataDir;
     const slot = { current: null };
     pairSlot = slot;
+    // A confirm that held clears the pending pair, which is what `current` looks
+    // at: that is the flow ending, not the flow overtaken.
+    let confirmed = false;
     const waited = await waitForNode({
       dataDir,
       since,
       slot,
-      isCurrent: current,
+      isCurrent: () => confirmed || current(),
       attempt: async () => {
         found = record;
         const r = await pairConfirm({ nodeId: record.nodeId });
-        if (r && r.ok && r.view && r.view !== 'pairing') return { done: true, result: r };
+        if (r && r.ok && r.view && r.view !== 'pairing') {
+          confirmed = true;
+          return { done: true, result: r };
+        }
         if (r && !r.ok && PAIR_FATAL.has(r.code)) return { done: true, result: r };
         return { done: false };
       }
@@ -574,6 +960,9 @@ function createDesktopController({
     if (!r.ok) return failFlow(request, { code: r.code, message: r.error || '' });
     personalFlow = null;
     nodeState = { ...nodeState, running: true, startError: null };
+    // §6.3 step 2: from the setup, pairing ends attached. The pane's own pairing
+    // keeps its Attach press.
+    if (launch.why === 'needs-node') return attach();
     return status();
   }
 
@@ -599,7 +988,19 @@ function createDesktopController({
     return finishPersonalPair(request, restarted.ranAt);
   }
 
-  async function pairStart() {
+  function pairStart() {
+    return joined('pair', async () => {
+      clearAnswers();
+      const out = await startPairing();
+      if (out && out.ok === false) {
+        answers = { setupError: out };
+        notify();
+      }
+      return out;
+    });
+  }
+
+  async function startPairing() {
     if (!state.secureStorageUsable()) return { ok: false, code: 'SECURE_STORAGE_UNAVAILABLE', error: MESSAGES.SECURE_STORAGE_UNAVAILABLE };
     // §6.2: the local read decides which flow runs.
     let local = null;
@@ -718,6 +1119,7 @@ function createDesktopController({
   async function pairCancel() {
     state.setPendingPair(null);
     personalFlow = null;
+    pressRuns.delete('pair');
     wakeSlot(pairSlot);
     nodeState = { ...nodeState, starting: false };
     stopPolling();
@@ -732,13 +1134,28 @@ function createDesktopController({
     return relaunch();
   }
 
+  // §6.5: what the marker says, for a refusal.
+  function profileMigrated() {
+    const { at, backupDir } = state.migration;
+    return {
+      ok: false,
+      code: 'PROFILE_MIGRATED',
+      error: `This profile was moved into King Louie Node on ${shown(String(at).slice(0, 10), 20)}; its copy here is kept but no longer used. The backup is at ${shown(backupDir, 400)}.`
+    };
+  }
+  const migratedRefusal = () => (state.migration && launch.why !== 'dev' ? profileMigrated() : null);
+
   async function detach({ confirmed = false } = {}) {
-    if (confirmed !== true) return { ok: false, code: 'CONFIRM_REQUIRED', error: DETACH_WARNING };
+    const migrated = migratedRefusal();
+    if (migrated) return migrated;
+    if (confirmed !== true) return { ok: false, code: 'CONFIRM_REQUIRED', error: detachWarning() };
     state.setMode('standalone');
     return relaunch();
   }
 
   async function standaloneOnce() {
+    const migrated = migratedRefusal();
+    if (migrated) return migrated;
     return relaunch([STANDALONE_ONCE]);
   }
 
@@ -781,8 +1198,27 @@ function createDesktopController({
     return status();
   }
 
+  // Check again: the facts are read anew, and what the last press said goes. The
+  // screens that say to fix something and press this rely on it.
   async function retry() {
     if (client) client.retryNow().catch(() => {});
+    clearAnswers();
+    elevated = false;
+    // A read still under way joins: a new one would leave its child reading the
+    // whole store beside this one, one more for every press while a read hangs.
+    if (!oldRead.run) invalidateOldProfile();
+    // A refusal for this app being elevated is about that launch's CLI run.
+    const pending = state.pendingPair;
+    if (pending && pending.personal && personalFlow && personalFlow.request === pending.request
+      && personalFlow.error && personalFlow.error.code === 'PAIR_ELEVATED') {
+      state.setPendingPair(null);
+      personalFlow = null;
+      pressRuns.delete('pair');
+      found = null;
+      foundError = null;
+    }
+    await refreshNode({ force: true }).catch(() => {});
+    notify();
     return { ok: true };
   }
 
@@ -807,10 +1243,12 @@ function createDesktopController({
   }
 
   async function importPlan() {
+    if (moveRun) return { ...MOVE_RUNNING };
     try {
       closeImportSession();
       const session = await importClient();
-      const source = await loadDesktopSource({ userDataDir, safeStorage, platform });
+      const hosting = session.client.service && session.client.service.hosting;
+      const source = await loadDesktopSource({ userDataDir, safeStorage, platform, ...(hosting ? { hosting } : {}) });
       const plan = await planImport({ client: session.client, source });
       importSession = { ...session, plan, source };
       return { ok: true, plan, attention: source.attention };
@@ -821,6 +1259,7 @@ function createDesktopController({
   }
 
   async function importApply() {
+    if (moveRun) return { ...MOVE_RUNNING };
     if (!importSession) return { ok: false, code: 'PLAN_EXPIRED', error: 'The import plan expired; plan the import again.' };
     try {
       const report = await applyImport({
@@ -840,6 +1279,345 @@ function createDesktopController({
       closeImportSession();
       notify();
     }
+  }
+
+  // One at a time: a second press of the same step gets the run in flight, and
+  // the other step is refused until it ends.
+  function runMove(kind, work) {
+    if (moveRun) return moveRun.kind === kind ? (moveAnswer || moveRun.promise) : Promise.resolve({ ...MOVE_RUNNING });
+    moveAnswer = null;
+    const promise = work().finally(() => { moveRun = null; });
+    moveRun = { kind, promise };
+    return promise;
+  }
+
+  // The live connection to this desktop's personal node, or why there is none.
+  // The move needs the node up, and a backup for a move that cannot run is waste.
+  function moveTarget() {
+    const pairing = state.pairing;
+    if (!pairing || !pairing.service) return { refusal: { ok: false, code: 'NOT_PAIRED', error: 'Pair with the local service first.' } };
+    const live = client && client.service && client.service.hosting;
+    if (pairing.service.hosting !== 'personal' || (live && live !== 'personal')) {
+      return { refusal: { ok: false, code: 'NOT_PERSONAL', error: NOT_PERSONAL_TEXT } };
+    }
+    if (!client || !client.connected) {
+      return { refusal: { ok: false, code: 'SERVICE_UNREACHABLE', error: MESSAGES.SERVICE_UNREACHABLE(pairing.service.port) } };
+    }
+    return { client, service: pairing.service };
+  }
+
+  const backupProgress = (stage) => (p) => send('desktop:importProgress', { stage, ...p, sent: p.files, total: p.totalFiles });
+
+  // §6.5: once per launch, while what it wrote still reads whole.
+  // A backup taken while cases were outside the profile does not hold them once
+  // the owner has moved them in, so a changed count makes a new one.
+  async function ensureBackup(onProgress, customCases) {
+    const sameRoot = backupMade && (backupMade.customCases === undefined || backupMade.customCases === customCases);
+    if (sameRoot && await readBackupManifest(backupMade.dest, { onProgress: backupProgress('backup-check') })) return backupMade;
+    backupMade = await move.backupProfile({
+      userDataDir, dest: backupDirFor(userDataDir, now), now, appVersion, env, onProgress
+    });
+    return backupMade;
+  }
+
+  const moveSourceRefusal = (error) => ({ ok: false, code: 'MIGRATION_SOURCE', error: shown(error, 600) });
+
+  // The source as read now against the backup just made of it: a store that
+  // stopped reading, or a reader that dropped chats, must not plan a smaller
+  // move that then verifies.
+  function sourceProblem(source, backup) {
+    const refused = source.attention.filter((a) => a.category === 'source' && MIGRATION_STORE_FILES.has(a.key));
+    if (refused.length) return refused.map((a) => `${a.key}: ${a.note}`).join('; ');
+    const chats = source.inventory.chats.map((c) => source.getValue('chat', c.id));
+    const messages = chats.reduce((n, c) => n + (c && Array.isArray(c.messages) ? c.messages.length : 0), 0);
+    if (chats.length < backup.history.chats || messages < backup.history.messages) {
+      return `the profile reads as ${chats.length} chats and ${messages} messages, and its backup holds ${backup.history.chats} and ${backup.history.messages}`;
+    }
+    return null;
+  }
+
+  function staysBehindLines(plan, source) {
+    const items = plan.items || [];
+    const named = items.filter((i) => i.action === 'skip-excluded' && i.note).map((i) => i.note);
+    const tooLarge = items.filter((i) => i.category === 'chat' && i.action === 'needs-attention' && i.note).map((i) => capitalised(i.note));
+    const agents = (source && Array.isArray(source.agentCases) ? source.agentCases : []).map(agentLine);
+    const keys = (source && Array.isArray(source.unreadableSecrets) ? source.unreadableSecrets : []).map(unreadableKeyLine);
+    return [...new Set([...keys, ...tooLarge, ...agents, ...named, ...STAYS_BEHIND_FIXED])].map((line) => shown(line, 600));
+  }
+
+  // What the owner reads of a plan or a report; the session keeps the real one.
+  const shownEntry = (entry) => {
+    const out = { ...entry };
+    for (const key of ['category', 'key', 'targetKey', 'note', 'error']) {
+      if (out[key] !== null && out[key] !== undefined) out[key] = shown(out[key], key === 'note' || key === 'error' ? 1200 : 200);
+    }
+    return out;
+  };
+  const shownEntries = (list) => (Array.isArray(list) ? list.filter(Boolean).map(shownEntry) : []);
+  const shownReport = (report) => ({
+    ...report,
+    failures: shownEntries(report.failures),
+    attention: shownEntries(report.attention),
+    incomplete: shownEntries(report.incomplete),
+    secretsMissing: shownEntries(report.secretsMissing),
+    skipped: shownEntries(report.skipped),
+    sendFailures: shownEntries(report.sendFailures),
+    notes: Array.isArray(report.notes) ? report.notes.map((n) => shown(n, 400)) : []
+  });
+
+  // What the owner must still see, as plain data: secrets that did not come, and
+  // whatever the plan, the source or the landing says needs attention. Each once.
+  function leftBehindOf({ plan, source, report = null }) {
+    const items = Array.isArray(plan.items) ? plan.items : [];
+    const entry = ({ category, key, note }) => shownEntry({ category, key, note: note || null });
+    const once = (list) => {
+      const seen = new Set();
+      return list.filter(({ category, key }) => {
+        const id = `${category}:${key}`;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      }).map(entry);
+    };
+    const isSecret = (i) => SECRET_CATEGORIES.has(i.category);
+    const open = items.filter((i) => i.action === 'needs-attention' || i.action === 'needs-desktop');
+    const reported = (key) => (report && Array.isArray(report[key]) ? report[key].filter(Boolean) : []);
+    return {
+      needsAttention: once([...open.filter((i) => !isSecret(i)), ...reported('attention').filter((i) => !isSecret(i)), ...(source.attention || [])]),
+      secrets: once([
+        ...(Array.isArray(source.unreadableSecrets) ? source.unreadableSecrets : []).map((s) => ({ ...s, note: UNREADABLE_KEY_NOTE })),
+        ...open.filter(isSecret), ...reported('secretsMissing'), ...reported('attention').filter(isSecret)
+      ])
+    };
+  }
+
+  // What a press does for the setup around a move: what it says on screen while
+  // it runs, and its answer after. A press refused because another run is under
+  // way changes nothing on screen, and neither does one joining a run.
+  function movePress(field, line, run, after = null) {
+    if (moveRun) return run();
+    clearAnswers();
+    setProgress(line);
+    const promise = run().then((answer) => {
+      answers[field] = answer;
+      if (after) after(answer);
+      setProgress(null);
+      return answer;
+    }, (err) => {
+      setProgress(null);
+      throw err;
+    });
+    // A second press gets the first press's answer, with its after-work done.
+    moveAnswer = promise;
+    return promise;
+  }
+
+  function migrationPlan() {
+    return movePress('migrationPlan', READING_OLD_PROFILE, runMigrationPlan);
+  }
+
+  function migrationApply(payload = {}) {
+    if (!payload || payload.confirmed !== true) return runMigrationApply(payload);
+    return movePress('migrationResult', 'Moving your chats and cases into King Louie Node…', () => runMigrationApply(payload), (answer) => {
+      // An apply that never began left the store as it was; anything that ran may
+      // have changed what there is to move.
+      if (answer.code !== 'PLAN_EXPIRED') invalidateOldProfile();
+    });
+  }
+
+  // What landed (MCP servers, bots, hooks) starts only when the node does, and a
+  // restart ends a turn, a take or a task, so it is the owner's press: `restartDue`
+  // on the marker offers it until he answers, at this launch or a later one. Later
+  // is an answer: the note that says when it takes effect stays on screen.
+  async function restartLater() {
+    state.clearRestartDue();
+    notify();
+    return { ok: true };
+  }
+
+  function runMigrationPlan() {
+    return runMove('plan', async () => {
+      if (state.migration) return profileMigrated();
+      // Planning the move is the owner taking back a Skip for now: the walk goes on
+      // to the move and its Finish, rather than staying finished for this launch.
+      finishedForNow = false;
+      migrateSkipped = false;
+      const target = moveTarget();
+      if (target.refusal) return target.refusal;
+      try {
+        const old = await move.detectOldProfile(userDataDir, { env });
+        setOldProfile(old);
+        if (old.schemaProblem) return moveSourceRefusal(`The old profile cannot be read, so nothing was moved: ${old.schemaProblem}`);
+        if (!old.found) return moveSourceRefusal('This profile holds no chats or cases to move.');
+        let backup;
+        try {
+          setProgress('Making a backup of your earlier King Louie…');
+          backup = await ensureBackup(backupProgress('backup'), old.customCases);
+        } catch (err) {
+          return { ok: false, code: err.code || 'BACKUP_FAILED', error: shown(err.message, 800), backupDir: err.dest ? shown(err.dest, 400) : null };
+        }
+        setProgress('Working out what will move…');
+        const source = await move.loadDesktopSource({ userDataDir, safeStorage, platform, customRootEmpty: old.customCases === 0, hosting: 'personal' });
+        const problem = sourceProblem(source, backup);
+        if (problem) return moveSourceRefusal(`The old profile did not read whole, so nothing was moved: ${problem}`);
+        if (source.inventory.secrets === 'unavailable') return moveSourceRefusal(NO_SECURE_STORAGE);
+        const keys = setAsideUnreadableSecrets(source);
+        if (keys.total >= WRONG_ENVIRONMENT_MIN_KEYS && keys.unreadable.length * 2 > keys.total) return moveSourceRefusal(keysUnreadable(keys.unreadable.length, keys.total));
+        closeImportSession();
+        const plan = withSourceFacts(await planImport({ client: target.client, source }), source);
+        // A case the reader holds back whole is in no plan, so nothing could ever
+        // find it missing: the apply refuses while there is one.
+        const heldCases = shownEntries(source.attention.filter((a) => a.category === 'case' && a.wholeCase === true));
+        const refusedFiles = source.attention.filter((a) => a.category === 'case' && a.wholeCase !== true && String(a.key).includes('/')).length;
+        importSession = {
+          client: target.client,
+          temporary: false,
+          plan,
+          source,
+          move: { backup, service: target.service, customCasesRoot: old.customCasesRoot, customCases: old.customCases, heldCases, refusedFiles }
+        };
+        return {
+          ok: true,
+          backup: {
+            dest: shown(backup.dest, 400),
+            bytes: backup.bytes,
+            files: backup.files,
+            history: backup.history,
+            customCasesRoot: old.customCasesRoot ? shown(old.customCasesRoot, 400) : null,
+            customCases: old.customCases,
+            customCasesMissing: old.customCasesMissing === true
+          },
+          plan: {
+            ...plan,
+            items: plan.items.map(shownEntry),
+            dirtyCases: plan.dirtyCases.map((d) => ({ key: shown(d.key), note: shown(d.note, 400) }))
+          },
+          heldCases,
+          refusedFiles,
+          attention: shownEntries(source.attention),
+          staysBehind: staysBehindLines(plan, source),
+          leftBehind: leftBehindOf({ plan, source })
+        };
+      } catch (err) {
+        closeImportSession();
+        return { ok: false, code: err.code || 'IMPORT_FAILED', error: shown(err.message, 600) };
+      }
+    });
+  }
+
+  function runMigrationApply({ confirmed = false } = {}) {
+    if (confirmed !== true) {
+      return Promise.resolve({ ok: false, code: 'CONFIRM_REQUIRED', error: 'Moving this profile needs the owner\'s press.' });
+    }
+    return runMove('apply', async () => {
+      if (state.migration) return profileMigrated();
+      const session = importSession && importSession.move ? importSession : null;
+      if (!session) return { ok: false, code: 'PLAN_EXPIRED', error: 'The plan for this move expired; plan it again.' };
+      const { backup, service, customCasesRoot, customCases, heldCases, refusedFiles } = session.move;
+      // The move carries only the profile's own cases folder, so marking it
+      // would leave these behind with no way back to them from this profile. The
+      // plan's count is only what it was: a drive can go, or a case arrive, since.
+      const caseRootRefusal = async () => {
+        if (!customCasesRoot) return null;
+        const now = await readCaseRoot(customCasesRoot);
+        if (now.customCases === 0) return null;
+        return moveSourceRefusal(now.customCasesMissing
+          ? `The cases folder ${shown(customCasesRoot, 400)} is not there, so its cases would not move. Plug its drive in, or if that folder is no longer used make an empty folder at that path, and plan again.`
+          : `Cases under ${shown(customCasesRoot, 400)} are outside this profile and would not move. Move them into the profile's cases folder, or out of use, and plan again.`);
+      };
+      if (customCases !== 0 && customCasesRoot) {
+        const refused = await caseRootRefusal();
+        return refused || moveSourceRefusal(`The cases folder ${shown(customCasesRoot, 400)} has changed since the plan, so plan again.`);
+      }
+      const rootChanged = await caseRootRefusal();
+      if (rootChanged) return rootChanged;
+      if (heldCases.length) {
+        const names = heldCases.map((h) => h.key).join(', ');
+        return moveSourceRefusal(`${heldCases.length === 1 ? 'A case cannot' : 'Cases cannot'} be moved as ${heldCases.length === 1 ? 'it stands' : 'they stand'}: ${names}. Nothing was moved. Sort ${heldCases.length === 1 ? 'it' : 'them'} out on the desktop and plan again.`);
+      }
+      try {
+        const report = await applyImport({
+          client: session.client,
+          plan: session.plan,
+          source: session.source,
+          onProgress: (p) => send('desktop:importProgress', p)
+        });
+        state.setLastImport({ at: now().toISOString(), counts: report.counts });
+        if (client && client.connected) {
+          try { client.service = await client.call('bridge.status'); } catch { /* keep the old summary */ }
+        }
+        setProgress('Checking what landed on the node…');
+        const verified = await verifyMigration({
+          plan: session.plan,
+          report,
+          invoke: (channel, args = []) => session.client.invoke(channel, args)
+        });
+        // Said beside the rest, and never a refusal: the mark does not wait on order.
+        const shownOut = shownReport({ ...report, notes: [...new Set([...(report.notes || []), ...(verified.notes || [])])] });
+        const leftBehind = leftBehindOf({ plan: session.plan, source: session.source, report });
+        if (!verified.ok) {
+          return {
+            ok: false,
+            code: 'MIGRATION_UNVERIFIED',
+            error: `${verified.missing.length} ${verified.missing.length === 1 ? 'item' : 'items'} on the node do not match the desktop, so this profile was not marked as moved. Nothing was removed. Moving again sends what did not arrive; each line says what else it needs.`,
+            report: shownOut,
+            leftBehind,
+            refusedFiles,
+            verified
+          };
+        }
+        // The mark is what stops the old profile opening, so the backup it names
+        // must still be whole at that moment.
+        if (!(await readBackupManifest(backup.dest, { onProgress: backupProgress('backup-check') }))) {
+          backupMade = null;
+          return {
+            ok: false,
+            code: 'BACKUP_FAILED',
+            error: `The move is on the node, but its backup at ${shown(backup.dest, 400)} no longer reads whole, so this profile was not marked as moved. Try again: a new backup is made first.`,
+            report: shownOut,
+            leftBehind,
+            refusedFiles,
+            verified
+          };
+        }
+        const rootGone = await caseRootRefusal();
+        if (rootGone) return { ...rootGone, report: shownOut, leftBehind, refusedFiles, verified };
+        try {
+          state.setMigration({
+            at: now().toISOString(),
+            // Only when something moved that starts with the node; the owner's press clears it.
+            ...(report.needsRestart === true ? { restartDue: true } : {}),
+            backupDir: backup.dest,
+            nodeDataDir: service.dataDir || null,
+            nodeId: service.nodeId,
+            counts: { ...verified.checked, attention: Array.isArray(report.attention) ? report.attention.length : 0 },
+            leftBehind,
+            // Both outlast the plan: the setup keeps them on screen up to Done.
+            private: session.plan.private || null,
+            staysBehind: staysBehindLines(session.plan, session.source),
+            notes: shownOut.notes
+          });
+        } catch (err) {
+          log.warn(`the migration marker was not written: ${err.message}`);
+          return { ok: false, code: 'MIGRATION_MARK_FAILED', error: `The move is on the node, but this profile could not be marked as moved (${shown(err.message, 300)}). Try again.`, report: shownOut, leftBehind, refusedFiles, verified };
+        }
+        log.info('this profile was moved into the node and verified', verified.checked);
+        return { ok: true, report: shownOut, leftBehind, refusedFiles, verified };
+      } catch (err) {
+        return { ok: false, code: err.code || 'IMPORT_FAILED', error: shown(err.message, 600) };
+      } finally {
+        closeImportSession();
+        notify();
+      }
+    });
+  }
+
+  // A plan lives on the node for its connection: after a drop only a new one can
+  // be applied. A move in flight ends with its own refusal.
+  function forgetPlan() {
+    if (moveRun) return;
+    if (importSession && importSession.move) closeImportSession();
+    if (answers.migrationPlan && answers.migrationPlan.ok) delete answers.migrationPlan;
   }
 
   function createClient() {
@@ -863,6 +1641,7 @@ function createDesktopController({
       // §7.4, C-13: after a drop the row is chosen from what §7.1 finds
       // now. Read only: a drop never runs the task.
       if (was === 'connected' && s.status !== 'connected') {
+        forgetPlan();
         refreshNode({ force: true })
           .then((changed) => { if (changed) notify(); })
           .catch((err) => log.warn(`reading King Louie Node after a drop failed: ${err.message}`));
@@ -889,7 +1668,8 @@ function createDesktopController({
 
   // Today's connect: the client's own loop and backoff, nothing else.
   function connectNow() {
-    if (client) client.connect().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
+    // A restart refused while connected leaves the connection it had: no second one.
+    if (client && !client.connected) client.connect().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
   }
 
   function endStart(startError) {
@@ -914,7 +1694,7 @@ function createDesktopController({
       ]);
       // A start begun meanwhile owns the state.
       if (disposed || startRun || nodeState.starting) return false;
-      nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+      nodeState = { ...nodeState, ...taskFields(task), ...runningFields(running), startError: withoutStaleTaskError(nodeState.startError, task.state) };
       return true;
     })();
     refreshRun = run;
@@ -960,6 +1740,13 @@ function createDesktopController({
       if (!current()) return;
       setRunning(running);
       run = !running.running;
+      // A node already up runs no task here, and the version row and the phone step
+      // ask what it runs.
+      if (!run) {
+        const task = await nodeRunner.queryTask({ me: local.me }).catch(() => ({ state: 'unknown' }));
+        if (!current()) return;
+        nodeState = { ...nodeState, ...taskFields(task) };
+      }
     }
     if (run) {
       // A restart stops only a node that runs: with none, it is a start.
@@ -1053,6 +1840,18 @@ function createDesktopController({
   // is under way; the wait goes on in the background (statusChanged on
   // each step), so the pane is not held for up to 60 s.
   async function nodeStart({ restart = false } = {}) {
+    clearAnswers();
+    const answersMove = restart === true && Boolean(state.migration && state.migration.restartDue);
+    if (answersMove) restartedAfterMove = true;
+    const out = await nodeStartNow({ restart });
+    if (out && out.ok === false) answers = { setupError: out };
+    else if (answersMove) state.clearRestartDue();
+    return out;
+  }
+
+  const nodeRestart = () => nodeStart({ restart: true });
+
+  async function nodeStartNow({ restart = false } = {}) {
     const dataDir = personalPairingDir();
     if (!dataDir || !nodeRunner) return { ok: false, code: 'NOT_PERSONAL', error: NOT_PERSONAL_TEXT };
     if (mode !== 'attached' || !client) return { ok: false, code: 'NOT_ATTACHED', error: 'Attach to King Louie Node first.' };
@@ -1070,7 +1869,8 @@ function createDesktopController({
 
   // §8: which data dir Install is for, and whose task it reads after.
   // The disk is read every time (C-7): a recorded data dir only says where
-  // to look, and must still be a personal node's.
+  // to look, and must still be a personal node's. With none recorded, a
+  // machine with nothing on it may be installed on (attach stage 2 §6.4).
   async function installTarget() {
     if (!nodeRunner) return null;
     const recorded = personalDataDir();
@@ -1081,39 +1881,71 @@ function createDesktopController({
       log.warn(`personal node read failed: ${err.message}`);
       return null;
     }
-    if (!local || !local.personal || !local.dataDir) return null;
+    if (!local || !local.dataDir) return null;
+    if (!local.personal && !(local.fresh === true && !recorded)) return null;
     if (recorded && !samePath(local.dataDir, recorded)) return null;
     return { dataDir: local.dataDir, me: local.me };
   }
 
   function installResult(cli) {
-    const lines = outputLines(cli && cli.stdout, cli && cli.stderr);
+    const stdout = withoutLogLines(cli && cli.stdout);
+    const stderr = withoutLogLines(cli && cli.stderr);
+    const lines = outputLines(stdout, stderr);
     if (cli && cli.code === 0) return { ok: true, lines };
-    const message = firstLine(cli && cli.stderr) || firstLine(cli && cli.stdout)
+    const message = firstLine(stderr) || firstLine(stdout)
       || (cli && cli.timedOut ? 'the command did not finish in time' : shown((cli && cli.error) || 'the command failed', 400));
     return { ok: false, code: 'NODE_INSTALL_FAILED', message, lines };
   }
 
   const notPersonalInstall = () => ({ ok: false, code: 'NOT_PERSONAL', message: NOT_PERSONAL_TEXT, error: NOT_PERSONAL_TEXT, lines: [] });
 
-  async function nodeInstallPreview() {
+  // What the setup keeps of an install press, and the elevated refusal in it.
+  function installPress(field, line, work) {
+    return joined(field, async () => {
+      clearAnswers();
+      elevated = false;
+      setProgress(line);
+      let answer;
+      try {
+        answer = await work();
+      } finally {
+        setupProgress = null;
+      }
+      answers[field] = answer;
+      if (!answer.ok && INSTALL_ELEVATED.test(`${answer.message || ''}\n${(answer.lines || []).join('\n')}`)) elevated = true;
+      notify();
+      return answer;
+    });
+  }
+
+  function nodeInstallPreview() {
+    return installPress('installPreview', 'Reading what installing would do…', runInstallPreview);
+  }
+
+  function nodeInstall(payload = {}) {
+    if (!payload || payload.confirmed !== true) return runInstall(payload);
+    return installPress('installResult', 'Installing King Louie Node…', () => runInstall(payload));
+  }
+
+  async function runInstallPreview() {
     const target = await installTarget();
     if (!target) return notPersonalInstall();
     const cli = await nodeRunner.runCli(['install', '--personal', '--dry-run', '--data-dir', target.dataDir], { timeoutMs: INSTALL_CLI_TIMEOUT_MS });
     return installResult(cli);
   }
 
-  async function nodeInstall({ confirmed = false } = {}) {
+  async function runInstall({ confirmed = false } = {}) {
     if (confirmed !== true) {
       const text = 'Installing King Louie Node needs the Install press.';
       return { ok: false, code: 'CONFIRM_REQUIRED', message: text, error: text, lines: [] };
     }
     const target = await installTarget();
     if (!target) return notPersonalInstall();
-    // §8: only while no task is registered.
+    // §8: only while no task is registered, or the owner's task runs a program that
+    // is gone (§6.8): the CLI's /Create /F registers it again.
     const before = await nodeRunner.queryTask({ me: target.me }).catch(() => ({ state: 'unknown' }));
-    if (before.state !== 'missing') {
-      nodeState = { ...nodeState, task: before.state };
+    if (before.state !== 'missing' && !(before.state === 'registered' && before.gone)) {
+      nodeState = { ...nodeState, ...taskFields(before) };
       notify();
       const refusal = INSTALL_REFUSALS[before.state] || INSTALL_REFUSALS.unknown;
       return { ok: false, code: refusal.code, message: refusal.message, error: refusal.message, lines: [] };
@@ -1124,7 +1956,7 @@ function createDesktopController({
       nodeRunner.queryTask({ me: target.me }).catch(() => ({ state: 'unknown' })),
       nodeRunner.nodeRunning({ dataDir: target.dataDir }).catch(() => ({ running: false, pid: null }))
     ]);
-    nodeState = { ...nodeState, task: task.state, ...runningFields(running) };
+    nodeState = { ...nodeState, ...taskFields(task), ...runningFields(running) };
     notify();
     return installResult(cli);
   }
@@ -1133,10 +1965,11 @@ function createDesktopController({
 
   return {
     status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
-    importPlan, importApply, dismissServiceCommand, createClient, setClient, dispose,
-    startAttached, startIdle, refreshIdle, nodeStart, nodeInstallPreview, nodeInstall,
+    importPlan, importApply, migrationPlan, migrationApply, restartLater, dismissServiceCommand, createClient, setClient, dispose,
+    startAttached, startIdle, refreshIdle, nodeStart, nodeRestart, nodeInstallPreview, nodeInstall,
+    setupStep, setupLater, setupFinish, finishedForNow: () => finishedForNow,
     on: (event, fn) => emitter.on(event, fn)
   };
 }
 
-module.exports = { createDesktopController, DETACH_WARNING, STANDALONE_ONCE };
+module.exports = { createDesktopController, DETACH_WARNING, DETACH_WARNING_WINDOWS, STANDALONE_ONCE };

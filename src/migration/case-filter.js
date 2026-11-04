@@ -60,6 +60,7 @@ function filterInventoryToCase({ inventory, getValue, caseFiles, caseRef }) {
   // the scalar fields (installId, sourceVersion, secrets) are kept.
   const out = {};
   for (const [key, value] of Object.entries(inventory)) {
+    if (key === 'settingDigests' || key === 'userProfileDigest') continue;
     if (Array.isArray(value)) out[key] = [];
     else if (typeof value === 'boolean') out[key] = false;
     else out[key] = value;

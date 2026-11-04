@@ -5,6 +5,26 @@ const path = require('path');
 // A personal node's data dir: under the user's own profile rather than a
 // machine-wide one, with its config dir beside it (adminConfigDir). Null on
 // Windows when LOCALAPPDATA is unset, since no user path can be named then.
+// The command-line launcher `install --personal` writes beside a window-installed
+// node's config dir, so its owner has a king-louie-service to run.
+const PERSONAL_CLI_FILE = 'king-louie-service.cmd';
+// Its first line. A file of that name without it may be the owner's own script.
+const PERSONAL_CLI_MARKER = '@rem King Louie Node launcher, written by install --personal.';
+
+function isPersonalCli(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const head = Buffer.alloc(PERSONAL_CLI_MARKER.length);
+    const read = fs.readSync(fd, head, 0, head.length, 0);
+    return head.toString('utf8', 0, read) === PERSONAL_CLI_MARKER;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 function personalDataDir({ platform = process.platform, env = process.env } = {}) {
   if (platform === 'win32') {
     return env.LOCALAPPDATA ? path.win32.join(env.LOCALAPPDATA, 'KingLouie', 'node', 'data') : null;
@@ -69,6 +89,17 @@ function fleetLayoutMarkers({ env = process.env } = {}) {
     path.win32.join(configDir, 'identity', 'node.json'),
     path.win32.join(configDir, 'session', 'helper-secret.json')
   ];
+}
+
+// Whether a path is there, for a check that must not take "may not look" for
+// "nothing there" (fs.existsSync does): only a clear no is a no.
+function pathPresent(p, stat = fs.statSync) {
+  try {
+    stat(p);
+    return true;
+  } catch (err) {
+    return !(err && (err.code === 'ENOENT' || err.code === 'ENOTDIR'));
+  }
 }
 
 // The first fleet layout marker that exists, or null.
@@ -293,7 +324,11 @@ module.exports = {
   fleetDataDir,
   fleetLayoutMarkers,
   fleetLayoutExists,
+  pathPresent,
   personalDataDir,
+  PERSONAL_CLI_FILE,
+  PERSONAL_CLI_MARKER,
+  isPersonalCli,
   desktopProfileDirs,
   adminConfigDir,
   adminCredentialPath,

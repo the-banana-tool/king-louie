@@ -7,7 +7,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { runPersonalInstall, renderPersonalTaskXml, PERSONAL_TASK_NAME } = require('../src/service/personal-install');
+const { spawnSync } = require('child_process');
+const { runPersonalInstall, renderPersonalTaskXml, PERSONAL_TASK_NAME, renderServiceCli } = require('../src/service/personal-install');
 const { loadNodeConfig } = require('../src/service/node-config');
 const { main } = require('../src/service/cli');
 
@@ -52,6 +53,7 @@ function deps(s, extra = {}) {
     findFfmpeg: () => 'C:\\ffmpeg\\bin\\ffmpeg.exe',
     fleetInstalled: () => ({ task: false, marker: null }),
     taskRegistered: () => true,
+    taskDataDir: () => null,
     // Only the temp tree exists, never the machine's real ProgramData.
     exists: (p) => p.startsWith(s.base) && fs.existsSync(p),
     hostname: () => 'laptop',
@@ -68,16 +70,131 @@ function deps(s, extra = {}) {
 const run = (command, s, d, flags = {}, t = io()) => runPersonalInstall({ command, flags: { dataDir: s.dataDir, ...flags }, io: t.io, deps: d }).then((code) => ({ code, t }));
 const argvs = (d) => d.executed.flat().filter((step) => step.run).map((step) => step.run);
 
+// Attach stage 2 §6.4 (C-6): no Chrome is no reason to refuse; a node whose
+// client is the window needs neither a browser nor a relay.
+describe('install --personal: with no Chrome', () => {
+  const NO_CHROME = { findChrome: () => null };
+
+  it('writes gui enabled: false and no apps, prints the one line, and goes on', async () => {
+    const s = setup();
+    const d = deps(s, NO_CHROME);
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    const yaml = fs.readFileSync(s.yamlPath, 'utf8');
+    assert.match(yaml, /^gui:\n {2}enabled: false\n$/m);
+    assert.doesNotMatch(yaml, /apps|take|browser/);
+    const lines = t.text().split('\n').filter((l) => l.includes('no chrome.exe found'));
+    assert.deepEqual(lines, ['no chrome.exe found: takes and desktop apps are off; add gui.apps.chrome and gui.browser to node.yaml to turn them on']);
+    assert.doesNotMatch(t.text(), /ffmpeg is not on PATH/, 'nothing to record without a browser');
+    assert.ok(argvs(d).some((a) => a.includes('/Create')));
+    const config = loadNodeConfig({ adminConfigDir: s.configDir, adminUid: UID });
+    assert.equal(config.hosting, 'personal');
+    assert.equal(config.gui.enabled, false);
+  });
+
+  it('--browser still writes the full block, with or without one found', async () => {
+    const s = setup();
+    const { code } = await run('install', s, deps(s, NO_CHROME), { browser: CHROME });
+    assert.equal(code, 0);
+    const yaml = fs.readFileSync(s.yamlPath, 'utf8');
+    assert.match(yaml, /enabled: true/);
+    assert.match(yaml, /browser: chrome/);
+  });
+
+  it('a second install over that file has nothing to add', async () => {
+    const s = setup();
+    await run('install', s, deps(s, NO_CHROME));
+    const { t } = await run('install', s, deps(s, NO_CHROME));
+    assert.match(t.text(), /it has every line install would write/);
+  });
+
+  it('a file with gui off does not nag for the browser lines when a Chrome is found, and does with --browser', async () => {
+    const s = setup();
+    await run('install', s, deps(s, NO_CHROME));
+    const found = await run('install', s, deps(s));
+    assert.match(found.t.text(), /it has every line install would write/);
+    const asked = await run('install', s, deps(s), { browser: CHROME });
+    assert.match(asked.t.text(), /it lacks these lines[\s\S]*gui\.apps\.chrome/);
+  });
+
+  it('a kept node.yaml that names its own browser is not told takes are off, or to turn gui off', async () => {
+    const s = setup();
+    await run('install', s, deps(s));
+    const { t } = await run('install', s, deps(s, NO_CHROME));
+    assert.doesNotMatch(t.text(), /no chrome\.exe found/);
+    assert.match(t.text(), /it has every line install would write/);
+    assert.doesNotMatch(t.text(), /gui\.enabled: false/);
+  });
+});
+
+// §6.4: a node whose client is the window runs on the bridge alone.
+describe('install --personal: startable with the desktop bridge on', () => {
+  const noStartableDep = (s, extra) => { const d = deps(s, { findChrome: () => null, ...extra }); delete d.startable; return d; };
+  const prepare = async (s) => { await run('install', s, noStartableDep(s)); };
+  const STARTED = (d) => argvs(d).some((a) => a.includes('/Run'));
+
+  it('service.json with features.desktopBridge true and no relay starts the task', async () => {
+    const s = setup();
+    await prepare(s);
+    fs.writeFileSync(path.join(s.configDir, 'service.json'), JSON.stringify({ features: { desktopBridge: true } }));
+    const d = noStartableDep(s);
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    assert.ok(STARTED(d), t.text());
+    assert.match(t.text(), /is registered and started/);
+  });
+
+  it('neither a relay nor the bridge: not started, with the same reason as before', async () => {
+    for (const body of [null, { features: { desktopBridge: false } }, { features: {} }]) {
+      const s = setup();
+      await prepare(s);
+      if (body) fs.writeFileSync(path.join(s.configDir, 'service.json'), JSON.stringify(body));
+      const d = noStartableDep(s);
+      const { t } = await run('install', s, d);
+      assert.equal(STARTED(d), false);
+      assert.match(t.text(), /has no approvers\.relay and there is no front-door\.json yet/);
+    }
+  });
+
+  it('startable reads the install\'s own data dir, not a sibling called data', async () => {
+    const s = setup();
+    const dataDir = path.join(path.dirname(s.dataDir), 'mine');
+    const flags = { dataDir };
+    await run('install', s, noStartableDep(s), flags);
+    fs.writeFileSync(path.join(s.configDir, 'service.json'), JSON.stringify({ features: { desktopBridge: true } }));
+    // A broken file beside the wrong path says nothing; beside the right one it does.
+    fs.mkdirSync(s.dataDir, { recursive: true });
+    fs.writeFileSync(path.join(s.dataDir, 'service.json'), '{ not json');
+    const ok = noStartableDep(s);
+    await run('install', s, ok, flags);
+    assert.ok(STARTED(ok));
+    fs.writeFileSync(path.join(dataDir, 'service.json'), '{ not json');
+    const bad = noStartableDep(s);
+    const { t } = await run('install', s, bad, flags);
+    assert.equal(STARTED(bad), false);
+    assert.match(t.text(), /service\.json does not load/);
+  });
+
+  it('a service.json that does not load is not startable, with why', async () => {
+    const s = setup();
+    await prepare(s);
+    fs.writeFileSync(path.join(s.configDir, 'service.json'), JSON.stringify({ features: { desktopBridge: true, nonsense: true } }));
+    const d = noStartableDep(s);
+    const { t } = await run('install', s, d);
+    assert.equal(STARTED(d), false);
+    assert.match(t.text(), /service\.json does not load/);
+  });
+});
+
 describe('install --personal: refusals', () => {
-  it('refuses elevated, off Windows, with a fleet node installed, and with no chrome', async () => {
+  it('refuses elevated, off Windows, and with a fleet node installed', async () => {
     const cases = [
       [{ isAdmin: () => true }, /install --personal runs as you, not elevated: open a normal prompt/],
       [{ platform: 'linux' }, /install --personal is Windows-only for now/],
       [{ fleetInstalled: () => ({ task: true, marker: null }) }, /a fleet node is installed on this machine \(the KingLouie scheduled task\); run uninstall \/ session uninstall first/],
       [{ fleetInstalled: () => ({ task: true, marker: 'C:\\ProgramData\\KingLouie\\config\\node.yaml' }) }, /a fleet node is installed on this machine \(the KingLouie scheduled task; C:\\ProgramData\\KingLouie\\config\\node\.yaml exists\); run uninstall \/ session uninstall first/],
       // A marker file alone: named, and removed by hand (the uninstalls would not remove it).
-      [{ fleetInstalled: () => ({ task: false, marker: 'C:\\ProgramData\\KingLouie\\config\\service.json' }) }, /^a fleet node's file is on this machine \(C:\\ProgramData\\KingLouie\\config\\service\.json\) with no KingLouie task: if no fleet node is meant to run here, remove that file by hand, then run this again$/m],
-      [{ findChrome: () => null }, /no chrome\.exe found; pass --browser <path>/]
+      [{ fleetInstalled: () => ({ task: false, marker: 'C:\\ProgramData\\KingLouie\\config\\service.json' }) }, /^a fleet node's file is on this machine \(C:\\ProgramData\\KingLouie\\config\\service\.json\) with no KingLouie task: if no fleet node is meant to run here, remove that file by hand, then run this again$/m]
     ];
     for (const [extra, message] of cases) {
       const s = setup();
@@ -357,6 +474,185 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
     assert.match(t.text(), /^ {2}binary: {5}C:\\Program Files\\King Louie\\King Louie\.exe, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed$/m);
     const write = d.executed.flat().find((step) => step.writeFile);
     assert.match(argsOf(write.writeFile.content), /-Command \$env:ELECTRON_RUN_AS_NODE='1'; & 'C:\\Program Files\\King Louie\\King Louie\.exe' 'C:\\kl\\bin\\king-louie-service\.js' run --data-dir /);
+  });
+
+  describe('the launcher a window-installed owner runs', () => {
+    const launcherStep = (d) => d.executed.flat().find((step) => step.writeFile && step.writeFile.path.endsWith('king-louie-service.cmd'));
+
+    it('written beside the config dir with the pinned paths, by execute, in the consent and the dry run', async () => {
+      const s = setup();
+      const d = deps(s, { runAsNode: true, nodePath: APP });
+      const { code, t } = await run('install', s, d, { yes: true });
+      assert.equal(code, 0, t.errors());
+      const step = launcherStep(d);
+      assert.equal(step.writeFile.path, path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd'));
+      assert.equal(step.ignoreFailure, true);
+      assert.equal(step.writeFile.content, renderServiceCli({ nodePath: APP, entryPath: 'C:\\kl\\bin\\king-louie-service.js' }));
+      assert.ok(t.text().includes('king-louie-service.cmd'));
+
+      const dry = deps(s, { runAsNode: true, nodePath: APP });
+      const out = await run('install', s, dry, { dryRun: true });
+      assert.equal(out.code, 0, out.t.errors());
+      assert.match(out.t.text(), /\[dry-run\] [^\n]*king-louie-service\.cmd/);
+      assert.ok(!fs.existsSync(step.writeFile.path), 'written only by execute');
+    });
+
+    it('a checkout install (node.exe) writes none', async () => {
+      const s = setup();
+      const d = deps(s, { runAsNode: false });
+      const { code, t } = await run('install', s, d, { yes: true });
+      assert.equal(code, 0, t.errors());
+      assert.equal(launcherStep(d), undefined);
+      assert.ok(!t.text().includes('king-louie-service.cmd'));
+    });
+
+    it('renders quoted, CRLF, with the variable set, spaces and shell characters inert', () => {
+      const text = renderServiceCli({ nodePath: 'C:\\Program Files\\King & Louie\\King Louie.exe', entryPath: 'C:\\Program Files\\King & Louie\\resources\\app.asar\\bin\\king-louie-service.js' });
+      assert.deepEqual(text.split('\r\n'), [
+        '@rem King Louie Node launcher, written by install --personal.',
+        '@echo off',
+        'setlocal',
+        'set "ELECTRON_RUN_AS_NODE=1"',
+        '"C:\\Program Files\\King & Louie\\King Louie.exe" "C:\\Program Files\\King & Louie\\resources\\app.asar\\bin\\king-louie-service.js" %*',
+        'exit /b %errorlevel%',
+        ''
+      ]);
+    });
+
+    it('a percent in a path is doubled; a non-ASCII path sets the code page; a quote is refused', () => {
+      assert.ok(renderServiceCli({ nodePath: 'C:\\a%b\\k.exe', entryPath: 'C:\\k.js' }).includes('"C:\\a%%b\\k.exe"'));
+      const accented = renderServiceCli({ nodePath: 'C:\\Users\\Jos\u00e9\\k.exe', entryPath: 'C:\\k.js' });
+      // setlocal first, the page saved before it changes, and put back after the
+      // node exits with the node's exit code kept.
+      assert.deepEqual(accented.split('\r\n'), [
+        '@rem King Louie Node launcher, written by install --personal.',
+        '@echo off',
+        'setlocal',
+        'for /f "tokens=2 delims=:." %%a in (\'chcp\') do set "KLCP=%%a"',
+        'chcp 65001 >nul',
+        'set "ELECTRON_RUN_AS_NODE=1"',
+        '"C:\\Users\\Jos\u00e9\\k.exe" "C:\\k.js" %*',
+        'set "KLEXIT=%errorlevel%"',
+        'if defined KLCP chcp %KLCP% >nul',
+        'exit /b %KLEXIT%',
+        ''
+      ]);
+      assert.ok(!renderServiceCli({ nodePath: 'C:\\k.exe', entryPath: 'C:\\k.js' }).includes('chcp'));
+      assert.throws(() => renderServiceCli({ nodePath: 'C:\\a"b\\k.exe', entryPath: 'C:\\k.js' }), /double quote/);
+    });
+
+    it('uninstall removes it, with the task and with no task; the dry run lists it; none there, no step', async () => {
+      const s = setup();
+      const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
+      fs.mkdirSync(path.dirname(cli), { recursive: true });
+      fs.writeFileSync(cli, renderServiceCli({ nodePath: 'C:\\elsewhere\\k.exe', entryPath: 'C:\\elsewhere\\k.js' }));
+      const d = deps(s);
+      const { code, t } = await run('uninstall', s, d, { yes: true });
+      assert.equal(code, 0, t.errors());
+      assert.ok(d.executed.flat().some((step) => step.unlink === cli));
+
+      const noTask = deps(s, { taskRegistered: () => false });
+      const second = await run('uninstall', s, noTask, { yes: true });
+      assert.equal(second.code, 0, second.t.errors());
+      assert.ok(noTask.executed.flat().some((step) => step.unlink === cli));
+
+      const dry = deps(s);
+      const out = await run('uninstall', s, dry, { dryRun: true });
+      assert.match(out.t.text(), /\[dry-run\] [^\n]*king-louie-service\.cmd/);
+      assert.ok(fs.existsSync(cli), 'a dry run removes nothing');
+
+      fs.unlinkSync(cli);
+      const none = deps(s);
+      await run('uninstall', s, none, { yes: true });
+      assert.ok(!none.executed.flat().some((step) => step.unlink));
+    });
+
+    it('install does not write over a file of that name it did not write, and says so; its own it replaces', async () => {
+      const s = setup();
+      const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
+      fs.mkdirSync(path.dirname(cli), { recursive: true });
+      fs.writeFileSync(cli, '@echo off\r\necho my own script\r\n');
+      const d = deps(s, { runAsNode: true, nodePath: APP });
+      const { code, t } = await run('install', s, d, { yes: true });
+      assert.equal(code, 0, t.errors());
+      assert.equal(launcherStep(d), undefined);
+      assert.match(t.text(), /king-louie-service\.cmd[^\n]* left /);
+
+      fs.writeFileSync(cli, renderServiceCli({ nodePath: 'C:\\old\\k.exe', entryPath: 'C:\\old\\k.js' }));
+      const again = deps(s, { runAsNode: true, nodePath: APP, taskRegistered: () => false });
+      await run('install', s, again, { yes: true });
+      assert.ok(launcherStep(again), 'an older launcher of ours is replaced');
+    });
+
+    it('uninstall with no --data-dir stops the node where its task says it runs (the uninstaller passes none)', async () => {
+      const s = setup();
+      const custom = path.join(path.dirname(path.resolve(s.dataDir)), 'elsewhere', 'data');
+      const stopped = [];
+      const d = deps(s, { taskDataDir: () => custom, runningServicePid: (dir) => (dir === custom ? 4242 : null), stopNode: async (dir) => { stopped.push(dir); return 0; } });
+      const { code, t } = await run('uninstall', s, d, { yes: true, dataDir: undefined });
+      assert.equal(code, 0, t.errors());
+      assert.deepStrictEqual(stopped, [custom]);
+    });
+
+    it('uninstall with no --data-dir looks at the default place', { skip: process.platform !== 'win32' && 'the default data dir is a win32 path' }, async () => {
+      const s = setup();
+      const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
+      fs.mkdirSync(path.dirname(cli), { recursive: true });
+      fs.writeFileSync(cli, renderServiceCli({ nodePath: APP, entryPath: 'C:\\k.js' }));
+      for (const taskRegistered of [() => true, () => false]) {
+        const d = deps(s, { taskRegistered });
+        const { code, t } = await run('uninstall', s, d, { yes: true, dataDir: undefined });
+        assert.equal(code, 0, t.errors());
+        assert.ok(d.executed.flat().some((step) => step.unlink === cli), 'the launcher goes');
+      }
+    });
+
+    it('uninstall with no --data-dir and no default place says what to pass', async () => {
+      const s = setup();
+      const none = deps(s, { env: { SystemRoot: 'C:\\Windows', PATH: '' } });
+      const { code, t } = await run('uninstall', s, none, { yes: true, dataDir: undefined });
+      assert.notEqual(code, 0);
+      assert.match(t.errors(), /--data-dir/);
+    });
+
+    it('uninstall removes what carries the marker, and leaves anyone else\'s, saying so', async () => {
+      const s = setup();
+      const cli = path.join(path.dirname(path.resolve(s.dataDir)), 'king-louie-service.cmd');
+      fs.mkdirSync(path.dirname(cli), { recursive: true });
+      fs.writeFileSync(cli, renderServiceCli({ nodePath: APP, entryPath: 'C:\\kl\\bin\\king-louie-service.js' }));
+      const same = deps(s, { nodePath: APP });
+      await run('uninstall', s, same, { yes: true });
+      assert.ok(same.executed.flat().some((step) => step.unlink === cli));
+
+      for (const taskRegistered of [() => true, () => false]) {
+        fs.writeFileSync(cli, '@echo off\r\necho my own script\r\n');
+        const d = deps(s, { taskRegistered });
+        const { code, t } = await run('uninstall', s, d, { yes: true });
+        assert.equal(code, 0, t.errors());
+        assert.ok(!d.executed.flat().some((step) => step.unlink), 'not ours: not removed');
+        assert.match(t.text(), /king-louie-service\.cmd[^\n]* left /);
+      }
+      const dry = deps(s);
+      const out = await run('uninstall', s, dry, { dryRun: true });
+      assert.doesNotMatch(out.t.text(), /\[dry-run\] [^\n]*king-louie-service\.cmd/);
+      assert.match(out.t.text(), /king-louie-service\.cmd[^\n]* left /);
+      assert.ok(fs.existsSync(cli));
+    });
+
+    it('a launcher with a non-ASCII path keeps the node\'s exit code and puts the console\'s page back', { skip: process.platform !== 'win32' }, () => {
+      const s = setup();
+      const dir = path.join(s.base, 'Jos\u00e9');
+      fs.mkdirSync(dir);
+      const entry = path.join(dir, 'k.js');
+      fs.writeFileSync(entry, 'process.exit(7);\n');
+      const file = path.join(s.base, 'launcher.cmd');
+      fs.writeFileSync(file, renderServiceCli({ nodePath: process.execPath, entryPath: entry }));
+      const script = path.join(s.base, 'outer.cmd');
+      fs.writeFileSync(script, ['@echo off', 'chcp 437 >nul', 'call "%~1"', 'echo exit=%errorlevel%', 'chcp', ''].join('\r\n'));
+      const r = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', script, file], { encoding: 'utf8', windowsHide: true });
+      assert.match(r.stdout, /exit=7/, r.stdout + r.stderr);
+      assert.match(r.stdout, /: 437\b/, r.stdout);
+    });
   });
 
   it('run from node.exe: no variable in the task and no binary line in the consent', async () => {

@@ -14,7 +14,8 @@ function registerWebhookHandlers(ipcMain, context = {}) {
   ipcMain.handle(IPC.WEBHOOK_LIST, wrapHandler(IPC.WEBHOOK_LIST, async () => {
     const registry = getRegistry();
     if (!registry) return [];
-    return registry.list();
+    const listening = Boolean(getServer()?.httpServer);
+    return registry.list().map((webhook) => ({ ...webhook, listening }));
   }));
 
   ipcMain.handle(IPC.WEBHOOK_CREATE, wrapHandler(IPC.WEBHOOK_CREATE, async (_event, payload) => {
@@ -34,11 +35,15 @@ function registerWebhookHandlers(ipcMain, context = {}) {
     };
 
     const webhook = webhookRegistry.register(config);
+    // Registering can start the listener (a personal node's default): answer
+    // with how that went, so a URL nothing serves is not shown as working.
+    if (context.whenListenersSettled) await context.whenListenersSettled();
     const webhookServer = getServer();
 
     return {
       ...webhook,
-      url: webhookServer ? webhookServer.getWebhookUrl(webhook.id) : null
+      url: webhookServer ? webhookServer.getWebhookUrl(webhook.id) : null,
+      listening: Boolean(webhookServer?.httpServer)
     };
   }));
 

@@ -86,7 +86,7 @@ const { localEntry } = require('../models/normalize');
 const { Profiles, sealLocalOnly } = require('../models/profiles');
 const { KingLouieProfile } = require('../models/king-louie');
 const { roleTimeoutMs } = require('../models/resolver');
-const { runTierMigration } = require('../models/migrate-tiers');
+const { runTierMigration, isFreshProfile } = require('../models/migrate-tiers');
 const { KL_PROVIDERS, LOCAL_PROVIDER } = require('../models/provider-ids');
 const { egressPolicy } = require('../models/egress');
 const { LocalServers, pinAdminServers } = require('../models/local-servers');
@@ -277,6 +277,10 @@ function createCore(deps = {}) {
   // checking — which is how service mode could report itself ready with
   // `features.webhooks` on and no webhook listener (src/service/run.js).
   let webhookListenerSettled = Promise.resolve();
+  // A personal node's default (src/service/config.js): features.webhooks on,
+  // but nothing binds until a webhook or a contact relay needs the listener,
+  // and a failed bind is a warning: the window shows nothing without a node.
+  const webhookListenerOptional = deps.webhooksOnDemand === true;
   let workflowEngine;
   let plannerExecutor;
   let agentExecutorAdapter;
@@ -3211,12 +3215,24 @@ function createCore(deps = {}) {
     webhookRegistry = new WebhookRegistry(store);
     webhookHandler = new WebhookHandler(webhookRegistry, sessionManager, agentExecutorAdapter);
     webhookServer = new WebhookServer(gatewayServer, webhookHandler, { port: ports.webhook });
-    if (features.webhooks) {
-      // Still not awaited here — a slow bind must not hold up start() for the
-      // Electron host — but the promise is kept so a host that needs to know
-      // can wait for it (core.whenListenersSettled).
-      webhookListenerSettled = webhookServer.start()
+    // Still not awaited here — a slow bind must not hold up start() for the
+    // Electron host — but the promise is kept so a host that needs to know
+    // can wait for it (core.whenListenersSettled).
+    const startWebhookListener = () => {
+      const started = webhookServer.start()
         .catch(err => log.warn(`Webhook server start failed: ${err.message}`));
+      // With another start in flight this one returns at once, so the wait is
+      // for both.
+      webhookListenerSettled = Promise.all([webhookListenerSettled, started]).then(() => {});
+    };
+    if (features.webhooks) {
+      const needed = !webhookListenerOptional
+        || webhookRegistry.list().length > 0
+        || Object.keys(deps.contactConfig?.relays || {}).length > 0;
+      if (needed) startWebhookListener();
+      // Every registration asks: start() returns early when it is up, and a
+      // bind that failed gets another try.
+      if (webhookListenerOptional) webhookRegistry.on('webhook:registered', startWebhookListener);
     }
 
     // Initialize mesh networking (peer-to-peer communication between king-louie instances)
@@ -3610,7 +3626,10 @@ function createCore(deps = {}) {
       ['Channel shutdown', channelRegistry && (() => channelRegistry.shutdownAll())],
       ['Webhook server stop', webhookServer && (() => webhookServer.stop())],
       ['Mesh shutdown', meshContext && (() => meshContext.shutdown())],
-      ['Gateway server stop', gatewayServer && (() => gatewayServer.stop())]
+      ['Gateway server stop', gatewayServer && (() => gatewayServer.stop())],
+      // start()'s background index runs git and command lookups in the working
+      // directory; a live child holds that directory on Windows.
+      ['First index', contextAssembler && (() => contextAssembler.firstIndexSettled())]
     ].filter(([, fn]) => fn);
     const results = await Promise.allSettled(
       stops.map(([label, fn]) => withTimeout(fn(), shutdownTimeoutMs, label, warnTimeout))
@@ -3918,6 +3937,7 @@ function createCore(deps = {}) {
     getCatalog: () => catalog,
     getAvailability: () => availability,
     getProfiles: () => profiles,
+    isFreshModelProfile: (profile) => isFreshProfile(profile, probedDefaults),
     getKingLouie: () => kingLouie,
     getLocalServers: () => localServers,
     getModelMigration: () => modelMigration,
@@ -4034,6 +4054,7 @@ function createCore(deps = {}) {
     // listener enabled, and the guard itself never ran.
     getGatewayServer: () => gatewayServer,
     getWebhookServer: () => webhookServer,
+    webhookListenerOptional: () => webhookListenerOptional,
     whenListenersSettled: () => webhookListenerSettled
   };
 }

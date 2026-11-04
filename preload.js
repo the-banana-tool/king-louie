@@ -1210,7 +1210,7 @@ contextBridge.exposeInMainWorld(
       install: (payload) => ipcRenderer.invoke('skill:install', payload),
       remove: (payload) => ipcRenderer.invoke('skill:remove', payload),
       checkDeps: (payload) => ipcRenderer.invoke('skill:checkDeps', payload),
-      checkUpdates: () => ipcRenderer.invoke('skill:checkUpdates'),
+      checkUpdates: (payload = {}) => ipcRenderer.invoke('skill:checkUpdates', { fetch: Boolean(payload && payload.fetch === true) }),
       update: (payload) => ipcRenderer.invoke('skill:update', payload)
     },
     webhook: {
@@ -1395,6 +1395,14 @@ contextBridge.exposeInMainWorld(
       nodeInstallPreview: () => ipcRenderer.invoke('desktop:nodeInstallPreview'),
       nodeInstall: (payload = {}) => ipcRenderer.invoke('desktop:nodeInstall', { confirmed: Boolean(payload && payload.confirmed === true) }),
       pairRestartConfirm: (payload = {}) => ipcRenderer.invoke('desktop:pairRestartConfirm', { confirmed: Boolean(payload && payload.confirmed === true) }),
+      migrationPlan: () => ipcRenderer.invoke('desktop:migrationPlan'),
+      migrationApply: (payload = {}) => ipcRenderer.invoke('desktop:migrationApply', { confirmed: Boolean(payload && payload.confirmed === true) }),
+      setupStep: () => ipcRenderer.invoke('desktop:setupStep'),
+      setupLater: () => ipcRenderer.invoke('desktop:setupLater'),
+      // skip: the step the Skip was pressed on, or nothing to finish.
+      setupFinish: (payload = {}) => ipcRenderer.invoke('desktop:setupFinish', payload && typeof payload.skip === 'string' ? { skip: payload.skip } : {}),
+      nodeRestart: () => ipcRenderer.invoke('desktop:nodeRestart'),
+      restartLater: () => ipcRenderer.invoke('desktop:restartLater'),
       importPlan: () => ipcRenderer.invoke('desktop:importPlan'),
       importApply: () => ipcRenderer.invoke('desktop:importApply'),
       onStatusChanged: (callback) => registerOnce('desktop:statusChanged', callback),
@@ -1405,7 +1413,8 @@ contextBridge.exposeInMainWorld(
       paneShapeChanged: (prevModel, nextModel) => (paneModel ? paneModel.paneShapeChanged(prevModel, nextModel) : true),
       describeBanner: (status) => (paneModel ? paneModel.describeAttachedBanner(status) : null),
       describeInstallPreview: (result) => (paneModel ? paneModel.describeInstallPreview(result) : null),
-      describeInstallResult: (result) => (paneModel ? paneModel.describeInstallResult(result) : null)
+      describeInstallResult: (result) => (paneModel ? paneModel.describeInstallResult(result) : null),
+      describeLocalInference: (status) => (paneModel ? paneModel.describeLocalInferenceBlock(status) : null)
     },
     markdown: {
       parse: (text) => safeMarkdownParse(text),

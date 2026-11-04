@@ -11,6 +11,8 @@
 //   hosting: personal; the rule is pairing.js's judgePersonalPaths, never a
 //   copy), and, from the same single inspector call, the bridge file's trust
 //   (inspectLocal, C-1);
+// - is this machine empty, so a node can be installed from nothing (`fresh`,
+//   attach stage 2 §6.4, C-4);
 // - is the logon task registered, enabled and this account's (queryTask: the
 //   task's XML, never schtasks' localised text, C-10);
 // - is a node running on the data dir (nodeRunning: the pidfile names a live
@@ -25,7 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile: execFileCallback, spawn: spawnDefault } = require('child_process');
 const { createLogger } = require('../logging');
-const { adminConfigDir } = require('../platform/paths');
+const { adminConfigDir, personalDataDir, fleetLayoutExists, pathPresent } = require('../platform/paths');
 const { windowsSchtasksExe, windowsPowerShellExe, windowsSystemRoot } = require('../platform/windows-paths');
 const { shown } = require('../service/commands/io');
 const { isServiceCommandLine } = require('../service/commands/stop');
@@ -44,6 +46,8 @@ const STOP_TIMEOUT_MS = 90000;
 const OUTPUT_CAP = 1024 * 1024;
 const LOG_TAIL_BYTES = 256 * 1024;
 const FAILED_TO_START = 'service failed to start';
+const NODE_YAML = 'node.yaml';
+const SERVICE_JSON = 'service.json';
 
 function createPersonalNodeRunner(deps = {}) {
   const env = deps.env || process.env;
@@ -55,11 +59,14 @@ function createPersonalNodeRunner(deps = {}) {
   const readFile = deps.readFile || readTail;
   const now = deps.now || Date.now;
   const execPath = deps.execPath || process.execPath;
+  const statFile = deps.statFile || ((p) => fs.promises.stat(p));
   const entryPath = deps.entryPath || ENTRY_PATH;
   const readPidfile = deps.readPidfile || (async (dataDir) => pidfile.readPidfile(dataDir));
   const isRunning = deps.isRunning || ((pid) => pidfile.isRunning(pid));
   const commandLineOf = deps.commandLineOf || ((pid) => defaultCommandLineOf(pid, { platform, env, execFile }));
   const whoAmI = deps.whoAmI || (() => defaultWhoAmI({ env, execFile }));
+  // An ACL-locked file is there: the fresh check must not read it as absent.
+  const exists = deps.exists || ((p) => pathPresent(p, deps.stat || fs.statSync));
   const testOverride = env.KL_TEST_MODE === '1' && Boolean(env.KL_DESKTOP_BRIDGE_FILE);
   // The SID the last inspector call reported: queryTask compares the task's
   // principal with it.
@@ -107,12 +114,33 @@ function createPersonalNodeRunner(deps = {}) {
     return { personal: false, dataDir: path.join(configDir, '..', 'data'), configDir, reason: 'not-windows' };
   }
 
-  // §5.2: is there a personal node here (or for the recorded data dir).
+  // Attach stage 2 §6.4 (C-4): nothing of a personal node at
+  // personalDataDir(), no fleet layout, and no task: what Install may start
+  // from. An answer that tells nothing (owners unread, schtasks not run) is
+  // not fresh. → the fresh answer, or null.
+  async function freshLayout(report) {
+    const dataDir = personalDataDir({ platform, env });
+    if (!dataDir) return null;
+    const configDir = adminConfigDir({ platform, dataDir });
+    if (fleetLayoutExists({ env, exists })) return null;
+    if ([path.win32.join(configDir, NODE_YAML), path.win32.join(configDir, SERVICE_JSON), dataDir].some((p) => exists(p))) return null;
+    const task = await queryTask({ me: report.me });
+    if (task.state !== 'missing') return null;
+    return { personal: false, fresh: true, dataDir, configDir, me: report.me };
+  }
+
+  // §5.2: is there a personal node here (or for the recorded data dir, which
+  // is never fresh: a record says something was installed).
   async function detectPersonalNode({ dataDir } = {}) {
     const file = bridgeFileFor(dataDir);
-    if (platform !== 'win32' || testOverride) return notApplicable(file);
+    if (platform !== 'win32' || testOverride) return { ...notApplicable(file), fresh: false };
     const { paths, report } = await inspect(file);
-    return judgeNode(file, paths, report);
+    const node = judgeNode(file, paths, report);
+    if (!node.personal && !dataDir && node.reason !== 'unreadable') {
+      const fresh = await freshLayout(report);
+      if (fresh) return fresh;
+    }
+    return { ...node, fresh: false };
   }
 
   // C-1: the bridge file's trust (readTrustedBridgeFile's result, with its
@@ -130,7 +158,13 @@ function createPersonalNodeRunner(deps = {}) {
       return report;
     };
     const trust = await pairing.readTrustedBridgeFile(file, { env, platform, inspectOwners: replay, loadNodeConfig });
-    return { trust, node: judgeNode(file, paths, report) };
+    const node = judgeNode(file, paths, report);
+    // The unpaired status's question too (§6.4): one inspector call answers it.
+    if (!node.personal && !dataDir && node.reason !== 'unreadable') {
+      const fresh = await freshLayout(report);
+      if (fresh) return { trust, node: fresh };
+    }
+    return { trust, node };
   }
 
   // execFile as a promise that never rejects: { err, stdout, stderr }.
@@ -168,7 +202,30 @@ function createPersonalNodeRunner(deps = {}) {
     }
     if (typeof sid !== 'string' || !sid.trim()) return { state: 'unknown' };
     if (task.userId.toUpperCase() !== sid.trim().toUpperCase()) return { state: 'other-account', userId: shown(task.userId) };
-    return { state: task.enabled ? 'registered' : 'disabled' };
+    return { state: task.enabled ? 'registered' : 'disabled', ...await taskProgramFacts(task) };
+  }
+
+  // What the task runs, read and never run (attach stage 2 §6.8). `/Run` succeeds for
+  // a program that is gone, so this is the only way to tell. The entry script counts:
+  // a removed checkout leaves node.exe standing. Only ENOENT is gone: a path inside
+  // the app's asar reads ENOTDIR to plain Node.
+  async function taskProgramFacts(task) {
+    if (!task.program) return {};
+    const facts = {
+      program: task.program,
+      // Only a call we wrote says what runs: anything else may be either.
+      ...(task.entry ? { runs: sameFile(task.program, execPath) ? 'app' : 'folder' } : {}),
+      ...(task.entry ? { entry: task.entry } : {})
+    };
+    for (const file of [task.program, task.entry]) {
+      if (!file || !path.win32.isAbsolute(file)) continue;
+      try {
+        await statFile(file);
+      } catch (err) {
+        if (err && err.code === 'ENOENT') return { ...facts, gone: file };
+      }
+    }
+    return facts;
   }
 
   // §7.1: the pidfile names a live pid whose command line is
@@ -301,7 +358,14 @@ function decodeOutput(out) {
 
 const unescapeXml = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 
-// The principal's UserId and <Settings>' own <Enabled> (absent: enabled).
+const sameFile = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+const fromPsQuote = (s) => s.replace(/''/g, "'");
+// The call renderPersonalTaskXml writes into the PowerShell arguments.
+const TASK_CALL = /&\s+'((?:[^']|'')*)'\s+'((?:[^']|'')*)'\s+run\s+--data-dir\s+'((?:[^']|'')*)'/;
+
+// The principal's UserId and <Settings>' own <Enabled> (absent: enabled), and what
+// the action runs: the program and entry inside PowerShell's arguments when it is the
+// call we write, else the <Command> itself.
 function parseTaskXml(xml) {
   const principal = /<Principal\b[^>]*>([\s\S]*?)<\/Principal>/.exec(xml);
   const user = principal && /<UserId>\s*([^<]*?)\s*<\/UserId>/.exec(principal[1]);
@@ -310,9 +374,15 @@ function parseTaskXml(xml) {
     ? settings[1].replace(/<(IdleSettings|NetworkSettings|MaintenanceSettings|RestartOnFailure)\b[\s\S]*?<\/\1>/g, '')
     : '';
   const enabled = /<Enabled>\s*([^<]*?)\s*<\/Enabled>/.exec(own);
+  const command = /<Exec>[\s\S]*?<Command>\s*([^<]*?)\s*<\/Command>/.exec(xml);
+  const args = /<Exec>[\s\S]*?<Arguments>\s*([^<]*?)\s*<\/Arguments>/.exec(xml);
+  const call = args ? TASK_CALL.exec(unescapeXml(args[1])) : null;
   return {
     userId: user && user[1] ? unescapeXml(user[1]) : null,
-    enabled: !(enabled && enabled[1].toLowerCase() === 'false')
+    enabled: !(enabled && enabled[1].toLowerCase() === 'false'),
+    program: call ? fromPsQuote(call[1]) : (command && command[1] ? unescapeXml(command[1]) : null),
+    entry: call ? fromPsQuote(call[2]) : null,
+    dataDir: call ? fromPsQuote(call[3]) : null
   };
 }
 
@@ -393,5 +463,6 @@ module.exports = {
   DEFAULT_CLI_TIMEOUT_MS,
   FAILED_TO_START,
   firstLine,
-  parseTaskXml
+  parseTaskXml,
+  decodeOutput
 };

@@ -110,7 +110,16 @@ describe('skill-handlers: registration', () => {
 
 describe('skill:checkUpdates', () => {
   let origExistsSync;
-  let origExecSync;
+  let origExecFile;
+  const fakeExec = (cp, fn) => {
+    cp.execFile = (file, args, opts, cb) => {
+      try {
+        cb(null, String(fn([file, ...args].join(' '), opts)), '');
+      } catch (err) {
+        cb(err, '', '');
+      }
+    };
+  };
   let fs_;
   let cp_;
 
@@ -118,12 +127,12 @@ describe('skill:checkUpdates', () => {
     fs_ = require('fs');
     cp_ = require('child_process');
     origExistsSync = fs_.existsSync;
-    origExecSync = cp_.execSync;
+    origExecFile = cp_.execFile;
   });
 
   afterEach(() => {
     fs_.existsSync = origExistsSync;
-    cp_.execSync = origExecSync;
+    cp_.execFile = origExecFile;
   });
 
   it('returns ok with empty results when no skills exist', async () => {
@@ -184,12 +193,12 @@ describe('skill:checkUpdates', () => {
     };
 
     const sameHash = 'abc123abc123abc123abc123abc123abc123abc1';
-    cp_.execSync = (cmd) => {
+    fakeExec(cp_, (cmd) => {
       if (cmd === 'git fetch') return Buffer.from('');
       if (cmd === 'git rev-parse HEAD') return Buffer.from(sameHash + '\n');
       if (cmd === 'git rev-parse @{u}') return Buffer.from(sameHash + '\n');
-      return origExecSync(cmd);
-    };
+      throw new Error(`unexpected ${cmd}`);
+    });
 
     const result = await invoke(ipcMain, 'skill:checkUpdates');
     assert.strictEqual(result.ok, true);
@@ -211,7 +220,7 @@ describe('skill:checkUpdates', () => {
       return origExistsSync(p);
     };
 
-    cp_.execSync = (cmd) => {
+    fakeExec(cp_, (cmd) => {
       if (cmd === 'git fetch') return Buffer.from('');
       if (cmd === 'git rev-parse HEAD') return Buffer.from('aaa\n');
       if (cmd === 'git rev-parse @{u}') return Buffer.from('bbb\n');
@@ -219,8 +228,8 @@ describe('skill:checkUpdates', () => {
         return Buffer.from(JSON.stringify({ version: '2.0.0' }));
       }
       if (cmd.startsWith('git rev-list')) return Buffer.from('3\n');
-      return origExecSync(cmd);
-    };
+      throw new Error(`unexpected ${cmd}`);
+    });
 
     const result = await invoke(ipcMain, 'skill:checkUpdates');
     assert.strictEqual(result.ok, true);
@@ -243,12 +252,12 @@ describe('skill:checkUpdates', () => {
       return origExistsSync(p);
     };
 
-    cp_.execSync = (cmd) => {
+    fakeExec(cp_, (cmd) => {
       if (cmd === 'git fetch') throw new Error('network error');
-      return origExecSync(cmd);
-    };
+      throw new Error(`unexpected ${cmd}`);
+    });
 
-    const result = await invoke(ipcMain, 'skill:checkUpdates');
+    const result = await invoke(ipcMain, 'skill:checkUpdates', { fetch: true });
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.results['fetch-fail'].updateAvailable, false);
     assert.ok(result.results['fetch-fail'].error);
@@ -265,14 +274,14 @@ describe('skill:checkUpdates', () => {
       return origExistsSync(p);
     };
 
-    cp_.execSync = (cmd) => {
+    fakeExec(cp_, (cmd) => {
       if (cmd === 'git fetch') return Buffer.from('');
       if (cmd === 'git rev-parse HEAD') return Buffer.from('aaa\n');
       if (cmd === 'git rev-parse @{u}') return Buffer.from('bbb\n');
       if (cmd.startsWith('git show @{u}:package.json')) throw new Error('not found');
       if (cmd.startsWith('git rev-list')) return Buffer.from('1\n');
-      return origExecSync(cmd);
-    };
+      throw new Error(`unexpected ${cmd}`);
+    });
 
     const result = await invoke(ipcMain, 'skill:checkUpdates');
     const info = result.results['no-remote-pkg'];
@@ -295,15 +304,15 @@ describe('skill:checkUpdates', () => {
     const hashA = 'aaa';
     const hashB = 'bbb';
 
-    cp_.execSync = (cmd, opts) => {
+    fakeExec(cp_, (cmd, opts) => {
       if (cmd === 'git fetch') return Buffer.from('');
       const isA = opts?.cwd?.includes('skill-a');
       if (cmd === 'git rev-parse HEAD') return Buffer.from(isA ? hashA : hashB);
       if (cmd === 'git rev-parse @{u}') return Buffer.from(isA ? hashA : 'ccc');  // A up-to-date, B behind
       if (cmd.startsWith('git show')) return Buffer.from(JSON.stringify({ version: '9.9.9' }));
       if (cmd.startsWith('git rev-list')) return Buffer.from('2\n');
-      return origExecSync(cmd);
-    };
+      throw new Error(`unexpected ${cmd}`);
+    });
 
     const result = await invoke(ipcMain, 'skill:checkUpdates');
     assert.strictEqual(result.results['skill-a'].updateAvailable, false);
@@ -311,9 +320,97 @@ describe('skill:checkUpdates', () => {
   });
 });
 
+describe('no blocking call and no shell string (final review, finding 10)', () => {
+  const cp = require('child_process');
+  const fsMod = require('fs');
+  const os = require('os');
+  const { markLocalDesktopEvent } = require('../src/core/origin');
+  let saved;
+  beforeEach(() => { saved = { execFile: cp.execFile, execSync: cp.execSync, existsSync: fsMod.existsSync }; });
+  afterEach(() => { Object.assign(cp, { execFile: saved.execFile, execSync: saved.execSync }); fsMod.existsSync = saved.existsSync; });
+
+  it('opening the pane does not fetch; the press does; arguments are arrays', async () => {
+    const { ipcMain, context, addSkill } = createContext();
+    registerSkillHandlers(ipcMain, context);
+    addSkill(makeSkill({ id: 'a-skill', _skillPath: '/fake/skills/a-skill' }));
+    fsMod.existsSync = (p) => (String(p).endsWith('.git') ? true : saved.existsSync(p));
+    cp.execSync = () => { throw new Error('execSync blocks the node'); };
+    const calls = [];
+    let sync = true;
+    cp.execFile = (file, args, opts, cb) => {
+      calls.push([file, args]);
+      assert.ok(Array.isArray(args));
+      assert.strictEqual(opts.shell, undefined);
+      assert.strictEqual(sync, false, 'called from the handler, never holding it');
+      setImmediate(() => cb(null, 'abc\n', ''));
+    };
+    sync = false;
+    await invoke(ipcMain, 'skill:checkUpdates');
+    assert.ok(!calls.some(([, args]) => args[0] === 'fetch'));
+    calls.length = 0;
+    await invoke(ipcMain, 'skill:checkUpdates', { fetch: true });
+    assert.deepStrictEqual(calls[0], ['git', ['fetch']]);
+  });
+
+  it('install clones and runs npm with no shell string', async () => {
+    const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'kl-skill-'));
+    try {
+      const { ipcMain, context, skillLoader } = createContext();
+      skillLoader.skillsDirectory = dir;
+      skillLoader.loadSkill = async () => null;
+      registerSkillHandlers(ipcMain, context);
+      cp.execSync = () => { throw new Error('execSync blocks the node'); };
+      const calls = [];
+      cp.execFile = (file, args, opts, cb) => {
+        calls.push([file, args]);
+        if (args[0] === 'clone') {
+          const target = args[args.length - 1];
+          fsMod.mkdirSync(target, { recursive: true });
+          fsMod.writeFileSync(path.join(target, 'package.json'), JSON.stringify({ dependencies: { x: '1' } }));
+        }
+        cb(null, '', '');
+      };
+      await invoke(ipcMain, 'skill:install', { url: 'https://example.com/owner/some-skill' });
+      assert.deepStrictEqual(calls[0], ['git', ['clone', '--', 'https://example.com/owner/some-skill.git', path.join(dir, 'some-skill')]]);
+      const npm = calls[1];
+      if (npm) {
+        assert.ok(npm[1].includes('install') && npm[1].includes('--production'));
+        assert.doesNotMatch(path.basename(npm[0]), /\.(cmd|bat)$/i);
+      }
+    } finally {
+      fsMod.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a relative path over the bridge is refused; the same call from the window keeps its old form', async () => {
+    const { ipcMain, context, skillLoader } = createContext();
+    skillLoader.skillsDirectory = '/fake/skills';
+    registerSkillHandlers(ipcMain, context);
+    const overBridge = markLocalDesktopEvent({}, { deviceId: 'kld-abc' });
+    for (const url of ['./evil', '../evil', '.\\\\evil', '~/evil']) {
+      const out = await ipcMain.handlers.get('skill:install')(overBridge, { url });
+      assert.strictEqual(out.ok, false);
+      assert.strictEqual(out.code, 'RELATIVE_PATH', url);
+    }
+    const fromWindow = await ipcMain.handlers.get('skill:install')(markLocalDesktopEvent({}), { url: './no-such-folder-here' });
+    assert.notStrictEqual(fromWindow.code, 'RELATIVE_PATH');
+  });
+});
+
 describe('skill:update', () => {
   let origExistsSync;
+  let origExecFile;
   let origExecSync;
+  const fakeExec = (cp, fn) => {
+    cp.execSync = () => { throw new Error('execSync blocks the node'); };
+    cp.execFile = (file, args, opts, cb) => {
+      try {
+        cb(null, String(fn([file, ...args].join(' '), opts)), '');
+      } catch (err) {
+        cb(err, '', err.stderr || '');
+      }
+    };
+  };
   let origReadFileSync;
   let fs_;
   let cp_;
@@ -323,12 +420,14 @@ describe('skill:update', () => {
     cp_ = require('child_process');
     origExistsSync = fs_.existsSync;
     origExecSync = cp_.execSync;
+    origExecFile = cp_.execFile;
     origReadFileSync = fs_.readFileSync;
   });
 
   afterEach(() => {
     fs_.existsSync = origExistsSync;
     cp_.execSync = origExecSync;
+    cp_.execFile = origExecFile;
     fs_.readFileSync = origReadFileSync;
   });
 
@@ -392,10 +491,10 @@ describe('skill:update', () => {
 
     const pullError = new Error('merge conflict');
     pullError.stderr = Buffer.from('cannot fast-forward');
-    cp_.execSync = (cmd) => {
+    fakeExec(cp_, (cmd) => {
       if (cmd.startsWith('git pull')) throw pullError;
-      return origExecSync(cmd);
-    };
+      return '';
+    });
 
     const result = await invoke(ipcMain, 'skill:update', { skillId: 'pull-fail' });
     assert.strictEqual(result.ok, false);
@@ -418,10 +517,10 @@ describe('skill:update', () => {
       return origExistsSync(p);
     };
 
-    cp_.execSync = (cmd) => {
+    fakeExec(cp_, (cmd) => {
       if (cmd.startsWith('git pull')) return Buffer.from('Already up to date.\n');
-      return origExecSync(cmd);
-    };
+      return '';
+    });
 
     const result = await invoke(ipcMain, 'skill:update', { skillId: 'test-skill' });
     assert.strictEqual(result.ok, true);
@@ -454,14 +553,14 @@ describe('skill:update', () => {
       return origReadFileSync(p, enc);
     };
 
-    cp_.execSync = (cmd, opts) => {
+    fakeExec(cp_, (cmd, opts) => {
       if (cmd.startsWith('git pull')) return Buffer.from('');
-      if (cmd.startsWith('npm install')) {
+      if (cmd.includes('install --production')) {
         npmInstallCalls.push({ cmd, cwd: opts?.cwd });
         return Buffer.from('');
       }
-      return origExecSync(cmd);
-    };
+      return '';
+    });
 
     const result = await invoke(ipcMain, 'skill:update', { skillId: 'deps-skill' });
     assert.strictEqual(result.ok, true);
@@ -493,11 +592,11 @@ describe('skill:update', () => {
       return origReadFileSync(p, enc);
     };
 
-    cp_.execSync = (cmd) => {
+    fakeExec(cp_, (cmd) => {
       if (cmd.startsWith('git pull')) return Buffer.from('');
-      if (cmd.startsWith('npm install')) npmCalls.push(cmd);
-      return origExecSync(cmd);
-    };
+      if (cmd.includes('install --production')) npmCalls.push(cmd);
+      return '';
+    });
 
     await invoke(ipcMain, 'skill:update', { skillId: 'no-deps' });
     assert.strictEqual(npmCalls.length, 0);
@@ -518,10 +617,10 @@ describe('skill:update', () => {
       return origExistsSync(p);
     };
 
-    cp_.execSync = (cmd) => {
+    fakeExec(cp_, (cmd) => {
       if (cmd.startsWith('git pull')) return Buffer.from('');
-      return origExecSync(cmd);
-    };
+      return '';
+    });
 
     const result = await invoke(ipcMain, 'skill:update', { skillId: 'reload-test' });
     assert.strictEqual(result.ok, true);
@@ -548,10 +647,10 @@ describe('skill:update', () => {
       return origExistsSync(p);
     };
 
-    cp_.execSync = (cmd) => {
+    fakeExec(cp_, (cmd) => {
       if (cmd.startsWith('git pull')) return Buffer.from('');
-      return origExecSync(cmd);
-    };
+      return '';
+    });
 
     const result = await invoke(ipcMain, 'skill:update', { skillId: 'reload-null' });
     assert.strictEqual(result.ok, false);
@@ -572,10 +671,10 @@ describe('skill:update', () => {
       return origExistsSync(p);
     };
 
-    cp_.execSync = (cmd) => {
+    fakeExec(cp_, (cmd) => {
       if (cmd.startsWith('git pull')) return Buffer.from('');
-      return origExecSync(cmd);
-    };
+      return '';
+    });
 
     const result = await invoke(ipcMain, 'skill:update', { skillId: 'reload-throw' });
     assert.strictEqual(result.ok, false);

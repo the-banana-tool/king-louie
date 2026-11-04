@@ -8,7 +8,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
-const { loadProfile } = require('../src/service/run');
+const net = require('net');
+const { loadProfile, runService } = require('../src/service/run');
 const { ensureServicePaths, ensurePrivateDir, desktopProfileDirs } = require('../src/platform/paths');
 const { readGuiStatusRecord } = require('../src/gui/status');
 const { isDeniedPath, clearDeniedDirs } = require('../src/tools/utils');
@@ -170,5 +171,214 @@ describe('loadProfile("agent") under hosting: service (default)', { timeout: 120
     const l2 = layout(SERVICE_YAML);
     writeBadRecord(l2.configDir);
     await assert.rejects(start(l2, { identityRecord: IDENTITY_RECORD_TEST_OPTIONS }), (err) => err.code === 'NODE_IDENTITY_RECORD_INVALID');
+  });
+});
+
+// Attach stage 2: a personal node's window is the only way in, so channels,
+// webhooks and app discovery default on there; a fleet node's defaults stay
+// off; an explicit admin value wins; and with nothing configured nothing binds.
+describe('feature defaults by hosting (the real runService path)', { timeout: 120000 }, () => {
+  const cwd = process.cwd();
+  after(() => process.chdir(cwd));
+
+  // A free loopback port, closed again.
+  const freePort = () => new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once('error', reject);
+    s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
+  });
+  const listening = (port) => new Promise((resolve) => {
+    const c = net.connect({ host: '127.0.0.1', port });
+    c.once('connect', () => { c.destroy(); resolve(true); });
+    c.once('error', () => resolve(false));
+  });
+  const serviceJson = (l, body) => fs.writeFileSync(path.join(l.configDir, 'service.json'), JSON.stringify(body));
+  const QUIET_YAML = 'name: n\nprofile: agent\nhosting: personal\ngui:\n  enabled: false\n';
+
+  // runService with the profile's start replaced: what would it start with?
+  async function startedWith(l) {
+    const ac = new AbortController();
+    let seen = null;
+    await runService({
+      dataDir: l.dataDir, adminUid: EUID, signal: ac.signal, stdout: { write: () => true },
+      deps: { startProfile: async (opts) => { seen = opts; setImmediate(() => ac.abort()); return { masterKeySource: 'test', stop: async () => {} }; } }
+    });
+    return seen;
+  }
+
+  it('personal: channels, webhooks and appDiscovery on; gateway, mesh and the bridge stay off', async () => {
+    const seen = await startedWith(layout(QUIET_YAML));
+    assert.deepEqual(seen.features, { gateway: false, webhooks: true, mesh: false, channels: true, appDiscovery: true, desktopBridge: false });
+    assert.equal(seen.webhooksOnDemand, true);
+  });
+
+  it('fleet: every default stays off, and nothing is on demand', async () => {
+    const seen = await startedWith(layout('name: n\nprofile: agent\n'));
+    assert.deepEqual(seen.features, OFF);
+    assert.ok(!seen.webhooksOnDemand);
+  });
+
+  it('personal: an explicit admin value wins, either way', async () => {
+    const l = layout(QUIET_YAML);
+    serviceJson(l, { features: { channels: false, webhooks: false, appDiscovery: false } });
+    const off = await startedWith(l);
+    assert.deepEqual(off.features, OFF);
+    assert.ok(!off.webhooksOnDemand);
+    serviceJson(l, { features: { webhooks: true } });
+    fs.rmSync(path.join(l.dataDir, 'service.pid'), { force: true });
+    const on = await startedWith(l);
+    assert.equal(on.features.webhooks, true);
+    assert.ok(!on.webhooksOnDemand, 'switched on by hand: bound at start, and refused when it cannot');
+  });
+
+  // The real start. appDiscovery is off here only so no `where` child runs.
+  function realRun(l, deps) {
+    const ac = new AbortController();
+    let ready;
+    const up = new Promise((resolve) => { ready = resolve; });
+    const stdout = { write: (t) => { if (String(t).includes('"ready"')) ready(); return true; } };
+    fs.rmSync(path.join(l.dataDir, 'service.pid'), { force: true });
+    const done = runService({ dataDir: l.dataDir, adminUid: EUID, signal: ac.signal, stdout, deps });
+    return { up: Promise.race([up, done]), stop: async () => { ac.abort(); await done; }, done };
+  }
+
+  it('nothing configured: the node starts and nothing listens on the webhook port', async () => {
+    const keepAlive = setTimeout(() => {}, 100000);
+    const l = layout(QUIET_YAML);
+    const port = await freePort();
+    serviceJson(l, { features: { appDiscovery: false }, ports: { webhook: port } });
+    const run = realRun(l, personalDeps(l, { [l.dataDir]: ME, [l.configDir]: ME }));
+    try {
+      await run.up;
+      assert.equal(await listening(port), false, 'no listener until something is configured');
+    } finally {
+      await run.stop();
+      clearTimeout(keepAlive);
+    }
+  });
+
+  it('nothing configured and the webhook port taken: the node still starts', async () => {
+    const keepAlive = setTimeout(() => {}, 100000);
+    const l = layout(QUIET_YAML);
+    const squatter = net.createServer();
+    await new Promise((resolve) => squatter.listen(0, '127.0.0.1', resolve));
+    serviceJson(l, { features: { appDiscovery: false }, ports: { webhook: squatter.address().port } });
+    const run = realRun(l, personalDeps(l, { [l.dataDir]: ME, [l.configDir]: ME }));
+    try {
+      await run.up;
+    } finally {
+      await run.stop();
+      await new Promise((resolve) => squatter.close(resolve));
+      clearTimeout(keepAlive);
+    }
+  });
+
+  // The on-demand listener, on the profile's own start.
+  const onDemand = (l, port, deps) => loadProfile('agent').start({
+    dataDir: l.dataDir, configDir: l.configDir, adminUid: EUID, workspace: l.workspace, audit: {}, deps,
+    features: { ...OFF, webhooks: true, channels: true }, ports: { webhook: port }, webhooksOnDemand: true
+  });
+
+  // The webhook channels over a real core, as the pane reaches them.
+  function webhookIpc(core) {
+    const handlers = new Map();
+    require('../src/ipc/webhook-handlers').registerWebhookHandlers({ handle: (ch, fn) => handlers.set(ch, fn) }, core.context);
+    return { create: async (name) => (await handlers.get('webhook:create')({}, { name })).data, list: async () => (await handlers.get('webhook:list')({})).data };
+  }
+
+  it('the first webhook binds on loopback; a stored one binds at the next start; a taken port is a warning; the next registration retries', async () => {
+    const l = layout(QUIET_YAML);
+    const deps = () => personalDeps(l, { [l.dataDir]: ME, [l.configDir]: ME });
+    const port = await freePort();
+    const first = await onDemand(l, port, deps());
+    try {
+      assert.equal(await listening(port), false);
+      first.core.context.getWebhookRegistry().register({ name: 'hook' });
+      await first.core.whenListenersSettled();
+      assert.equal(first.core.getWebhookServer().httpServer.address().address, '127.0.0.1');
+      assert.equal(await listening(port), true);
+    } finally {
+      await first.stop();
+    }
+    const second = await onDemand(l, port, deps());
+    try {
+      assert.equal(await listening(port), true, 'a stored webhook binds at start');
+    } finally {
+      await second.stop();
+    }
+    const squatter = net.createServer();
+    await new Promise((resolve) => squatter.listen(port, '127.0.0.1', resolve));
+    let third;
+    let squatted = true;
+    try {
+      third = await onDemand(l, port, deps());
+      const ipc = webhookIpc(third.core);
+      assert.equal(third.core.getWebhookServer().httpServer, null);
+      const listed = await ipc.list();
+      assert.equal(listed[0].listening, false, 'the pane is told the listener is down');
+      const created = await ipc.create('second');
+      assert.equal(created.listening, false, 'the reply says so while the port is taken');
+      await new Promise((resolve) => squatter.close(resolve));
+      squatted = false;
+      const again = await ipc.create('third');
+      assert.equal(again.listening, true, 'a later registration tries again');
+      assert.equal(await listening(port), true);
+    } finally {
+      if (squatted) await new Promise((resolve) => squatter.close(resolve));
+      if (third) await third.stop();
+    }
+  });
+
+  it('webhooks set by hand on a personal node keep the rule: a taken port refuses the start', async () => {
+    const l = layout(QUIET_YAML);
+    const squatter = net.createServer();
+    await new Promise((resolve) => squatter.listen(0, '127.0.0.1', resolve));
+    try {
+      await assert.rejects(loadProfile('agent').start({
+        dataDir: l.dataDir, configDir: l.configDir, adminUid: EUID, workspace: l.workspace, audit: {},
+        deps: personalDeps(l, { [l.dataDir]: ME, [l.configDir]: ME }),
+        features: { ...OFF, webhooks: true }, ports: { webhook: squatter.address().port }
+      }), /refusing to run without webhooks/);
+    } finally {
+      await new Promise((resolve) => squatter.close(resolve));
+    }
+  });
+
+  it('the renderer words a listener that is down, on create and in the list', () => {
+    const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    // The handlers answer { ok, data }: without the unwrap the pane listed nothing.
+    assert.match(renderer, /unwrapIpcResult\(await window\.electron\.webhook\.list\(\)/);
+    assert.match(renderer, /unwrapIpcResult\(await window\.electron\.webhook\.create\(payload\)/);
+    assert.match(renderer, /result\?\.listening === false/);
+    assert.match(renderer, /webhooks\.some\(\(wh\) => wh\.listening === false\)/);
+  });
+
+  it('a fleet start with webhooks on still binds at once, with none configured', async () => {
+    const l = layout('name: n\nprofile: agent\n');
+    const port = await freePort();
+    const running = await loadProfile('agent').start({
+      dataDir: l.dataDir, configDir: l.configDir, adminUid: EUID, workspace: l.workspace, audit: {},
+      features: { ...OFF, webhooks: true }, ports: { webhook: port }
+    });
+    try {
+      assert.equal(await listening(port), true);
+    } finally {
+      await running.stop();
+    }
+  });
+
+  it('channels on and no token: /llm telegram no longer says channels are off, and nothing starts', async () => {
+    const l = layout(QUIET_YAML);
+    const port = await freePort();
+    const running = await onDemand(l, port, personalDeps(l, { [l.dataDir]: ME, [l.configDir]: ME }));
+    try {
+      const out = await running.core.context.runLlmCommand('/llm telegram status');
+      assert.doesNotMatch(JSON.stringify(out), /Channels are off/);
+      const add = await running.core.context.runLlmCommand('/llm telegram add');
+      assert.doesNotMatch(JSON.stringify(add), /Channels are off/);
+      assert.equal(await listening(port), false);
+    } finally {
+      await running.stop();
+    }
   });
 });

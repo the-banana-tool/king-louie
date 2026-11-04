@@ -7,12 +7,10 @@
  * Supported platforms: Windows, macOS, Linux
  */
 
-const { exec } = require('child_process');
-const { promisify } = require('util');
 const fs = require('fs');
 const path = require('path');
-
-const execAsync = promisify(exec);
+const { lookupCommand, runProgram } = require('./command-lookup');
+const { windowsPowerShellExe, windowsRegExe } = require('../platform/windows-paths');
 
 /**
  * Known apps and their capability tags.
@@ -77,17 +75,8 @@ const DISCOVERY_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 async function isAppAvailable(app) {
   // Try command-line detection first
   for (const name of app.names || []) {
-    const lookup = process.platform === 'win32'
-      ? `where ${name} 2>NUL`
-      : `command -v ${name} 2>/dev/null`;
-    try {
-      const { stdout } = await execAsync(lookup, { windowsHide: true, timeout: 5000, shell: true });
-      if (stdout.trim()) {
-        return { found: true, launchCmd: stdout.trim().split('\n')[0].trim() };
-      }
-    } catch {
-      // Not found via this name
-    }
+    const launchCmd = await lookupCommand(name);
+    if (launchCmd) return { found: true, launchCmd };
   }
 
   // Platform-specific checks
@@ -101,23 +90,23 @@ async function isAppAvailable(app) {
 }
 
 /**
- * The command that checks whether a COM class (e.g. "Word.Application") is
+ * reg.exe's arguments for whether a COM class (e.g. "Word.Application") is
  * registered, by reading its CLSID key. It never creates the object:
  * instantiating a COM class starts the app (a hidden WINWORD.EXE for Word)
  * and nothing would ever close it. Returns null for anything that is not a
- * plain dotted ProgID, since the value goes into a shell command.
+ * plain dotted ProgID.
  */
-function comClassRegisteredCommand(progId) {
+function comClassRegisteredArgs(progId) {
   if (typeof progId !== 'string' || !/^[A-Za-z0-9]+(\.[A-Za-z0-9]+)+$/.test(progId)) return null;
-  return `reg query "HKCR\\${progId}\\CLSID" /ve`;
+  return ['query', `HKCR\\${progId}\\CLSID`, '/ve'];
 }
 
 async function detectWindows(app) {
   // A registered COM class means the app is installed (reg exits non-zero if not)
-  const regCmd = comClassRegisteredCommand(app.winReg);
-  if (regCmd) {
+  const regArgs = comClassRegisteredArgs(app.winReg);
+  if (regArgs) {
     try {
-      await execAsync(regCmd, { windowsHide: true, timeout: 5000 });
+      await runProgram(windowsRegExe(process.env), regArgs);
       return { found: true, launchCmd: app.names[0] || app.id };
     } catch {
       // COM class not registered
@@ -154,9 +143,10 @@ async function detectWindows(app) {
 
   // Start Menu shortcut check for common apps
   try {
-    const { stdout } = await execAsync(
-      `powershell -NoProfile -Command "Get-StartApps | Where-Object { $_.Name -like '*${app.id}*' } | Select-Object -First 1 -ExpandProperty AppID"`,
-      { windowsHide: true, timeout: 8000, shell: true }
+    const { stdout } = await runProgram(
+      windowsPowerShellExe(process.env),
+      ['-NoProfile', '-Command', `Get-StartApps | Where-Object { $_.Name -like '*${app.id}*' } | Select-Object -First 1 -ExpandProperty AppID`],
+      { timeout: 8000 }
     );
     if (stdout.trim()) {
       return { found: true, launchCmd: `start "" "${stdout.trim()}"`, appId: stdout.trim() };
@@ -180,12 +170,10 @@ async function detectMacOS(app) {
 
     // Try mdfind (Spotlight)
     try {
-      const { stdout } = await execAsync(
-        `mdfind "kMDItemKind == 'Application'" -name "${app.macApp}" 2>/dev/null | head -1`,
-        { timeout: 5000 }
-      );
-      if (stdout.trim()) {
-        return { found: true, launchCmd: `open "${stdout.trim()}"` };
+      const { stdout } = await runProgram('/usr/bin/mdfind', ["kMDItemKind == 'Application'", '-name', app.macApp]);
+      const found = stdout.trim().split('\n')[0].trim();
+      if (found) {
+        return { found: true, launchCmd: `open "${found}"` };
       }
     } catch {
       // Spotlight not available
@@ -412,7 +400,7 @@ async function discoverAllApps(options = {}) {
 
 module.exports = {
   APP_CATALOG,
-  comClassRegisteredCommand,
+  comClassRegisteredArgs,
   discoverApps,
   discoverAllApps,
   findByCapability,

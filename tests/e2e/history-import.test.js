@@ -146,6 +146,26 @@ describe('E2E: importing a conversation', { timeout: 240000 }, () => {
     assert.strictEqual(readHistoryChats(ctx).length, count, 'no second chat');
   });
 
+  // The list a load brings back was read before this selection reached the
+  // main process, so its active chat is the one left behind. Importing runs
+  // into this by itself: chat:updated and the commit's reply each load the list.
+  it('a chat selected while the chat list is on its way stays selected', async () => {
+    const seen = JSON.parse(await evaluate(ctx, `(async () => {
+      const from = appState.activeChatId;
+      const to = appState.chats.find((c) => c.id !== from).id;
+      await Promise.all([loadChats(), handleSelectChat(to)]);
+      const chat = appState.chats.find((c) => c.id === to);
+      const seenNow = { from, to, active: appState.activeChatId, loaded: Array.isArray(chat && chat.messages), saved: unwrapIpcResult(await window.electron.chat.load(), 'no list').activeChatId };
+      // The next test acts on the imported chat this one started on.
+      await handleSelectChat(from);
+      return JSON.stringify(seenNow);
+    })()`));
+    assert.notStrictEqual(seen.to, seen.from);
+    assert.strictEqual(seen.saved, seen.to, 'the main process has the selection');
+    assert.strictEqual(seen.active, seen.to, 'the window stays on the chat selected');
+    assert.strictEqual(seen.loaded, true, 'its messages are loaded');
+  });
+
   it('a file that is no transcript: the dialog names it, says why, and offers no Import', async () => {
     const file = path.join(tmp, 'shopping-list.md');
     fs.writeFileSync(file, '# Shopping\n\n- hose timer\n- garden twine\n');

@@ -89,3 +89,36 @@ test('leaves ${vault:contact.…} references unresolved, never reads them, and l
   assert.strictEqual(warnings.length, refs.length);
   assert.match(warnings[0], /contact/);
 });
+
+test('leaves ${vault:local.…} references unresolved and never reads them', () => {
+  const reads = [];
+  const store = { get: (k) => { reads.push(k); return 'encrypted'; } };
+  const resolver = createVaultEnvResolver({ vaultStore: store, decryptToken: () => 'secret', logger: { warn() {} } });
+  const refs = ['${vault:local.box}', '${vault: Local.box}', '${vault:LOCAL.box}', '${vault:local[0]}'];
+  const env = Object.fromEntries(refs.map((r, i) => [`K${i}`, r]));
+  const resolved = resolver({ env: { ...env, OK: '${vault:github_token}' } });
+  refs.forEach((r, i) => assert.strictEqual(resolved.env[`K${i}`], r));
+  assert.strictEqual(resolved.env.OK, 'secret');
+  assert.deepStrictEqual(reads, ['__vault_github_token']);
+});
+
+test('a name that walks off a branch is the normal refusal, on the real store', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { JsonFileStore } = require('../src/platform/json-file-store');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-resolver-'));
+  try {
+    const store = new JsonFileStore({ dir, name: 'config' });
+    store.set('__vault_x.example.com', 'enc');
+    const missing = [];
+    const resolver = createVaultEnvResolver({ vaultStore: store, decryptToken: () => 'plain', onMissing: (key) => missing.push(key) });
+    const resolved = resolver({ env: { A: '${vault:x.toString}', B: '${vault:x.example}', C: '${vault:x.example.com}' } });
+    assert.strictEqual(resolved.env.A, '${vault:x.toString}');
+    assert.strictEqual(resolved.env.B, '${vault:x.example}');
+    assert.strictEqual(resolved.env.C, 'plain');
+    assert.deepStrictEqual(missing, ['x.toString', 'x.example']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

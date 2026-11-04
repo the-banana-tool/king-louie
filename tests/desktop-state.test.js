@@ -168,3 +168,103 @@ describe('desktop state: seal() rejects non-strings', () => {
     assert.throws(() => state.seal(null));
   });
 });
+
+describe('desktop state: the migration marker and the setup (attach stage 2 §6.5)', () => {
+  const marker = () => ({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\Users\\alex\\AppData\\Roaming\\king-louie.backup-1', nodeDataDir: 'C:\\Users\\alex\\AppData\\Local\\KingLouie\\node\\data', nodeId: 'kl-abc', counts: { chats: 2, cases: 1, attention: 0 } });
+
+  it('both default to null', () => {
+    const state = openState();
+    assert.strictEqual(state.migration, null);
+    assert.strictEqual(state.setup, null);
+  });
+
+  it('the marker round-trips, across a reopen of the file', () => {
+    const dir = tmp();
+    openDesktopState(dir, fakeSafeStorage(), { storeFactory }).setMigration(marker());
+    const again = openDesktopState(dir, fakeSafeStorage(), { storeFactory });
+    assert.deepStrictEqual(again.migration, marker());
+  });
+
+  it('a state file from before the marker opens with none', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'desktop-bridge.json'), JSON.stringify({ mode: 'attached', installId: 'i-1', pairing: null }));
+    const state = openDesktopState(dir, fakeSafeStorage(), { storeFactory });
+    assert.strictEqual(state.migration, null);
+    assert.strictEqual(state.mode, 'attached');
+  });
+
+  it('setMigration without backupDir, at or nodeId throws and stores nothing', () => {
+    const state = openState();
+    for (const key of ['backupDir', 'at', 'nodeId']) {
+      const m = marker();
+      delete m[key];
+      assert.throws(() => state.setMigration(m), new RegExp(key));
+      assert.throws(() => state.setMigration({ ...marker(), [key]: '' }), new RegExp(key));
+    }
+    assert.throws(() => state.setMigration(null));
+    assert.strictEqual(state.migration, null);
+  });
+
+  it('a profile is marked once: the marker keeps the first node', () => {
+    const state = openState();
+    state.setMigration(marker());
+    assert.throws(() => state.setMigration({ ...marker(), nodeId: 'kl-other' }), /already/);
+    assert.strictEqual(state.migration.nodeId, 'kl-abc');
+  });
+
+  it('clearing the pairing or changing the mode leaves the marker', () => {
+    const state = openState();
+    state.setMigration(marker());
+    state.clearPairing();
+    state.setMode('standalone');
+    assert.deepStrictEqual(state.migration, marker());
+  });
+
+  it('the marker keeps what was left behind, when told', () => {
+    const state = openState();
+    const leftBehind = { needsAttention: [{ category: 'case', key: 'x', note: 'n' }], secrets: [] };
+    state.setMigration({ ...marker(), leftBehind });
+    assert.deepStrictEqual(state.migration.leftBehind, leftBehind);
+  });
+
+  it('the marker keeps the private note and the stays-behind list, when told, so they outlast the plan', () => {
+    const state = openState();
+    const privateNote = { chats: 1, cases: 0, note: '1 private chat stays private.' };
+    state.setMigration({ ...marker(), private: privateNote, staysBehind: ['Browser profiles stay.'], notes: ['Cron jobs were imported disabled.'] });
+    assert.deepStrictEqual(state.migration.notes, ['Cron jobs were imported disabled.']);
+    assert.deepStrictEqual(state.migration.private, privateNote);
+    assert.deepStrictEqual(state.migration.staysBehind, ['Browser profiles stay.']);
+  });
+
+  it('setSetup round-trips and needs completedAt', () => {
+    const state = openState();
+    state.setSetup({ completedAt: '2026-11-04T10:05:00.000Z' });
+    assert.deepStrictEqual(state.setup, { completedAt: '2026-11-04T10:05:00.000Z' });
+    assert.throws(() => openState().setSetup({}), /completedAt/);
+  });
+
+  it('restartDue goes on the marker and comes off alone', () => {
+    const state = openState();
+    state.setMigration({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\b', nodeId: 'kl-abc', restartDue: true });
+    assert.strictEqual(state.migration.restartDue, true);
+    state.clearRestartDue();
+    assert.strictEqual(state.migration.restartDue, undefined);
+    assert.strictEqual(state.migration.backupDir, 'C:\\b');
+    state.clearRestartDue();
+    const none = openState();
+    none.clearRestartDue();
+    assert.strictEqual(none.migration, null);
+  });
+
+  it('noteSetup keeps what the walk has shown, and setSetup keeps it', () => {
+    const state = openState();
+    assert.strictEqual(state.setup, null);
+    state.noteSetup({ phoneOffered: true });
+    state.noteSetup({ phoneSeen: true, stray: 'x' });
+    assert.deepStrictEqual(state.setup, { phoneOffered: true, phoneSeen: true });
+    state.setSetup({ completedAt: '2026-11-04T10:05:00.000Z' });
+    assert.deepStrictEqual(state.setup, { phoneOffered: true, phoneSeen: true, completedAt: '2026-11-04T10:05:00.000Z' });
+    state.noteSetup({ phoneOffered: false });
+    assert.strictEqual(state.setup.phoneOffered, true, 'once shown it stays shown');
+  });
+});

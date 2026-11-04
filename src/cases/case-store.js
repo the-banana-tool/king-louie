@@ -167,4 +167,4 @@ class CaseStore {
   }
 }
 
-module.exports = { CaseStore, STATUSES, CASE_YAML_KEYS, parseCaseYaml };
+module.exports = { CaseStore, STATUSES, CASE_YAML_KEYS, parseCaseYaml, newId };

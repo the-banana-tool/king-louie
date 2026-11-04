@@ -14,7 +14,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { sanitizeWindowsPath, xmlEscape, executeSteps } = require('./installers');
 const { windowsSystemRoot, windowsSchtasksExe, windowsPowerShellExe } = require('../platform/windows-paths');
-const { ensurePrivateDir } = require('../platform/paths');
+const { ensurePrivateDir, personalDataDir, PERSONAL_CLI_FILE, PERSONAL_CLI_MARKER, isPersonalCli } = require('../platform/paths');
 const { parseYaml } = require('../platform/yaml');
 const { parseGuiConfig } = require('../gui/config');
 const { shown } = require('./commands/io');
@@ -32,6 +32,7 @@ const REBOOT_LINE = 'a logon task: after a reboot the node is down until you log
 const BINARY_LINE = (bin) => `binary:     ${bin}, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed`;
 const ALREADY_RUNNING = (pid) => `King Louie Node is already running (pid ${pid}); the task starts it at your next logon.`;
 const FFMPEG_LINE = 'ffmpeg is not on PATH: a take that records needs it. Install it as yourself: winget install Gyan.FFmpeg';
+const NO_CHROME_LINE = 'no chrome.exe found: takes and desktop apps are off; add gui.apps.chrome and gui.browser to node.yaml to turn them on';
 
 const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
@@ -78,6 +79,33 @@ function renderPersonalTaskXml({ sid, nodePath, entryPath, dataDir, runAsNode = 
 const system32 = (env, exe) => path.win32.join(windowsSystemRoot(env), 'System32', exe);
 
 // `whoami /user /fo csv`: a header line, then "domain\user","S-1-…".
+// A window-installed node runs the app's own binary, which has no command on any
+// PATH (`king-louie-service` is only a package.json bin), so the owner gets this
+// file instead: the logon task's pinned paths and variable, as a .cmd. Run by a
+// person, from cmd.exe. Inside double quotes only `%` is still special; a quote
+// cannot be there (sanitizeWindowsPath). cmd reads a batch file in the console's
+// code page, so a path outside ASCII needs UTF-8 said first.
+function renderServiceCli({ nodePath, entryPath }) {
+  const node = sanitizeWindowsPath('nodePath', nodePath);
+  const entry = sanitizeWindowsPath('entryPath', entryPath);
+  const quoted = (p) => `"${p.replace(/%/g, '%%')}"`;
+  const ascii = /^[\x00-\x7f]*$/.test(node + entry);
+  // cmd reads a non-ASCII path in the console's page, and the page outlives the
+  // script: it is saved, set for the one line, and put back with the exit code kept.
+  return [
+    PERSONAL_CLI_MARKER,
+    '@echo off',
+    'setlocal',
+    ...(ascii ? [] : ['for /f "tokens=2 delims=:." %%a in (\'chcp\') do set "KLCP=%%a"', 'chcp 65001 >nul']),
+    'set "ELECTRON_RUN_AS_NODE=1"',
+    `${quoted(node)} ${quoted(entry)} %*`,
+    ...(ascii ? ['exit /b %errorlevel%'] : ['set "KLEXIT=%errorlevel%"', 'if defined KLCP chcp %KLCP% >nul', 'exit /b %KLEXIT%']),
+    ''
+  ].join('\r\n');
+}
+
+const cliLeftLine = (file) => `${shown(file, 400)} is left where it is: King Louie did not write it.`;
+
 function defaultWhoAmI(env) {
   const out = String(execFileSync(system32(env, 'whoami.exe'), ['/user', '/fo', 'csv'], { encoding: 'utf8', windowsHide: true, timeout: 30000 }));
   const line = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop() || '';
@@ -99,6 +127,18 @@ function defaultFindChrome(env) {
   return null;
 }
 
+// The data dir the registered task runs, read from its XML: a node installed with
+// --data-dir is stopped where it is, whoever asks with no --data-dir (the uninstaller).
+function defaultTaskDataDir(env) {
+  const { parseTaskXml, decodeOutput } = require('../desktop-bridge/personal-node');
+  try {
+    const xml = execFileSync(windowsSchtasksExe(env), ['/Query', '/TN', PERSONAL_TASK_NAME, '/XML', 'ONE'], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 30000 });
+    return parseTaskXml(decodeOutput(xml)).dataDir;
+  } catch {
+    return null;
+  }
+}
+
 function taskExists(env, name) {
   try {
     execFileSync(windowsSchtasksExe(env), ['/Query', '/TN', name], { stdio: 'ignore', windowsHide: true, timeout: 30000 });
@@ -113,7 +153,9 @@ function taskExists(env, name) {
 // (paths.js fleetLayoutMarkers). → { task, marker: <path> | null }.
 function defaultFleetInstalled(env) {
   const task = taskExists(env, FLEET_TASK_NAME);
-  const marker = require('../platform/paths').fleetLayoutExists({ env });
+  const { fleetLayoutExists, pathPresent } = require('../platform/paths');
+  // A marker this account may not read is still a fleet node's.
+  const marker = fleetLayoutExists({ env, exists: pathPresent });
   return { task, marker };
 }
 
@@ -136,12 +178,29 @@ function readYaml(file) {
   }
 }
 
+// With no relay and no front door, whether the node's client is the window:
+// <configDir>/service.json loads with the desktop bridge on (attach stage 2
+// §6.4). → the same answer as defaultStartable.
+function bridgeStartable(configDir, dataDir) {
+  const { loadServiceConfig, CONFIG_FILE } = require('./config');
+  if (!fs.existsSync(path.join(configDir, CONFIG_FILE))) return { ok: false, why: NOTHING_PAIRED };
+  const uid = typeof process.geteuid === 'function' ? process.geteuid() : -1;
+  let features;
+  try {
+    ({ features } = loadServiceConfig(dataDir, {}, { adminConfigDir: configDir, adminUid: uid }));
+  } catch (err) {
+    return { ok: false, why: `${CONFIG_FILE} does not load (${shown(err.message)})` };
+  }
+  return features.desktopBridge === true ? { ok: true } : { ok: false, why: NOTHING_PAIRED };
+}
+
 // Whether the node.yaml in configDir is one the started task would run:
 // it loads through loadNodeConfig with hosting: personal and
-// approvers.relay set or a front door pinned in <configDir>/front-door.json
-// (what the node links to: service-wiring.js prefers the pin).
+// approvers.relay set, a front door pinned in <configDir>/front-door.json
+// (what the node links to: service-wiring.js prefers the pin), or the desktop
+// bridge on.
 // → { ok: true } or { ok: false, why } (one line).
-function defaultStartable(configDir) {
+function defaultStartable(configDir, dataDir) {
   let config;
   try {
     const uid = typeof process.geteuid === 'function' ? process.geteuid() : -1;
@@ -156,7 +215,7 @@ function defaultStartable(configDir) {
   try {
     st = fs.lstatSync(path.join(configDir, FRONT_DOOR_PIN));
   } catch (err) {
-    if (err.code === 'ENOENT') return { ok: false, why: NOTHING_PAIRED };
+    if (err.code === 'ENOENT') return bridgeStartable(configDir, dataDir);
     return { ok: false, why: `${FRONT_DOOR_PIN} cannot be read (${shown(err.message)})` };
   }
   if (st.isSymbolicLink()) return { ok: false, why: `${FRONT_DOOR_PIN} is a link, which the node refuses` };
@@ -178,6 +237,7 @@ function resolveDeps(deps, io) {
     fleetInstalled: deps.fleetInstalled || (() => defaultFleetInstalled(env)),
     startable: deps.startable || defaultStartable,
     taskRegistered: deps.taskRegistered || (() => taskExists(env, PERSONAL_TASK_NAME)),
+    taskDataDir: deps.taskDataDir || (() => defaultTaskDataDir(env)),
     exists: deps.exists || fs.existsSync,
     hostname: deps.hostname || os.hostname,
     tmpDir: deps.tmpDir || os.tmpdir(),
@@ -199,16 +259,19 @@ function resolveDeps(deps, io) {
 const scalar = (v) => `'${String(v).replace(/'/g, "''")}'`;
 
 // The values node.yaml gets, as dotted paths, in the order they are written.
+// chrome null: none found and none named, so desktop apps and takes are off.
 function wantedLeaves({ name, chrome, provider, model }) {
   const leaves = [
     ['name', name],
     ['profile', 'agent'],
     ['hosting', 'personal'],
-    ['gui.enabled', true],
-    ['gui.apps.chrome', chrome],
-    ['gui.take.enabled', true],
-    ['gui.take.max_minutes', 240],
-    ['gui.browser', 'chrome']
+    ...(chrome ? [
+      ['gui.enabled', true],
+      ['gui.apps.chrome', chrome],
+      ['gui.take.enabled', true],
+      ['gui.take.max_minutes', 240],
+      ['gui.browser', 'chrome']
+    ] : [['gui.enabled', false]])
   ];
   if (provider) leaves.push(['delegate.provider', provider]);
   if (model) leaves.push(['delegate.model', model]);
@@ -221,13 +284,15 @@ function renderNodeYaml({ name, chrome, provider, model }) {
     'profile: agent',
     'hosting: personal',
     'gui:',
-    '  enabled: true',
-    '  apps:',
-    `    chrome: ${scalar(chrome)}`,
-    '  take:',
-    '    enabled: true',
-    '    max_minutes: 240',
-    '  browser: chrome'
+    ...(chrome ? [
+      '  enabled: true',
+      '  apps:',
+      `    chrome: ${scalar(chrome)}`,
+      '  take:',
+      '    enabled: true',
+      '    max_minutes: 240',
+      '  browser: chrome'
+    ] : ['  enabled: false'])
   ];
   if (provider || model) {
     lines.push('delegate:');
@@ -237,9 +302,21 @@ function renderNodeYaml({ name, chrome, provider, model }) {
   return `${lines.join('\n')}\n`;
 }
 
+// Whether a node.yaml's text names a browser of its own.
+function namesBrowser(text) {
+  try {
+    const parsed = parseYaml(text);
+    return Boolean(parsed && parsed.gui && parsed.gui.browser !== undefined);
+  } catch {
+    return false;
+  }
+}
+
 // The wanted lines an existing node.yaml does not have (any `name` will do,
-// and a browser it already names is its own choice).
-function missingLines(text, wanted) {
+// and a browser it already names is its own choice). A gui the file has off
+// is its own choice too, unless this install was told a browser (browserNamed),
+// and install never asks anyone to turn a gui off.
+function missingLines(text, wanted, { browserNamed = false } = {}) {
   let parsed;
   try {
     parsed = parseYaml(text);
@@ -249,8 +326,11 @@ function missingLines(text, wanted) {
   if (!parsed || typeof parsed !== 'object') return null;
   const at = (dotted) => dotted.split('.').reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), parsed);
   const hasBrowser = at('gui.browser') !== undefined;
+  const guiOff = at('gui.enabled') === false && !browserNamed;
   return wanted
     .filter(([key]) => key !== 'name' && !(hasBrowser && (key === 'gui.browser' || key === 'gui.apps.chrome')))
+    .filter(([key, value]) => !(key === 'gui.enabled' && value === false))
+    .filter(([key]) => !(guiOff && key.startsWith('gui.')))
     .filter(([key, value]) => at(key) !== value)
     .map(([key, value]) => `${key}: ${typeof value === 'string' ? scalar(value) : value}`);
 }
@@ -292,9 +372,11 @@ async function install({ flags, io, c }) {
   // running platform's path form so the files land where it says.
   const configDir = path.join(path.dirname(dataDir), 'config');
   const yamlPath = path.join(configDir, NODE_YAML);
+  const cliPath = path.join(path.dirname(dataDir), PERSONAL_CLI_FILE);
 
-  const chrome = flags.browser || c.findChrome();
-  if (!chrome) return refuse(io, 'no chrome.exe found; pass --browser <path>');
+  // No Chrome is no reason to stop (C-6): the window needs no browser, and
+  // gui stays off until node.yaml says otherwise.
+  const chrome = flags.browser || c.findChrome() || null;
   const wanted = { name: c.hostname(), chrome, provider: flags.provider, model: flags.model };
   const yaml = renderNodeYaml(wanted);
   try {
@@ -306,10 +388,11 @@ async function install({ flags, io, c }) {
   const account = c.whoAmI();
   const existing = readYaml(yamlPath);
   if (existing && existing.error) return refuse(io, `Could not read ${yamlPath}: ${existing.error.message}`);
-  const missing = existing ? missingLines(existing.text, wantedLeaves(wanted)) : null;
+  const missing = existing ? missingLines(existing.text, wantedLeaves(wanted), { browserNamed: Boolean(flags.browser) }) : null;
+  const noBrowser = !chrome && !(existing && namesBrowser(existing.text));
   // The task is started only when the node.yaml it will run is one that
   // starts: a fresh one has no relay yet, and pair starts it.
-  const start = existing ? c.startable(configDir) : { ok: false, why: NOTHING_PAIRED };
+  const start = existing ? c.startable(configDir, dataDir) : { ok: false, why: NOTHING_PAIRED };
   const relay = start.ok;
   // A node already running on this data dir (one started by hand included)
   // is not started a second time (C-11).
@@ -332,6 +415,7 @@ async function install({ flags, io, c }) {
     existing ? `  ${yamlPath} (exists: install keeps it)` : `  ${yamlPath}`,
     `  ${dataDir} and ${configDir} (created when missing)`,
     `  the logon task "${PERSONAL_TASK_NAME}" (registered again when it exists)`,
+    ...(c.runAsNode ? [`  ${cliPath} (the king-louie-service command for this node)`] : []),
     ''
   ].join('\n'));
   if (!existing) {
@@ -343,9 +427,10 @@ async function install({ flags, io, c }) {
   } else {
     io.stdout.write(`${yamlPath} exists and install keeps it; it has every line install would write.\n`);
   }
+  if (noBrowser) io.stdout.write(`${NO_CHROME_LINE}\n`);
   // A warning, not a refusal: a take that records refuses recorder_missing
   // later with the same remedy.
-  if (!c.findFfmpeg()) io.stdout.write(`${FFMPEG_LINE}\n`);
+  else if (!c.findFfmpeg()) io.stdout.write(`${FFMPEG_LINE}\n`);
   if (runningPid) io.stdout.write(`${ALREADY_RUNNING(runningPid)}\n`);
   if (leftover) io.stdout.write(`${fleetData} exists but no fleet config file is beside it: every command ignores it, and it may be removed.\n`);
 
@@ -356,6 +441,11 @@ async function install({ flags, io, c }) {
     { description: `register the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Create', '/TN', PERSONAL_TASK_NAME, '/XML', xmlPath, '/F'] },
     { description: 'delete the temporary task definition', unlink: xmlPath, always: true, ignoreFailure: true }
   ];
+  // With none, the owner has only a harder command to type; no reason to stop.
+  // A file of that name it did not write stays; its own older one is replaced.
+  const cliForeign = c.runAsNode && c.exists(cliPath) && !isPersonalCli(cliPath);
+  if (cliForeign) io.stdout.write(`${cliLeftLine(cliPath)}\n`);
+  if (c.runAsNode && !cliForeign) steps.push({ description: 'write the king-louie-service command', writeFile: { path: cliPath, content: renderServiceCli({ nodePath: c.nodePath, entryPath: c.entryPath }) }, ignoreFailure: true });
   if (relay && !runningPid) steps.push({ description: `start the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Run', '/TN', PERSONAL_TASK_NAME] });
 
   if (flags.dryRun) {
@@ -390,22 +480,43 @@ async function uninstall({ flags, io, c }) {
   if (!flags.dryRun && !flags.yes && !c.isTTY()) {
     return refuse(io, 'Refusing to remove the personal node\'s logon task without confirmation on a non-interactive terminal; pass --yes.');
   }
+  const named = flags.dataDir || c.taskDataDir() || personalDataDir({ platform: 'win32', env: c.env });
+  if (!named) return refuse(io, 'LOCALAPPDATA is not set, so there is no default data dir: pass --data-dir DIR');
+  const dataDir = path.resolve(named);
+  const cliPath = path.join(path.dirname(dataDir), PERSONAL_CLI_FILE);
+  const cliThere = c.exists(cliPath);
+  const cliOurs = cliThere && isPersonalCli(cliPath);
+  const cliSteps = cliOurs
+    ? [{ description: 'delete the king-louie-service command', unlink: cliPath, ignoreFailure: true }]
+    : [];
+  if (cliThere && !cliOurs) io.stdout.write(`${cliLeftLine(cliPath)}\n`);
   if (!c.taskRegistered()) {
-    io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered: nothing to remove. The data dir stays as it is.\n`);
+    if (!cliSteps.length) {
+      io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered: nothing to remove. The data dir stays as it is.\n`);
+      return 0;
+    }
+    io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered. The data dir stays as it is.\n`);
+    if (flags.dryRun) {
+      await executeSteps(cliSteps, { dryRun: true, io });
+      return 0;
+    }
+    if (!flags.yes && (await c.confirm(`Remove ${cliPath}? [y/N] `)) !== true) {
+      io.stderr.write('Not removing without confirmation. Nothing was removed.\n');
+      return 1;
+    }
+    await c.execute(cliSteps);
     return 0;
   }
   const schtasks = windowsSchtasksExe(c.env);
   const steps = [
     // Already stopped (or never started) is not a reason to stop here.
     { description: `end the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/End', '/TN', PERSONAL_TASK_NAME], ignoreFailure: true },
-    { description: `delete the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Delete', '/TN', PERSONAL_TASK_NAME, '/F'] }
+    { description: `delete the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Delete', '/TN', PERSONAL_TASK_NAME, '/F'] },
+    ...cliSteps
   ];
-  const stays = flags.dataDir
-    ? `The data dir ${path.resolve(flags.dataDir)} stays, and so does the config dir beside it: the node's identity, chats and vault are in them. Delete them yourself to remove the node.`
-    : 'The data dir stays: the node\'s identity, chats and vault are in it.';
+  const stays = `The data dir ${dataDir} stays, and so does the config dir beside it: the node's identity, chats and vault are in them. Delete them yourself to remove the node.`;
   // `schtasks /End` kills only the PowerShell wrapper and leaves node.exe
   // running, so the node is stopped first, the way `stop` stops it.
-  const dataDir = path.resolve(flags.dataDir);
   if (flags.dryRun) {
     io.stdout.write(`  stop the node running on ${dataDir}, if any (${require('./commands/stop').stopCommandText(dataDir)})\n`);
     await executeSteps(steps, { dryRun: true, io });
@@ -435,4 +546,4 @@ async function runPersonalInstall({ command, flags = {}, io, deps = {} }) {
   return refuse(io, `Unknown command "${command}".`);
 }
 
-module.exports = { runPersonalInstall, renderPersonalTaskXml, renderNodeYaml, PERSONAL_TASK_NAME };
+module.exports = { runPersonalInstall, renderPersonalTaskXml, renderServiceCli, renderNodeYaml, PERSONAL_TASK_NAME };

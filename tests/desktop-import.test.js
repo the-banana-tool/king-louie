@@ -13,7 +13,7 @@ const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { addSink } = require('../src/logging');
 const { createDesktopScope } = require('../src/desktop-bridge/desktop-scope');
 const { checkPath } = require('../src/desktop-bridge/check-path');
-const { DesktopImporter, buildImportTargets, MAX_BATCH_BYTES, isSkippedCaseFile } = require('../src/migration/desktop-import');
+const { DesktopImporter, buildImportTargets, MAX_BATCH_BYTES, isSkippedCaseFile, importedSettingsKeys, IMPORTED_SETTINGS_KEYS, EXCLUDED, CATEGORY_ORDER, SECRET_CATEGORIES } = require('../src/migration/desktop-import');
 const { MemoryManager, MemoryStore } = require('../src/memory');
 const git = require('../src/cases/git');
 const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
@@ -48,7 +48,7 @@ const caseInventoryEntry = (dir, files) => ({
   bytes: files.reduce((n, f) => n + Buffer.from(f.b64, 'base64').length, 0)
 });
 
-async function service({ cipher = createAesGcmCipher(crypto.randomBytes(32)), now } = {}) {
+async function service({ cipher = createAesGcmCipher(crypto.randomBytes(32)), now, hosting } = {}) {
   const dataDir = tmp();
   process.env.KL_CASES_ROOT = path.join(dataDir, 'cases');
   const core = createCore({
@@ -67,7 +67,8 @@ async function service({ cipher = createAesGcmCipher(crypto.randomBytes(32)), no
   const importer = new DesktopImporter({
     context: core.context, targets, dataDir, cipher, checkPath,
     scope: createDesktopScope({ dataDir, context: core.context }),
-    ...(now ? { now } : {})
+    ...(now ? { now } : {}),
+    ...(hosting ? { hosting } : {})
   });
   return { core, dataDir, importer };
 }
@@ -1137,5 +1138,284 @@ describe('DesktopImporter', () => {
     assert.strictEqual(results[0].ok, true, JSON.stringify(results));
     await importer.finish({ planId: plan.planId });
     assert.strictEqual(fs.readFileSync(path.join(dataDir, 'cases', 'lakeside-lot', '..notes.md'), 'utf8'), 'hi\n');
+  });
+});
+
+// The personal carry set (attach stage 2 spec §6.5, C-9). Every core here has
+// really started, so the node holds what a real fresh node holds: the Default
+// profile its first start made.
+describe('DesktopImporter: the personal carry set', () => {
+  const BOT_TOKEN = '123456:example-BOT-token-value';
+  const carriedSettings = () => ({
+    models: {
+      profiles: [{ id: 'p-owner', name: 'Everyday', kind: 'user', roles: { main: [{ provider: 'anthropic', model: 'claude-sonnet-5', effort: null }], worker: [], utility: [] }, localOnly: ['utility'] }],
+      defaultProfileId: 'p-owner',
+      customRoles: [{ id: 'reviewer', name: 'Reviewer' }],
+      localServers: [{ id: 'from-desktop', kind: 'ollama', baseUrl: 'http://192.0.2.10:11434' }]
+    },
+    channels: { telegram: { requireMention: true, contactEnabled: true, contactOwnerUserId: '1000' } },
+    hooks: { enabled: false, hookStates: { 'log-tool-usage': false } },
+    mcpServers: { files: { command: 'example-mcp', args: ['--root', 'data'], env: { API_KEY: '${vault:github}' } } }
+  });
+  const carriedFixture = (settings = carriedSettings()) => {
+    const fx = desktopFixture({ settings, chats: {}, memory: {}, cron: {}, cases: {}, providerTokens: {} });
+    fx.inventory.providerTokens = [];
+    fx.inventory.permissionRules = [];
+    fx.inventory.alwaysApprove = [];
+    fx.inventory.allowedDirectories = [];
+    fx.inventory.userProfile = false;
+    fx.inventory.excluded = Object.keys(EXCLUDED);
+    fx.inventory.channelTokens = ['__telegram_bot_token'];
+    fx.inventory.channelAllowlists = ['telegram'];
+    const base = fx.valueOf;
+    fx.valueOf = (category, key) => {
+      if (category === 'channelToken') return BOT_TOKEN;
+      if (category === 'channelAllowlist') return { users: ['1000'], groups: [] };
+      return base(category, key);
+    };
+    return fx;
+  };
+  const noteOf = (plan, category, key) => plan.items.find((i) => i.category === category && i.key === key)?.note;
+  const rawSettings = (core) => core.context.getStore().get('settings');
+
+  it('importedSettingsKeys adds the four only under personal', () => {
+    assert.deepStrictEqual(importedSettingsKeys('service'), [...IMPORTED_SETTINGS_KEYS]);
+    assert.deepStrictEqual(importedSettingsKeys(undefined), [...IMPORTED_SETTINGS_KEYS]);
+    assert.deepStrictEqual(importedSettingsKeys('personal'), [...IMPORTED_SETTINGS_KEYS, 'models', 'channels', 'hooks', 'mcpServers']);
+    assert.strictEqual(SECRET_CATEGORIES.has('channelToken'), true);
+    assert.strictEqual(CATEGORY_ORDER.indexOf('channelToken'), CATEGORY_ORDER.indexOf('anthropicOAuth') + 1);
+  });
+
+  it('plans each one new against a fresh node, whose first start made a Default profile', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    assert.strictEqual(core.context.getSettings().models.profiles.length, 1, 'the node really has its own Default profile');
+    const fx = carriedFixture();
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    for (const key of ['models', 'channels', 'hooks', 'mcpServers']) assert.strictEqual(actionOf(plan, 'settings', key), 'new', key);
+    assert.strictEqual(actionOf(plan, 'channelToken', '__telegram_bot_token'), 'new');
+    assert.strictEqual(actionOf(plan, 'channelAllowlist', 'telegram'), 'new');
+  });
+
+  it('says nothing stays behind for what it carries, and still lists the rest', async () => {
+    const { importer } = await service({ hosting: 'personal' });
+    const fx = carriedFixture();
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    for (const key of ['settings.models', 'settings.channels', 'settings.hooks', 'settings.mcpServers', 'channelTokens']) {
+      assert.strictEqual(actionOf(plan, 'excluded', key), undefined, key);
+    }
+    assert.strictEqual(actionOf(plan, 'excluded', 'skills'), 'skip-excluded');
+    assert.strictEqual(actionOf(plan, 'excluded', 'settings.inference'), 'skip-excluded');
+  });
+
+  it('shows the owner, on each carried item, what moving it does and does not do', async () => {
+    const { importer } = await service({ hosting: 'personal' });
+    const fx = carriedFixture();
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.match(noteOf(plan, 'settings', 'models'), /local servers/i);
+    assert.match(noteOf(plan, 'settings', 'hooks'), /hook folders are not copied/i);
+    assert.match(noteOf(plan, 'settings', 'mcpServers'), /relative path/i);
+    assert.match(noteOf(plan, 'settings', 'channels'), /service\.json/);
+  });
+
+  it('applies: settings written, the node\'s own local servers kept, the token through the cipher', async () => {
+    const { core, dataDir, importer } = await service({ hosting: 'personal' });
+    const store = core.context.getStore();
+    const own = [{ id: 'node-own', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434' }];
+    const raw = store.get('settings');
+    store.set('settings', { ...raw, models: { ...raw.models, localServers: own } });
+    const fx = carriedFixture();
+    const { report, plan } = await runImport(importer, fx);
+    assert.strictEqual(actionOf(plan, 'settings', 'models'), 'new', 'a stored local server list is not the owner having set up models here');
+    assert.deepStrictEqual(report.failures, []);
+
+    const models = rawSettings(core).models;
+    assert.deepStrictEqual(models.localServers, own, 'the node\'s list is what it was');
+    assert.strictEqual(models.defaultProfileId, 'p-owner');
+    assert.deepStrictEqual(models.profiles.map((p) => p.id), ['p-owner'], 'the fresh Default gives way to the owner\'s profiles');
+    assert.deepStrictEqual(models.profiles[0].localOnly, ['utility'], 'a local-only role stays local-only');
+    assert.deepStrictEqual(models.customRoles, [{ id: 'reviewer', name: 'Reviewer' }]);
+
+    const settings = core.context.getSettings();
+    assert.strictEqual(settings.channels.telegram.requireMention, true);
+    assert.strictEqual(settings.hooks.enabled, false);
+    assert.strictEqual(settings.hooks.hookStates['log-tool-usage'], false);
+    assert.strictEqual(settings.mcpServers.files.env.API_KEY, '${vault:github}', 'a vault reference is carried as written, never expanded');
+
+    const stored = core.context.getApiTokens().__telegram_bot_token;
+    assert.notStrictEqual(stored, BOT_TOKEN);
+    assert.strictEqual(core.context.decryptToken(stored), BOT_TOKEN);
+    assert.strictEqual(core.context.vault.get('github'), VAULT_SECRET, 'what the reference names came too');
+
+    assert.deepStrictEqual(core.context.getAllowlistManager().getPolicy('telegram'), { default: 'deny', users: ['1000'], groups: [] });
+
+    const manifest = fs.readFileSync(path.join(dataDir, 'imports', `desktop-${fx.inventory.installId}.json`), 'utf8');
+    assert.ok(!manifest.includes('from-desktop') && !manifest.includes('localServers'), 'the manifest never records a local server');
+    assert.ok(!manifest.includes(BOT_TOKEN), 'nor a token');
+  });
+
+  it('tells the owner the node must restart for MCP servers, bots and hooks to take', async () => {
+    const { importer } = await service({ hosting: 'personal' });
+    const { report } = await runImport(importer, carriedFixture());
+    assert.ok(report.notes.some((n) => /next starts/.test(n)), report.notes.join(' | '));
+  });
+
+  it('never carries a token or a value into the log, plan or report', async () => {
+    const lines = [];
+    const remove = addSink((r) => lines.push(JSON.stringify(r)));
+    try {
+      const { importer } = await service({ hosting: 'personal' });
+      const out = await runImport(importer, carriedFixture());
+      const text = JSON.stringify({ plan: out.plan, report: out.report, lines });
+      assert.ok(!text.includes(BOT_TOKEN));
+    } finally {
+      if (typeof remove === 'function') remove();
+    }
+  });
+
+  it('a second run moves nothing, and a changed desktop does not overwrite the node', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    const fx = carriedFixture();
+    await runImport(importer, fx);
+    const before = JSON.stringify(rawSettings(core));
+    const tokenBefore = core.context.getApiTokens().__telegram_bot_token;
+    const again = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    for (const key of ['models', 'channels', 'hooks', 'mcpServers']) {
+      assert.strictEqual(actionOf(again, 'settings', key), 'skip-present', key);
+      assert.match(noteOf(again, 'settings', key), /already set on this node/);
+    }
+    assert.strictEqual(actionOf(again, 'channelToken', '__telegram_bot_token'), 'skip-present');
+    assert.strictEqual(actionOf(again, 'channelAllowlist', 'telegram'), 'skip-present');
+    const applied = await importer.apply({ planId: again.planId, batch: [{ category: 'channelToken', key: '__telegram_bot_token', value: 'another-token' }] });
+    assert.strictEqual(applied.results[0].ok, false);
+    await importer.finish({ planId: again.planId });
+    assert.strictEqual(JSON.stringify(rawSettings(core)), before);
+    assert.strictEqual(core.context.getApiTokens().__telegram_bot_token, tokenBefore);
+  });
+
+  const editDefault = (core) => {
+    const edited = core.context.getSettings();
+    const profile = edited.models.profiles[0];
+    core.context.setSettings({ ...edited, models: { ...edited.models, profiles: [{ ...profile, roles: { ...profile.roles, main: [{ provider: 'openai', model: 'owner-picked', effort: null }] } }] } });
+    return profile.id;
+  };
+
+  it('a node with an edited Default and a desktop with two named profiles: attention, nothing overwritten', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    const ownId = editDefault(core);
+    const before = core.context.getSettings().models;
+    const fx = carriedFixture();
+    fx.inventory.modelProfileIds = ['p-everyday', 'p-cheap'];
+    const { plan, report } = await runImport(importer, fx);
+    assert.strictEqual(actionOf(plan, 'settings', 'models'), 'needs-attention');
+    assert.match(noteOf(plan, 'settings', 'models'), /your 2 model profiles were not moved/);
+    assert.ok(report.attention.some((a) => a.category === 'settings' && a.key === 'models' && /your 2 model profiles were not moved/.test(a.note)), 'the report carries it');
+    assert.deepStrictEqual(report.failures, [], 'it is attention, not a failure');
+    const after = core.context.getSettings().models;
+    assert.strictEqual(after.defaultProfileId, ownId);
+    assert.deepStrictEqual(after.profiles, before.profiles);
+    const again = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(again, 'settings', 'models'), 'needs-attention', 'a later run still says so');
+  });
+
+  it('says one profile in the singular, counting only what the node lacks', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    const ownId = editDefault(core);
+    const fx = carriedFixture();
+    fx.inventory.modelProfileIds = [ownId, 'p-everyday'];
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'settings', 'models'), 'needs-attention');
+    assert.match(noteOf(plan, 'settings', 'models'), /your 1 model profile was not moved/);
+  });
+
+  it('a node that already holds the desktop\'s profiles is plain skip-present', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    const ownId = editDefault(core);
+    const fx = carriedFixture();
+    fx.inventory.modelProfileIds = [ownId];
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'settings', 'models'), 'skip-present');
+    assert.match(noteOf(plan, 'settings', 'models'), /already set on this node/);
+  });
+
+  it('an inventory with no profile ids (an older desktop) stays skip-present', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    editDefault(core);
+    const fx = carriedFixture();
+    delete fx.inventory.modelProfileIds;
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'settings', 'models'), 'skip-present');
+  });
+
+  it('a fleet node ignores the profile ids', async () => {
+    const { importer } = await service();
+    const fx = carriedFixture();
+    fx.inventory.modelProfileIds = ['p-everyday'];
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'settings', 'models'), 'skip-excluded');
+  });
+
+  it('an allowlist the node already has says the desktop\'s was left behind', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    core.context.getStore().set('channelAllowlists', { telegram: { default: 'deny', users: ['2000'], groups: [] } });
+    const fx = carriedFixture();
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'channelAllowlist', 'telegram'), 'skip-present');
+    assert.match(noteOf(plan, 'channelAllowlist', 'telegram'), /the desktop's list was left behind/);
+    assert.deepStrictEqual(core.context.getAllowlistManager().getPolicy('telegram').users, ['2000']);
+  });
+
+  it('a desktop with no profiles does not leave the node with none', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    const own = core.context.getSettings().models;
+    const settings = { ...carriedSettings(), models: { customRoles: [{ id: 'reviewer', name: 'Reviewer' }] } };
+    const { report } = await runImport(importer, carriedFixture(settings));
+    assert.deepStrictEqual(report.failures, []);
+    const after = core.context.getSettings().models;
+    assert.deepStrictEqual(after.profiles, own.profiles);
+    assert.strictEqual(after.defaultProfileId, own.defaultProfileId);
+    assert.deepStrictEqual(after.customRoles, [{ id: 'reviewer', name: 'Reviewer' }]);
+  });
+
+  it('refuses a carried setting that is not an object', async () => {
+    const { importer } = await service({ hosting: 'personal' });
+    const fx = carriedFixture();
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    const { results } = await importer.apply({ planId: plan.planId, batch: [{ category: 'settings', key: 'mcpServers', value: 'node evil.js' }] });
+    assert.strictEqual(results[0].ok, false);
+    await importer.finish({ planId: plan.planId });
+  });
+
+  it('takes only the channel tokens it knows: never the typesafe.ai key or a local server\'s', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    const fx = carriedFixture();
+    fx.inventory.channelTokens = ['__telegram_bot_token', '__typesafe_api_key', '__local_workstation'];
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'channelToken', '__typesafe_api_key'), 'skip-excluded');
+    assert.strictEqual(actionOf(plan, 'channelToken', '__local_workstation'), 'skip-excluded');
+    const { results } = await importer.apply({ planId: plan.planId, batch: [{ category: 'channelToken', key: '__typesafe_api_key', value: 'nope' }] });
+    assert.strictEqual(results[0].ok, false);
+    await importer.finish({ planId: plan.planId });
+    assert.strictEqual('__typesafe_api_key' in core.context.getApiTokens(), false);
+  });
+
+  it('a fleet node excludes each, with today\'s reasons, and writes none of them', async () => {
+    const { core, importer } = await service();
+    const fx = carriedFixture();
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    for (const key of ['models', 'channels', 'hooks', 'mcpServers']) {
+      assert.strictEqual(actionOf(plan, 'settings', key), 'skip-excluded', key);
+      assert.strictEqual(noteOf(plan, 'settings', key), EXCLUDED[`settings.${key}`]);
+    }
+    assert.strictEqual(actionOf(plan, 'channelToken', '__telegram_bot_token'), 'skip-excluded');
+    assert.strictEqual(noteOf(plan, 'channelToken', '__telegram_bot_token'), EXCLUDED.channelTokens);
+    assert.strictEqual(actionOf(plan, 'channelAllowlist', 'telegram'), undefined, 'a fleet plan is as it was');
+    assert.strictEqual(actionOf(plan, 'excluded', 'settings.hooks'), 'skip-excluded');
+    assert.strictEqual(actionOf(plan, 'excluded', 'channelTokens'), 'skip-excluded');
+    const { results } = await importer.apply({ planId: plan.planId, batch: [{ category: 'channelToken', key: '__telegram_bot_token', value: BOT_TOKEN }, { category: 'settings', key: 'mcpServers', value: {} }] });
+    assert.deepStrictEqual(results.map((r) => r.ok), [false, false]);
+    const report = await importer.finish({ planId: plan.planId });
+    assert.ok(!report.notes.some((n) => /next starts/.test(n)));
+    assert.strictEqual('__telegram_bot_token' in core.context.getApiTokens(), false);
+    assert.strictEqual(core.context.getSettings().mcpServers, undefined);
   });
 });

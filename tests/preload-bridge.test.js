@@ -44,6 +44,40 @@ describe('preload → window.electron bridge resilience', () => {
     assert.ok(exposedApi.chat, 'chat namespace must be exposed');
   });
 
+  it('the setup calls go out on their channels, and skip names only a step', async () => {
+    const invoked = [];
+    let api = null;
+    const sandbox = {
+      require: (mod) => {
+        if (mod === 'electron') {
+          return {
+            contextBridge: { exposeInMainWorld: (_name, exposed) => { api = exposed; } },
+            ipcRenderer: { invoke: async (ch, payload) => { invoked.push(payload === undefined ? [ch] : [ch, payload]); return { ok: true }; }, on: () => {}, send: () => {}, removeListener: () => {} }
+          };
+        }
+        return require(mod);
+      },
+      console, Date, process: { env: {} }
+    };
+    vm.runInContext(preloadCode, vm.createContext(sandbox));
+    await api.desktop.setupStep();
+    await api.desktop.setupLater();
+    await api.desktop.setupFinish();
+    await api.desktop.setupFinish({ skip: 'phone' });
+    await api.desktop.setupFinish({ skip: { evil: true } });
+    await api.desktop.nodeRestart();
+    await api.desktop.restartLater();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(invoked)), [
+      ['desktop:setupStep'],
+      ['desktop:setupLater'],
+      ['desktop:setupFinish', {}],
+      ['desktop:setupFinish', { skip: 'phone' }],
+      ['desktop:setupFinish', {}],
+      ['desktop:nodeRestart'],
+      ['desktop:restartLater']
+    ]);
+  });
+
   it('STILL exposes window.electron when the bundled logging module cannot be required', () => {
     // Reproduces the whole-UI outage: a sandboxed preload where relative
     // requires throw. Before the fix this aborted the preload, leaving
@@ -153,7 +187,13 @@ describe('desktop: personal-node methods (spec §11)', () => {
     assert.deepStrictEqual(JSON.parse(JSON.stringify(invoked)), [['desktop:nodeInstallPreview']]);
   });
 
-  for (const [method, channel] of [['nodeInstall', 'desktop:nodeInstall'], ['pairRestartConfirm', 'desktop:pairRestartConfirm']]) {
+  it('migrationPlan sends nothing but the channel', async () => {
+    const { exposedApi, invoked } = runPreloadWithFakeIpc();
+    await exposedApi.desktop.migrationPlan({ dest: 'C:\\elsewhere' });
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(invoked)), [['desktop:migrationPlan']]);
+  });
+
+  for (const [method, channel] of [['nodeInstall', 'desktop:nodeInstall'], ['pairRestartConfirm', 'desktop:pairRestartConfirm'], ['migrationApply', 'desktop:migrationApply']]) {
     it(`${method} sends confirmed: true only when the caller passed confirmed === true`, async () => {
       const { exposedApi, invoked } = runPreloadWithFakeIpc();
       await exposedApi.desktop[method]({ confirmed: true, dataDir: 'C:\\elsewhere' });

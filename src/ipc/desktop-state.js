@@ -46,7 +46,7 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
   const store = make({
     name: 'desktop-bridge',
     cwd: userDataDir,
-    defaults: { mode: 'standalone', installId: null, pairing: null, pendingPair: null, lastImport: null, pendingServiceCommand: null }
+    defaults: { mode: 'standalone', installId: null, pairing: null, pendingPair: null, lastImport: null, pendingServiceCommand: null, migration: null, setup: null }
   });
   if (!store.get('installId')) store.set('installId', crypto.randomUUID());
   const usable = () => secureStorageUsable(safeStorage, platform);
@@ -86,6 +86,47 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
         throw new Error('setPendingServiceCommand needs a { command } string');
       }
       store.set('pendingServiceCommand', { command: entry.command, at: entry.at || new Date().toISOString() });
+    },
+    // The one-time move (attach stage 2 §6.5): this profile was moved into a
+    // node and verified. Set once, by a verified move only; nothing here clears
+    // it, Unpair included, and it names the first node.
+    get migration() { return store.get('migration') || null; },
+    setMigration(entry) {
+      if (!entry || typeof entry !== 'object') throw new Error('setMigration needs a record');
+      for (const key of ['at', 'backupDir', 'nodeId']) {
+        if (typeof entry[key] !== 'string' || !entry[key]) throw new Error(`setMigration needs ${key}`);
+      }
+      if (store.get('migration')) throw new Error('this profile is already marked as migrated');
+      const { at, backupDir, nodeDataDir = null, nodeId, counts = {}, leftBehind, private: privateNote, staysBehind, notes, restartDue } = entry;
+      store.set('migration', {
+        at, backupDir, nodeDataDir, nodeId, counts,
+        ...(leftBehind ? { leftBehind } : {}),
+        ...(privateNote ? { private: privateNote } : {}),
+        ...(staysBehind ? { staysBehind } : {}),
+        ...(notes ? { notes } : {}),
+        ...(restartDue === true ? { restartDue: true } : {})
+      });
+    },
+    // The one change a marker takes: the restart it was owed has gone out.
+    clearRestartDue() {
+      const marker = store.get('migration');
+      if (!marker || !marker.restartDue) return;
+      const { restartDue: _done, ...rest } = marker;
+      store.set('migration', rest);
+    },
+    get setup() { return store.get('setup') || null; },
+    setSetup(entry) {
+      if (!entry || typeof entry.completedAt !== 'string' || !entry.completedAt) throw new Error('setSetup needs completedAt');
+      store.set('setup', { ...(store.get('setup') || {}), completedAt: entry.completedAt });
+    },
+    // What the walk has shown, so a relaunch comes back to it. One way: only true
+    // is ever written, and only these two.
+    noteSetup({ phoneOffered, phoneSeen } = {}) {
+      store.set('setup', {
+        ...(store.get('setup') || {}),
+        ...(phoneOffered === true ? { phoneOffered: true } : {}),
+        ...(phoneSeen === true ? { phoneSeen: true } : {})
+      });
     },
     secureStorageUsable: usable,
     seal(text) {

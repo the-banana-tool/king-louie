@@ -7,8 +7,12 @@ const {
   findById,
   buildAppContextSection,
   resetDiscoveryCache,
-  comClassRegisteredCommand
+  comClassRegisteredArgs
 } = require('../src/execution/app-discovery');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { isCommandAvailable } = require('../src/execution/runtime-environment');
 
 // Discovery over the real catalog probes the machine; the tests stub the
 // per-app check so the suite never touches installed software.
@@ -113,17 +117,15 @@ describe('discoverApps()', () => {
 
 // ── Windows COM check ────────────────────────────────────────────────────────
 
-describe('comClassRegisteredCommand()', () => {
+describe('comClassRegisteredArgs()', () => {
   it('reads the registry and never instantiates the COM class', () => {
-    const cmd = comClassRegisteredCommand('Word.Application');
-    assert.strictEqual(cmd, 'reg query "HKCR\\Word.Application\\CLSID" /ve');
-    assert.doesNotMatch(cmd, /New-Object|ComObject|powershell/i);
+    assert.deepStrictEqual(comClassRegisteredArgs('Word.Application'), ['query', 'HKCR\\Word.Application\\CLSID', '/ve']);
   });
 
   it('refuses a ProgID that is not a plain dotted name', () => {
-    assert.strictEqual(comClassRegisteredCommand('Word.Application" & calc'), null);
-    assert.strictEqual(comClassRegisteredCommand(''), null);
-    assert.strictEqual(comClassRegisteredCommand(undefined), null);
+    assert.strictEqual(comClassRegisteredArgs('Word.Application" & calc'), null);
+    assert.strictEqual(comClassRegisteredArgs(''), null);
+    assert.strictEqual(comClassRegisteredArgs(undefined), null);
   });
 });
 
@@ -208,5 +210,75 @@ describe('buildAppContextSection()', () => {
     const section = buildAppContextSection(apps);
     assert.ok(section.includes('cat1:'));
     assert.ok(section.includes('cat2:'));
+  });
+});
+
+// The service's working directory is <dataDir>/workspace, where the model can
+// write. A lookup at start must never run, or report, anything from there. An
+// agent shell sets NoDefaultCurrentDirectoryInExePath, which hides this on
+// Windows, so the test takes it out.
+describe('nothing from the working directory', () => {
+  const cwd = process.cwd();
+  const savedNoCwd = process.env.NoDefaultCurrentDirectoryInExePath;
+  const savedPath = process.env.PATH;
+  let dir;
+  const beforeEach_ = () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-discovery-'));
+    delete process.env.NoDefaultCurrentDirectoryInExePath;
+    process.chdir(dir);
+    resetDiscoveryCache();
+  };
+  const afterEach_ = () => {
+    process.chdir(cwd);
+    if (savedNoCwd !== undefined) process.env.NoDefaultCurrentDirectoryInExePath = savedNoCwd;
+    process.env.PATH = savedPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+    resetDiscoveryCache();
+  };
+  const entry = (extra) => ({ id: 'kl-planted-tool', names: ['kl-planted-tool'], capabilities: ['x'], category: 'x', description: 'x', ...extra });
+
+  it('Windows: a planted where.cmd, reg.cmd, powershell.cmd or tool does not run or reach the result', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
+    beforeEach_();
+    try {
+      for (const name of ['where', 'reg', 'powershell', 'kl-planted-tool']) {
+        fs.writeFileSync(path.join(dir, `${name}.cmd`), `@echo off\r\necho ran> "%~dp0${name}.ran"\r\necho ${path.join(dir, name)}.cmd\r\n`);
+      }
+      const apps = await discoverApps({ force: true, catalog: [entry({ winReg: 'Kl.Planted' })] });
+      assert.deepStrictEqual(apps, [], 'nothing from the cwd is found');
+      assert.strictEqual(await isCommandAvailable('kl-planted-tool'), false);
+      assert.deepStrictEqual(fs.readdirSync(dir).filter((f) => f.endsWith('.ran')), [], 'nothing planted ran');
+    } finally {
+      afterEach_();
+    }
+  });
+
+  it('Windows: the real programs still answer', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
+    beforeEach_();
+    try {
+      const apps = await discoverApps({ force: true, catalog: [
+        entry({ id: 'cmd', names: ['cmd'] }),
+        entry({ id: 'kl-com', names: [], winReg: 'Scripting.FileSystemObject' })
+      ] });
+      assert.match(apps.find((a) => a.id === 'cmd').launchCmd, /cmd\.exe$/i);
+      assert.ok(apps.find((a) => a.id === 'kl-com'), 'a registered COM class is found');
+      assert.strictEqual(await isCommandAvailable('cmd'), true);
+    } finally {
+      afterEach_();
+    }
+  });
+
+  it('POSIX: a PATH that names the cwd does not find a tool planted there', { skip: process.platform === 'win32' && 'POSIX only' }, async () => {
+    beforeEach_();
+    try {
+      const tool = path.join(dir, 'kl-planted-tool');
+      fs.writeFileSync(tool, '#!/bin/sh\ntouch "$(dirname "$0")/tool.ran"\n', { mode: 0o755 });
+      process.env.PATH = `.:${process.env.PATH}`;
+      const apps = await discoverApps({ force: true, catalog: [entry()] });
+      assert.deepStrictEqual(apps, []);
+      assert.strictEqual(await isCommandAvailable('kl-planted-tool'), false);
+      assert.strictEqual(fs.existsSync(path.join(dir, 'tool.ran')), false);
+    } finally {
+      afterEach_();
+    }
   });
 });

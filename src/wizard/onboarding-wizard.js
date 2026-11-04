@@ -6,15 +6,31 @@ function completeOnboarding(store) {
   store.set('onboardingComplete', true);
 }
 
-function getWizardSteps() {
-  return [
-    {
-      id: 'welcome',
-      title: 'Welcome to King Louie',
-      description: 'A brief introduction to your new desktop chat companion.',
-      optional: false,
-      validate: () => true,
-    },
+// Attached, the window is a client of a node (attach stage 2 spec §6.3): the
+// setup flow has already introduced it, and its channels are the node's.
+function getWizardSteps({ attached = false } = {}) {
+  const welcome = {
+    id: 'welcome',
+    title: 'Welcome to King Louie',
+    description: 'A brief introduction to your new desktop chat companion.',
+    optional: false,
+    validate: () => true,
+  };
+  const channels = {
+    id: 'channels',
+    title: 'Enable Channels',
+    description: 'Connect Telegram by providing your bot token.',
+    optional: true,
+    validate: () => true,
+  };
+  const phone = {
+    id: 'phone',
+    title: 'Your Phone',
+    description: 'Approve what King Louie does while you are away. Optional; it is set up from a terminal.',
+    optional: true,
+    validate: () => true,
+  };
+  const [provider, profile, finish] = [
     {
       id: 'provider',
       title: 'Select Provider',
@@ -35,13 +51,6 @@ function getWizardSteps() {
         typeof data.name === 'string' && data.name.length > 0,
     },
     {
-      id: 'channels',
-      title: 'Enable Channels',
-      description: 'Connect Telegram by providing your bot token.',
-      optional: true,
-      validate: () => true,
-    },
-    {
       id: 'finish',
       title: 'All Set!',
       description: 'Review your choices and finish onboarding.',
@@ -49,6 +58,7 @@ function getWizardSteps() {
       validate: () => true,
     },
   ];
+  return attached ? [provider, profile, phone, finish] : [welcome, provider, profile, channels, finish];
 }
 
 module.exports = { isFirstRun, completeOnboarding, getWizardSteps };

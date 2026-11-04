@@ -8,6 +8,7 @@ const { EventEmitter } = require('events');
 const { JsonFileStore } = require('../src/platform/json-file-store');
 const { openDesktopState } = require('../src/ipc/desktop-state');
 const { startAttachedHost } = require('../src/ipc/attached-host');
+const { describeSetup } = require('../src/desktop-bridge/setup-flow');
 const { listIpcChannels } = require('../src/ipc/channel-inventory');
 const { BridgeError } = require('../src/desktop-bridge/protocol');
 
@@ -55,7 +56,7 @@ class FakeClient extends EventEmitter {
 
 const SERVICE = (channels, extra = {}) => ({ version: '26.9.0', protocol: 1, nodeId: 'kl-abcdefghijklmnop', account: 'LOCAL SERVICE', profile: 'agent', providersConfigured: true, channels, ...extra });
 
-function setup() {
+function setup({ pairingService = {}, ...hostDeps } = {}) {
   const handlers = new Map();
   const listeners = new Map();
   const ipcMain = {
@@ -70,12 +71,66 @@ function setup() {
   const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
   const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
   state.setMode('attached');
-  state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, pairedAt: '2026-09-23T14:02:11Z' } });
+  state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, pairedAt: '2026-09-23T14:02:11Z', ...pairingService } });
   const client = new FakeClient();
   const app = { getPath: () => userDataDir, relaunch() {}, exit() {}, quit() {} };
-  const host = startAttachedHost({ app, ipcMain, safeStorage, dialog, getWindow: () => window, state, env: {}, platform: 'linux', clientFactory: () => client });
-  return { host, handlers, listeners, sent, client, dialogAnswers };
+  const host = startAttachedHost({ app, ipcMain, safeStorage, dialog, getWindow: () => window, state, env: {}, platform: 'linux', clientFactory: () => client, ...hostDeps });
+  return { host, handlers, listeners, sent, client, dialogAnswers, state };
 }
+
+// Attach stage 2 §6.1: on Windows a detached window comes back under needs-node
+// with its pairing kept. Nothing connects behind the words of the warning.
+describe('attached host: a window the launch rule sent to the setup', () => {
+  function needsNode({ paired }) {
+    const userDataDir = tmp();
+    const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
+    const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
+    state.setMode('standalone');
+    if (paired) state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, hosting: 'personal', dataDir: 'C:\\x\\data', pairedAt: '2026-11-03T14:02:11Z' } });
+    const calls = [];
+    const app = { getPath: () => userDataDir, relaunch: (o) => calls.push(['relaunch', o]), exit: () => calls.push(['exit']), quit: () => calls.push(['quit']) };
+    let clients = 0;
+    const host = startAttachedHost({
+      app, ipcMain: { handle() {}, on() {} }, safeStorage, dialog: {}, getWindow: () => null, state, env: {}, platform: 'linux',
+      launch: { host: 'attached', why: 'needs-node', degraded: false },
+      clientFactory: () => { clients += 1; return new FakeClient(); }
+    });
+    return { host, state, calls, clientsMade: () => clients };
+  }
+
+  it('a kept pairing, detached: no client, nothing connects, and the one press is Attach', async () => {
+    const { host, state, calls, clientsMade } = needsNode({ paired: true });
+    assert.strictEqual(host.client, null);
+    assert.strictEqual(clientsMade(), 0);
+    host.start();
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(clientsMade(), 0);
+    const status = await host.controller.status();
+    assert.strictEqual(status.mode, 'standalone');
+    assert.strictEqual(status.view, 'paired');
+    const model = describeSetup(status);
+    assert.strictEqual(model.step, 'pair');
+    assert.deepStrictEqual(model.actions.map((a) => a.id), ['attach']);
+    assert.strictEqual((await host.controller.attach()).ok, true);
+    assert.strictEqual(state.mode, 'attached');
+    assert.ok(calls.length, 'and it relaunches');
+    await host.shutdown();
+  });
+
+  it('a launch that is attached still builds its client', async () => {
+    const userDataDir = tmp();
+    const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
+    const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
+    state.setMode('attached');
+    state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, pairedAt: '2026-11-03T14:02:11Z' } });
+    const fake = new FakeClient();
+    const app = { getPath: () => userDataDir, relaunch() {}, exit() {}, quit() {} };
+    const host = startAttachedHost({ app, ipcMain: { handle() {}, on() {} }, safeStorage, dialog: {}, getWindow: () => null, state, env: {}, platform: 'linux', launch: { host: 'attached', why: 'attached', degraded: false }, clientFactory: () => fake });
+    assert.strictEqual(host.client, fake);
+    assert.strictEqual((await host.controller.status()).mode, 'attached');
+    await host.shutdown();
+  });
+});
 
 describe('attached host', () => {
   it('registers every inventory channel exactly once, plus canvas:executeJsResult', () => {
@@ -83,6 +138,13 @@ describe('attached host', () => {
     const inv = listIpcChannels();
     assert.deepStrictEqual([...handlers.keys()].sort(), [...inv.handle].sort());
     assert.deepStrictEqual([...listeners.keys()].sort(), [...inv.on, 'canvas:executeJsResult'].sort());
+  });
+
+  it('hands the launch to its controller', async () => {
+    const launch = { host: 'attached', why: 'needs-node', degraded: false };
+    const { host } = setup({ launch });
+    assert.deepStrictEqual((await host.controller.status()).launch, launch);
+    await host.shutdown();
   });
 
   it('routes proxy, deny, local and service-too-old channels', async () => {
@@ -103,6 +165,57 @@ describe('attached host', () => {
     assert.deepStrictEqual(await handlers.get('chat:load')({}), { ok: false, code: 'BRIDGE_TIMEOUT', error: 'The local service did not answer in time.' });
     client.answers.set('chat:load', () => { throw new BridgeError('PAYLOAD_TOO_LARGE', 'Payload too large'); });
     assert.strictEqual((await handlers.get('chat:load')({})).error, 'That request is too large for the local service (64 MiB limit).');
+  });
+
+  it('wizard answers from the setup state on a personal pairing; a fleet pairing has no first run', async () => {
+    const personal = { hosting: 'personal', dataDir: 'C:\\Users\\owner\\node\\data' };
+    const attached = { host: 'attached', why: 'attached', degraded: false };
+    const first = setup({ pairingService: personal, launch: attached, nodeRunner: null });
+    assert.deepStrictEqual(await first.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: true });
+    assert.deepStrictEqual((await first.handlers.get('wizard:getSteps')({})).steps.map((s) => s.id), ['provider', 'profile', 'phone', 'finish']);
+    first.state.setSetup({ completedAt: '2026-11-04T10:00:00.000Z' });
+    assert.deepStrictEqual(await first.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
+
+    const dev = setup({ pairingService: personal, launch: { host: 'standalone', why: 'dev', degraded: false } });
+    assert.deepStrictEqual(await dev.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
+
+    const fleet = setup({ launch: attached });
+    assert.deepStrictEqual(await fleet.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
+    await first.host.shutdown();
+    await dev.host.shutdown();
+    await fleet.host.shutdown();
+  });
+
+  it('a setup finished for this launch does not open the wizard again', async () => {
+    const made = setup({ pairingService: { hosting: 'personal', dataDir: 'C:\\x\\data' }, launch: { host: 'attached', why: 'attached', degraded: false }, nodeRunner: null, controllerFactory: (deps) => {
+      const { createDesktopController } = require('../src/ipc/desktop-controller');
+      return createDesktopController({ ...deps, nodeRunner: null, migrationDeps: { detectOldProfile: async () => ({ found: true, chats: 0, messages: 0, cases: 0, bytes: 0, schemaProblem: 'bad', customCasesRoot: null, customCases: 0 }) } });
+    } });
+    made.client.goLive(SERVICE([]));
+    await made.host.controller.setupFinish({ skip: 'migrate' });
+    await made.host.controller.setupFinish({ skip: 'phone' });
+    await made.handlers.get('wizard:complete')({});
+    assert.ok(!made.state.setup.completedAt);
+    assert.deepStrictEqual(await made.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
+    await made.host.shutdown();
+  });
+
+  it('wizard:complete finishes the setup, and is refused before the move', async () => {
+    const finished = [];
+    const controllerFactory = (deps) => {
+      const { createDesktopController } = require('../src/ipc/desktop-controller');
+      const controller = createDesktopController({ ...deps, nodeRunner: null });
+      const setupFinish = controller.setupFinish;
+      return { ...controller, setupFinish: async (p) => { finished.push(p); return setupFinish(p); } };
+    };
+    const made = setup({ pairingService: { hosting: 'personal', dataDir: 'C:\\x\\data' }, launch: { host: 'attached', why: 'attached', degraded: false }, controllerFactory });
+    made.client.goLive(SERVICE([]));
+    const answer = await made.handlers.get('wizard:complete')({});
+    assert.strictEqual(finished.length, 1);
+    assert.deepStrictEqual(answer, { ok: true });
+    assert.ok(made.state.setup.completedAt);
+    assert.deepStrictEqual(await made.handlers.get('wizard:getStatus')({}), { ok: true, isFirstRun: false });
+    await made.host.shutdown();
   });
 
   it('wizard is local, and a send without a provider says so', async () => {
@@ -176,6 +289,82 @@ describe('attached host', () => {
     assert.strictEqual(status.ok, true);
     assert.strictEqual(status.view, 'attached-connected');
     assert.ok(status.unavailableTabs.includes('mcp'));
+  });
+});
+
+// Attach stage 2 (spec 2026-11-03 §6.6, G-1): the pairing record says what the
+// node is; what it serves the handshake still says, channel by channel.
+describe('attached host: a personal pairing', () => {
+  const PERSONAL = { pairingService: { hosting: 'personal', dataDir: 'C:\\example\\data' } };
+
+  it('proxies a personal domain the service lists', async () => {
+    const { host, handlers, client } = setup(PERSONAL);
+    client.goLive(SERVICE(['hooks:list', 'settings:mcpList'], { hosting: 'personal' }));
+    assert.deepStrictEqual(await handlers.get('hooks:list')({}), { ok: true, data: { channel: 'hooks:list' } });
+    assert.deepStrictEqual(await handlers.get('settings:mcpList')({}), { ok: true, data: { channel: 'settings:mcpList' } });
+    assert.deepStrictEqual(client.invoked.map(([ch]) => ch), ['hooks:list', 'settings:mcpList']);
+    await host.shutdown();
+  });
+
+  it('answers SERVICE_TOO_OLD when the service does not list it', async () => {
+    const { host, handlers, client } = setup(PERSONAL);
+    client.goLive(SERVICE(['chat:load'], { hosting: 'personal' }));
+    assert.strictEqual((await handlers.get('hooks:list')({})).code, 'SERVICE_TOO_OLD');
+    assert.deepStrictEqual(client.invoked, []);
+    await host.shutdown();
+  });
+
+  it('answers SERVICE_UNREACHABLE while the node is down', async () => {
+    const { host, handlers } = setup(PERSONAL);
+    assert.strictEqual((await handlers.get('hooks:list')({})).code, 'SERVICE_UNREACHABLE');
+    await host.shutdown();
+  });
+
+  it('keeps Anthropic OAuth and read-aloud unavailable', async () => {
+    const { host, handlers, client } = setup(PERSONAL);
+    client.goLive(SERVICE(['settings:anthropicOAuthStart', 'chat:speakLast'], { hosting: 'personal' }));
+    assert.strictEqual((await handlers.get('settings:anthropicOAuthStart')({})).code, 'ATTACHED_UNAVAILABLE');
+    assert.strictEqual((await handlers.get('chat:speakLast')({})).code, 'ATTACHED_UNAVAILABLE');
+    assert.deepStrictEqual(client.invoked, []);
+    await host.shutdown();
+  });
+
+  it('a record with no hosting is the fleet: unavailable, even if a service lists the channel', async () => {
+    const { host, handlers, client } = setup();
+    client.goLive(SERVICE(['hooks:list', 'settings:mcpList']));
+    assert.strictEqual((await handlers.get('hooks:list')({})).code, 'ATTACHED_UNAVAILABLE');
+    assert.strictEqual((await handlers.get('settings:mcpList')({})).code, 'ATTACHED_UNAVAILABLE');
+    assert.deepStrictEqual(client.invoked, []);
+    await host.shutdown();
+  });
+
+  it('goes by the record as it is now', async () => {
+    const { host, handlers, client, state } = setup(PERSONAL);
+    client.goLive(SERVICE(['hooks:list'], { hosting: 'personal' }));
+    assert.strictEqual((await handlers.get('hooks:list')({})).ok, true);
+    const { hosting, ...fleet } = state.pairing.service;
+    assert.strictEqual(hosting, 'personal');
+    state.setPairing({ ...state.pairing, service: fleet });
+    assert.strictEqual((await handlers.get('hooks:list')({})).code, 'ATTACHED_UNAVAILABLE');
+    await host.shutdown();
+  });
+
+  it('a workflow event reaches the window on a personal pairing and not on a fleet one', async () => {
+    const wide = setup(PERSONAL);
+    wide.client.emit('event', 'workflow:started', { workflowId: 'w-1' });
+    assert.deepStrictEqual(wide.sent, [['workflow:started', { workflowId: 'w-1' }]]);
+    await wide.host.shutdown();
+    const fleet = setup();
+    fleet.client.emit('event', 'workflow:started', { workflowId: 'w-1' });
+    assert.deepStrictEqual(fleet.sent, []);
+    await fleet.host.shutdown();
+  });
+
+  it('desktop:status marks only the mesh unavailable', async () => {
+    const { host, handlers, client } = setup(PERSONAL);
+    client.goLive(SERVICE(['chat:load'], { hosting: 'personal' }));
+    assert.deepStrictEqual((await handlers.get('desktop:status')({})).unavailableTabs, ['mesh']);
+    await host.shutdown();
   });
 });
 

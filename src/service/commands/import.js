@@ -454,7 +454,7 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
       return 0;
     }
     const skipped = [];
-    for (const batch of planBatches(items, source, { skipped })) {
+    for (const batch of planBatches(items, source, { skipped, chatParts: plan.chatParts === true })) {
       await writer.request('apply', { planId: plan.planId, batch });
     }
     const report = await writer.request('finish', { planId: plan.planId });

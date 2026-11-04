@@ -12,6 +12,12 @@ const PROFILES = new Set(['agent', 'runbook', 'frontdoor']);
 // remote approval, and stage 3 brings the phone approver that makes channels
 // useful for unsafe work.
 const DEFAULT_FEATURES = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false };
+// Attach stage 2: on a personal node the window is the only way in and nobody
+// writes service.json by hand, so what a desktop had on is on. None of the
+// three opens anything with nothing configured: a channel starts only with its
+// token, app discovery only runs local lookups, and the webhook listener binds
+// only for a webhook or a contact relay (webhooksOnDemand). An admin value wins.
+const PERSONAL_FEATURE_DEFAULTS = Object.freeze({ webhooks: true, channels: true, appDiscovery: true });
 // Distinct from the Electron app's 18789/18790 *and* from mesh's documented
 // 18791 (src/mesh/mesh-transport.js), which the desktop app binds on 0.0.0.0
 // by default — so a service and a desktop app on one machine do not fight
@@ -448,11 +454,15 @@ function assertAdminOwned(file, geteuid, adminUid = 0, controls = SERVICE_CONFIG
  *                        per-platform location beside the data dir
  * @param geteuid         injectable for tests, the way master-key.js takes getuid
  * @param adminUid        which uid counts as the administrator (0; see assertAdminOwned)
+ * @param readHosting     () => the node's hosting, asked only on the agent
+ *                        profile; runService passes it, and without it the
+ *                        fleet defaults apply
  */
 function loadServiceConfig(dataDir, overrides = {}, {
   adminConfigDir: adminDir = adminConfigDir({ dataDir }),
   geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1),
-  adminUid = 0
+  adminUid = 0,
+  readHosting = null
 } = {}) {
   const serviceFile = path.join(dataDir, CONFIG_FILE);
   const adminFile = path.join(adminDir, CONFIG_FILE);
@@ -480,7 +490,10 @@ function loadServiceConfig(dataDir, overrides = {}, {
   const profile = overrides.profile || adminCfg.profile || 'agent';
   if (!PROFILES.has(profile)) throw new Error(`Unknown profile "${profile}". Expected one of: ${[...PROFILES].join(', ')}`);
 
-  const features = { ...DEFAULT_FEATURES, ...validateFeatures(adminCfg.features, adminFile), ...(overrides.features || {}) };
+  const adminFeatures = validateFeatures(adminCfg.features, adminFile);
+  const hostingDefaults = profile === 'agent' && readHosting && readHosting() === 'personal' ? PERSONAL_FEATURE_DEFAULTS : {};
+  const features = { ...DEFAULT_FEATURES, ...hostingDefaults, ...adminFeatures, ...(overrides.features || {}) };
+  const setByHand = (name) => Object.hasOwn(adminFeatures, name) || Object.hasOwn(overrides.features || {}, name);
   // mesh binds a non-loopback listener and stage 1 has no remote approver, so
   // it stays off even when an administrator asks for it.
   if (features.mesh) {
@@ -499,7 +512,7 @@ function loadServiceConfig(dataDir, overrides = {}, {
     if (!on) continue;
     const source = overrides.features && overrides.features[name] !== undefined
       ? 'a command-line override'
-      : adminFile;
+      : (setByHand(name) ? adminFile : 'the personal node default');
     log.info(`feature "${name}" is ENABLED by ${source}`);
   }
 
@@ -524,8 +537,11 @@ function loadServiceConfig(dataDir, overrides = {}, {
     contact: validateContactConfig(adminCfg.contact, adminFile, { unknownKeyError }),
     playbooks: parsePlaybooksConfig(adminCfg.playbooks, adminFile),
     localInference: parseLocalInferenceConfig(adminCfg.localInference, adminFile),
-    caseChecks: parseCaseChecksConfig(adminCfg.caseChecks, adminFile)
+    caseChecks: parseCaseChecksConfig(adminCfg.caseChecks, adminFile),
+    // Only when the personal default is what turned webhooks on: switched on
+    // by hand, the listener binds at start and a failed bind refuses the start.
+    ...(hostingDefaults.webhooks && !setByHand('webhooks') ? { webhooksOnDemand: true } : {})
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, hostPushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, parseLocalInferenceConfig, parseCaseChecksConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };
+module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, hostPushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, parseLocalInferenceConfig, parseCaseChecksConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, PERSONAL_FEATURE_DEFAULTS, CONFIG_FILE, unknownKeyError };

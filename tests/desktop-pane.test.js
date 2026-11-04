@@ -6,7 +6,7 @@ const path = require('path');
 const {
   describeServicePane, describeImportReport, decideDetachClick, paneShapeChanged,
   describeAttachedBanner, describeInstallPreview, describeInstallResult,
-  DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE
+  DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE, nodeHosting, nodeVersion
 } = require('../src/desktop-bridge/pane-model');
 
 const ROOT = path.join(__dirname, '..');
@@ -88,8 +88,8 @@ describe('describeServicePane', () => {
     const lines = describeImportReport({ counts: { new: 3, 'skip-present': 1, failed: 1 }, failures: [{ category: 'vault', key: 'github', error: 'Encryption unavailable in the service.' }], secretsMissing: [{ category: 'vault', key: 'github' }], attention: [], notes: ['1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'], skipped: [] });
     assert.deepStrictEqual(lines, [
       'new: 3, skip-present: 1, failed: 1',
-      'Failed: vault github — Encryption unavailable in the service.',
-      'Secrets that did not arrive: vault github',
+      'Failed: Vault entry github — Encryption unavailable in the service.',
+      'Secrets that did not arrive: Vault entry github',
       '1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'
     ]);
     assert.strictEqual(UNAVAILABLE_TAB_NOTICE, 'Managed by the local service; not available while attached.');
@@ -234,6 +234,13 @@ describe('describeServicePane: personal node', () => {
     assert.deepStrictEqual(ids(other), STANDARD_DISCONNECTED);
     const taskCode = at({ task: 'unknown', startError: { code: 'NODE_TASK_DISABLED' } });
     assert.strictEqual(taskCode.lines[0], disabled.lines[0]);
+    // A task code is about the task as it was: read as registered now, it is stale.
+    const stale = at({ task: 'registered', running: false, startError: { code: 'NODE_TASK_MISSING', message: 'no task' } });
+    assert.strictEqual(stale.lines[0], at({ task: 'registered', running: false }).lines[0]);
+    assert.ok(ids(stale).includes('nodeStart'), ids(stale).join());
+    assert.ok(!ids(stale).includes('nodeInstallPreview'), ids(stale).join());
+    const staleRunning = at({ task: 'registered', running: true, pid: 4242, startError: { code: 'NODE_TASK_DISABLED' } });
+    assert.ok(ids(staleRunning).includes('nodeRestart'), ids(staleRunning).join());
     const unknown = at({ task: 'unknown', running: false });
     assert.strictEqual(unknown.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18796).');
     assert.deepStrictEqual(ids(unknown), STANDARD_DISCONNECTED);
@@ -292,6 +299,115 @@ describe('describeAttachedBanner', () => {
     assert.strictEqual(b({ running: true, pid: null }).line, 'King Louie Node is running but its desktop bridge is not open.');
     assert.deepStrictEqual(timeout.actions.map((a) => a.id), FLEET_IDS);
     assert.strictEqual(b({ startError: { code: 'NODE_START_FAILED', message: 'service failed to start: x' } }).line, 'King Louie Node stopped while starting: service failed to start: x');
+  });
+});
+
+describe('describeAttachedBanner: the platform and the version (attach stage 2 §6.2, §6.8)', () => {
+  const down = (extra = {}) => ({ view: 'attached-disconnected', pairing: personalPairing, connection: { error: 'E' }, node: node(), ...extra });
+
+  it('win32 has no Use standalone this time; off Windows it stays (C-3)', () => {
+    const win = describeAttachedBanner(down({ platform: 'win32' }));
+    assert.ok(!win.actions.some((a) => a.id === 'standaloneOnce'));
+    assert.deepStrictEqual(win.actions.map((a) => a.id), ['retry', 'openServiceSettings', 'nodeStart']);
+    const mac = describeAttachedBanner(down({ platform: 'darwin' }));
+    assert.ok(mac.actions.some((a) => a.id === 'standaloneOnce'));
+    const fleetWin = describeAttachedBanner({ view: 'attached-disconnected', platform: 'win32', connection: { error: 'E' }, node: null });
+    assert.deepStrictEqual(fleetWin.actions.map((a) => a.id), ['retry', 'openServiceSettings']);
+  });
+
+  it('versionMismatch while connected: the line and one press', () => {
+    const b = describeAttachedBanner({ view: 'attached-connected', pairing: personalPairing, versionMismatch: { node: '1.0.0', app: '1.0.1', runs: 'app' } });
+    assert.deepStrictEqual(b, {
+      line: 'King Louie Node runs 1.0.0; this app is 1.0.1.',
+      actions: [{ id: 'nodeRestart', label: 'Restart King Louie Node to update it' }]
+    });
+  });
+
+  it('versionMismatch while down: added to the row\'s line; a node to start is updated by Start, so no second press', () => {
+    const running = describeAttachedBanner(down({ node: node({ running: true, pid: 7 }), versionMismatch: { node: '1.0.0', app: '1.0.1', runs: 'app' } }));
+    assert.match(running.line, /bridge is not open\. King Louie Node runs 1\.0\.0; this app is 1\.0\.1\.$/);
+    assert.deepStrictEqual(running.actions.filter((a) => a.id === 'nodeRestart'), [{ id: 'nodeRestart', label: 'Restart King Louie Node to update it' }]);
+    const stopped = describeAttachedBanner(down({ versionMismatch: { node: '1.0.0', app: '1.0.1' } }));
+    assert.match(stopped.line, /runs 1\.0\.0/);
+    assert.ok(stopped.actions.some((a) => a.id === 'nodeStart'));
+    assert.ok(!stopped.actions.some((a) => a.id === 'nodeRestart'));
+  });
+
+  it('versionMismatch while starting adds nothing: no press mid-start', () => {
+    assert.deepStrictEqual(describeAttachedBanner({ view: 'attached-starting', versionMismatch: { node: '1', app: '2' } }), { line: 'Starting King Louie Node…', actions: [] });
+  });
+
+  it('the versions go through shown', () => {
+    const b = describeAttachedBanner({ view: 'attached-connected', versionMismatch: { node: '1.0\u0007', app: '1.0.1' } });
+    assert.ok(b.line.includes('[hidden or control characters removed]'));
+    assert.doesNotMatch(b.line, /\u0007/);
+  });
+});
+
+describe('describeServicePane: the platform and the version row', () => {
+  it('attached-disconnected on win32 has no standaloneOnce; off Windows the same three as before', () => {
+    const status = { view: 'attached-disconnected', connection: { error: 'E' } };
+    assert.deepStrictEqual(ids(describeServicePane({ ...status, platform: 'win32' })), ['retry', 'detach']);
+    assert.deepStrictEqual(ids(describeServicePane({ ...status, platform: 'darwin' })), STANDARD_DISCONNECTED);
+    assert.deepStrictEqual(ids(describeServicePane(status)), STANDARD_DISCONNECTED);
+  });
+
+  it('versionMismatch adds the row and the press where the node is attached', () => {
+    const folder = describeServicePane({ view: 'attached-connected', pairing: personalPairing, service: { version: '1.0.0' }, versionMismatch: { node: '1.0.0', app: '1.0.1', runs: 'folder' } });
+    assert.ok(folder.lines.some((l) => /from a folder.*update that folder/.test(l)));
+    assert.ok(!ids(folder).includes('nodeRestart'), 'a restart there runs the same files');
+    const folderBanner = describeAttachedBanner({ view: 'attached-connected', pairing: personalPairing, versionMismatch: { node: '1.0.0', app: '1.0.1', runs: 'folder' } });
+    assert.deepStrictEqual(folderBanner.actions, []);
+    const unknown = describeServicePane({ view: 'attached-connected', pairing: personalPairing, service: { version: '1.0.0' }, versionMismatch: { node: '1.0.0', app: '1.0.1' } });
+    assert.ok(!ids(unknown).includes('nodeRestart'), 'not known to help, not offered');
+    const m = describeServicePane({ view: 'attached-connected', pairing: personalPairing, service: { version: '1.0.0' }, versionMismatch: { node: '1.0.0', app: '1.0.1', runs: 'app' } });
+    assert.ok(m.lines.includes('King Louie Node runs 1.0.0; this app is 1.0.1.'));
+    assert.deepStrictEqual(m.actions.find((a) => a.id === 'nodeRestart'), { id: 'nodeRestart', label: 'Restart King Louie Node to update it' });
+    const none = describeServicePane({ view: 'attached-connected', pairing: personalPairing, service: { version: '1.0.0' }, versionMismatch: null });
+    assert.ok(!ids(none).includes('nodeRestart'));
+  });
+
+  it('a personal version goes through shown', () => {
+    const m = describeServicePane({ view: 'attached-connected', pairing: personalPairing, service: { version: '1\u0007' } });
+    assert.ok(m.lines.some((l) => l.includes('[hidden or control characters removed]')));
+  });
+});
+
+describe('nodeHosting / nodeVersion: what a node says of itself', () => {
+  it('hosting is personal, service or nothing', () => {
+    assert.strictEqual(nodeHosting('personal'), 'personal');
+    assert.strictEqual(nodeHosting('service'), 'service');
+    for (const v of ['root', '', null, undefined, 1, {}, ['personal']]) assert.strictEqual(nodeHosting(v), null);
+  });
+
+  it('version is a version-shaped string of at most 64 characters, or nothing', () => {
+    assert.strictEqual(nodeVersion('1.0.0'), '1.0.0');
+    for (const v of ['', null, undefined, 1, {}, ['1.0.0']]) assert.strictEqual(nodeVersion(v), null);
+    assert.strictEqual(nodeVersion('1.0.0-beta.1+build7'), '1.0.0-beta.1+build7');
+    assert.strictEqual(nodeVersion('9'.repeat(64)).length, 64);
+    for (const v of ['9'.repeat(65), '1\u0007', 'Restart now', 'see https://example.com', '1.0\n2']) assert.strictEqual(nodeVersion(v), null, v);
+  });
+});
+
+describe('describeLocalInferenceBlock: the Models pane on a personal node (G-5)', () => {
+  const { describeLocalInferenceBlock } = require('../src/desktop-bridge/pane-model');
+
+  it('names the service.json beside the data dir, with a block the service would load', () => {
+    const m = describeLocalInferenceBlock({ node: { hosting: 'personal', dataDir: path.win32.join('C:\\', 'Users', 'owner', 'AppData', 'Local', 'KingLouie', 'node', 'data') } });
+    assert.strictEqual(m.file, path.win32.join('C:\\', 'Users', 'owner', 'AppData', 'Local', 'KingLouie', 'node', 'config', 'service.json'));
+    assert.match(m.intro, /restart King Louie Node/);
+    const { parseLocalInferenceConfig } = require('../src/service/config');
+    const block = JSON.parse(`{${m.example}}`).localInference;
+    assert.strictEqual(block.servers[0].id, 'workstation');
+    assert.ok(parseLocalInferenceConfig(block));
+  });
+
+  it('the path goes through shown; a fleet node, or a node with no data dir, gets nothing', () => {
+    const odd = describeLocalInferenceBlock({ node: { hosting: 'personal', dataDir: path.win32.join('C:\\', 'x\u202e', 'data') } });
+    assert.match(odd.file, /hidden or control characters removed/);
+    assert.strictEqual(describeLocalInferenceBlock({ node: null }), null);
+    assert.strictEqual(describeLocalInferenceBlock({ node: { hosting: 'personal' } }), null);
+    assert.strictEqual(describeLocalInferenceBlock({}), null);
   });
 });
 

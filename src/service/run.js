@@ -27,7 +27,10 @@ function assertEnabledListenersBound(core, features) {
   // The webhook one assigns its handle synchronously and is kicked off
   // fire-and-forget, so callers must await core.whenListenersSettled() first.
   if (features.gateway && !core.getGatewayServer()?.wss) missing.push('gateway');
-  if (features.webhooks && !core.getWebhookServer()?.httpServer) missing.push('webhooks');
+  // A personal node's default (webhooksOnDemand in create-core.js) is not this
+  // rule's case: nothing was switched on by hand, it binds only when it has
+  // something to serve, and a failed bind is a warning the Webhooks pane shows.
+  if (features.webhooks && !core.getWebhookServer()?.httpServer && !core.webhookListenerOptional?.()) missing.push('webhooks');
   if (missing.length === 0) return;
   throw new Error(
     `refusing to run without ${missing.join(' and ')}: ${missing.length > 1 ? 'those listeners are' : 'that listener is'} `
@@ -118,7 +121,7 @@ function loadProfile(profile) {
       // helper endpoint under a temp dir or a personal node's channel;
       // deps.personalOwner reaches assertPersonalOwner). runService passes
       // its own deps through, which are none outside tests.
-      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, localInference = null, caseChecks = null, adminUid, configDir, executors, deps = {} }) {
+      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, localInference = null, caseChecks = null, adminUid, configDir, executors, webhooksOnDemand = false, deps = {} }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -211,6 +214,7 @@ function loadProfile(profile) {
             ...servicePorts,
             ...desktopBridge.coreDeps,
             features,
+            webhooksOnDemand: hosting === 'personal' && webhooksOnDemand === true,
             ports,
             workingDirectory: workspace,
             // Cases stage 4: the owner identity and contact addresses, from
@@ -349,6 +353,7 @@ function loadProfile(profile) {
           },
           startBackgroundChecks: () => core.models.startBackgroundChecks(),
           masterKeySource: servicePorts.masterKeySource,
+          core,
           desktopBridge,
           approvals,
           fleet,
@@ -453,6 +458,14 @@ function ensureWorkspace(dataDir) {
 // deps.startProfile (in place of loadProfile(profile).start) and
 // deps.stopRequest (watchStopRequest's options: the interval).
 async function runService({ dataDir: requestedDataDir, profile: profileOverride, signal, stdout = process.stdout, adminUid, deps = {} }) {
+  // A node installed from the desktop runs the app's binary with this set, so
+  // that the binary runs as Node. It has done that job by now. Left here, an
+  // MCP server, a hook or a model's shell would inherit it, and an Electron
+  // program among them would run as plain Node. Every child that needs it (the
+  // PDF and embed workers, Playwright's install) sets it itself;
+  // tests/electron-boundary.test.js holds that. `run` only: a one-shot CLI
+  // command keeps it.
+  delete process.env.ELECTRON_RUN_AS_NODE;
   // Resolved once, here, because this is the only place that moves the
   // process: ensureWorkspace chdirs below, and a relative --data-dir would
   // then be re-resolved against the *new* cwd by everything built afterwards
@@ -484,11 +497,13 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
     let running;
     let profile;
     try {
-      const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
+      // The same node.yaml and rules the agent profile's start reads next.
+      const readHosting = () => require('./node-config').loadNodeConfig(adminDirOptions({ dataDir, adminUid })).hosting;
+      const config = loadServiceConfig(dataDir, { profile: profileOverride }, { readHosting, ...(adminUid === undefined ? {} : { adminUid }) });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
       const startProfile = deps.startProfile || ((opts) => loadProfile(profile).start(opts));
-      running = await startProfile({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, serviceConfig: config, deps });
+      running = await startProfile({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, webhooksOnDemand: config.webhooksOnDemand === true, serviceConfig: config, deps });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

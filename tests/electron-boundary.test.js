@@ -42,6 +42,44 @@ describe('Electron import boundary', () => {
       'If you removed a violation, delete it from KNOWN_VIOLATIONS. If you added one, inject the dependency instead.');
   });
 
+  // Under the app binary a child with no ELECTRON_RUN_AS_NODE opens the app
+  // instead of running its script, and the service drops the variable from its
+  // own environment at start. A file that names process.execPath either sets it
+  // for the child, or only records the path (a task definition, a probe).
+  it('whatever runs process.execPath sets ELECTRON_RUN_AS_NODE itself', () => {
+    const RECORDS_THE_PATH_ONLY = new Set([
+      'service/installers.js', // the fleet's task and unit files, for real Node
+      'service/personal-install.js', // renderPersonalTaskXml sets it in the task
+      'service/commands/session.js', // the fleet's helper, for real Node
+      'session/autostart.js', // the same, its child's env is written out in full
+      'session/backends/macos.js' // reports the path on the probe
+    ]);
+    const missing = [];
+    for (const file of walk(SRC)) {
+      const rel = path.relative(SRC, file).split(path.sep).join('/');
+      const code = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+      if (!/process\.execPath/.test(code) || RECORDS_THE_PATH_ONLY.has(rel)) continue;
+      if (!/ELECTRON_RUN_AS_NODE:?\s*=?\s*'1'/.test(code)) missing.push(rel);
+    }
+    assert.deepStrictEqual(missing, []);
+  });
+
+  // fork runs process.execPath without naming it, so the scan above cannot see it.
+  it('whatever forks sets ELECTRON_RUN_AS_NODE itself', () => {
+    const FORKS = /(?:\{[^}]*\bfork\b[^}]*\}\s*=\s*require\(\s*['"](?:node:)?child_process['"]\s*\))|(?:child_?[pP]rocess\.fork\()/;
+    const forkers = [];
+    const missing = [];
+    for (const file of walk(SRC)) {
+      const rel = path.relative(SRC, file).split(path.sep).join('/');
+      const code = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+      if (!FORKS.test(code)) continue;
+      forkers.push(rel);
+      if (!/ELECTRON_RUN_AS_NODE:?\s*=?\s*'1'/.test(code)) missing.push(rel);
+    }
+    assert.ok(forkers.includes('service/courier-proxy.js'), 'the scan sees the one fork there is');
+    assert.deepStrictEqual(missing, []);
+  });
+
   it('walks the fleet stage 7 desktop bridge and migration modules', () => {
     const files = walk(SRC).map((f) => path.relative(SRC, f).split(path.sep).join('/'));
     assert.ok(files.some((f) => f.startsWith('desktop-bridge/')), 'src/desktop-bridge/ is checked');

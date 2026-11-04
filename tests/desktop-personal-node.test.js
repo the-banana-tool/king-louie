@@ -9,7 +9,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createPersonalNodeRunner } = require('../src/desktop-bridge/personal-node');
+const { createPersonalNodeRunner, parseTaskXml } = require('../src/desktop-bridge/personal-node');
 
 const ME = 'S-1-5-21-1000-2000-3000-1001';
 const OTHER = 'S-1-5-21-1000-2000-3000-1002';
@@ -42,13 +42,88 @@ function recording(entries, me = ME) {
   return fn;
 }
 
+// Attach stage 2 §6.4 (C-4): a machine with nothing on it. Paths are win32
+// strings the injected `exists` answers for; nothing real is read.
+describe('detectPersonalNode: fresh', () => {
+  const env = { LOCALAPPDATA: 'C:\\Users\\owner\\AppData\\Local', ProgramData: 'C:\\ProgramData', SystemRoot: 'C:\\Windows' };
+  const DATA = path.win32.join(env.LOCALAPPDATA, 'KingLouie', 'node', 'data');
+  const CONFIG = path.win32.join(env.LOCALAPPDATA, 'KingLouie', 'node', 'config');
+  const FLEET_MARKER = path.win32.join(env.ProgramData, 'KingLouie', 'config', 'service.json');
+  const nobody = [null, null, null, null];
+  // schtasks: exit 1 is "not registered"; exit 0 with no principal tells nothing.
+  const taskMissing = (file, args, opts, cb) => cb(Object.assign(new Error('no task'), { code: 1 }), Buffer.alloc(0), Buffer.alloc(0));
+  const taskUnreadable = (file, args, opts, cb) => cb(null, Buffer.from('<Task/>'), Buffer.alloc(0));
+  const runnerFor = (extra = {}) => createPersonalNodeRunner({
+    platform: 'win32', env, inspectOwners: recording(nobody), exists: () => false, execFile: taskMissing, ...extra
+  });
+
+  it('an empty layout is fresh, at personalDataDir(), with the owner\'s SID', async () => {
+    assert.deepStrictEqual(await runnerFor().detectPersonalNode(), { personal: false, fresh: true, dataDir: DATA, configDir: CONFIG, me: ME });
+  });
+
+  it('any one of node.yaml, service.json or the data dir at the personal path is not fresh', async () => {
+    for (const present of [path.win32.join(CONFIG, 'node.yaml'), path.win32.join(CONFIG, 'service.json'), DATA]) {
+      const out = await runnerFor({ exists: (p) => p === present }).detectPersonalNode();
+      assert.strictEqual(out.fresh, false, present);
+      assert.strictEqual(out.personal, false, present);
+    }
+  });
+
+  it('a fleet layout is not fresh and not personal, with today\'s fields', async () => {
+    const out = await runnerFor({ exists: (p) => p === FLEET_MARKER }).detectPersonalNode();
+    assert.strictEqual(out.fresh, false);
+    assert.strictEqual(out.personal, false);
+    assert.strictEqual(out.reason, 'missing');
+  });
+
+  it('a task that is there, or cannot be read, is not fresh', async () => {
+    const out = await runnerFor({ execFile: taskUnreadable }).detectPersonalNode();
+    assert.strictEqual(out.fresh, false);
+  });
+
+  it('owners that cannot be read, and no LOCALAPPDATA, are not fresh', async () => {
+    const failed = await runnerFor({ inspectOwners: async () => { throw new Error('powershell gone'); } }).detectPersonalNode();
+    assert.strictEqual(failed.fresh, false);
+    assert.strictEqual(failed.reason, 'unreadable');
+    const noLocal = await runnerFor({ env: { ProgramData: env.ProgramData, SystemRoot: env.SystemRoot } }).detectPersonalNode();
+    assert.strictEqual(noLocal.fresh, false);
+  });
+
+  it('a recorded data dir is never fresh, and schtasks is not asked', async () => {
+    let asked = 0;
+    const execFile = (file, args, opts, cb) => { asked += 1; taskMissing(file, args, opts, cb); };
+    const out = await runnerFor({ execFile }).detectPersonalNode({ dataDir: DATA });
+    assert.strictEqual(out.fresh, false);
+    assert.strictEqual(asked, 0);
+  });
+
+  it('a marker the owner may not stat counts as present (an ACL-locked fleet layout)', async () => {
+    const denied = (code) => (p) => {
+      if (p === FLEET_MARKER) throw Object.assign(new Error(code), { code });
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    };
+    for (const code of ['EPERM', 'EACCES']) {
+      const { exists, ...rest } = { exists: null, stat: denied(code) };
+      const runner = createPersonalNodeRunner({ platform: 'win32', env, inspectOwners: recording(nobody), execFile: taskMissing, ...rest });
+      assert.strictEqual((await runner.detectPersonalNode()).fresh, false, code);
+    }
+    const none = createPersonalNodeRunner({ platform: 'win32', env, inspectOwners: recording(nobody), execFile: taskMissing, stat: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); } });
+    assert.strictEqual((await none.detectPersonalNode()).fresh, true);
+  });
+
+  it('off Windows it is never fresh', async () => {
+    const out = await runnerFor({ platform: 'linux' }).detectPersonalNode();
+    assert.strictEqual(out.fresh, false);
+  });
+});
+
 describe('detectPersonalNode', () => {
   it('says personal when the config dir, node.yaml and the data dir are owned by me', async () => {
     const { configDir, dataDir, nodeYaml, file } = layout();
     const inspectOwners = recording([mine, null, mine, mine]);
     const runner = createPersonalNodeRunner({ platform: 'win32', env: {}, bridgeFile: file, inspectOwners });
     const out = await runner.detectPersonalNode();
-    assert.deepStrictEqual(out, { personal: true, name: 'laptop-01', dataDir, configDir, me: ME });
+    assert.deepStrictEqual(out, { personal: true, fresh: false, name: 'laptop-01', dataDir, configDir, me: ME });
     assert.deepStrictEqual(inspectOwners.calls, [[configDir, file, nodeYaml, dataDir]]);
   });
 
@@ -112,6 +187,30 @@ describe('detectPersonalNode', () => {
     const e2e = createPersonalNodeRunner({ platform: 'win32', env: { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: file }, inspectOwners });
     assert.strictEqual((await e2e.detectPersonalNode()).personal, false);
     assert.strictEqual(inspectOwners.calls.length, 0);
+  });
+});
+
+describe('inspectLocal: an empty machine (attach stage 2 §6.4)', () => {
+  it('answers fresh from the same inspector call when nothing is there', async () => {
+    const { file } = layout();
+    const localAppData = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-fresh-'));
+    try {
+      const inspectOwners = recording([null, null, null, null]);
+      const execFile = (_f, args, _o, cb) => cb(Object.assign(new Error('no task'), { code: 1 }), '', 'ERROR: The system cannot find the file specified.');
+      const runner = createPersonalNodeRunner({ platform: 'win32', env: { LOCALAPPDATA: localAppData, ProgramData: localAppData, SystemRoot: 'C:\\Windows' }, bridgeFile: file, inspectOwners, execFile, exists: () => false });
+      const out = await runner.inspectLocal();
+      assert.strictEqual(inspectOwners.calls.length, 1);
+      assert.strictEqual(out.node.fresh, true);
+      assert.strictEqual(out.node.personal, false);
+    } finally {
+      fs.rmSync(localAppData, { recursive: true, force: true });
+    }
+  });
+
+  it('a recorded data dir is never fresh', async () => {
+    const { file, dataDir } = layout();
+    const runner = createPersonalNodeRunner({ platform: 'win32', env: { LOCALAPPDATA: 'C:\\x' }, bridgeFile: file, inspectOwners: recording([null, null, null, null]), exists: () => false });
+    assert.ok(!(await runner.inspectLocal({ dataDir })).node.fresh);
   });
 });
 
@@ -208,6 +307,55 @@ function exits(code, stdout = '', stderr = '') {
   };
 }
 
+describe('what the task runs (attach stage 2 §6.8; read, never run)', () => {
+  const xml = ({ node = 'C:\\Program Files\\nodejs\\node.exe', entry = 'C:\\work\\k\\bin\\king-louie-service.js', dir = 'C:\\Users\\owner\\node\\data', prefix = '' } = {}) => `<Task><Principals><Principal id="Author"><UserId>${ME}</UserId></Principal></Principals><Settings></Settings><Actions Context="Author"><Exec><Command>C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe</Command><Arguments>-WindowStyle Hidden -NoProfile -NonInteractive -Command ${prefix}&amp; '${node}' '${entry}' run --data-dir '${dir}'</Arguments></Exec></Actions></Task>`;
+  const missing = (...files) => async (file) => { if (files.includes(file)) throw Object.assign(new Error('gone'), { code: 'ENOENT' }); return {}; };
+  const runnerOver = (stdout, extra) => createPersonalNodeRunner({ platform: 'win32', env: ENV, execFile: fakeExecFile(() => ({ stdout })), execPath: 'C:\\Programs\\King Louie\\King Louie.exe', ...extra });
+
+  it('reads the program and the entry out of the PowerShell call', () => {
+    const task = parseTaskXml(xml({ dir: "C:\\o'brien\\data" }).replace(/o'brien/, "o''brien"));
+    assert.strictEqual(task.program, 'C:\\Program Files\\nodejs\\node.exe');
+    assert.strictEqual(task.entry, 'C:\\work\\k\\bin\\king-louie-service.js');
+    assert.strictEqual(task.dataDir, "C:\\o'brien\\data");
+  });
+
+  it('a removed checkout: node.exe stands, the entry is gone, and that is said', async () => {
+    const entry = 'C:\\work\\k\\bin\\king-louie-service.js';
+    const out = await runnerOver(xml(), { statFile: missing(entry) }).queryTask({ me: ME });
+    assert.strictEqual(out.state, 'registered');
+    assert.strictEqual(out.gone, entry);
+    assert.strictEqual(out.runs, 'folder');
+  });
+
+  it('an app moved: the program is gone', async () => {
+    const app = 'C:\\Programs\\King Louie\\King Louie.exe';
+    const out = await runnerOver(xml({ node: app, prefix: "$env:ELECTRON_RUN_AS_NODE='1'; " }), { execPath: app, statFile: missing(app) }).queryTask({ me: ME });
+    assert.strictEqual(out.gone, app);
+    assert.strictEqual(out.runs, 'app');
+  });
+
+  it('only ENOENT is gone: a path inside the asar reads ENOTDIR to plain Node, and an unreadable one is not gone', async () => {
+    for (const code of ['ENOTDIR', 'EACCES']) {
+      const out = await runnerOver(xml(), { statFile: async () => { throw Object.assign(new Error('x'), { code }); } }).queryTask({ me: ME });
+      assert.ok(!('gone' in out), code);
+    }
+  });
+
+  it('an action we did not write says nothing of what it runs', async () => {
+    const stdout = xml().replace(/<Arguments>[^<]*<\/Arguments>/, '<Arguments>-File C:\\mine\\start.ps1</Arguments>');
+    const out = await runnerOver(stdout, { statFile: async () => ({}) }).queryTask({ me: ME });
+    assert.strictEqual(out.state, 'registered');
+    assert.ok(!('runs' in out));
+  });
+
+  it('another account\'s task is not read further', async () => {
+    let stats = 0;
+    const out = await runnerOver(xml().replace(ME, 'S-1-5-21-9-9-9-9'), { statFile: async () => { stats += 1; return {}; } }).queryTask({ me: ME });
+    assert.strictEqual(out.state, 'other-account');
+    assert.strictEqual(stats, 0);
+  });
+});
+
 describe('queryTask (C-10: the task XML, never the localised text)', () => {
   const runner = (answer, extra = {}) => {
     const execFile = fakeExecFile(answer);
@@ -216,7 +364,7 @@ describe('queryTask (C-10: the task XML, never the localised text)', () => {
 
   it('queries the one task as XML, by schtasks\'s absolute path, with no shell', async () => {
     const { execFile, r } = runner(() => ({ stdout: fixture('enabled') }));
-    assert.deepStrictEqual(await r.queryTask({ me: ME }), { state: 'registered' });
+    assert.strictEqual((await r.queryTask({ me: ME })).state, 'registered');
     assert.strictEqual(execFile.calls.length, 1);
     assert.strictEqual(execFile.calls[0].file, SCHTASKS);
     assert.deepStrictEqual(execFile.calls[0].args, ['/Query', '/TN', 'KingLouie Node', '/XML', 'ONE']);
@@ -225,7 +373,7 @@ describe('queryTask (C-10: the task XML, never the localised text)', () => {
 
   it('reads <Settings><Enabled>false</Enabled> as disabled', async () => {
     const { r } = runner(() => ({ stdout: fixture('disabled') }));
-    assert.deepStrictEqual(await r.queryTask({ me: ME }), { state: 'disabled' });
+    assert.strictEqual((await r.queryTask({ me: ME })).state, 'disabled');
   });
 
   it('refuses another account\'s task, whatever its state', async () => {
@@ -236,7 +384,7 @@ describe('queryTask (C-10: the task XML, never the localised text)', () => {
   it('reads UTF-16 output too', async () => {
     const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(fixture('enabled'), 'utf16le')]);
     const { r } = runner(() => ({ stdout: utf16 }));
-    assert.deepStrictEqual(await r.queryTask({ me: ME }), { state: 'registered' });
+    assert.strictEqual((await r.queryTask({ me: ME })).state, 'registered');
   });
 
   it('says missing on a non-zero exit, unknown when schtasks could not run or the XML says nothing', async () => {
@@ -254,9 +402,9 @@ describe('queryTask (C-10: the task XML, never the localised text)', () => {
     const r = createPersonalNodeRunner({ platform: 'win32', env: ENV, execFile, bridgeFile: file, inspectOwners: recording([mine, null, mine, mine]), whoAmI: async () => null });
     assert.deepStrictEqual(await r.queryTask(), { state: 'unknown' });
     await r.detectPersonalNode();
-    assert.deepStrictEqual(await r.queryTask(), { state: 'registered' });
+    assert.strictEqual((await r.queryTask()).state, 'registered');
     const viaWhoAmI = createPersonalNodeRunner({ platform: 'win32', env: ENV, execFile, whoAmI: async () => ME });
-    assert.deepStrictEqual(await viaWhoAmI.queryTask(), { state: 'registered' });
+    assert.strictEqual((await viaWhoAmI.queryTask()).state, 'registered');
   });
 
   it('is unknown off Windows, and runs nothing', async () => {
