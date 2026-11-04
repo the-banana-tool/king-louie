@@ -153,7 +153,13 @@ describe('desktop: personal-node methods (spec §11)', () => {
     assert.deepStrictEqual(JSON.parse(JSON.stringify(invoked)), [['desktop:nodeInstallPreview']]);
   });
 
-  for (const [method, channel] of [['nodeInstall', 'desktop:nodeInstall'], ['pairRestartConfirm', 'desktop:pairRestartConfirm']]) {
+  it('migrationPlan sends nothing but the channel', async () => {
+    const { exposedApi, invoked } = runPreloadWithFakeIpc();
+    await exposedApi.desktop.migrationPlan({ dest: 'C:\\elsewhere' });
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(invoked)), [['desktop:migrationPlan']]);
+  });
+
+  for (const [method, channel] of [['nodeInstall', 'desktop:nodeInstall'], ['pairRestartConfirm', 'desktop:pairRestartConfirm'], ['migrationApply', 'desktop:migrationApply']]) {
     it(`${method} sends confirmed: true only when the caller passed confirmed === true`, async () => {
       const { exposedApi, invoked } = runPreloadWithFakeIpc();
       await exposedApi.desktop[method]({ confirmed: true, dataDir: 'C:\\elsewhere' });

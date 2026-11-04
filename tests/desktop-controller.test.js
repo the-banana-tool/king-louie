@@ -1684,3 +1684,422 @@ describe('desktop controller: hosting and the version gap', () => {
     controller.dispose();
   });
 });
+
+// --- The one-time move (attach stage 2 §6.5): a temp profile on disk, a real
+// backup, a fake node that keeps what the apply batches gave it.
+
+class FakeNodeClient extends EventEmitter {
+  constructor({ hosting = 'personal', dropChat = null, shortChat = null, finish = {}, failFinish = false, excluded = [] } = {}) {
+    super();
+    this.connected = true;
+    this.service = { version: '1.0.0', account: 'alex', profile: 'agent', providersConfigured: true, hosting };
+    this.chats = new Map();
+    this.cases = new Set();
+    this.plans = 0;
+    this.finishes = 0;
+    Object.assign(this, { dropChat, shortChat, finishExtra: finish, failFinish, excluded });
+  }
+  close() {}
+  retryNow() { return Promise.resolve(null); }
+  async call(method, params) {
+    if (method === 'bridge.status') return this.service;
+    if (method === 'bridge.approvalsStatus') return { available: false };
+    if (method === 'import.plan') {
+      this.plans += 1;
+      const { inventory } = params;
+      const items = [
+        ...inventory.chats.map((c) => ({ category: 'chat', key: c.id, action: this.chats.has(c.id) ? 'skip-present' : 'new', note: null, targetKey: c.id })),
+        ...inventory.cases.map((c) => ({ category: 'case', key: c.dir, action: this.cases.has(c.dir) ? 'skip-present' : 'new', note: null, targetKey: c.dir })),
+        ...this.excluded.map((e) => ({ category: 'excluded', key: e.key, action: 'skip-excluded', note: e.note, targetKey: e.key }))
+      ];
+      return { planId: `plan-${this.plans}`, items, counts: {} };
+    }
+    if (method === 'import.apply') {
+      const results = [];
+      for (const entry of params.batch) {
+        if (entry.category === 'chat' && entry.key !== this.dropChat) {
+          const n = entry.value.messages.length;
+          this.chats.set(entry.key, entry.key === this.shortChat ? n - 1 : n);
+        }
+        if (entry.category === 'case') this.cases.add(entry.key);
+        results.push({ category: entry.category, key: entry.key, ok: true });
+      }
+      return { results };
+    }
+    if (method === 'import.finish') {
+      this.finishes += 1;
+      if (this.failFinish) throw Object.assign(new Error('the node went away'), { code: 'SERVICE_UNREACHABLE' });
+      return { planId: params.planId, counts: { failed: 0 }, failures: [], attention: [], incomplete: [], secretsMissing: [], cronDisabled: 0, notes: [], ...this.finishExtra };
+    }
+    throw new Error(`unexpected ${method}`);
+  }
+  async invoke(channel) {
+    if (channel === 'chat:load') return { ok: true, data: { chats: [...this.chats].map(([id, messageCount]) => ({ id, messageCount })), history: { available: true } } };
+    if (channel === 'case:list') return { ok: true, cases: [...this.cases].map((dir) => ({ dir: path.join('C:', 'node', 'cases', dir) })) };
+    throw new Error(`unexpected ${channel}`);
+  }
+}
+
+describe('desktop controller: the one-time move', () => {
+  const { openTempStore, seedChat } = require('./helpers/history-fixture');
+  const { readBackupManifest } = require('../src/migration/profile-backup');
+
+  // A profile with a real store, a chat-data.json and a case folder.
+  function moveController({ client = new FakeNodeClient(), chats = [['c1', 2], ['c2', 3]], launch = { host: 'attached', why: 'attached', degraded: false }, pairingRecord = personalPairing(), profile = true, extra = {} } = {}) {
+    const parent = tmp();
+    const userDataDir = path.join(parent, 'king-louie');
+    fs.mkdirSync(userDataDir);
+    if (profile) {
+      const temp = openTempStore();
+      for (const [id, n] of chats) seedChat(temp.store, { id, messages: Array.from({ length: n }, (_, i) => ({ sender: 'user', text: `line ${i}` })) });
+      temp.store.close();
+      fs.copyFileSync(temp.dbPath, path.join(userDataDir, 'history.sqlite'));
+      fs.rmSync(temp.dir, { recursive: true, force: true });
+      fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify({ settings: {} }));
+      fs.mkdirSync(path.join(userDataDir, 'cases', 'lakeside-lot'), { recursive: true });
+      fs.writeFileSync(path.join(userDataDir, 'cases', 'lakeside-lot', 'case.yaml'), 'title: Lakeside lot\n');
+    }
+    const state = openDesktopState(userDataDir, fakeSafeStorage(), { storeFactory });
+    state.setMode('attached');
+    if (pairingRecord) state.setPairing(pairingRecord);
+    const app = fakeApp();
+    const sent = [];
+    const controller = createDesktopController({
+      state, mode: 'attached', app, getWindow: () => ({ isDestroyed: () => false, webContents: { send: (ch, p) => sent.push([ch, p]) } }),
+      env: {}, platform: 'win32', userDataDir, safeStorage: fakeSafeStorage(), stdout: { write() {} },
+      argv: ['electron', '.'], username: 'alex', launch, nodeRunner: fakeRunner({ running: true }), ...extra
+    });
+    if (client) controller.setClient(client);
+    return { controller, state, app, client, userDataDir, parent, sent };
+  }
+  const backupsIn = (parent) => fs.readdirSync(parent).filter((n) => n.startsWith('king-louie.backup-'));
+
+  it('migrationPlan makes the backup first and returns the plan and what stays behind', async () => {
+    const client = new FakeNodeClient({ excluded: [{ key: 'skills', note: 'skills, pins and customizations are set up on the service by an administrator' }] });
+    const { controller, parent, userDataDir } = moveController({ client });
+    const out = await controller.migrationPlan();
+    assert.strictEqual(out.ok, true, JSON.stringify(out));
+    assert.strictEqual(backupsIn(parent).length, 1);
+    assert.strictEqual(path.dirname(out.backup.dest), path.dirname(userDataDir));
+    assert.deepStrictEqual(out.backup.history, { chats: 2, messages: 5 });
+    const manifest = await readBackupManifest(path.join(parent, backupsIn(parent)[0]));
+    assert.deepStrictEqual(manifest.history, { chats: 2, messages: 5 });
+    const planned = out.plan.items.filter((i) => i.category === 'chat').map((i) => [i.key, i.action, i.messageCount]);
+    assert.deepStrictEqual(planned.sort(), [['c1', 'new', 2], ['c2', 'new', 3]]);
+    const behind = out.staysBehind.join('\n');
+    assert.match(behind, /browser profiles/i);
+    assert.match(behind, /local servers/i);
+    assert.match(behind, /typesafe/i);
+    assert.match(behind, /skills, pins and customizations/);
+    assert.ok(Array.isArray(out.attention));
+    controller.dispose();
+  });
+
+  it('what stays behind comes from the node\'s plan, so what a personal node carries is not listed', async () => {
+    const { controller } = moveController();
+    const out = await controller.migrationPlan();
+    assert.doesNotMatch(out.staysBehind.join('\n'), /bot tokens|chat bot|hooks spawn|MCP servers spawn/);
+    controller.dispose();
+  });
+
+  it('what it returns goes through shown; the plan it applies keeps the real keys', async () => {
+    const client = new FakeNodeClient({ excluded: [{ key: 'x', note: 'stays \u202Eevil' }] });
+    const { controller } = moveController({ client });
+    const out = await controller.migrationPlan();
+    assert.ok(!JSON.stringify(out).includes('\u202E'));
+    controller.dispose();
+  });
+
+  it('the backup is made once per launch and reused while it still reads whole', async () => {
+    const { controller, parent, client } = moveController();
+    const first = await controller.migrationPlan();
+    const second = await controller.migrationPlan();
+    assert.strictEqual(second.backup.dest, first.backup.dest);
+    assert.strictEqual(backupsIn(parent).length, 1);
+    assert.strictEqual(client.plans, 2);
+    controller.dispose();
+  });
+
+  it('a backup that no longer reads whole is made again', async () => {
+    let tick = 0;
+    const { controller, parent } = moveController({ extra: { now: () => new Date(Date.UTC(2026, 10, 4, 10, 0, tick++)) } });
+    const first = await controller.migrationPlan();
+    fs.rmSync(path.join(parent, backupsIn(parent)[0], 'backup.json'));
+    const second = await controller.migrationPlan();
+    assert.notStrictEqual(second.backup.dest, first.backup.dest);
+    assert.strictEqual(backupsIn(parent).length, 2);
+    controller.dispose();
+  });
+
+  it('migrationPlan refuses on schemaProblem: no backup made, MIGRATION_SOURCE', async () => {
+    const { controller, parent, userDataDir, client } = moveController();
+    fs.writeFileSync(path.join(userDataDir, 'history.sqlite'), 'this is not a database, not at all');
+    const out = await controller.migrationPlan();
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'MIGRATION_SOURCE');
+    assert.ok(out.error);
+    assert.deepStrictEqual(backupsIn(parent), []);
+    assert.strictEqual(client.plans, 0);
+    controller.dispose();
+  });
+
+  it('a profile with nothing in it plans no move and makes no backup', async () => {
+    const { controller, parent } = moveController({ profile: false });
+    const out = await controller.migrationPlan();
+    assert.strictEqual(out.code, 'MIGRATION_SOURCE');
+    assert.deepStrictEqual(backupsIn(parent), []);
+    controller.dispose();
+  });
+
+  it('a backup that fails stops the move: BACKUP_FAILED, the directory named, nothing planned', async () => {
+    const client = new FakeNodeClient();
+    const { controller } = moveController({
+      client,
+      extra: { migrationDeps: { backupProfile: async ({ dest }) => { throw Object.assign(new Error(`The profile could not be backed up: the disk is full. The unfinished copy is at ${dest}.`), { code: 'BACKUP_FAILED', dest }); } } }
+    });
+    const out = await controller.migrationPlan();
+    assert.strictEqual(out.code, 'BACKUP_FAILED');
+    assert.ok(out.backupDir.includes('king-louie.backup-'));
+    assert.strictEqual(client.plans, 0);
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).code, 'PLAN_EXPIRED');
+    controller.dispose();
+  });
+
+  it('a source that reads fewer chats than the backup holds is refused, never planned as a smaller move', async () => {
+    const client = new FakeNodeClient();
+    const { controller } = moveController({
+      client,
+      extra: { migrationDeps: { loadDesktopSource: async () => ({ installId: 'i-1', attention: [], inventory: { installId: 'i-1', chats: [], cases: [] }, getValue: () => null, caseFiles: () => [] }) } }
+    });
+    const out = await controller.migrationPlan();
+    assert.strictEqual(out.code, 'MIGRATION_SOURCE');
+    assert.strictEqual(client.plans, 0);
+    controller.dispose();
+  });
+
+  it('a store the second read refuses is refused too, not planned as empty', async () => {
+    const client = new FakeNodeClient();
+    const { controller } = moveController({
+      client,
+      extra: { migrationDeps: { loadDesktopSource: async () => ({ installId: 'i-1', attention: [{ category: 'source', key: 'history.sqlite', note: 'could not be read (locked)' }], inventory: { installId: 'i-1', chats: [], cases: [] }, getValue: () => null, caseFiles: () => [] }) } }
+    });
+    const out = await controller.migrationPlan();
+    assert.strictEqual(out.code, 'MIGRATION_SOURCE');
+    assert.match(out.error, /locked/);
+    assert.strictEqual(client.plans, 0);
+    controller.dispose();
+  });
+
+  it('needs a pairing, a personal node and a live connection, before any backup', async () => {
+    const none = moveController({ pairingRecord: null, client: null });
+    assert.strictEqual((await none.controller.migrationPlan()).code, 'NOT_PAIRED');
+    assert.deepStrictEqual(backupsIn(none.parent), []);
+    none.controller.dispose();
+
+    const fleet = moveController({ pairingRecord: pairedRecord(), client: new FakeNodeClient({ hosting: 'service' }) });
+    assert.strictEqual((await fleet.controller.migrationPlan()).code, 'NOT_PERSONAL');
+    assert.deepStrictEqual(backupsIn(fleet.parent), []);
+    fleet.controller.dispose();
+
+    const down = moveController();
+    down.client.connected = false;
+    assert.strictEqual((await down.controller.migrationPlan()).code, 'SERVICE_UNREACHABLE');
+    assert.deepStrictEqual(backupsIn(down.parent), []);
+    down.controller.dispose();
+  });
+
+  it('migrationApply without confirmed is CONFIRM_REQUIRED and sends nothing', async () => {
+    const { controller, client, state } = moveController();
+    await controller.migrationPlan();
+    for (const payload of [undefined, {}, { confirmed: 'true' }]) {
+      assert.strictEqual((await controller.migrationApply(payload)).code, 'CONFIRM_REQUIRED');
+    }
+    assert.strictEqual(client.finishes, 0);
+    assert.strictEqual(state.migration, null);
+    controller.dispose();
+  });
+
+  it('migrationApply with no plan is PLAN_EXPIRED', async () => {
+    const { controller } = moveController();
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).code, 'PLAN_EXPIRED');
+    controller.dispose();
+  });
+
+  it('a verified move sets the marker with backupDir, nodeId, nodeDataDir and counts', async () => {
+    const { controller, state, sent, client } = moveController();
+    const planned = await controller.migrationPlan();
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.ok, true, JSON.stringify(out));
+    assert.deepStrictEqual(out.verified, { ok: true, checked: { chats: 2, cases: 1 } });
+    assert.ok(out.report);
+    const marker = state.migration;
+    assert.strictEqual(marker.backupDir, planned.backup.dest);
+    assert.strictEqual(marker.nodeId, identity.nodeId);
+    assert.strictEqual(marker.nodeDataDir, PERSONAL_DATA_DIR);
+    assert.deepStrictEqual(marker.counts, { chats: 2, cases: 1, attention: 0 });
+    assert.ok(Date.parse(marker.at));
+    assert.ok(sent.some(([ch]) => ch === 'desktop:importProgress'));
+    assert.strictEqual(client.finishes, 1);
+    controller.dispose();
+  });
+
+  it('one chat missing on the node: no marker, MIGRATION_UNVERIFIED naming it, and Try again lands it', async () => {
+    const client = new FakeNodeClient({ dropChat: 'c2' });
+    const { controller, state, parent } = moveController({ client });
+    await controller.migrationPlan();
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'MIGRATION_UNVERIFIED');
+    assert.deepStrictEqual(out.verified.missing.map((m) => m.key), ['c2']);
+    assert.ok(out.report);
+    assert.ok(out.error);
+    assert.strictEqual(state.migration, null);
+
+    client.dropChat = null;
+    const again = await controller.migrationPlan();
+    assert.strictEqual(again.ok, true);
+    assert.strictEqual(again.plan.items.find((i) => i.key === 'c1').action, 'skip-present');
+    assert.strictEqual(backupsIn(parent).length, 1, 'the launch\'s backup is reused');
+    const second = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(second.ok, true, JSON.stringify(second));
+    assert.deepStrictEqual(state.migration.counts, { chats: 2, cases: 1, attention: 0 });
+    controller.dispose();
+  });
+
+  it('a chat short of its messages on the node: no marker', async () => {
+    const client = new FakeNodeClient({ shortChat: 'c1' });
+    const { controller, state } = moveController({ client });
+    await controller.migrationPlan();
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.code, 'MIGRATION_UNVERIFIED');
+    assert.strictEqual(state.migration, null);
+    controller.dispose();
+  });
+
+  it('a report that lists a failure: no marker, even with everything else there', async () => {
+    const client = new FakeNodeClient({ finish: { failures: [{ category: 'memory', key: 'm-1', error: 'disk full' }], counts: { failed: 1 } } });
+    const { controller, state } = moveController({ client });
+    await controller.migrationPlan();
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.code, 'MIGRATION_UNVERIFIED');
+    assert.strictEqual(state.migration, null);
+    controller.dispose();
+  });
+
+  it('the node going away mid-apply: no marker, and it can be tried again', async () => {
+    const client = new FakeNodeClient({ failFinish: true });
+    const { controller, state } = moveController({ client });
+    await controller.migrationPlan();
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'SERVICE_UNREACHABLE');
+    assert.strictEqual(state.migration, null);
+    client.failFinish = false;
+    assert.strictEqual((await controller.migrationPlan()).ok, true);
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).ok, true);
+    assert.ok(state.migration);
+    controller.dispose();
+  });
+
+  it('a marker that cannot be written: said so, with the verified result, and the retry marks', async () => {
+    const { controller, state } = moveController();
+    const real = state.setMigration;
+    state.setMigration = () => { throw new Error('EPERM on desktop-bridge.json'); };
+    await controller.migrationPlan();
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'MIGRATION_MARK_FAILED');
+    assert.strictEqual(out.verified.ok, true);
+    state.setMigration = real;
+    await controller.migrationPlan();
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).ok, true);
+    controller.dispose();
+  });
+
+  it('two presses of Move everything run one move', async () => {
+    const { controller, client } = moveController();
+    await controller.migrationPlan();
+    const [a, b] = await Promise.all([controller.migrationApply({ confirmed: true }), controller.migrationApply({ confirmed: true })]);
+    assert.strictEqual(a.ok, true);
+    assert.strictEqual(b.ok, true);
+    assert.strictEqual(client.finishes, 1);
+    controller.dispose();
+  });
+
+  it('the pane\'s import waits out a move: it would drop the plan under it', async () => {
+    const { controller } = moveController();
+    const running = controller.migrationPlan();
+    assert.strictEqual((await controller.importPlan()).code, 'MIGRATION_BUSY');
+    await running;
+    controller.dispose();
+  });
+
+  it('a custom cases root with cases in it: planned and shown, but the move is refused', async () => {
+    const elsewhere = tmp();
+    fs.mkdirSync(path.join(elsewhere, 'north-field'));
+    const { controller, state, client } = moveController({ extra: { env: { KL_CASES_ROOT: elsewhere } } });
+    const planned = await controller.migrationPlan();
+    assert.strictEqual(planned.ok, true, JSON.stringify(planned));
+    assert.strictEqual(planned.backup.customCases, 1);
+    assert.ok(planned.backup.customCasesRoot);
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.code, 'MIGRATION_SOURCE');
+    assert.strictEqual(state.migration, null);
+    assert.strictEqual(client.finishes, 0);
+    controller.dispose();
+  });
+
+  it('PROFILE_MIGRATED unless dev: standaloneOnce and detach', async () => {
+    const marked = moveController();
+    marked.state.setMigration({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\Users\\alex\\king-louie.backup-1', nodeDataDir: PERSONAL_DATA_DIR, nodeId: 'kl-abc', counts: {} });
+    for (const out of [await marked.controller.standaloneOnce(), await marked.controller.detach({ confirmed: true }), await marked.controller.detach()]) {
+      assert.strictEqual(out.ok, false);
+      assert.strictEqual(out.code, 'PROFILE_MIGRATED');
+      assert.match(out.error, /2026-11-04/);
+      assert.match(out.error, /king-louie\.backup-1/);
+    }
+    assert.strictEqual(marked.state.mode, 'attached', 'detach changed nothing');
+    assert.deepStrictEqual(marked.app.calls, []);
+    marked.controller.dispose();
+
+    const dev = moveController({ launch: { host: 'standalone', why: 'dev', degraded: false } });
+    dev.state.setMigration({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\b', nodeDataDir: PERSONAL_DATA_DIR, nodeId: 'kl-abc', counts: {} });
+    assert.strictEqual((await dev.controller.standaloneOnce()).ok, true);
+    assert.strictEqual((await dev.controller.detach({ confirmed: true })).ok, true);
+    dev.controller.dispose();
+  });
+
+  it('an unmigrated profile: the degraded path stays open, also after an unverified move', async () => {
+    const client = new FakeNodeClient({ dropChat: 'c1' });
+    const { controller, app } = moveController({ client });
+    await controller.migrationPlan();
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).code, 'MIGRATION_UNVERIFIED');
+    assert.strictEqual((await controller.standaloneOnce()).ok, true);
+    assert.ok(app.calls.some(([name]) => name === 'relaunch'));
+    controller.dispose();
+  });
+
+  it('a migrated profile is not moved again, whatever launched it', async () => {
+    const { controller, state, parent, client } = moveController();
+    state.setMigration({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\b', nodeDataDir: PERSONAL_DATA_DIR, nodeId: 'kl-abc', counts: {} });
+    assert.strictEqual((await controller.migrationPlan()).code, 'PROFILE_MIGRATED');
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).code, 'PROFILE_MIGRATED');
+    assert.deepStrictEqual(backupsIn(parent), []);
+    assert.strictEqual(client.plans, 0);
+    controller.dispose();
+  });
+
+  it('unpair keeps the marker, and desktop:status carries it with the backup path shown', async () => {
+    const { controller, state } = moveController();
+    state.setMigration({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\b\u202E', nodeDataDir: PERSONAL_DATA_DIR, nodeId: 'kl-abc', counts: { chats: 1 } });
+    const status = await controller.status();
+    assert.strictEqual(status.migration.at, '2026-11-04T10:00:00.000Z');
+    assert.ok(!status.migration.backupDir.includes('\u202E'));
+    controller.dispose();
+    const second = moveController();
+    second.state.setMigration({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\b', nodeDataDir: PERSONAL_DATA_DIR, nodeId: 'kl-abc', counts: {} });
+    await second.controller.unpair();
+    assert.ok(second.state.migration);
+    second.controller.dispose();
+  });
+});

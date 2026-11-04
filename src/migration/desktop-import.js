@@ -8,7 +8,7 @@ const path = require('path');
 const { createLogger } = require('../logging');
 const { DEFAULT_SETTINGS, mergeSettings } = require('../core/settings');
 const { resolveCasesRoot } = require('../cases');
-const { initRepo } = require('../cases/git');
+const { initRepo, git } = require('../cases/git');
 const UserProfile = require('../telos/user-profile');
 const { writeFileAtomic } = require('../desktop-bridge/pairing');
 const { MESSAGES } = require('../desktop-bridge/protocol');
@@ -105,6 +105,7 @@ const ALREADY_ON_NODE = 'already set on this node; left as it is';
 const ALLOWLIST_NOTE = 'who may reach this bot';
 const ALLOWLIST_LEFT_BEHIND = 'this node already has a list for this bot; the desktop\'s list was left behind';
 const profilesNotMoved = (n) => `your ${n} model ${n === 1 ? 'profile was' : 'profiles were'} not moved: this node's models were already set up, so they were left as they are; set the ${n === 1 ? 'profile' : 'profiles'} up again under Settings > Models`;
+const landedIncomplete = (dir) => `${dir} is on this node but an earlier import landed it incomplete, so it does not count as moved. Stop the node, remove that folder from its cases folder, and try again.`;
 const RESTART_NOTE = 'MCP servers, channel bots and hook choices that moved take effect when the node next starts.';
 
 class ImportError extends Error {
@@ -282,6 +283,23 @@ function assertGitDirSafe(caseDir) {
     return; // absent — initRepo will create it fresh
   }
   if (!st.isDirectory()) throw new ImportError('BAD_PATH', `${gitPath} exists but is not a directory`);
+}
+
+// Null when the repository has no commit yet (a case with no history is fine)
+// or its index now matches HEAD; otherwise what is wrong with its history.
+async function rebuildIndexFromHead(dir) {
+  try {
+    await git(dir, ['rev-parse', '--verify', '-q', 'HEAD']);
+  } catch {
+    return null;
+  }
+  try {
+    await git(dir, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']);
+    await git(dir, ['read-tree', 'HEAD']);
+    return null;
+  } catch (err) {
+    return String((err && err.message) || err).split(/\r?\n/)[0];
+  }
 }
 
 // Whether `child` is strictly inside `parent`. Compares the *first path
@@ -590,6 +608,9 @@ class DesktopImporter {
           files: Number.isFinite(c.files) ? c.files : null,
           bytes: Number.isFinite(c.bytes) ? c.bytes : null
         });
+      } else if (done('case', dir)?.incomplete) {
+        add('case', dir, 'needs-attention', landedIncomplete(dir));
+        items[items.length - 1].incomplete = true;
       } else if (done('case', dir)) add('case', dir, 'skip-present');
       else add('case', dir, 'needs-attention', 'a case with this directory already exists on the service');
     }
@@ -673,7 +694,7 @@ class DesktopImporter {
       try {
         const out = (await this.write(plan, item, entry.value)) || {};
         results.push(out.note ? { category, key, ok: true, note: out.note } : { category, key, ok: true });
-        if (category !== 'case') plan.results.set(k, { ok: true, note: out.note || null, attention: Boolean(out.attention), record: out.record || null });
+        if (category !== 'case') plan.results.set(k, { ok: true, note: out.note || null, attention: Boolean(out.attention), incomplete: Boolean(out.incomplete), record: out.record || null });
       } catch (err) {
         log.warn(`importing ${category}${SECRET_CATEGORIES.has(category) ? '' : ` ${key}`} failed: ${err.message}`);
         results.push({ category, key, ok: false, error: err.message });
@@ -878,7 +899,8 @@ class DesktopImporter {
       if (!target || target.updatedAt !== expected) {
         return {
           note: 'the chat changed on the service after the plan was made; import again to pick up the current version',
-          attention: true
+          attention: true,
+          incomplete: true
         };
       }
     }
@@ -1093,6 +1115,12 @@ class DesktopImporter {
         });
         continue;
       }
+      // The importer brings a case's .git objects, refs and HEAD but never its
+      // index, so a landed repository reads every file as deleted and untracked
+      // until the index is rebuilt (only .git/index is written). A HEAD that
+      // names a commit which is not there is a case that did not land whole.
+      // A personal node's move only (attach stage 2 §6.5); a fleet import is as it was.
+      const headProblem = this.personal ? await rebuildIndexFromHead(stagedDir) : null;
       try {
         fs.renameSync(stagedDir, dest);
         // After initRepo (fix round 2), so onPathWritten sees the files
@@ -1110,6 +1138,7 @@ class DesktopImporter {
         );
         const notes = [];
         if (short) notes.push(`received ${files.count} file(s)/${files.bytes} byte(s); the inventory listed ${expected.files ?? '?'} file(s)/${expected.bytes ?? '?'} byte(s) — the case may be incomplete`);
+        if (headProblem) notes.push(`its git history does not read (${headProblem}) — the case may be incomplete`);
         // Fix round 4, ruling (c): names Windows can't store were skipped;
         // the rest of the case landed, and the owner is told which.
         if (files.unstorable && files.unstorable.size) {
@@ -1119,6 +1148,7 @@ class DesktopImporter {
           ok: true,
           attention: notes.length > 0,
           note: notes.length ? notes.join('; ') : null,
+          incomplete: this.personal && (short || Boolean(headProblem)),
           record: { targetKey: dir }
         });
       } catch (err) {
@@ -1139,6 +1169,7 @@ class DesktopImporter {
     const items = [...plan.items.values()];
     const failures = [];
     const attention = [];
+    const incomplete = [];
     const secretsMissing = [];
     let cronDisabled = 0;
     let needsRestart = false;
@@ -1162,9 +1193,11 @@ class DesktopImporter {
         continue;
       }
       if (r.attention) attention.push({ category: item.category, key: item.key, note: r.note });
+      // Written, but not all of it: a retry must not read this as done.
+      if (this.personal && r.incomplete) incomplete.push({ category: item.category, key: item.key, note: r.note });
       if (item.category === 'cron') cronDisabled += 1;
       if (this.personal && (item.category === 'channelToken' || (item.category === 'settings' && ['channels', 'hooks', 'mcpServers'].includes(item.key)))) needsRestart = true;
-      manifest.items[k] = { at, result: 'ok', ...(r.record || {}) };
+      manifest.items[k] = { at, result: 'ok', ...(r.record || {}), ...(this.personal && r.incomplete ? { incomplete: true } : {}) };
     }
     manifest.runs.push({ planId: plan.planId, at, source: plan.source });
     this.writeManifest(manifest);
@@ -1177,6 +1210,7 @@ class DesktopImporter {
       counts,
       failures,
       attention,
+      incomplete,
       secretsMissing,
       cronDisabled,
       notes: [

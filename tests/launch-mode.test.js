@@ -38,4 +38,12 @@ describe('resolveLaunchMode', () => {
   it('takes only the exact flags', () => {
     assert.strictEqual(resolveLaunchMode({ argv: argv('--kl-standalone-twice', '--kl-standalone=1'), platform: 'win32', stateMode: 'standalone' }).why, 'needs-node');
   });
+
+  it('a migrated profile is not opened by the once flag; the development flag still opens it', () => {
+    const once = argv('--kl-standalone-once');
+    assert.deepStrictEqual(resolveLaunchMode({ argv: once, platform: 'win32', stateMode: 'standalone', migrated: true }), { host: 'attached', why: 'needs-node', degraded: false });
+    assert.deepStrictEqual(resolveLaunchMode({ argv: once, platform: 'win32', stateMode: 'attached', migrated: true }), { host: 'attached', why: 'attached', degraded: false });
+    assert.strictEqual(resolveLaunchMode({ argv: argv('--kl-standalone'), platform: 'win32', stateMode: 'attached', migrated: true }).why, 'dev');
+    assert.strictEqual(resolveLaunchMode({ argv: once, platform: 'win32', stateMode: 'attached', migrated: false }).why, 'once');
+  });
 });

@@ -288,7 +288,7 @@ describe('main.js', () => {
     assert.match(main, /openDesktopState\(/);
     assert.match(main, /startAttachedHost/);
     assert.match(main, /startStandaloneHost/);
-    assert.match(main, /resolveLaunchMode\(\{ argv: process\.argv, platform: process\.platform, stateMode: state\.mode \}\)/);
+    assert.match(main, /resolveLaunchMode\(\{ argv: process\.argv, platform: process\.platform, stateMode: state\.mode, migrated: Boolean\(state\.migration\) \}\)/);
     assert.match(main, /const deps = \{[^}]*\blaunch\b[^}]*\}/);
     assert.ok(main.split('\n').length < 130, `main.js has ${main.split('\n').length} lines`);
   });

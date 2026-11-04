@@ -4,8 +4,11 @@
 const STANDALONE_FLAG = '--kl-standalone';
 const STANDALONE_ONCE_FLAG = '--kl-standalone-once';
 
-function resolveLaunchMode({ argv, platform, stateMode }) {
-  if (argv.includes(STANDALONE_ONCE_FLAG)) return { host: 'standalone', why: 'once', degraded: true };
+// `migrated`: the marker of a verified move (§6.5). A migrated profile is never
+// opened as a live King Louie again, so the once flag means nothing to it; the
+// development flag, which is no product path, still opens it.
+function resolveLaunchMode({ argv, platform, stateMode, migrated = false }) {
+  if (argv.includes(STANDALONE_ONCE_FLAG) && !migrated) return { host: 'standalone', why: 'once', degraded: true };
   if (argv.includes(STANDALONE_FLAG)) return { host: 'standalone', why: 'dev', degraded: false };
   if (stateMode === 'attached') return { host: 'attached', why: 'attached', degraded: false };
   if (platform !== 'win32') return { host: 'standalone', why: 'platform', degraded: false };

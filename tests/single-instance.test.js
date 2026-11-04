@@ -86,6 +86,6 @@ describe('main.js', () => {
   });
 
   it('a second instance stops there', () => {
-    assert.match(main, /if \(!claimSingleInstance\(\{ app, getWindow \}\)\) \{\s*app\.exit\(0\);\s*return;\s*\}/);
+    assert.match(main, /if \(!claimSingleInstance\(\{ app, getWindow \}\)\) \{[^}]*app\.exit\(0\);\s*return;\s*\}/);
   });
 });

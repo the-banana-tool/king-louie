@@ -46,7 +46,7 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
   const store = make({
     name: 'desktop-bridge',
     cwd: userDataDir,
-    defaults: { mode: 'standalone', installId: null, pairing: null, pendingPair: null, lastImport: null, pendingServiceCommand: null }
+    defaults: { mode: 'standalone', installId: null, pairing: null, pendingPair: null, lastImport: null, pendingServiceCommand: null, migration: null, setup: null }
   });
   if (!store.get('installId')) store.set('installId', crypto.randomUUID());
   const usable = () => secureStorageUsable(safeStorage, platform);
@@ -86,6 +86,24 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
         throw new Error('setPendingServiceCommand needs a { command } string');
       }
       store.set('pendingServiceCommand', { command: entry.command, at: entry.at || new Date().toISOString() });
+    },
+    // The one-time move (attach stage 2 §6.5): this profile was moved into a
+    // node and verified. Set once, by a verified move only; nothing here clears
+    // it, Unpair included, and it names the first node.
+    get migration() { return store.get('migration') || null; },
+    setMigration(entry) {
+      if (!entry || typeof entry !== 'object') throw new Error('setMigration needs a record');
+      for (const key of ['at', 'backupDir', 'nodeId']) {
+        if (typeof entry[key] !== 'string' || !entry[key]) throw new Error(`setMigration needs ${key}`);
+      }
+      if (store.get('migration')) throw new Error('this profile is already marked as migrated');
+      const { at, backupDir, nodeDataDir = null, nodeId, counts = {} } = entry;
+      store.set('migration', { at, backupDir, nodeDataDir, nodeId, counts });
+    },
+    get setup() { return store.get('setup') || null; },
+    setSetup(entry) {
+      if (!entry || typeof entry.completedAt !== 'string' || !entry.completedAt) throw new Error('setSetup needs completedAt');
+      store.set('setup', { completedAt: entry.completedAt });
     },
     secureStorageUsable: usable,
     seal(text) {

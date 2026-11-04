@@ -1395,6 +1395,8 @@ contextBridge.exposeInMainWorld(
       nodeInstallPreview: () => ipcRenderer.invoke('desktop:nodeInstallPreview'),
       nodeInstall: (payload = {}) => ipcRenderer.invoke('desktop:nodeInstall', { confirmed: Boolean(payload && payload.confirmed === true) }),
       pairRestartConfirm: (payload = {}) => ipcRenderer.invoke('desktop:pairRestartConfirm', { confirmed: Boolean(payload && payload.confirmed === true) }),
+      migrationPlan: () => ipcRenderer.invoke('desktop:migrationPlan'),
+      migrationApply: (payload = {}) => ipcRenderer.invoke('desktop:migrationApply', { confirmed: Boolean(payload && payload.confirmed === true) }),
       importPlan: () => ipcRenderer.invoke('desktop:importPlan'),
       importApply: () => ipcRenderer.invoke('desktop:importApply'),
       onStatusChanged: (callback) => registerOnce('desktop:statusChanged', callback),

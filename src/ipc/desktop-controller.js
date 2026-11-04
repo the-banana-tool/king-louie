@@ -12,6 +12,8 @@ const { rawFromPublicKeyObject, fingerprintGroups } = require('../desktop-bridge
 const { MESSAGES } = require('../desktop-bridge/protocol');
 const { unavailableTabsFor } = require('../desktop-bridge/allowlist');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
+const { detectOldProfile, backupProfile, backupDirFor, readBackupManifest } = require('../migration/profile-backup');
+const { verifyMigration, withSourceCounts } = require('../migration/migration-verify');
 const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
 const { shown } = require('../service/commands/io');
 const { STANDALONE_FLAG, STANDALONE_ONCE_FLAG: STANDALONE_ONCE } = require('../desktop-bridge/launch-mode');
@@ -48,6 +50,14 @@ const PAIR_FATAL = new Set([...BRIDGE_FATAL, 'PAIR_SERVICE_CHANGED', 'PAIR_NOT_F
 const INITIAL_NODE_STATE = Object.freeze({ task: 'unknown', running: false, pid: null, starting: false, startError: null });
 const INSTALL_CLI_TIMEOUT_MS = 120000;
 const NOT_PERSONAL_TEXT = 'No King Louie Node on this computer is paired with this desktop.';
+// §6.5: named beside what the node's plan lists, since the engine walks none of them.
+const STAYS_BEHIND_FIXED = Object.freeze([
+  'Browser profiles: log in again in the node\'s browser.',
+  'Local servers: add them to the node\'s service.json.',
+  'The typesafe.ai key: enter it again on the node.'
+]);
+const MIGRATION_STORE_FILES = new Set(['history.sqlite', 'chat-data.json']);
+const MOVE_RUNNING = { ok: false, code: 'MIGRATION_BUSY', error: 'The move of this profile is running; wait for it to finish.' };
 
 // A data dir as the disk names it and as the pairing recorded it: Windows
 // paths compare without case and without a trailing separator.
@@ -110,8 +120,10 @@ function createDesktopController({
   // and the clock and timers of the §7.3 wait (tests inject a fake clock).
   nodeRunner = platform === 'win32' ? createPersonalNodeRunner({ env, platform }) : null,
   clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
-  nodeStartWaitMs = NODE_START_WAIT_MS, nodeRetryMs = NODE_RETRY_MS, nodeRefreshMs = NODE_REFRESH_MS
+  nodeStartWaitMs = NODE_START_WAIT_MS, nodeRetryMs = NODE_RETRY_MS, nodeRefreshMs = NODE_REFRESH_MS,
+  migrationDeps = {}
 }) {
+  const move = { detectOldProfile, backupProfile, loadDesktopSource, ...migrationDeps };
   const emitter = new EventEmitter();
   const bridgeFile = () => bridgeFilePath({ env, platform });
   // Async (final review I2): on Windows the trust read is a ~1.5 s
@@ -163,6 +175,10 @@ function createDesktopController({
   let startGeneration = 0;
   let startRun = null;
   let attachWaiting = false;
+  // The one-time move (§6.5): this launch's backup, and the plan or apply
+  // running now, so a second press joins it and nothing drops its session.
+  let backupMade = null;
+  let moveRun = null;
 
   const send = (channel, payload) => {
     const win = getWindow();
@@ -362,7 +378,8 @@ function createDesktopController({
       ok: true,
       mode,
       view: current,
-      standaloneOnce: argv.includes(STANDALONE_ONCE),
+      standaloneOnce: mode === 'standalone' && argv.includes(STANDALONE_ONCE),
+      migration: state.migration ? { ...state.migration, backupDir: shown(state.migration.backupDir, 400) } : null,
       launch: { ...launch },
       bridgeFile: bridgeFile(),
       bridge,
@@ -760,13 +777,28 @@ function createDesktopController({
     return relaunch();
   }
 
+  // §6.5: what the marker says, for a refusal.
+  function profileMigrated() {
+    const { at, backupDir } = state.migration;
+    return {
+      ok: false,
+      code: 'PROFILE_MIGRATED',
+      error: `This profile was moved into King Louie Node on ${shown(String(at).slice(0, 10), 20)}; its copy here is kept but no longer used. The backup is at ${shown(backupDir, 400)}.`
+    };
+  }
+  const migratedRefusal = () => (state.migration && launch.why !== 'dev' ? profileMigrated() : null);
+
   async function detach({ confirmed = false } = {}) {
+    const migrated = migratedRefusal();
+    if (migrated) return migrated;
     if (confirmed !== true) return { ok: false, code: 'CONFIRM_REQUIRED', error: DETACH_WARNING };
     state.setMode('standalone');
     return relaunch();
   }
 
   async function standaloneOnce() {
+    const migrated = migratedRefusal();
+    if (migrated) return migrated;
     return relaunch([STANDALONE_ONCE]);
   }
 
@@ -835,6 +867,7 @@ function createDesktopController({
   }
 
   async function importPlan() {
+    if (moveRun) return { ...MOVE_RUNNING };
     try {
       closeImportSession();
       const session = await importClient();
@@ -849,6 +882,7 @@ function createDesktopController({
   }
 
   async function importApply() {
+    if (moveRun) return { ...MOVE_RUNNING };
     if (!importSession) return { ok: false, code: 'PLAN_EXPIRED', error: 'The import plan expired; plan the import again.' };
     try {
       const report = await applyImport({
@@ -868,6 +902,192 @@ function createDesktopController({
       closeImportSession();
       notify();
     }
+  }
+
+  // One at a time: a second press of the same step gets the run in flight, and
+  // the other step is refused until it ends.
+  function runMove(kind, work) {
+    if (moveRun) return moveRun.kind === kind ? moveRun.promise : Promise.resolve({ ...MOVE_RUNNING });
+    const promise = work().finally(() => { moveRun = null; });
+    moveRun = { kind, promise };
+    return promise;
+  }
+
+  // The live connection to this desktop's personal node, or why there is none.
+  // The move needs the node up, and a backup for a move that cannot run is waste.
+  function moveTarget() {
+    const pairing = state.pairing;
+    if (!pairing || !pairing.service) return { refusal: { ok: false, code: 'NOT_PAIRED', error: 'Pair with the local service first.' } };
+    const live = client && client.service && client.service.hosting;
+    if (pairing.service.hosting !== 'personal' || (live && live !== 'personal')) {
+      return { refusal: { ok: false, code: 'NOT_PERSONAL', error: NOT_PERSONAL_TEXT } };
+    }
+    if (!client || !client.connected) {
+      return { refusal: { ok: false, code: 'SERVICE_UNREACHABLE', error: MESSAGES.SERVICE_UNREACHABLE(pairing.service.port) } };
+    }
+    return { client, service: pairing.service };
+  }
+
+  // §6.5: once per launch, while what it wrote still reads whole.
+  async function ensureBackup(onProgress) {
+    if (backupMade && await readBackupManifest(backupMade.dest)) return backupMade;
+    backupMade = await move.backupProfile({
+      userDataDir, dest: backupDirFor(userDataDir, now), now, appVersion, env, onProgress
+    });
+    return backupMade;
+  }
+
+  const moveSourceRefusal = (error) => ({ ok: false, code: 'MIGRATION_SOURCE', error: shown(error, 600) });
+
+  // The source as read now against the backup just made of it: a store that
+  // stopped reading, or a reader that dropped chats, must not plan a smaller
+  // move that then verifies.
+  function sourceProblem(source, backup) {
+    const refused = source.attention.filter((a) => a.category === 'source' && MIGRATION_STORE_FILES.has(a.key));
+    if (refused.length) return refused.map((a) => `${a.key}: ${a.note}`).join('; ');
+    const chats = source.inventory.chats.map((c) => source.getValue('chat', c.id));
+    const messages = chats.reduce((n, c) => n + (c && Array.isArray(c.messages) ? c.messages.length : 0), 0);
+    if (chats.length < backup.history.chats || messages < backup.history.messages) {
+      return `the profile reads as ${chats.length} chats and ${messages} messages, and its backup holds ${backup.history.chats} and ${backup.history.messages}`;
+    }
+    return null;
+  }
+
+  function staysBehindLines(plan) {
+    const named = (plan.items || []).filter((i) => i.action === 'skip-excluded' && i.note).map((i) => i.note);
+    return [...new Set([...named, ...STAYS_BEHIND_FIXED])].map((line) => shown(line, 400));
+  }
+
+  // What the owner reads of a plan or a report; the session keeps the real one.
+  const shownEntry = (entry) => {
+    const out = { ...entry };
+    for (const key of ['category', 'key', 'targetKey', 'note', 'error']) {
+      if (out[key] !== null && out[key] !== undefined) out[key] = shown(out[key], key === 'note' || key === 'error' ? 400 : 200);
+    }
+    return out;
+  };
+  const shownEntries = (list) => (Array.isArray(list) ? list.filter(Boolean).map(shownEntry) : []);
+  const shownReport = (report) => ({
+    ...report,
+    failures: shownEntries(report.failures),
+    attention: shownEntries(report.attention),
+    incomplete: shownEntries(report.incomplete),
+    secretsMissing: shownEntries(report.secretsMissing),
+    skipped: shownEntries(report.skipped),
+    sendFailures: shownEntries(report.sendFailures),
+    notes: Array.isArray(report.notes) ? report.notes.map((n) => shown(n, 400)) : []
+  });
+
+  function migrationPlan() {
+    return runMove('plan', async () => {
+      if (state.migration) return profileMigrated();
+      const target = moveTarget();
+      if (target.refusal) return target.refusal;
+      try {
+        const old = await move.detectOldProfile(userDataDir, { env });
+        if (old.schemaProblem) return moveSourceRefusal(`The old profile cannot be read, so nothing was moved: ${old.schemaProblem}`);
+        if (!old.found) return moveSourceRefusal('This profile holds no chats or cases to move.');
+        let backup;
+        try {
+          backup = await ensureBackup((p) => send('desktop:importProgress', { stage: 'backup', ...p, sent: p.files, total: p.totalFiles }));
+        } catch (err) {
+          return { ok: false, code: err.code || 'BACKUP_FAILED', error: shown(err.message, 800), backupDir: err.dest ? shown(err.dest, 400) : null };
+        }
+        notify();
+        const source = await move.loadDesktopSource({ userDataDir, safeStorage, platform });
+        const problem = sourceProblem(source, backup);
+        if (problem) return moveSourceRefusal(`The old profile did not read whole, so nothing was moved: ${problem}`);
+        closeImportSession();
+        const plan = withSourceCounts(await planImport({ client: target.client, source }), source);
+        importSession = {
+          client: target.client,
+          temporary: false,
+          plan,
+          source,
+          move: { backup, service: target.service, customCasesRoot: old.customCasesRoot, customCases: old.customCases }
+        };
+        return {
+          ok: true,
+          backup: {
+            dest: shown(backup.dest, 400),
+            bytes: backup.bytes,
+            files: backup.files,
+            history: backup.history,
+            customCasesRoot: old.customCasesRoot ? shown(old.customCasesRoot, 400) : null,
+            customCases: old.customCases
+          },
+          plan: { ...plan, items: plan.items.map(shownEntry) },
+          attention: shownEntries(source.attention),
+          staysBehind: staysBehindLines(plan)
+        };
+      } catch (err) {
+        closeImportSession();
+        return { ok: false, code: err.code || 'IMPORT_FAILED', error: shown(err.message, 600) };
+      }
+    });
+  }
+
+  function migrationApply({ confirmed = false } = {}) {
+    if (confirmed !== true) {
+      return Promise.resolve({ ok: false, code: 'CONFIRM_REQUIRED', error: 'Moving this profile needs the owner\'s press.' });
+    }
+    return runMove('apply', async () => {
+      if (state.migration) return profileMigrated();
+      const session = importSession && importSession.move ? importSession : null;
+      if (!session) return { ok: false, code: 'PLAN_EXPIRED', error: 'The plan for this move expired; plan it again.' };
+      const { backup, service, customCasesRoot, customCases } = session.move;
+      // The move carries only the profile's own cases folder, so marking it
+      // would leave these behind with no way back to them from this profile.
+      if (customCasesRoot && customCases !== 0) {
+        return moveSourceRefusal(`Cases under ${customCasesRoot} are outside this profile and would not move. Move them into the profile's cases folder, or out of use, and plan again.`);
+      }
+      try {
+        const report = await applyImport({
+          client: session.client,
+          plan: session.plan,
+          source: session.source,
+          onProgress: (p) => send('desktop:importProgress', p)
+        });
+        state.setLastImport({ at: now().toISOString(), counts: report.counts });
+        if (client && client.connected) {
+          try { client.service = await client.call('bridge.status'); } catch { /* keep the old summary */ }
+        }
+        const verified = await verifyMigration({
+          plan: session.plan,
+          report,
+          invoke: (channel, args = []) => session.client.invoke(channel, args)
+        });
+        const shownOut = shownReport(report);
+        if (!verified.ok) {
+          return {
+            ok: false,
+            code: 'MIGRATION_UNVERIFIED',
+            error: `${verified.missing.length} ${verified.missing.length === 1 ? 'item' : 'items'} could not be found on the node, so this profile was not marked as moved. Nothing was removed; try again.`,
+            report: shownOut,
+            verified
+          };
+        }
+        try {
+          state.setMigration({
+            at: now().toISOString(),
+            backupDir: backup.dest,
+            nodeDataDir: service.dataDir || null,
+            nodeId: service.nodeId,
+            counts: { ...verified.checked, attention: Array.isArray(report.attention) ? report.attention.length : 0 }
+          });
+        } catch (err) {
+          log.warn(`the migration marker was not written: ${err.message}`);
+          return { ok: false, code: 'MIGRATION_MARK_FAILED', error: `The move is on the node, but this profile could not be marked as moved (${shown(err.message, 300)}). Try again.`, report: shownOut, verified };
+        }
+        log.info('this profile was moved into the node and verified', verified.checked);
+        return { ok: true, report: shownOut, verified };
+      } catch (err) {
+        return { ok: false, code: err.code || 'IMPORT_FAILED', error: shown(err.message, 600) };
+      } finally {
+        closeImportSession();
+        notify();
+      }
+    });
   }
 
   function createClient() {
@@ -1165,7 +1385,7 @@ function createDesktopController({
 
   return {
     status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
-    importPlan, importApply, dismissServiceCommand, createClient, setClient, dispose,
+    importPlan, importApply, migrationPlan, migrationApply, dismissServiceCommand, createClient, setClient, dispose,
     startAttached, startIdle, refreshIdle, nodeStart, nodeInstallPreview, nodeInstall,
     on: (event, fn) => emitter.on(event, fn)
   };

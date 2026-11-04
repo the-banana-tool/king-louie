@@ -168,3 +168,62 @@ describe('desktop state: seal() rejects non-strings', () => {
     assert.throws(() => state.seal(null));
   });
 });
+
+describe('desktop state: the migration marker and the setup (attach stage 2 §6.5)', () => {
+  const marker = () => ({ at: '2026-11-04T10:00:00.000Z', backupDir: 'C:\\Users\\alex\\AppData\\Roaming\\king-louie.backup-1', nodeDataDir: 'C:\\Users\\alex\\AppData\\Local\\KingLouie\\node\\data', nodeId: 'kl-abc', counts: { chats: 2, cases: 1, attention: 0 } });
+
+  it('both default to null', () => {
+    const state = openState();
+    assert.strictEqual(state.migration, null);
+    assert.strictEqual(state.setup, null);
+  });
+
+  it('the marker round-trips, across a reopen of the file', () => {
+    const dir = tmp();
+    openDesktopState(dir, fakeSafeStorage(), { storeFactory }).setMigration(marker());
+    const again = openDesktopState(dir, fakeSafeStorage(), { storeFactory });
+    assert.deepStrictEqual(again.migration, marker());
+  });
+
+  it('a state file from before the marker opens with none', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'desktop-bridge.json'), JSON.stringify({ mode: 'attached', installId: 'i-1', pairing: null }));
+    const state = openDesktopState(dir, fakeSafeStorage(), { storeFactory });
+    assert.strictEqual(state.migration, null);
+    assert.strictEqual(state.mode, 'attached');
+  });
+
+  it('setMigration without backupDir, at or nodeId throws and stores nothing', () => {
+    const state = openState();
+    for (const key of ['backupDir', 'at', 'nodeId']) {
+      const m = marker();
+      delete m[key];
+      assert.throws(() => state.setMigration(m), new RegExp(key));
+      assert.throws(() => state.setMigration({ ...marker(), [key]: '' }), new RegExp(key));
+    }
+    assert.throws(() => state.setMigration(null));
+    assert.strictEqual(state.migration, null);
+  });
+
+  it('a profile is marked once: the marker keeps the first node', () => {
+    const state = openState();
+    state.setMigration(marker());
+    assert.throws(() => state.setMigration({ ...marker(), nodeId: 'kl-other' }), /already/);
+    assert.strictEqual(state.migration.nodeId, 'kl-abc');
+  });
+
+  it('clearing the pairing or changing the mode leaves the marker', () => {
+    const state = openState();
+    state.setMigration(marker());
+    state.clearPairing();
+    state.setMode('standalone');
+    assert.deepStrictEqual(state.migration, marker());
+  });
+
+  it('setSetup round-trips and needs completedAt', () => {
+    const state = openState();
+    state.setSetup({ completedAt: '2026-11-04T10:05:00.000Z' });
+    assert.deepStrictEqual(state.setup, { completedAt: '2026-11-04T10:05:00.000Z' });
+    assert.throws(() => openState().setSetup({}), /completedAt/);
+  });
+});

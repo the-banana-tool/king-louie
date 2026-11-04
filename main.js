@@ -41,7 +41,7 @@ const log = createLogger('main');
 // Attached or standalone is decided here, before any core exists (spec
 // 2026-11-03-attach-stage2-design §6.1).
 const state = openDesktopState(app.getPath('userData'), safeStorage);
-const launch = resolveLaunchMode({ argv: process.argv, platform: process.platform, stateMode: state.mode });
+const launch = resolveLaunchMode({ argv: process.argv, platform: process.platform, stateMode: state.mode, migrated: Boolean(state.migration) });
 const attached = launch.host === 'attached';
 const standaloneOnce = launch.degraded;
 const deps = { app, ipcMain, safeStorage, shell, dialog, Notification, getWindow, state, appDir: __dirname, standaloneOnce, launch };

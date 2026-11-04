@@ -194,6 +194,7 @@ describe('desktop:* handlers', () => {
     assert.strictEqual(IPC.DESKTOP_IMPORT_PROGRESS, 'desktop:importProgress');
     assert.deepStrictEqual(Object.keys(DESKTOP_METHODS).sort(), [
       'desktop:attach', 'desktop:detach', 'desktop:dismissServiceCommand', 'desktop:importApply', 'desktop:importPlan',
+      'desktop:migrationApply', 'desktop:migrationPlan',
       'desktop:nodeInstall', 'desktop:nodeInstallPreview', 'desktop:nodeStart',
       'desktop:pairCancel', 'desktop:pairConfirm', 'desktop:pairRestartConfirm', 'desktop:pairStart', 'desktop:retry',
       'desktop:standaloneOnce', 'desktop:status', 'desktop:unpair'
@@ -205,7 +206,9 @@ describe('desktop:* handlers', () => {
       DESKTOP_NODE_START: ['desktop:nodeStart', 'nodeStart'],
       DESKTOP_NODE_INSTALL_PREVIEW: ['desktop:nodeInstallPreview', 'nodeInstallPreview'],
       DESKTOP_NODE_INSTALL: ['desktop:nodeInstall', 'nodeInstall'],
-      DESKTOP_PAIR_RESTART_CONFIRM: ['desktop:pairRestartConfirm', 'pairRestartConfirm']
+      DESKTOP_PAIR_RESTART_CONFIRM: ['desktop:pairRestartConfirm', 'pairRestartConfirm'],
+      DESKTOP_MIGRATION_PLAN: ['desktop:migrationPlan', 'migrationPlan'],
+      DESKTOP_MIGRATION_APPLY: ['desktop:migrationApply', 'migrationApply']
     };
     const inv = listIpcChannels();
     const served = servedChannels(inv).handle;

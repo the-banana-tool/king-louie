@@ -12,6 +12,10 @@ const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 // land either (the plan is gone, or so is the connection): stop sending.
 const STOP_CODES = new Set(['PLAN_EXPIRED', 'SERVICE_UNREACHABLE', 'CANCELLED']);
 
+// finish sets up every case's repository before it answers, one git run after
+// another: a default-sized bound would read a slow finish as a dead node.
+const FINISH_TIMEOUT_MS = 10 * 60 * 1000;
+
 const failuresFor = (batch, error, code) => batch.map((e) => ({
   category: e.category, key: e.key, ok: false, error, ...(code ? { code } : {})
 }));
@@ -67,7 +71,7 @@ async function applyImport({ client, plan, source, onProgress = () => {} }) {
   onProgress({ sent: total, total });
   let report;
   try {
-    report = await client.call('import.finish', { planId: plan.planId });
+    report = await client.call('import.finish', { planId: plan.planId }, { timeoutMs: FINISH_TIMEOUT_MS });
   } catch (err) {
     throw fatal || err;
   }
