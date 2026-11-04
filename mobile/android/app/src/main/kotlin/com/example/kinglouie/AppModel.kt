@@ -90,7 +90,7 @@ class AppModel(context: Context) {
     /** The box key (R-SP-10), or null for a phone enrolled before it or one whose Keystore refuses it. Deleted with `key`. */
     private var boxKey by mutableStateOf(runCatching { BoxKey.load() }.getOrNull())
 
-    /** The nodes this phone has opened a sealed message from (R-SP-15), as Storage keeps them; noteSeal is the only writer. */
+    /** The nodes this phone has verified a sealed message from (R-SP-15), as Storage keeps them; noteSeal is the only writer. */
     private var sealedSeen: Set<String> = storage.sealedSeen
 
     /**
@@ -2305,8 +2305,8 @@ class AppModel(context: Context) {
         } catch (e: ProtocolException) {
             return null
         }
-        // OPENED and these reasons come only past the pin and the node's signature, so the kid is that node.
-        if (view.seal == SealState.OPENED) noteSeal(envelope.kid, view.seal)
+        // Anything but CLEAR comes only past the pin and the node's signature, so the kid is that node.
+        if (view.seal != SealState.CLEAR) noteSeal(envelope.kid, view.seal)
         val id = message["request_id"].str() ?: return null
         val pin = pins.firstOrNull { it.id == envelope.kid } ?: return null
         if (!view.shown || display == null) {

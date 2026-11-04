@@ -950,11 +950,11 @@ In this order, and nothing is opened before the signature holds:
    will not answer is `key_locked`.
 4. The opened message against the node's rules (`validateOpenedRequest`), and its
    salted hash: `action_hash_mismatch` before anything is shown.
-5. Clear, from a node this phone has opened a sealed message from: `clear_after_sealed`.
+5. Clear, from a node this phone has verified a sealed message from: `clear_after_sealed`.
 
 `sealedSeen` (R-SP-15) is kept per node id beside the pins. Reset clears it. A
 relay can replay an old clear message, signed by the node, to draw a clear answer,
-so once a phone has opened something sealed from a node, a clear
+so once a phone has verified something sealed from a node, opened or not, a clear
 `kl.approval.request`, `kl.lease.request` or `kl.question.ask` from it has no
 decision.
 
@@ -1005,7 +1005,7 @@ pad comes before the limit is read, so it counts against it.
 | `not_recipient`, `open_failed` | phone, node | not sealed to this key, or it would not open |
 | `content_malformed` | `openSealed`, `Seal.open` | opened, and not the JCS of the type's content keys and a `pad` of spaces |
 | `action_hash_mismatch` | phone, node | the hash does not hold; on a phone, for the salted rule too |
-| `clear_after_sealed` | phone | a clear message from a node this phone has opened a sealed one from |
+| `clear_after_sealed` | phone | a clear message from a node this phone has verified a sealed one from |
 | `key_locked` | phone | the box key would not answer, most often because the phone is locked |
 | `bad_box_key` | relay | the statement is not the calling device's, signed with its device key |
 

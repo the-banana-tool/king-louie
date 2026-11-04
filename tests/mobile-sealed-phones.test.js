@@ -147,15 +147,15 @@ describe('Android: sealedSeen (R-SP-15)', () => {
     assert.ok(!model.includes('LeaseRequest.from('), 'check keeps the reason for the row and the state for the mark');
   });
 
-  it('only a verified open marks a node, through one function, statuses and views included', () => {
+  it('only a verified sealed message marks a node, opened or not, through one function, statuses and views included', () => {
     const model = kt('AppModel.kt');
     const note = section(model, 'private fun noteSeal(nodeId: String, state: SealState)', '\n    }\n');
     assert.match(note, /Seal\.noteSealedSeen\(sealedSeen, nodeId, state\)/);
     assert.match(note, /storage\.sealedSeen = next/);
     assert.equal(count(model, 'Seal.noteSealedSeen('), 1);
-    // A request: Display.view reports OPENED only past the signature; the kid is then the node.
+    // A request: Display.view reports anything but CLEAR only past the signature; the kid is then the node.
     const receive = section(model, 'private fun receive(', '\n    }\n');
-    assert.match(receive, /if \(view\.seal == SealState\.OPENED\) noteSeal\(envelope\.kid, view\.seal\)/);
+    assert.match(receive, /if \(view\.seal != SealState\.CLEAR\) noteSeal\(envelope\.kid, view\.seal\)/);
     // A question: the pin's own, its signature held, before anything opens; marked for the pin, never a name inside.
     const question = section(model, 'private fun verifiedQuestion', '\n    }\n');
     assert.ok(question.indexOf('envelope.verifyEd25519(pin.key)') < question.indexOf('QuestionItem.from('));
@@ -657,14 +657,14 @@ describe('iOS: sealedSeen (R-SP-15)', () => {
     assert.match(section(model, 'func reset() {', '\n    }\n'), /leaseNames = \[:\]/);
   });
 
-  it('only a verified open marks a node, through one function, statuses and views included', () => {
+  it('only a verified sealed message marks a node, opened or not, through one function, statuses and views included', () => {
     const model = iosModel();
     const note = section(model, 'private func noteSeal(_ nodeId: String, _ state: SealState)', '\n    }\n');
     assert.match(note, /Seal\.noteSealedSeen\(sealedSeen, nodeId: nodeId, state: state\)/);
     assert.match(note, /if SealedSeenStore\.load\(\) != next \{ SealedSeenStore\.save\(next\) \}/);
     assert.match(note, /if marked \{ demoteClear\(nodeId\) \}/);
     assert.equal(count(model, 'Seal.noteSealedSeen('), 1);
-    assert.match(section(model, 'private func receive(', '\n    }\n'), /if view\.seal == \.opened \{ noteSeal\(env\.kid, view\.seal\) \}/);
+    assert.match(section(model, 'private func receive(', '\n    }\n'), /if view\.seal != \.clear \{ noteSeal\(env\.kid, view\.seal\) \}/);
     const question = section(model, 'private func verifiedQuestion', '\n    }\n');
     assert.ok(question.indexOf('envelope.verifyEd25519(spkiHex: pin.key)') >= 0 && question.indexOf('envelope.verifyEd25519(spkiHex: pin.key)') < question.indexOf('QuestionItem('));
     assert.ok(question.indexOf('message["node_id"]?.stringValue == pin.id') >= 0 && question.indexOf('message["node_id"]?.stringValue == pin.id') < question.indexOf('QuestionItem('));

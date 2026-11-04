@@ -591,7 +591,7 @@ reason text. They keep `job_id`, `lease_id`, `kind`, `request_id`, `apps`, `minu
 
 **Codes.** `no_sealed_recipient` (a status `reason`, and the cause inside
 `capability_unavailable`), `lease_hash_mismatch`, `clear_after_sealed` (a clear
-request from a node this phone has opened a sealed message from), `key_locked`,
+request from a node this phone has verified a sealed message from), `key_locked`,
 `not_recipient`, `open_failed`. A sealed request a phone cannot read shows the row and
 line of approval-v1's revision, with no Allow or Deny. Its label is the status's `kind`,
 if a status came with it, else `Request`.

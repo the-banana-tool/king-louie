@@ -23,7 +23,7 @@ relay you pair it with.
 - A reference to the box key, which opens what your nodes seal to this phone.
   See "The box key" below. A phone paired before the box key existed also keeps,
   for up to seven days, the statement that introduces it, and which nodes were told.
-- Which nodes this phone has opened a sealed message from (their ids), so that a
+- Which nodes this phone has verified a sealed message from (their ids), so that a
   clear message replayed from such a node gets no decision.
 - The push token, when push is configured. The Android app sends it to the
   relay again at every start. Reset this phone asks the relay to forget it
@@ -168,7 +168,7 @@ once; with none, the node then sends in clear.
 
 The relay cannot approve anything: nodes check the phone's signature over the
 exact action, and phones show only what a pinned node signed. A relay can replay an
-old clear message a node once signed; a phone that has opened a sealed message from
+old clear message a node once signed; a phone that has verified a sealed message from
 that node shows it with no decision.
 
 ## Push

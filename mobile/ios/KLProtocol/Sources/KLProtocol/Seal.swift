@@ -124,29 +124,32 @@ public enum Seal {
     ]
 
     /// R-SP-15: a relay can replay an old clear ask or request, signed by the
-    /// node, to draw a clear answer. Once this phone has opened a sealed message
-    /// from a node, such a message from that node is unreadable with this reason
+    /// node, to draw a clear answer. Once this phone has verified a sealed message
+    /// from a node, opened or not, such a message from that node is unreadable with this reason
     /// and offers no decision. Checked after the signature.
     public static let clearAfterSealed = "clear_after_sealed"
 
     /// What a reader says when the box key would not act (`SealKeyUnavailable`).
     /// The readers do not throw, so this is how a locked phone reaches the row. It
-    /// is transient, offers no decision and marks nothing in `sealedSeen`.
+    /// is transient and offers no decision. It marks a node only as any sealed
+    /// message does: past the node's signature.
     public static let keyLocked = "key_locked"
 
     private static let heldToSealing = ["kl.question.ask", "kl.approval.request", "kl.lease.request"]
 
     /// Whether R-SP-15 refuses this message. `sealedSeen`: the nodes this phone has
-    /// opened a sealed message from, tested against the message's own `node_id`.
+    /// verified a sealed message from, tested against the message's own `node_id`.
     public static func clearRefused(type: String, message: JSONValue, sealedSeen: Set<String>) -> Bool {
         guard heldToSealing.contains(where: { ExactText.same($0, type) }), message["sealed"] == nil,
               let nodeId = message["node_id"]?.stringValue else { return false }
         return sealedSeen.contains(nodeId)
     }
 
-    /// The nodes seen sealing, after a verified message from `nodeId` was read: only an open adds one, and nothing takes one away.
+    /// The nodes seen sealing, after a message from `nodeId` was read past its signature: a sealed
+    /// one marks it, opened or not, since only that node could have signed it. Nothing takes one
+    /// away. A reader answers `.clear` for a misshapen or unverified message, so it marks nothing.
     public static func noteSealedSeen(_ seen: Set<String>, nodeId: String, state: SealState) -> Set<String> {
-        state == .opened ? seen.union([nodeId]) : seen
+        state != .clear ? seen.union([nodeId]) : seen
     }
 
     private static let keyBytes = 32

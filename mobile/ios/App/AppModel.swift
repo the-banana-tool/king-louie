@@ -6,7 +6,7 @@ import UIKit
 
 /// What the app keeps (mobile/PRIVACY.md): the relay pin, node pins, its key
 /// references (in the Keychain) and the push token here; beside this, the nodes it
-/// has opened a sealed message from (SealedSeenStore, `kl.sealed-seen`) and what
+/// has verified a sealed message from (SealedSeenStore, `kl.sealed-seen`) and what
 /// nodes were told of its box key (BoxKeyNodes, `kl.box-key.nodes`). Nothing else,
 /// and no analytics. History is held in memory only (see AppModel.history).
 struct StoredState: Codable {
@@ -32,10 +32,10 @@ struct StoredState: Codable {
     }
 }
 
-/// The nodes this phone has opened a sealed message from, by node id (R-SP-15).
+/// The nodes this phone has verified a sealed message from, by node id (R-SP-15).
 /// Beside the pins, under its own key: a new key in StoredState would fail the old
 /// decode and lose the pins, and `restore` puts back a StoredState from before a
-/// pairing, which must not take a mark away. Only a signature-verified open adds one
+/// pairing, which must not take a mark away. Only a sealed message past the signature adds one
 /// (AppModel.noteSeal); Reset clears it, and nothing else takes one away. A one-way
 /// mark, so it is pushed to disk before anything goes on.
 enum SealedSeenStore {
@@ -140,7 +140,7 @@ final class AppModel: ObservableObject {
     private(set) var key: DeviceKey?
     /// The box key (R-SP-10), or nil for a phone enrolled before it, one that refused it, or one locked at launch. Deleted with `key`.
     @Published private var boxKey: BoxKey?
-    /// The nodes this phone has opened a sealed message from (R-SP-15); noteSeal is the only writer but Reset.
+    /// The nodes this phone has verified a sealed message from (R-SP-15); noteSeal is the only writer but Reset.
     private var sealedSeen: Set<String> = SealedSeenStore.load()
     private let sealMemo = SealMemo()
     /// The last name a sealed status of a take or task opened to, by lease id: what the rows show, since drawing never decrypts.
@@ -1802,8 +1802,8 @@ final class AppModel: ObservableObject {
             }
         }
         guard let env = try? Envelope(json: envJSON), let message = try? env.message() else { return .nothing }
-        // An open and the reasons below come only past the pin and the node's signature, so the kid is that node.
-        if view.seal == .opened { noteSeal(env.kid, view.seal) }
+        // Anything but .clear comes only past the pin and the node's signature, so the kid is that node.
+        if view.seal != .clear { noteSeal(env.kid, view.seal) }
         guard let requestId = message["request_id"]?.stringValue,
               let pin = pins.first(where: { $0.id == env.kid }) else { return .nothing }
         guard view.shown, let display = view.display else {

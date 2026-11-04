@@ -1246,8 +1246,8 @@ the e2e test), the owner check cannot tell them apart.
     relayed message never clears it. Residual: anything running as the service account can delete the file,
     and with no device holding a box key the node then sends in clear.
   - The phones (`Seal.kt`, `Seal.swift`): shape, pin, signature, and only then the open. `sealedSeen`, per
-    node, persisted, cleared by Reset: once a node's sealed message has opened, its clear request or ask has
-    no decision (`clear_after_sealed`), since a relay can replay an old one. A message that cannot be read
+    node, persisted, cleared by Reset: once a node's sealed message has verified, opened or not, its clear
+    request or ask has no decision (`clear_after_sealed`), since a relay can replay an old one. A message that cannot be read
     is a row from its verified clear part with no decision (`not_recipient`, `open_failed`, `key_locked`,
     the apps' `box_key_broken`). An app from before this shows nothing, so phones upgrade first. A clear
     answer with no clear ask of its token is refused `sealed_required` on the node.

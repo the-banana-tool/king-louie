@@ -28,7 +28,7 @@ class OwnerMessage(message: String) : Exception(message)
 /**
  * What the app keeps (mobile/PRIVACY.md): relay pin, node pins, mode, push
  * token, the read key's set-up (android-slim §8.7), the box key's, and the nodes
- * it has opened a sealed message from. The keys live in the Keystore.
+ * it has verified a sealed message from. The keys live in the Keystore.
  */
 class Storage(context: Context) {
     private val prefs = context.getSharedPreferences("kl.state", Context.MODE_PRIVATE)
@@ -71,8 +71,8 @@ class Storage(context: Context) {
         }))).apply()
 
     /**
-     * The nodes this phone has opened a sealed message from, by node id
-     * (R-SP-15). Only a signature-verified open adds one (AppModel.noteSeal);
+     * The nodes this phone has verified a sealed message from, by node id
+     * (R-SP-15). Only a sealed message past the signature adds one (AppModel.noteSeal);
      * Reset clears it with the rest, and nothing else takes one away. A one-way
      * mark, so it is on disk before anything goes on (commit, not apply).
      */

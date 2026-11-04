@@ -286,7 +286,7 @@ class SealVectorTest {
         assertNull(Display.view(vector("request-valid")["input"]!!, clearPins, sealedSeen = emptySet()).opened)
     }
 
-    /** The phone's box key will not act: no decision, for a reason that passes, and nothing marks the node. */
+    /** The phone's box key will not act: no decision, for a reason that passes. Its signature held, so it marks the node as any sealed message does. */
     @Test
     fun aLockedPhoneAndARequest() {
         val v = vector("request-sealed-display")
@@ -297,7 +297,7 @@ class SealVectorTest {
         assertEquals("key_locked", view.reason)
         assertEquals(SealState.UNREAD, view.seal)
         assertNull(view.display)
-        assertEquals(emptySet<String>(), Seal.noteSealedSeen(emptySet(), pins[0].id, view.seal))
+        assertEquals(setOf(pins[0].id), Seal.noteSealedSeen(emptySet(), pins[0].id, view.seal))
     }
 
     @Test
@@ -576,7 +576,7 @@ class SealVectorTest {
         assertTrue(Display.view(sealed["input"]!!, sealedPins, openerOf(sealed["given"]["box"]), sealedSeen = seen).shown)
     }
 
-    /** The rule for one node: what opened sealed marks it, for good; nothing else does; types not listed are not held to it. */
+    /** The rule for one node: a verified sealed message marks it, opened or not, for good; nothing else does; types not listed are not held to it. */
     @Test
     fun theSealedSeenRule() {
         val node = "kl-aaaaaaaaaaaaaaaa"
@@ -584,8 +584,7 @@ class SealVectorTest {
         var seen = emptySet<String>()
         seen = Seal.noteSealedSeen(seen, node, SealState.CLEAR)
         assertEquals(emptySet<String>(), seen)
-        seen = Seal.noteSealedSeen(seen, node, SealState.UNREAD)
-        assertEquals(emptySet<String>(), seen)
+        assertEquals(setOf(node), Seal.noteSealedSeen(seen, node, SealState.UNREAD))
         seen = Seal.noteSealedSeen(seen, node, SealState.OPENED)
         assertEquals(setOf(node), seen)
         seen = Seal.noteSealedSeen(seen, node, SealState.CLEAR)
@@ -601,6 +600,35 @@ class SealVectorTest {
             assertFalse(type, Seal.clearRefused(type, JsonObject(clearAsk - "node_id"), seen))
         }
         for (type in listOf("kl.lease.status", "kl.lease.view", "kl.approval.status", "kl.lease.listing")) assertFalse(type, Seal.clearRefused(type, clearAsk, seen))
+    }
+
+    /** L-3: every reader says UNREAD past the signature with no way to open, and CLEAR for what is not verified or not in shape. */
+    @Test
+    fun whatMarksANodeThroughTheReaders() {
+        val web = keys()["nodes"]["web-01"]
+        val pin = NodePin(web["id"].str()!!, "web-01", web["spki"].str()!!)
+        fun marks(state: SealState) = Seal.noteSealedSeen(emptySet(), pin.id, state) == setOf(pin.id)
+        val leaseDir = File(System.getProperty("kl.leaseVectors") ?: error("kl.leaseVectors is not set"))
+        fun leaseVector(name: String) = JsonText.parse(File(leaseDir, "$name.json").readBytes())
+        val request = vector("request-sealed-display")["input"]!!
+
+        assertEquals(SealState.UNREAD, Display.view(request, listOf(pin), sealedSeen = emptySet()).seal)
+        assertTrue(marks(QuestionItem.from(Envelope.fromJson(vector("question-ask-sealed")["input"]!!).message(), "web-01", sealedSeen = emptySet())!!.seal))
+        assertTrue(marks(LeaseRequest.check(Envelope.fromJson(leaseVector("request-sealed")["input"]!!).message(), sealedSeen = emptySet()).seal))
+        assertTrue(marks(LeaseStatus.from(Envelope.fromJson(leaseVector("status-sealed")["input"]!!).message())!!.seal))
+        assertTrue(marks(Leases.verifyView(Envelope.fromJson(leaseVector("view-sealed")["input"]!!), pin).view!!.seal))
+        assertTrue(marks(Display.view(request, listOf(pin), Seal.opener("d-aaaaaaaaaaaaaaaa", softwareAgree(keys()["devices"]["A_box"]["d"].str()!!)), sealedSeen = emptySet()).seal))
+
+        // Unverified, unpinned, or misshapen: nothing.
+        val other = NodePin(pin.id, "web-01", keys()["nodes"]["gpu-box"]["spki"].str()!!)
+        assertFalse(marks(Display.view(request, listOf(other), sealedSeen = emptySet()).seal))
+        assertFalse(marks(Display.view(request, emptyList(), sealedSeen = emptySet()).seal))
+        val noBox = JsonObject(Envelope.fromJson(request).message() - "node_box")
+        assertFalse(marks(Display.view(signedByWeb(noBox).json, listOf(pin), sealedSeen = emptySet()).seal))
+        assertFalse(marks(LeaseRequest.check(noBox, sealedSeen = emptySet()).seal))
+        // A clear message from a node never marks it.
+        val clear = vector("request-valid")
+        assertFalse(marks(Display.view(clear["input"]!!, clear["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }, sealedSeen = emptySet()).seal))
     }
 
     // ---- the box key (R-SP-10) ----

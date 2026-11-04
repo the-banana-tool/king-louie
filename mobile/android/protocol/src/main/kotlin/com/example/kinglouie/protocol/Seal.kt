@@ -113,27 +113,31 @@ object Seal {
 
     /**
      * R-SP-15: a relay can replay an old clear ask or request, signed by the
-     * node, to draw a clear answer. Once this phone has opened a sealed message
-     * from a node, such a message from that node is unreadable with this reason
+     * node, to draw a clear answer. Once this phone has verified a sealed message
+     * from a node, opened or not, such a message from that node is unreadable with this reason
      * and offers no decision. Checked after the signature, by the reader, so nobody
      * parses an unverified payload to find its node.
      */
     const val CLEAR_AFTER_SEALED = "clear_after_sealed"
     private val HELD_TO_SEALING = setOf("kl.question.ask", "kl.approval.request", "kl.lease.request")
 
-    /** Whether R-SP-15 refuses this message. [sealedSeen]: the nodes this phone has opened a sealed message from. */
+    /** Whether R-SP-15 refuses this message. [sealedSeen]: the nodes this phone has verified a sealed message from. */
     fun clearRefused(type: String, message: JsonObject, sealedSeen: Set<String>): Boolean =
         type in HELD_TO_SEALING && !message.containsKey("sealed") && message["node_id"].str()?.let { it in sealedSeen } == true
 
     /**
      * Sealed and the phone's box key will not act now: it passes when the phone
-     * unlocks. No decision is offered, what needs nothing opened still reads, and
-     * no node is marked by it.
+     * unlocks. No decision is offered, and what needs nothing opened still reads.
+     * It marks a node only as any sealed message does: past the node's signature.
      */
     const val KEY_LOCKED = "key_locked"
 
-    /** The nodes seen sealing, after a verified message from [nodeId] was read: only an open adds one, and nothing takes one away. */
-    fun noteSealedSeen(seen: Set<String>, nodeId: String, state: SealState): Set<String> = if (state == SealState.OPENED) seen + nodeId else seen
+    /**
+     * The nodes seen sealing, after a message from [nodeId] was read past its signature: a sealed
+     * one marks it, opened or not, since only that node could have signed it. Nothing takes one
+     * away. A reader answers [SealState.CLEAR] for a misshapen or unverified message, so it marks nothing.
+     */
+    fun noteSealedSeen(seen: Set<String>, nodeId: String, state: SealState): Set<String> = if (state != SealState.CLEAR) seen + nodeId else seen
 
     private const val KEY_BYTES = 32
     private const val IV_BYTES = 12

@@ -409,6 +409,38 @@ final class SealVectorTests: XCTestCase {
         }
     }
 
+    /// L-3: every reader says `.unread` past the signature with no way to open, and `.clear` for what is not verified or not in shape.
+    func testWhatMarksANodeThroughTheReaders() throws {
+        let k = try keys()
+        let web = k["nodes"]!["web-01"]!
+        let pin = NodePin(id: web["id"]!.stringValue!, name: "web-01", key: web["spki"]!.stringValue!)
+        func marks(_ state: SealState) -> Bool { Seal.noteSealedSeen([], nodeId: pin.id, state: state) == [pin.id] }
+        var leaseDir = Self.dir
+        leaseDir.deleteLastPathComponent()
+        leaseDir.appendPathComponent("lease-v1")
+        func leaseVector(_ name: String) throws -> JSONValue { try JSONParser.parse(try Data(contentsOf: leaseDir.appendingPathComponent("\(name).json"))) }
+        let request = try vector("request-sealed-display")["input"]!
+
+        XCTAssertEqual(Display.view(request, pinned: [pin], sealedSeen: []).seal, .unread)
+        XCTAssertTrue(marks(QuestionItem(message: try Envelope(json: try vector("question-ask-sealed")["input"]!).message(), nodeName: "web-01", sealedSeen: [])!.seal))
+        XCTAssertTrue(marks(LeaseRequest.check(try Envelope(json: try leaseVector("request-sealed")["input"]!).message(), sealedSeen: []).seal))
+        XCTAssertTrue(marks(LeaseStatus(message: try Envelope(json: try leaseVector("status-sealed")["input"]!).message())!.seal))
+        XCTAssertTrue(marks(Leases.verifyView(try Envelope(json: try leaseVector("view-sealed")["input"]!), pin: pin).view!.seal))
+        let wrongBox = Seal.opener(recipientId: "d-aaaaaaaaaaaaaaaa", agree: try softwareAgree(text: k["devices"]!["A_box"]!["d"]!.stringValue!))
+        XCTAssertTrue(marks(Display.view(request, pinned: [pin], open: wrongBox, sealedSeen: []).seal))
+
+        // Unverified, unpinned, or misshapen: nothing.
+        let other = NodePin(id: pin.id, name: "web-01", key: k["nodes"]!["gpu-box"]!["spki"]!.stringValue!)
+        XCTAssertFalse(marks(Display.view(request, pinned: [other], sealedSeen: []).seal))
+        XCTAssertFalse(marks(Display.view(request, pinned: [], sealedSeen: []).seal))
+        let noBox = withField(try Envelope(json: request).message(), "node_box", nil)
+        let signed = try Envelope.seal(noBox, alg: "Ed25519", kid: pin.id, sign: try ed25519Signer(seedHex: web["seed"]!.stringValue!))
+        XCTAssertFalse(marks(Display.view(signed.json, pinned: [pin], sealedSeen: []).seal))
+        // A clear message from a node never marks it.
+        let clear = try vector("request-valid")
+        XCTAssertFalse(marks(Display.view(clear["input"]!, pinned: pins(clear), sealedSeen: []).seal))
+    }
+
     /// The pad: every sealer's length is a whole number of 256-byte blocks; an opener takes only spaces, and strips them.
     func testThePad() throws {
         let k = try keys()
@@ -488,7 +520,7 @@ final class SealVectorTests: XCTestCase {
         XCTAssertNil(view.opened)
     }
 
-    /// A locked key: its own reason, no decision, and nothing marks the node.
+    /// A locked key: its own reason and no decision. Its signature held, so it marks the node as any sealed message does.
     func testALockedKeyOnTheScreen() throws {
         let v = try vector("request-sealed-display")
         let view = Display.view(v["input"]!, pinned: pins(v), open: lockedOpener(v["given"]!["box"]!["device_id"]!.stringValue!), sealedSeen: [])
@@ -497,7 +529,7 @@ final class SealVectorTests: XCTestCase {
         XCTAssertEqual(Seal.keyLocked, "key_locked")
         XCTAssertNil(view.display)
         XCTAssertEqual(view.seal, .unread)
-        XCTAssertEqual(Seal.noteSealedSeen([], nodeId: "kl-aaaaaaaaaaaaaaaa", state: view.seal), [])
+        XCTAssertEqual(Seal.noteSealedSeen([], nodeId: "kl-aaaaaaaaaaaaaaaa", state: view.seal), ["kl-aaaaaaaaaaaaaaaa"])
     }
 
     /// R-SP-15: once a node was seen sealing, its clear request is unreadable and offers no decision.
@@ -532,7 +564,7 @@ final class SealVectorTests: XCTestCase {
         var seen = Set<String>()
         seen = Seal.noteSealedSeen(seen, nodeId: node, state: .clear)
         XCTAssertEqual(seen, [])
-        seen = Seal.noteSealedSeen(seen, nodeId: node, state: .unread)
+        XCTAssertEqual(Seal.noteSealedSeen(seen, nodeId: node, state: .unread), [node])
         XCTAssertEqual(seen, [])
         seen = Seal.noteSealedSeen(seen, nodeId: node, state: .opened)
         XCTAssertEqual(seen, [node])
