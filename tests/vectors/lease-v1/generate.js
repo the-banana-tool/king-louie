@@ -107,11 +107,12 @@ const appsFor = (ids, apps = GUI_APPS) => ids.map((id) => ({ id, name: apps[id].
 const JOB = 'job-1758650651201-a1b2c3';
 
 // kind, take (2026-10-24): a take lease (demo takes spec §6) carries
-// take = { name, sites, browser, credentials, unattended }.
-function requestFor(label, { appIds = ['calculator', 'notepad'], maxMinutes = 15, resumes = null, leaseLabel = label, kind = 'computer_use', take = null } = {}) {
+// take = { name, sites, browser, credentials, unattended }. A task lease
+// (2026-11-03, tasks stage 1 spec §4.6) carries task = { name, sites, allows, usd }.
+function requestFor(label, { appIds = ['calculator', 'notepad'], maxMinutes = 15, resumes = null, leaseLabel = label, kind = 'computer_use', take = null, task = null } = {}) {
   return L.buildLeaseRequest({
     identity: GPU, nodeName: 'gpu-box', jobId: JOB, apps: appsFor(appIds), maxMinutes, reason: 'Enter the totals', resumes: resumes ? uuidOf(`lease ${leaseLabel}`) : null,
-    kind, take,
+    kind, take, task,
     limits: [], origin: { client: 'claude.ai', session: 'mcp-session-1', job_id: JOB }, now: NOW_MS,
     requestId: uuidOf(`request ${label}`), leaseId: uuidOf(`lease ${leaseLabel}`), nonce: nonceOf(`request ${label}`)
   });
@@ -126,7 +127,7 @@ function grantMessage(request, { decision = 'grant', apps = null, minutes = 10, 
   return {
     v: 1, type: 'kl.lease.grant', request_id: request.request_id, lease_id: request.lease_id, node_id: request.node_id,
     lease_hash: request.lease_hash, nonce: request.nonce, decision,
-    grant: decision === 'grant' ? { apps: apps || request.lease.apps.map((a) => a.id), minutes } : null,
+    grant: decision === 'grant' ? { apps: apps || (request.lease.apps || []).map((a) => a.id), minutes } : null,
     expires_at: request.expires_at, device_id: DEVICES[device].id, signed_at: signedAt, ...overrides
   };
 }
@@ -372,11 +373,11 @@ function buildVectors() {
   }));
   // A request the node signed with its lease altered and hashed again, so
   // that only the shape (VALIDATORS['kl.lease.request']) is wrong.
-  const requestVector = (name, { requestOptions, change }) => {
+  const requestVector = (name, { requestOptions, change, consumers = PHONES }) => {
     const { message } = requestFor(name, requestOptions);
     const lease = change({ ...message.lease });
     const input = seal({ ...message, lease, lease_hash: L.leaseHash(lease) }, nodeSigner(GPU));
-    return { name, consumers: PHONES, check: 'request', given: viewGiven, input, expect: reject('malformed') };
+    return { name, consumers, check: 'request', given: viewGiven, input, expect: reject('malformed') };
   };
   out.push(requestVector('take-request-missing-name', { requestOptions: takeRequest, change: (l) => { delete l.name; return l; } }));
   out.push(requestVector('computer-use-with-unattended', { requestOptions: {}, change: (l) => ({ ...l, unattended: true }) }));
@@ -404,6 +405,72 @@ function buildVectors() {
     name: 'status-take', consumers: PHONES, check: null, given: viewGiven,
     input: statusEnvelope('status-take', { seq: 5, kind: 'take', unattended: true, name: TAKE.name, expiresAt: NOW_MS + 180 * 60000 }),
     expect: { ...accepted, status: { lease_id: uuidOf('lease status-take'), seq: 5, state: 'active', reason: null, contact_token: tokenOf('status status-take'), granted_by: grantedByA, kind: 'take', unattended: true, name: TAKE.name } }
+  });
+
+  // Revised 2026-11-03 (tasks stage 1 spec §4.6): a task lease has no apps, and
+  // its own sites, allows and usd. The phones consume every one of these: a phone's
+  // vector test names each vector, and refuses what the node refuses before it signs.
+  const TASK_LEASE = { name: 'Find a dentist', sites: ['*.example.com'], allows: ['browser-act'], usd: 2 };
+  const taskRequest = { kind: 'task', task: TASK_LEASE, appIds: [], maxMinutes: 20 };
+  {
+    const { envelope } = requestFor('task-request', taskRequest);
+    out.push({ name: 'task-request', consumers: PHONES, check: 'request', given: viewGiven, input: envelope, expect: accepted });
+  }
+  // What only a raise of the spend cap sends: a look-only task gets no first card.
+  {
+    const { envelope } = requestFor('task-request-read-only', { ...taskRequest, task: { ...TASK_LEASE, allows: [] } });
+    out.push({ name: 'task-request-read-only', consumers: PHONES, check: 'request', given: viewGiven, input: envelope, expect: accepted });
+  }
+  const taskRefused = {
+    'task-request-allows-unsorted': { allows: ['shell', 'browser-act'] },
+    'task-request-allows-repeated': { allows: ['shell', 'shell'] },
+    'task-request-allows-unknown': { allows: ['desktop-input'] },
+    // A raise is a fresh request, so no task request resumes. Its own lease id, so only this rule refuses it.
+    'task-request-resumes': { resumes: uuidOf('lease task-request-resumes') },
+    'task-request-sites-over-32': { sites: Array.from({ length: 33 }, (_, i) => `s${i}.example.com`) },
+    'task-request-bad-site': { sites: ['Example.com'] },
+    'task-request-usd-under': { usd: 1 },
+    'task-request-usd-over': { usd: L.TASK_USD_MAX + 1 },
+    'task-request-usd-fraction': { usd: 2.5 },
+    'task-request-attended': { unattended: false },
+    'task-request-minutes-over-240': { max_minutes: L.TAKE_MAX_MINUTES + 1 },
+    'task-request-with-apps': { apps: appsFor(['notepad']) },
+    'task-request-name-hidden': { name: 'Find\u200Ba dentist' },
+    'task-request-name-too-long': { name: 'x'.repeat(61) }
+  };
+  for (const [name, fields] of Object.entries(taskRefused)) {
+    out.push(requestVector(name, { requestOptions: taskRequest, change: (l) => ({ ...l, ...fields }) }));
+  }
+  out.push(grantVector('task-grant', {
+    requestOptions: taskRequest, grantOptions: { apps: [], minutes: 20 }, expect: accepted, consumers: PHONES, withRequest: true
+  }));
+  out.push(grantVector('task-grant-with-apps', {
+    requestOptions: taskRequest, grantOptions: { apps: ['notepad'], minutes: 20 }, expect: reject('apps_not_requested'), check: 12, consumers: PHONES, withRequest: true
+  }));
+  out.push(grantVector('task-grant-minutes-over-requested', {
+    requestOptions: taskRequest, grantOptions: { apps: [], minutes: 21 }, expect: reject('minutes_out_of_range'), check: 12, consumers: PHONES, withRequest: true
+  }));
+  // The request says 240, the most a request may; 241 still passes the grant's shape.
+  out.push(grantVector('task-grant-minutes-over-240', {
+    requestOptions: { ...taskRequest, maxMinutes: 240 }, grantOptions: { apps: [], minutes: 241 }, expect: reject('minutes_out_of_range'), check: 12, consumers: PHONES, withRequest: true
+  }));
+  // gui.take.max_minutes is a take's: it does not bind a task.
+  out.push(grantVector('task-grant-ignores-take-cap', {
+    requestOptions: { ...taskRequest, maxMinutes: 180 }, grantOptions: { apps: [], minutes: 180 }, given: { gui_take_max_minutes: 120 }, expect: accepted, consumers: PHONES, withRequest: true
+  }));
+  // A grant may name no apps only for a kind that has none.
+  out.push(grantVector('computer-use-grant-no-apps', { grantOptions: { apps: [], minutes: 10 }, expect: reject('apps_not_requested'), check: 12, consumers: PHONES, withRequest: true }));
+  out.push(grantVector('take-grant-no-apps', {
+    requestOptions: takeRequest, grantOptions: { apps: [], minutes: 180 }, given: { gui_take_max_minutes: 240 }, expect: reject('apps_not_requested'), check: 12, consumers: PHONES, withRequest: true
+  }));
+  out.push({
+    name: 'task-status', consumers: PHONES, check: null, given: viewGiven,
+    input: statusEnvelope('task-status', { seq: 5, kind: 'task', unattended: true, name: TASK_LEASE.name, expiresAt: NOW_MS + 20 * 60000 }),
+    expect: { ...accepted, status: { lease_id: uuidOf('lease task-status'), seq: 5, state: 'active', reason: null, contact_token: tokenOf('status task-status'), granted_by: grantedByA, kind: 'task', unattended: true, name: TASK_LEASE.name } }
+  });
+  out.push({
+    name: 'task-status-no-name', consumers: PHONES, check: null, given: viewGiven,
+    input: statusEnvelope('task-status-no-name', { seq: 5, kind: 'task', unattended: true, name: null }), expect: reject('malformed')
   });
   return out;
 }

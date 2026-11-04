@@ -46,6 +46,13 @@ describe('PushQueue', () => {
     assert.deepEqual(link.calls, [{ kind: 'session_ended', id: LEASE(1), to_device: null, except_device: 'dev-b', expires_at: null }]);
   });
 
+  it('accepts task_ended, for every phone: no device narrowing', async () => {
+    const { link, queue } = build();
+    queue.enqueue({ kind: 'task_ended', id: LEASE(7) });
+    await settle();
+    assert.deepEqual(link.calls, [{ kind: 'task_ended', id: LEASE(7), to_device: null, except_device: null, expires_at: null }]);
+  });
+
   it('entries queued before start, whose link came up before start, are sent by start (a take ended at a restart)', async () => {
     const link = new FakeLink({ connected: false });
     const queue = new PushQueue({ relayClient: link, clock: () => Date.parse('2026-10-29T12:00:00.000Z'), log: capture().log });

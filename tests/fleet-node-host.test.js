@@ -163,6 +163,7 @@ describe('the courier RPC path', () => {
 // Fix round 1 (Task 13 review).
 describe('fleet node shutdown and startup failure (review items 2, 5, 6)', () => {
   const { startFleetNode } = require('../src/fleet/start');
+  const { PushQueue } = require('../src/gui/push-queue');
   const { ensureServicePaths, ensurePrivateDir } = require('../src/platform/paths');
   const FAKE_IDENTITY = { publicKey: Buffer.alloc(32), nodeId: 'node-test' };
   const allOff = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false };
@@ -244,6 +245,51 @@ describe('fleet node shutdown and startup failure (review items 2, 5, 6)', () =>
     });
     assert.deepEqual(order, ['fleetService.stop', 'core.shutdown', 'approvals.stop']);
     assert.equal(live.size, 0, 'no interval (delegate sweep, courier pump) outlives stop()');
+  });
+
+  it('with no lease manager the agent profile builds a push queue for tasks, and stops it with them', async () => {
+    const l = agentLayout();
+    const order = [];
+    await withStubs(order, { relay: fakeRelay() }, async () => {
+      const running = await loadProfile('agent').start({ dataDir: l.dataDir, features: allOff, ports: {}, workspace: l.workspace, adminUid: EUID, configDir: l.configDir });
+      const { tasks } = running.fleet.handler;
+      assert.equal(running.gui, null, 'gui is off in this node.yaml');
+      assert.equal(tasks.grants, null);
+      assert.ok(tasks.push instanceof PushQueue);
+      assert.equal(tasks.push.listening, true);
+      await running.stop();
+      assert.equal(tasks.stopped, true);
+      assert.equal(tasks.push.listening, false);
+    });
+  });
+
+  it('with a lease manager the agent profile uses its push queue, and stops tasks before the GUI ends their leases', async () => {
+    const l = agentLayout();
+    const order = [];
+    const pushQueue = { enqueue() {} };
+    const gui = {
+      leases: { pushQueue, on() {}, off() {} },
+      takes: null,
+      start: async () => {},
+      stop: async () => { order.push('gui.stop'); }
+    };
+    const guiEntry = require.resolve('../src/gui');
+    const saved = require.cache[guiEntry];
+    require.cache[guiEntry] = { id: guiEntry, filename: guiEntry, loaded: true, exports: { createGuiSubsystem: () => gui, isJobOpen: () => false } };
+    try {
+      await withStubs(order, { relay: fakeRelay() }, async () => {
+        const running = await loadProfile('agent').start({ dataDir: l.dataDir, features: allOff, ports: {}, workspace: l.workspace, adminUid: EUID, configDir: l.configDir });
+        const { tasks } = running.fleet.handler;
+        assert.equal(tasks.grants.leases, gui.leases);
+        assert.equal(tasks.push, pushQueue);
+        const stopTasks = tasks.stop.bind(tasks);
+        tasks.stop = async () => { order.push('tasks.stop'); return stopTasks(); };
+        await running.stop();
+      });
+    } finally {
+      if (saved) require.cache[guiEntry] = saved; else delete require.cache[guiEntry];
+    }
+    assert.deepEqual(order, ['tasks.stop', 'gui.stop', 'core.shutdown', 'approvals.stop']);
   });
 
   it('a fleet node that fails to start leaves nothing running, and the agent profile still stops the core and approvals', async () => {

@@ -23,6 +23,7 @@ const {
   registerFleetChatTools, unregisterFleetChatTools
 } = require('../src/tools/builtin/fleet-chat-tools');
 const { MCP_TOOLS, FleetToolHandler, ToolError } = require('../src/fleet/fleet-tools');
+const { TASK_TOOL_NAMES } = require('../src/fleet/tool-definitions');
 const { delegateToolNames, DELEGATE_EXCLUDED_TOOLS } = require('../src/fleet/delegate-sessions');
 const { actionHash } = require('../src/approvals/messages');
 const { CASE_TOOL_NAMES, WAKEUP_BASE_TOOLS, shapeToolDefinitions } = require('../src/cases/chat-integration');
@@ -99,7 +100,7 @@ describe('fleet tools in the chat: presence', () => {
 
   it('are the MCP names with provider-safe schemas; the read tools need no approval, the acting ones do', () => {
     registerFleetChatTools(toolRegistry);
-    assert.deepEqual([...FLEET_CHAT_TOOL_NAMES], MCP_TOOLS.map((t) => t.name));
+    assert.deepEqual([...FLEET_CHAT_TOOL_NAMES], MCP_TOOLS.map((t) => t.name).filter((name) => !TASK_TOOL_NAMES.includes(name)));
     for (const name of FLEET_CHAT_TOOL_NAMES) {
       const tool = toolRegistry.get(name);
       const read = FLEET_READ_TOOLS.includes(name);

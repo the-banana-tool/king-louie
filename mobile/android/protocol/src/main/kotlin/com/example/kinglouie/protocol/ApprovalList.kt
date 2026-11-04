@@ -119,6 +119,12 @@ object ApprovalList {
         val nodeName: String,
         val label: String,
         val summary: String,
+        /**
+         * A task's request: the card in full (`Leases.taskLines`), shown in
+         * place of the one-line summary, so Allow on the row signs what the row
+         * shows (the one press of tasks stage 1). Empty for every other row.
+         */
+        val cardLines: List<String> = emptyList(),
         /** A second line: a pairing's fingerprint. */
         val secondLine: String? = null,
         val secondLineMonospace: Boolean = false,
@@ -142,7 +148,9 @@ object ApprovalList {
         /** Shown in the warning colour ("Could not confirm"). */
         val warning: Boolean = false,
         /** A question of `high` urgency. */
-        val highUrgency: Boolean = false
+        val highUrgency: Boolean = false,
+        /** False for a task's lease: it has no frames, so no live view; the row and its Stop are all of it. */
+        val hasDetail: Boolean = true
     )
 
     /** §7.5: what an empty list says; [toScanner] adds the button to the Scanner. */
@@ -208,21 +216,23 @@ object ApprovalList {
         if (!Leases.isLive(s.state) && s.state != "pending") return null
         val node = Display.escape(lease.nodeName)
         val expiresMs = s.expiresAt?.let { Timestamps.epochMillis(it) }
-        val take = if (s.state != "pending" && s.unattended && s.name != null && expiresMs != null) s.name else null
+        val take = if (s.kind == "take" && s.state != "pending" && s.unattended && s.name != null && expiresMs != null) s.name else null
         val summary = when {
             s.state == "pending" -> Leases.pendingTitle(lease.nodeName, lease.signedGrant)
+            s.kind == "task" -> Leases.taskTitle(lease.nodeName, s.name ?: "")
             take != null -> "Unattended take: " + Display.escape(take) + ", ends " + input.formatTime(expiresMs!!)
             // The iOS words (R-F5-19): opening the detail is what keeps it going.
             Leases.isPausedForContact(s.state, s.reason) && grantedByThisPhone(s, input) -> "Paused: open to let it continue ($node)"
             else -> "Lease ${if (s.state == "suspended") "paused" else "active"} on $node"
         }
-        val detail = if (s.state == "pending") Leases.pendingDetail(lease.signedGrant) else Leases.grantedByOther(s.grantedByDevice, s.grantedByName, input.thisDevice)
+        val detail = if (s.state == "pending") Leases.pendingDetail(lease.signedGrant, s.kind == "task") else Leases.grantedByOther(s.grantedByDevice, s.grantedByName, input.thisDevice)
         return Row(
             id = "lease:${s.leaseId}", kind = Kind.RUNNING_LEASE, ref = s.leaseId, nodeId = s.nodeId, nodeName = node,
-            label = if (s.kind == "take") "Take" else "Computer use", summary = summary, detail = detail,
+            label = when (s.kind) { "take" -> "Take"; "task" -> "Task"; else -> "Computer use" }, summary = summary, detail = detail,
             timeLeftMs = expiresMs?.let { (it - input.relayNowMs).coerceAtLeast(0) },
             buttons = listOf(Button.STOP), enabled = !lease.sending, status = if (lease.sending) SENDING else null,
-            notConfirmed = if (lease.sending) null else lease.unconfirmed
+            notConfirmed = if (lease.sending) null else lease.unconfirmed,
+            hasDetail = s.kind != "task"
         )
     }
 
@@ -270,12 +280,14 @@ object ApprovalList {
         val r = item.request
         val (label, summary) = when {
             r.isResume -> "Resume" to "Resume computer use · ${r.maxMinutes} min left"
+            r.isTask -> "Task" to (Display.escape(r.name ?: "") + " · ${r.maxMinutes} min · up to \$${r.usd}")
             r.isTake -> "Take" to (Display.escape(r.name ?: "") + " · ${r.maxMinutes} min" + if (r.unattended) " · unattended" else "")
             else -> "Computer use" to (r.apps.joinToString(", ") { Display.escape(it.name) } + " · ${r.maxMinutes} min")
         }
         val row = Row(
             id = "lease-request:${r.requestId}", kind = Kind.LEASE_REQUEST, ref = r.requestId, nodeId = r.nodeId,
-            nodeName = Display.escape(item.nodeName), label = label, summary = summary, timeLeftMs = item.timeLeftMs.coerceAtLeast(0)
+            nodeName = Display.escape(item.nodeName), label = label, summary = summary,
+            cardLines = if (r.isTask) Leases.taskLines(r, item.nodeName) else emptyList(), timeLeftMs = item.timeLeftMs.coerceAtLeast(0)
         )
         // C-12: limits carry warnings that must be read; a take with credentials may use logins from the vault.
         return decisionRow(row, r.limits.isNotEmpty() || (r.isTake && r.credentials), input, item.sending, item.decided, item.unconfirmed)

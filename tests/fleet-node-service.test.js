@@ -51,7 +51,7 @@ function service(e = engine()) {
 describe('NodeFleetService', () => {
   it('registers every fleet method on the link', () => {
     const { link } = service();
-    assert.deepEqual([...link.methods.keys()].sort(), ['fleet.cancel_job', 'fleet.delegate', 'fleet.describe', 'fleet.get_job', 'fleet.get_job_logs', 'fleet.get_state', 'fleet.run_runbook', 'fleet.send_to_job']);
+    assert.deepEqual([...link.methods.keys()].sort(), ['fleet.cancel_job', 'fleet.cancel_task', 'fleet.delegate', 'fleet.describe', 'fleet.get_job', 'fleet.get_job_logs', 'fleet.get_state', 'fleet.get_task', 'fleet.list_tasks', 'fleet.run_runbook', 'fleet.run_task', 'fleet.send_to_job', 'fleet.send_to_task']);
   });
 
   it('re-checks the scopes the front door sent, on its own catalog tier, before anything runs', async () => {

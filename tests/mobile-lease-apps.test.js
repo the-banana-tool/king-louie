@@ -210,7 +210,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(iosReply, /let pin = state\.nodes\.first\(where: \{ \$0\.id == current\.nodeId \}\) else \{ return \}/);
     assert.match(iosReply, /apply\(signed, pin: pin, deviceId: key\.deviceId, to: &current\)/);
     assert.equal(count(iosLeases, 'applyReplyStatus('), 4, 'declared, after Allow, after each watch, and after each revoke');
-    assert.equal(count(iosLeases, '["status"]'), 3, 'a listed request\'s status, a listed lease\'s status and a reply\'s: all through verifiedMessage');
+    assert.equal(count(iosLeases, '["status"]'), 4, 'a listed request\'s status, a listed lease\'s status, a reply\'s and a task\'s Allow (through noteListedLease): all through verifiedMessage');
     // One early watch at most per 20 s, so a phone that is never contact does not loop.
     const iosLive = section(iosLeases, 'func openLiveLease', 'private func apply(');
     assert.match(iosLive, /let early = Leases\.isPausedForContact\(state: live\.state, reason: live\.reason\) && !earlyUsed\n\s+&& live\.contactToken != nil && live\.contactToken != lastWatchToken/);
@@ -230,7 +230,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(reply, /val signed = reply\["status"\]\?\.takeIf \{ it !is JsonNull \}\?\.let \{ runCatching \{ Envelope\.fromJson\(it\) \}\.getOrNull\(\) \} \?: return live/);
     assert.match(reply, /return applyLease\(signed, pin, live, deviceId\)/);
     assert.equal(count(live, 'applyReplyStatus('), 5, 'declared, after Allow, after the live view\'s watch, after the fingerprint watch, after Stop');
-    assert.equal(count(live, '["status"]'), 4, 'a listed request\'s status, a listed lease\'s (twice: the list, and the live view\'s fresh status) and a reply\'s: all through verifiedMessage or applyLease');
+    assert.equal(count(live, '["status"]'), 5, 'a listed request\'s status, a listed lease\'s (twice: the list, and the live view\'s fresh status), a reply\'s and a task\'s Allow (through noteListedLease): all through verifiedMessage or applyLease');
     // The live view asks for a fresh status before a watch only when the token it holds is over a minute old by the phone's running clock.
     const refresh = section(live, '// ---- Live view loop (android-slim §7.6) ----', '// ---- Live view loop: end ----');
     assert.match(refresh, /if \(Leases\.tokenIsStale\(live\.contactTokenAtMs, SystemClock\.elapsedRealtime\(\)\)\) \{\n\s+for \(entry in api\.leases\(\)\) \{\n/);
@@ -333,7 +333,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     const press = section(android, 'fun press(row: ApprovalList.Row, button: ApprovalList.Button)', '\n    }\n');
     assert.match(press, /if \(liveLease\?\.leaseId == row\.ref\) killSwitch\(\) else runningLeases\.firstOrNull \{ it\.leaseId == row\.ref \}\?\.let \{ stopRunningLease\(it\) \}/);
     const listKt = read('mobile', 'android', 'protocol', 'src', 'main', 'kotlin', 'com', 'example', 'kinglouie', 'protocol', 'ApprovalList.kt');
-    assert.match(listKt, /val detail = if \(s\.state == "pending"\) Leases\.pendingDetail\(lease\.signedGrant\) else Leases\.grantedByOther\(s\.grantedByDevice, s\.grantedByName, input\.thisDevice\)/);
+    assert.match(listKt, /val detail = if \(s\.state == "pending"\) Leases\.pendingDetail\(lease\.signedGrant, s\.kind == "task"\) else Leases\.grantedByOther\(s\.grantedByDevice, s\.grantedByName, input\.thisDevice\)/);
     assert.match(listKt, /buttons = listOf\(Button\.STOP\)/);
     const screens = read(...kt, 'LeaseScreens.kt');
     assert.match(screens, /val grantedByOther = Leases\.grantedByOther\(live\.grantedByDevice, live\.grantedByName, model\.deviceId\)/);
@@ -562,7 +562,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
     // The grant is remembered once it is signed, before it is sent: whatever the relay then answers.
     const decideIos = section(iosLeases, 'func decideLease', '\n    }\n');
-    assert.ok(decideIos.indexOf('envelope = try await key.signEnvelope(message, reason: "Allow computer use') < decideIos.indexOf('signedLeaseGrants[item.request.leaseId] = '));
+    assert.ok(decideIos.indexOf('envelope = try await key.signEnvelope(message, reason: "Allow ') < decideIos.indexOf('signedLeaseGrants[item.request.leaseId] = '));
     assert.ok(decideIos.indexOf('signedLeaseGrants[item.request.leaseId] = ') < decideIos.indexOf('client.leaseDecision("grant"'));
     assert.equal(count(decideIos, 'signedLeaseGrants['), 1, 'for a grant only, never a deny');
     // A status its node signed: live, or pending with a grant this phone signed, gets a row; "ended" forgets the grant.
@@ -637,8 +637,8 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     const DETAIL = 'Its computer says a request for computer use is waiting for a phone\'s answer. This phone does not remember allowing it. An Allow signed before this app was restarted, or on another phone, could still reach it. Stop cancels the request.';
     assert.ok(swift.includes(`public static let requestWaitingDetail = "${DETAIL}"`));
     assert.ok(kotlin.includes(`const val REQUEST_WAITING_DETAIL = "${DETAIL}"`));
-    assert.match(swift, /public static func pendingDetail\(signedGrant: Bool\) -> String \{ signedGrant \? mayStillStartDetail : requestWaitingDetail \}/);
-    assert.match(kotlin, /fun pendingDetail\(signedGrant: Boolean\): String = if \(signedGrant\) MAY_STILL_START_DETAIL else REQUEST_WAITING_DETAIL/);
+    assert.match(swift, /public static func pendingDetail\(signedGrant: Bool, task: Bool = false\) -> String \{ signedGrant \? mayStillStartDetail : \(task \? taskRequestWaitingDetail : requestWaitingDetail\) \}/);
+    assert.match(kotlin, /fun pendingDetail\(signedGrant: Boolean, task: Boolean = false\): String = if \(signedGrant\) MAY_STILL_START_DETAIL else if \(task\) TASK_REQUEST_WAITING_DETAIL else REQUEST_WAITING_DETAIL/);
 
     // iOS.
     const ios = read('mobile', 'ios', 'App', 'AppModel.swift');
@@ -1075,25 +1075,25 @@ describe('take leases on the phones', () => {
       file: 'mobile/ios/KLProtocol/Sources/KLProtocol/Lease.swift',
       list: (src, kind) => strings(src.match(new RegExp(`^\\s+"${kind}": \\[([^\\]]*)\\]`, 'm'))[1]),
       caps: [/public static let maxMinutes = (\d+)\n/, /public static let takeMaxMinutes = (\d+)\n/],
-      maxRange: '(1...(take ? takeMaxMinutes : maxMinutes)).contains(minutes)',
-      grantCap: ['let cap = min(request.maxMinutes, request.isTake ? takeMaxMinutes : maxMinutes)', 'guard cap >= 1, (1...cap).contains(minutes) else { throw'],
+      maxRange: '(1...(kind == "computer_use" ? maxMinutes : takeMaxMinutes)).contains(minutes)',
+      grantCap: ['let cap = min(request.maxMinutes, request.kind == "computer_use" ? maxMinutes : takeMaxMinutes)', 'guard cap >= 1, (1...cap).contains(minutes) else { throw'],
       status: ['let kind = message["kind"]?.stringValue, Leases.leaseKinds.contains(kind)',
-        'let unattended = message["unattended"]?.boolValue, kind == "take" || !unattended',
-        'let nameValue = message["name"], (kind == "take" ? Leases.isTakeName(nameValue) : nameValue.isNull) else { return nil }'],
-      kinds: /static let leaseKinds = \["computer_use", "take"\]/
+        'let unattended = message["unattended"]?.boolValue, kind != "computer_use" || !unattended',
+        'let nameValue = message["name"], (kind == "computer_use" ? nameValue.isNull : Leases.isTakeName(nameValue)) else { return nil }'],
+      kinds: /static let leaseKinds = \["computer_use", "take", "task"\]/
     },
     Android: {
       file: 'mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/Lease.kt',
       list: (src, kind) => strings(src.match(new RegExp(`^\\s+"${kind}" to listOf\\(([^)]*)\\)`, 'm'))[1]),
       caps: [/const val MAX_MINUTES = (\d+)\n/, /const val TAKE_MAX_MINUTES = (\d+)\n/],
-      maxRange: 'if (minutes !in 1..(if (take) TAKE_MAX_MINUTES else MAX_MINUTES)) return false',
-      grantCap: ['val cap = minOf(request.maxMinutes, if (request.isTake) TAKE_MAX_MINUTES else MAX_MINUTES)', 'if (minutes !in 1..cap) throw ProtocolException('],
+      maxRange: 'if (minutes !in 1..(if (kind == "computer_use") MAX_MINUTES else TAKE_MAX_MINUTES)) return false',
+      grantCap: ['val cap = minOf(request.maxMinutes, if (request.kind == "computer_use") MAX_MINUTES else TAKE_MAX_MINUTES)', 'if (minutes !in 1..cap) throw ProtocolException('],
       status: ['val kind = m["kind"].str()?.takeIf { it in Leases.LEASE_KINDS } ?: return null',
         'val unattended = m["unattended"].bool() ?: return null',
-        'if (kind != "take" && unattended) return null',
+        'if (kind == "computer_use" && unattended) return null',
         'val name = m["name"] ?: return null',
-        'if (if (kind == "take") !Leases.isTakeName(name) else name !is JsonNull) return null'],
-      kinds: /val LEASE_KINDS = listOf\("computer_use", "take"\)/
+        'if (if (kind == "computer_use") name !is JsonNull else !Leases.isTakeName(name)) return null'],
+      kinds: /val LEASE_KINDS = listOf\("computer_use", "take", "task"\)/
     }
   };
   for (const [label, core] of Object.entries(CORES)) {
@@ -1101,10 +1101,11 @@ describe('take leases on the phones', () => {
       const src = read(core.file);
       assert.deepEqual([...core.list(src, 'take')].sort(), nodeKeys('take-grant', 'take'), 'the take key list');
       assert.deepEqual([...core.list(src, 'computer_use')].sort(), nodeKeys('grant-valid', 'computer_use'), 'the computer_use key list');
+      assert.deepEqual([...core.list(src, 'task')].sort(), nodeKeys('task-grant', 'task'), 'the task key list');
       assert.equal(Number(src.match(core.caps[0])[1]), protocol.MAX_MINUTES);
       assert.equal(Number(src.match(core.caps[1])[1]), protocol.TAKE_MAX_MINUTES);
       assert.equal(protocol.TAKE_MAX_MINUTES, 240);
-      assert.deepEqual(protocol.LEASE_KINDS, ['computer_use', 'take']);
+      assert.deepEqual(protocol.LEASE_KINDS, ['computer_use', 'take', 'task']);
       assert.match(src, core.kinds);
       // checkLease's max_minutes by kind, the grant's cap (the request's, and never past the kind's), the status rules.
       assert.equal(count(src, core.maxRange), 1, 'max_minutes by kind');
@@ -1150,6 +1151,129 @@ describe('take leases on the phones', () => {
       for (const n of ['take-grant', 'take-grant-minutes-over-cap', 'take-request-missing-name', 'computer-use-with-unattended', 'status-take']) {
         assert.ok(read(f).includes(`"${n}"`), `${f} ${n}`);
       }
+    }
+  });
+});
+
+// Revised 2026-11-03 (tasks stage 1 spec §4.6, §4.9): a task is a lease of a
+// third kind. The owner approves it with one press on a host-built card, and a
+// running task has a Stop and no live view: it has no frames.
+describe('task leases on the phones', () => {
+  const protocol = require('../src/gui/lease-protocol.js');
+  const IOS_CORE = 'mobile/ios/KLProtocol/Sources/KLProtocol/Lease.swift';
+  const ANDROID_CORE = 'mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/Lease.kt';
+  const ANDROID_LIST = 'mobile/android/protocol/src/main/kotlin/com/example/kinglouie/protocol/ApprovalList.kt';
+  const IOS_VIEWS = 'mobile/ios/App/LeaseViews.swift';
+  const IOS_MODEL = 'mobile/ios/App/AppModel.swift';
+  const ANDROID_SCREEN = 'mobile/android/app/src/main/kotlin/com/example/kinglouie/LeaseScreens.kt';
+  const ANDROID_MODEL = 'mobile/android/app/src/main/kotlin/com/example/kinglouie/AppModel.kt';
+  const ANDROID_LIST_SCREEN = 'mobile/android/app/src/main/kotlin/com/example/kinglouie/Screens.kt';
+  const SWIFT_VECTOR_TEST = 'mobile/ios/KLProtocol/Tests/KLProtocolTests/LeaseVectorTests.swift';
+  const KOTLIN_VECTOR_TEST = 'mobile/android/protocol/src/test/kotlin/com/example/kinglouie/protocol/LeaseVectorTest.kt';
+  const CARD_WORDS = ['Task: ', 'Sites: ', 'May: ', 'click and type in your signed-in browser', 'sign in with saved logins', 'run shell commands', 'write files',
+    'May: read only', 'For: 1 minute"', ' minutes', 'Spend up to ', 'Node: '];
+
+  for (const [label, file] of [['iOS', IOS_CORE], ['Android', ANDROID_CORE]]) {
+    it(`${label} core holds the node's allows and spend cap, and the card's words`, () => {
+      const src = read(file);
+      assert.match(src, /"task"/);
+      for (const a of protocol.TASK_ALLOWS) assert.ok(src.includes(`"${a}"`), a);
+      assert.equal(Number(src.match(/(?:taskUsdMax|TASK_USD_MAX) = (\d+)\n/)[1]), protocol.TASK_USD_MAX);
+      assert.equal(Number(src.match(/(?:taskUsdMin|TASK_USD_MIN) = (\d+)\n/)[1]), protocol.TASK_USD_MIN);
+      for (const w of CARD_WORDS) assert.ok(src.includes(w), w);
+      assert.ok(src.includes('Task on '), 'the running row\'s words');
+    });
+  }
+
+  it('a task grant signs no apps and the minutes the card shows, in the core and from both screens', () => {
+    const swift = read(IOS_CORE);
+    assert.equal(count(swift, 'guard chosen.isEmpty else { throw'), 1);
+    assert.equal(count(swift, 'guard minutes == request.maxMinutes else { throw'), 1);
+    const kotlin = read(ANDROID_CORE);
+    assert.equal(count(kotlin, 'if (chosen.isNotEmpty()) throw ProtocolException('), 1);
+    assert.equal(count(kotlin, 'if (minutes != request.maxMinutes) throw ProtocolException('), 1);
+    const ios = read(IOS_VIEWS);
+    assert.equal(count(ios, 'await model.decideLease(item, apps: [], minutes: item.request.maxMinutes, grant: true)'), 1);
+    const android = read(ANDROID_SCREEN);
+    assert.equal(count(android, 'model.decideLease(item, emptySet(), item.request.maxMinutes, grant = true)'), 1);
+    // A row's own Allow: every requested app (a task has none) and max_minutes.
+    assert.equal(count(read(ANDROID_MODEL), 'decideLease(item, item.request.apps.map { it.id }.toSet(), item.request.maxMinutes, grant = true)'), 1);
+  });
+
+  it('a task card has no app switches and no duration stepper: every screen is the card\'s lines', () => {
+    const ios = read(IOS_VIEWS);
+    const iosTask = section(ios, 'if item.request.isTask {\n                // The whole card', '} else if item.request.isTake {');
+    assert.ok(iosTask.includes('Leases.taskLines(item.request, nodeName: item.nodeName)'));
+    none(iosTask, ['appsSection', 'minutesSection', 'Toggle', 'Stepper', 'reasonSection'], 'the iOS task card');
+    const android = read(ANDROID_SCREEN);
+    const taskScreen = section(android, 'private fun TaskRequestScreen(', '\n}\n');
+    assert.ok(taskScreen.includes('Leases.taskLines(item.request, item.nodeName)'));
+    none(taskScreen, ['Switch(', 'LeaseMinutes(', 'item.request.reason'], 'the Android task card');
+    assert.ok(android.includes('if (item.request.isTask) return TaskRequestScreen(model, item, back)'));
+    // The row in the Android list is the same card, in full, over its Allow.
+    const list = read(ANDROID_LIST);
+    assert.ok(list.includes('cardLines = if (r.isTask) Leases.taskLines(r, item.nodeName) else emptyList()'));
+    const rowBody = section(read(ANDROID_LIST_SCREEN), 'private fun RowBody(', '\n}\n');
+    assert.ok(rowBody.includes('if (row.cardLines.isNotEmpty()) for (line in row.cardLines) Text(line'));
+  });
+
+  it('no live view: a running task is a row with Stop, on both phones', () => {
+    const list = read(ANDROID_LIST);
+    assert.ok(list.includes('s.kind == "task" -> Leases.taskTitle(lease.nodeName, s.name ?: "")'));
+    assert.ok(list.includes('hasDetail = s.kind != "task"'));
+    const model = read(ANDROID_MODEL);
+    // Android: no follow after Allow, no open from a row, and a pushed lease's task goes to the list.
+    assert.ok(model.includes('if (grant && item.request.isTask) noteListedLease('));
+    assert.ok(section(model, 'fun open(row: ApprovalList.Row) {', 'ApprovalList.Kind.NODE_CHECK').includes('if (!row.hasDetail) null else'));
+    assert.ok(section(model, 'private suspend fun pushedLease(', '\n    }\n').includes('taskNotice(id)?.let { listNotice = it; return null }'));
+    assert.match(read(ANDROID_LIST_SCREEN), /if \(row\.kind == ApprovalList\.Kind\.NODE_CHECK \|\| !row\.hasDetail\) ItemCard\(color = tint\)/);
+    // iOS: no live view after Allow, and its banner row is text with the same Stop.
+    const iosModel = read(IOS_MODEL);
+    assert.ok(iosModel.includes('noteListedLease(.object(["node_id": .string(item.request.nodeId), "status": result?["status"] ?? .null]), deviceId: key.deviceId)'));
+    const banner = section(read(IOS_VIEWS), 'struct LeaseBanner: View {', 'Button("Stop", role: .destructive)');
+    assert.ok(banner.includes('if let task = model.runningTask(lease) {'));
+    assert.ok(banner.includes('Leases.taskTitle(nodeName: lease.nodeName, name: task)'));
+    // A task is not a take: its unattended status never reads as "Unattended take:".
+    assert.ok(iosModel.includes('status.kind == "take", status.unattended'));
+    assert.ok(model.includes('status.kind != "take" || !status.unattended'));
+  });
+
+  // Fix round 1. The prompt is what the owner reads as he stops it, so it reads the status its node signed.
+  it('Stop says what it stops: a task by its checked name and node, with one signature', () => {
+    const kt = section(read(ANDROID_MODEL), 'fun killSwitch() {', '\n    }\n');
+    assert.ok(kt.includes('val signedStatus = live.lastStatus?.let { envelope -> storage.nodes.firstOrNull { it.id == live.nodeId }?.let { Leases.verifiedMessage(envelope, it) } }'));
+    assert.ok(kt.includes('if (task) "Stop this task" else "Stop computer use now"'));
+    assert.ok(kt.includes('Leases.taskStopName(signedStatus)?.let { "${promptText(it, 40)} on $node" } ?: node'));
+    assert.equal(count(kt, 'signEnvelope(k,'), 1);
+    const swift = section(read(IOS_MODEL), 'func killSwitch() async {', '// Read again: the prompt took time.');
+    assert.ok(swift.includes('let signedStatus = live.lastStatus.flatMap { envelope in state.nodes.first(where: { $0.id == live.nodeId }).flatMap { Leases.verifiedMessage(envelope, pin: $0) } }'));
+    assert.ok(swift.includes('"Stop this task: \\(Self.promptText($0, 40)) on \\(node)"'));
+    assert.ok(swift.includes('"Stop this task on \\(node)"'));
+    assert.ok(swift.includes('"Stop computer use on \\(node) now"'));
+    assert.equal(count(swift, 'key.signEnvelope('), 1);
+    // The name in a prompt is only ever the checked one.
+    for (const core of [read(IOS_CORE), read(ANDROID_CORE)]) assert.match(core, /taskStopName[\s\S]{0,120}isTakeName/);
+  });
+
+  it('a card says one minute; an allow with no words is not read; a pending task says task', () => {
+    const swift = read(IOS_CORE);
+    const kotlin = read(ANDROID_CORE);
+    assert.ok(swift.includes('lines.append(request.maxMinutes == 1 ? "For: 1 minute" : "For: \\(request.maxMinutes) minutes")'));
+    assert.ok(kotlin.includes('lines.add(if (request.maxMinutes == 1) "For: 1 minute" else "For: ${request.maxMinutes} minutes")'));
+    assert.ok(swift.includes('{ taskAllows.contains($0) && taskMayWords($0) != nil }'));
+    assert.ok(kotlin.includes('{ it in TASK_ALLOWS && taskMayWords(it) != null }'));
+    assert.ok(read(IOS_MODEL).includes('Leases.pendingDetail(signedGrant: signedLeaseGrants[lease.leaseId] != nil, task: runningTask(lease) != nil)'));
+    assert.ok(read(ANDROID_LIST).includes('Leases.pendingDetail(lease.signedGrant, s.kind == "task")'));
+    const words = /request for a task is waiting for a phone's answer\. This phone does not remember allowing it\./;
+    assert.match(swift, words);
+    assert.match(kotlin, words);
+  });
+
+  it('both vector tests name every task vector', () => {
+    const consumed = fs.readdirSync(path.join(ROOT, 'tests', 'vectors', 'lease-v1')).filter((f) => /^(task-|computer-use-grant-no-apps|take-grant-no-apps)/.test(f)).map((f) => f.replace(/\.json$/, ''));
+    assert.equal(consumed.length, 25);
+    for (const f of [SWIFT_VECTOR_TEST, KOTLIN_VECTOR_TEST]) {
+      for (const n of consumed) assert.ok(read(f).includes(`"${n}"`), `${f} ${n}`);
     }
   });
 });

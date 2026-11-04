@@ -9,9 +9,9 @@ import org.junit.Test
 /** Spec 2026-10-28-push-notifications-design.md §7.1, §7.2 (R-PU-4, C-6, C-8). */
 class PushTextTest {
     @Test
-    fun acceptsTheEightKindsAndNothingElse() {
+    fun acceptsTheNineKindsAndNothingElse() {
         assertEquals(
-            setOf("approval", "question", "lease", "pairing", "alert", "session_ended", "session_paused", "test"),
+            setOf("approval", "question", "lease", "pairing", "alert", "session_ended", "session_paused", "task_ended", "test"),
             PushText.KINDS
         )
         assertFalse("grant" in PushText.KINDS)
@@ -97,6 +97,19 @@ class PushTextTest {
         assertEquals(PushText.SESSIONS_CHANNEL, PushText.channel("session_paused", 1))
         assertEquals("4 waiting", PushText.approvalText("session_ended", "gpu-box", 4))
         assertTrue(PushText.opensList("session_ended", 4))
+    }
+
+    /** Tasks stage 1: `{ k, rid, n }`, its own notification keyed by the task, and a tap opens the list: a task has no live view. */
+    @Test
+    fun taskEnded() {
+        assertEquals("A task ended on gpu-box", PushText.otherText("task_ended", "gpu-box"))
+        assertEquals("A task ended", PushText.otherText("task_ended", ""))
+        assertEquals("task-ended:t-1", PushText.tag("task_ended", "t-1"))
+        assertEquals(PushText.SESSIONS_CHANNEL, PushText.channel("task_ended"))
+        assertFalse(PushText.joinsApprovals("task_ended", 1))
+        assertTrue(PushText.opensList("task_ended", 1))
+        assertEquals("approvals", PushText.tag("task_ended", "t-1", 3))
+        assertEquals(PushText.APPROVALS_CHANNEL, PushText.channel("task_ended", 3))
     }
 
     @Test

@@ -102,7 +102,7 @@ describe('the MCP endpoint', () => {
     const t = await start();
     const { id } = await session(t);
     const list = await rpc(t, { jsonrpc: '2.0', id: 3, method: 'tools/list' }, { session: id });
-    assert.deepEqual(list.json.result.tools.map((x) => x.name).sort(), ['describe_machine', 'get_job', 'get_job_logs', 'get_state', 'list_machines']);
+    assert.deepEqual(list.json.result.tools.map((x) => x.name).sort(), ['describe_machine', 'get_job', 'get_job_logs', 'get_state', 'get_task', 'list_machines', 'list_tasks']);
     const call = await rpc(t, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'run_runbook', arguments: { machine: 'web-01', runbook: 'site.status' } } }, { session: id });
     assert.equal(call.json.result.isError, true);
     assert.deepEqual(JSON.parse(call.json.result.content[0].text), { error: 'insufficient_scope', message: 'insufficient_scope: this client was not granted fleet:run', required: 'fleet:run' });

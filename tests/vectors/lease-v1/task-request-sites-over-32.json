@@ -1,0 +1,27 @@
+{
+  "name": "task-request-sites-over-32",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": "request",
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "node": {
+      "id": "kl-hnef32472qzibi5r",
+      "name": "gpu-box",
+      "key": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950"
+    }
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-hnef32472qzibi5r",
+    "payload": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsImxlYXNlIjp7ImFsbG93cyI6WyJicm93c2VyLWFjdCJdLCJqb2JfaWQiOiJqb2ItMTc1ODY1MDY1MTIwMS1hMWIyYzMiLCJraW5kIjoidGFzayIsImxpbWl0cyI6W10sIm1heF9taW51dGVzIjoyMCwibmFtZSI6IkZpbmQgYSBkZW50aXN0IiwicmVhc29uIjoiRW50ZXIgdGhlIHRvdGFscyIsInJlc3VtZXMiOm51bGwsInNpdGVzIjpbInMwLmV4YW1wbGUuY29tIiwiczEuZXhhbXBsZS5jb20iLCJzMi5leGFtcGxlLmNvbSIsInMzLmV4YW1wbGUuY29tIiwiczQuZXhhbXBsZS5jb20iLCJzNS5leGFtcGxlLmNvbSIsInM2LmV4YW1wbGUuY29tIiwiczcuZXhhbXBsZS5jb20iLCJzOC5leGFtcGxlLmNvbSIsInM5LmV4YW1wbGUuY29tIiwiczEwLmV4YW1wbGUuY29tIiwiczExLmV4YW1wbGUuY29tIiwiczEyLmV4YW1wbGUuY29tIiwiczEzLmV4YW1wbGUuY29tIiwiczE0LmV4YW1wbGUuY29tIiwiczE1LmV4YW1wbGUuY29tIiwiczE2LmV4YW1wbGUuY29tIiwiczE3LmV4YW1wbGUuY29tIiwiczE4LmV4YW1wbGUuY29tIiwiczE5LmV4YW1wbGUuY29tIiwiczIwLmV4YW1wbGUuY29tIiwiczIxLmV4YW1wbGUuY29tIiwiczIyLmV4YW1wbGUuY29tIiwiczIzLmV4YW1wbGUuY29tIiwiczI0LmV4YW1wbGUuY29tIiwiczI1LmV4YW1wbGUuY29tIiwiczI2LmV4YW1wbGUuY29tIiwiczI3LmV4YW1wbGUuY29tIiwiczI4LmV4YW1wbGUuY29tIiwiczI5LmV4YW1wbGUuY29tIiwiczMwLmV4YW1wbGUuY29tIiwiczMxLmV4YW1wbGUuY29tIiwiczMyLmV4YW1wbGUuY29tIl0sInVuYXR0ZW5kZWQiOnRydWUsInVzZCI6Mn0sImxlYXNlX2hhc2giOiIzQkFNSy1Lam10LW81YjZSODN6UGtnVUxfUEZPVFN5eVJvT1IyREF2OU9jIiwibGVhc2VfaWQiOiIyMDUzOTE4NS0xYzViLTQ5NjgtYjBjZi1kNzVmZTM4MDIyYmUiLCJub2RlX2lkIjoia2wtaG5lZjMyNDcycXppYmk1ciIsIm5vZGVfbmFtZSI6ImdwdS1ib3giLCJub25jZSI6InRFMU9TT2VPWW81SktUa3VYYzBOMWQ3VEZqb2ZFX1l5SnRWVUV1ZGE5WG8iLCJvcmlnaW4iOnsiY2xpZW50IjoiY2xhdWRlLmFpIiwiam9iX2lkIjoiam9iLTE3NTg2NTA2NTEyMDEtYTFiMmMzIiwic2Vzc2lvbiI6Im1jcC1zZXNzaW9uLTEifSwicmVxdWVzdF9pZCI6ImY1N2Q2MDc5LWQ0MGUtNDUxOC1hMThhLTY5NmZmYTU1MjRiMyIsInR5cGUiOiJrbC5sZWFzZS5yZXF1ZXN0IiwidiI6MX0",
+    "sig": "CKQxEH-mSCByhnlOaec9aR0Ewru0Mfkdy0X5V-ihGwsstXekmPerVItyT3s-Y1cFD49wfy07aVxRUbmQGuHSDQ"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "malformed"
+  }
+}

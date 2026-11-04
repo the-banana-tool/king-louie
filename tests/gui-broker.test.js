@@ -195,6 +195,15 @@ describe('no lease manager, no input (review finding 4)', () => {
   });
 });
 
+describe('a task lease has no apps, so no input', () => {
+  it('input with no leased app is refused before the helper hears of it', async () => {
+    const { b, channel } = broker();
+    channel.connect();
+    assert.equal(await code(b.input({ kind: 'key', mods: [], key: 'a', repeat: 1 }, { jobId: 'job-1', leaseId: 'l1', appIds: [], yieldMs: 0 })), 'app_not_running');
+    assert.deepEqual(channel.requests.filter((r) => r.op === 'input'), []);
+  });
+});
+
 describe('capability lifecycle', () => {
   it('available only between ready and closed, advertising only probed sub-capabilities', () => {
     const { b, channel } = broker();

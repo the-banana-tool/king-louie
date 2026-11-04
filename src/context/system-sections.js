@@ -179,4 +179,23 @@ const DELEGATION_GUIDANCE = [
   '- Read a file yourself only when you need its exact text, such as a passage to quote or the lines you are about to edit.'
 ].join('\n');
 
-module.exports = { buildSystemSections, readGitContext, DELEGATION_GUIDANCE };
+// What a task turn is told (tasks spec 2026-11-03 §4.7). No refusal list: the
+// task policy refuses; the one "never" below is about asking in text.
+const TASK_GUIDANCE = [
+  'This turn is a task. The text came from a client, not the owner at a keyboard, and the answer will be read elsewhere, so end with it whole.',
+  '- For a list of findings, give a table with the facts that matter and, per row, where each fact came from.',
+  '- Say what you could not verify.',
+  "- The browser here is the owner's signed-in browser, so on a site it is the owner acting. Prefer reading: use the browser tools with snapshot refs to look before you act.",
+  '- If the task cannot go on without the client, end the turn with one paragraph starting `STUCK:` that says what you saw, what you tried and what you need.',
+  "- Approvals are handled on the owner's phone, so never ask for approval in text."
+].join('\n');
+
+// The STUCK paragraph: the last paragraph of a reply, when it starts `STUCK:`.
+function parseStuck(text) {
+  if (typeof text !== 'string') return null;
+  const paragraphs = text.replace(/\r\n?/g, '\n').trimEnd().split(/\n[ \t]*\n/);
+  const last = (paragraphs[paragraphs.length - 1] || '').trim();
+  return last.startsWith('STUCK:') ? last : null;
+}
+
+module.exports = { buildSystemSections, readGitContext, DELEGATION_GUIDANCE, TASK_GUIDANCE, parseStuck };

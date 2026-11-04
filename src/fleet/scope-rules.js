@@ -28,8 +28,17 @@ const REQUIRED_SCOPE = Object.freeze({
   run_runbook: 'fleet:run',
   cancel_job: 'fleet:run',
   delegate: 'fleet:delegate',
-  send_to_job: 'fleet:delegate'
+  send_to_job: 'fleet:delegate',
+  run_task: 'fleet:delegate',
+  send_to_task: 'fleet:delegate',
+  cancel_task: 'fleet:delegate',
+  get_task: 'fleet:read',
+  list_tasks: 'fleet:read'
 });
+
+// A task is made of unsafe calls, so what starts or moves one also needs
+// fleet:unsafe on the machine, up front, never half-run (tasks spec §3).
+const NEEDS_UNSAFE = new Set(['run_task', 'send_to_task', 'cancel_task']);
 
 // Runbook tiers that fleet:run covers on its own. Every other tier, including
 // one this module does not know, also needs fleet:unsafe. `null` means the
@@ -121,7 +130,7 @@ function allows(scopes, tool, opts = {}) {
   const targeted = 'machine' in o && o.machine !== null;
   if (targeted && !entryCovers(entry, o.machine)) return { ok: false, code: 'unknown_machine', required: need };
   const tier = o.tier === undefined ? null : o.tier;
-  if (tool === 'run_runbook' && !TIERS_WITHOUT_UNSAFE.has(tier)) {
+  if (NEEDS_UNSAFE.has(tool) || (tool === 'run_runbook' && !TIERS_WITHOUT_UNSAFE.has(tier))) {
     const unsafe = entryFor(list, 'fleet:unsafe');
     // Scope-only (no machine) accepts a machine-limited fleet:unsafe; the router always re-checks with the machine.
     if (!unsafe || (targeted && !entryCovers(unsafe, o.machine))) return { ok: false, code: 'insufficient_scope', required: 'fleet:unsafe' };

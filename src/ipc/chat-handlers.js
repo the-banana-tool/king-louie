@@ -81,6 +81,8 @@ async function refreshProvider(availability, provider) {
   return null;
 }
 
+const TASK_RUNNING_MESSAGE = 'A task is still running in this chat. Send your message when it has finished.';
+
 function registerChatHandlers(ipcMain, context = {}) {
   const {
     createId,
@@ -125,8 +127,14 @@ function registerChatHandlers(ipcMain, context = {}) {
   // controller in the set and clears the whole entry.
   const activeRuns = new Map();
   // Owner decision Q29: case:attach refuses a chat while a turn runs in it
-  // (src/ipc/case-handlers.js reads this from the context the two share).
-  context.isChatRunning = (chatId) => activeRuns.has(chatId);
+  // (src/ipc/case-handlers.js reads this from the context the two share). A
+  // task's turn counts (tasks spec 2026-11-03 §4.3): src/fleet/start.js sets
+  // isTaskChatRunning while the node runs, so it is read on every call.
+  context.isChatRunning = (chatId) => activeRuns.has(chatId) || context.isTaskChatRunning?.(chatId) === true;
+
+  const assertNoTaskRunning = (chatId) => {
+    if (context.isTaskChatRunning?.(chatId) === true) throw Object.assign(new Error(TASK_RUNNING_MESSAGE), { code: 'CHAT_BUSY' });
+  };
 
   const findChat = (chatId, options = { messages: true }) => {
     const id = String(chatId || '').trim();
@@ -418,6 +426,11 @@ function registerChatHandlers(ipcMain, context = {}) {
       throw new Error('Message text or at least one attachment is required.');
     }
 
+    // A task's turn holds its chat. Two owner sends may overlap (see activeRuns), but an owner's
+    // words landing in a client's run would be read by that run as the client's. Before anything
+    // is begun or stored.
+    assertNoTaskRunning(chatId);
+
     // Resolve working directory: per-chat > process.cwd()
     const chatForDir = findChat(chatId, { messages: true });
     const chatWorkingDirectory = chatForDir?.workingDirectory || process.cwd();
@@ -647,8 +660,10 @@ function registerChatHandlers(ipcMain, context = {}) {
             // A message a Telegram/Discord bridge appended on a remote
             // sender's behalf is stamped sender: 'user' too, but it is not
             // the owner talking in this chat — a channel tag (F5) excludes
-            // it from the quote-verified owner-message pool.
-            const owned = chatRaw.messages.filter((m) => m.sender === 'user' && !m.channel && typeof m.text === 'string' && m.text);
+            // it from the quote-verified owner-message pool. So does a
+            // task's client (tasks spec 2026-11-03 §4.3): a task chat attached
+            // to a case keeps the rows its client wrote, marked.
+            const owned = chatRaw.messages.filter((m) => m.sender === 'user' && !m.channel && m.author !== 'client' && typeof m.text === 'string' && m.text);
             const messages = owned.map((m) => m.text);
             ownerMessageTimes = owned.map((m) => m.timestamp || null);
             const nowIso = new Date().toISOString();
@@ -1080,6 +1095,8 @@ function registerChatHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CHAT_TRUNCATE_FROM, wrapHandler(IPC.CHAT_TRUNCATE_FROM, async (_event, { chatId, fromIndex }) => {
+    // A Resend truncates, then sends: refused here, it has removed nothing.
+    assertNoTaskRunning(chatId);
     const chat = findChat(chatId, { messages: true });
     if (!chat) throw new Error('Chat not found');
     if (!Number.isInteger(fromIndex) || fromIndex < 0 || fromIndex >= chat.messages.length) {

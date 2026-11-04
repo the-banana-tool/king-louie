@@ -10,10 +10,15 @@
 // the grant that started it (ruling T11-owner): the cache records that owner
 // and every cached read and every watch checks it; another grant is told the
 // job does not exist. Clients only ever see public job ids.
+//
+// A task (tasks spec §4.1, §4.2, §4.4) is the node's: the router places it,
+// forwards it and rewrites its id, and keeps nothing of it. Every grant that
+// may read the node reads its tasks, so the job cache is not consulted, and an
+// offline node has no cached answer.
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const { createLogger } = require('../../logging');
-const { MCP_TOOLS, untrustedOutput } = require('../../fleet/tool-definitions');
+const { MCP_TOOLS, TASK_TOOL_NAMES, WAIT_MS_MAX, untrustedOutput } = require('../../fleet/tool-definitions');
 const { REQUIRED_SCOPE, allows, machineVisible } = require('../../fleet/scope-rules');
 const { LinkRpcError } = require('../../approvals/link-rpc');
 const { GRANT_ID_RE } = require('../protocol/messages');
@@ -32,7 +37,12 @@ const METHODS = Object.freeze({
   send_to_job: 'fleet.send_to_job',
   get_job: 'fleet.get_job',
   get_job_logs: 'fleet.get_job_logs',
-  cancel_job: 'fleet.cancel_job'
+  cancel_job: 'fleet.cancel_job',
+  run_task: 'fleet.run_task',
+  get_task: 'fleet.get_task',
+  send_to_task: 'fleet.send_to_task',
+  cancel_task: 'fleet.cancel_task',
+  list_tasks: 'fleet.list_tasks'
 });
 const JOB_TOOLS = new Set(['get_job', 'get_job_logs', 'send_to_job', 'cancel_job']);
 const CACHED_WHEN_OFFLINE = new Set(['describe_machine', 'get_state', 'get_job']);
@@ -49,6 +59,21 @@ const EARLY_UPDATE_MAX = 256;
 const GRANT_WRITE_LIMIT = 30;
 const GRANT_WRITE_WINDOW_MS = 60000;
 const OFFLINE_CODES = new Set(['offline', 'peer_disconnected', 'unknown_node', 'closed', 'not_linked']);
+// What each task tool also sends beside the id, the origin and max_bytes.
+const TASK_TOOLS = Object.freeze({ get_task: ['seen_seq', 'wait_ms'], send_to_task: ['message', 'wait_ms'], cancel_task: [] });
+const taskProps = (name) => MCP_TOOLS.find((t) => t.name === name).inputSchema.properties;
+const TASK_TEXT_MAX = taskProps('run_task').task.maxLength;
+const TASK_STATES = taskProps('list_tasks').state.enum;
+const TASK_LIST_MAX = 50;
+// A link failure that says the call never reached the node. Any other failure
+// may have come after the node began: the link has no request_id for a task, so
+// nothing here is ever sent twice, and the client is told to look instead.
+const NOT_SENT_CODES = new Set(['offline', 'unknown_node', 'not_linked', 'peer_busy', 'no_local_node']);
+const TASK_UNANSWERED = Object.freeze({
+  run_task: 'the task may have started; look with list_tasks, and do not run it again',
+  send_to_task: 'the message may have reached the task; look with get_task, and do not send it again',
+  cancel_task: 'the cancel may have landed; look with get_task, or send it again, which is safe: a cancel changes nothing on a task that has ended'
+});
 // The router's own calls (the catalog refresh after fleet.hello): read-only.
 // The node refuses any origin without a grant_id (Task 12), so the router
 // names itself with one that can never be a client's (GRANT_ID_RE).
@@ -66,6 +91,10 @@ const unknownMachine = (machine) => refusal('unknown_machine', `unknown_machine:
 // one only another grant's cache entry knows: existence never leaks.
 const jobNotFound = (publicId) => refusal('job_not_found', `job_not_found: no job "${publicId}" for this client`);
 const notAJobId = () => refusal('job_not_found', 'job_not_found: that is not a front-door job id (<machine>:<job>)');
+const taskNotFound = (publicId) => refusal('task_not_found', `task_not_found: no task "${publicId}" for this client`);
+const notATaskId = () => refusal('task_not_found', 'task_not_found: that is not a front-door task id (<machine>:<task>)');
+const badTaskAnswer = (name, machine) => refusal('bad_node_answer',
+  `bad_node_answer: ${machine} sent no usable task${TASK_UNANSWERED[name] ? `; ${TASK_UNANSWERED[name]}` : ''}`);
 
 // A grant the router can act for: a live grant record as GrantStore#live
 // returns it. Anything else reaches nothing.
@@ -74,6 +103,8 @@ const grantOk = (grant) => isPlainObject(grant) && typeof grant.grant_id === 'st
 // Whether a runbook of this tier needs fleet:unsafe, by scope-rules' own
 // table: fleet:run alone covers it or it does not.
 const needsUnsafe = (tier) => !allows(['fleet:run'], 'run_runbook', { tier }).ok;
+// The same for a task tool: its own scope alone covers it or it does not.
+const taskNeedsUnsafe = (tool) => !allows([REQUIRED_SCOPE[tool]], tool).ok;
 
 // logs / lines → output; a string result or reply → a one-item wrapper.
 // Whatever the node sent, it goes out labelled as data (§3.5).
@@ -83,6 +114,54 @@ function wrapUntrusted(reply) {
   if (Array.isArray(logs) || Array.isArray(lines)) out.output = untrustedOutput(Array.isArray(logs) ? logs : lines);
   for (const k of ['result', 'reply']) if (typeof out[k] === 'string') out[k] = untrustedOutput([out[k]]);
   return out;
+}
+
+// The fields a task tool passes on, by name; absent ones stay absent.
+function copied(args, keys) {
+  const out = {};
+  for (const k of keys) if (args[k] !== undefined && args[k] !== null) out[k] = args[k];
+  return out;
+}
+
+// What the router itself must know of a task call's arguments: wait_ms because
+// _sendTask adds it to the forward's timeout, the rest because they decide
+// placement or the fan-out. The node checks everything else.
+function taskArgsProblem(name, a) {
+  if (taskProps(name).wait_ms && a.wait_ms !== undefined && a.wait_ms !== null && !(Number.isInteger(a.wait_ms) && a.wait_ms >= 0 && a.wait_ms <= WAIT_MS_MAX)) {
+    return `"wait_ms" must be an integer from 0 to ${WAIT_MS_MAX}`;
+  }
+  if (name === 'run_task' && (typeof a.task !== 'string' || !a.task.trim() || a.task.length > TASK_TEXT_MAX)) return `"task" must be 1 to ${TASK_TEXT_MAX} characters`;
+  if (taskProps(name).node && a.node !== undefined && a.node !== null && (typeof a.node !== 'string' || !a.node)) return '"node" must be a node name';
+  if (name === 'list_tasks' && a.state !== undefined && a.state !== null && !TASK_STATES.includes(a.state)) return 'unknown task state';
+  return null;
+}
+
+// A node's task as a client sees it: the public id, the name the router knows
+// the node by, and its words labelled as data whatever the node sent.
+function taskView(machine, view) {
+  const out = { ...view, task_id: publicJobId(machine, view.task_id), node: machine };
+  if (typeof out.text === 'string') out.text = untrustedOutput([out.text]);
+  if (isPlainObject(out.answer) && typeof out.answer.text === 'string') out.answer = { ...out.answer, text: untrustedOutput([out.answer.text]) };
+  return out;
+}
+
+const createdAtMs = (row) => {
+  const at = Date.parse(row.created_at);
+  return Number.isNaN(at) ? 0 : at;
+};
+
+// What a list of several nodes leaves out: what each node's own page left out,
+// added up, and what the router's cap took. A node's note is not passed on.
+function mergedLeftOut(replies, cut) {
+  const left = replies.map((r) => (isPlainObject(r.left_out) ? r.left_out : {}));
+  const words = left.some((l) => l.words === true);
+  const tasks = cut + left.reduce((sum, l) => sum + (Number.isInteger(l.tasks) && l.tasks > 0 ? l.tasks : 0), 0);
+  if (!words && tasks === 0) return null;
+  const note = [
+    words ? 'Some rows have no text or answer; get_task reads one whole.' : null,
+    tasks > 0 ? `${tasks} more task(s) are not on this page; narrow with node or state.` : null
+  ].filter(Boolean).join(' ');
+  return { words, tasks, note };
 }
 
 // What the router keeps of a node's fleet.hello: typed and bounded, since
@@ -298,6 +377,7 @@ class FleetRouter extends EventEmitter {
     if (typeof name !== 'string' || !Object.hasOwn(METHODS, name)) return refusal('invalid_params', 'invalid_params: no such tool');
     const base = allows(origin.scopes, name);
     if (!base.ok) return scopeRefusal(base);
+    if (TASK_TOOL_NAMES.includes(name)) return this._callTask(name, a, grant, origin);
     const required = REQUIRED_SCOPE[name];
 
     let machine;
@@ -388,13 +468,13 @@ class FleetRouter extends EventEmitter {
     return { ok: false, error: { ...err, message } };
   }
 
-  async _forward(nodeId, method, params) {
+  async _forward(nodeId, method, params, { timeoutMs = this.timeoutMs } = {}) {
     const n = this.inflight.get(nodeId) || 0;
     if (n >= this.perNodeLimit || this.total >= this.totalLimit) throw Object.assign(new Error('busy'), { code: 'frontdoor_busy' });
     this.inflight.set(nodeId, n + 1);
     this.total += 1;
     try {
-      return await this.nodeHub.rpc(nodeId, method, params, { timeoutMs: this.timeoutMs });
+      return await this.nodeHub.rpc(nodeId, method, params, { timeoutMs });
     } finally {
       const left = (this.inflight.get(nodeId) || 1) - 1;
       if (left > 0) this.inflight.set(nodeId, left);
@@ -417,18 +497,163 @@ class FleetRouter extends EventEmitter {
     return refusal('node_error', `node_error: the call to ${machine} failed`);
   }
 
+  // Whether this grant may use `node` for a task tool: null, or the refusal.
+  // A machine it does not cover answers `denied`; a node it covers but
+  // without fleet:unsafe says so. Token and grant must both agree, as in
+  // _reaches, and a task tool that needs fleet:unsafe needs its pin as well.
+  _taskRefusal(grant, scopes, tool, node, denied) {
+    const check = allows(scopes, tool, { machine: node.node_name });
+    if (!check.ok) return check.code === 'unknown_machine' ? denied : scopeRefusal(check);
+    if (!machineMatches(grant, REQUIRED_SCOPE[tool], node.node_name, node.node_id)) return denied;
+    if (taskNeedsUnsafe(tool) && !machineMatches(grant, 'fleet:unsafe', node.node_name, node.node_id)) {
+      return scopeRefusal({ code: 'insufficient_scope', required: 'fleet:unsafe' });
+    }
+    return null;
+  }
+
+  // The nodes run_task may place on: agent nodes that are online and that
+  // this grant may reach for it.
+  _place(grant, scopes) {
+    return this.registry.list().filter((r) => r.profile === 'agent' && this._online(r.node_id) && !this._taskRefusal(grant, scopes, 'run_task', r, true));
+  }
+
+  // A node the client named for run_task or list_tasks: { node } or { refused }.
+  _namedTaskNode(name, machine, grant, scopes) {
+    const node = this.registry.byName(machine);
+    const refused = node ? this._taskRefusal(grant, scopes, name, node, unknownMachine(machine)) : unknownMachine(machine);
+    if (refused) return { refused };
+    if (node.profile !== 'agent') return { refused: refusal('capability_unavailable', `capability_unavailable: ${machine} is a ${node.profile} node; tasks need profile: agent`) };
+    return { node };
+  }
+
+  async _callTask(name, a, grant, origin) {
+    const problem = taskArgsProblem(name, a);
+    if (problem) return refusal('invalid_params', `invalid_params: ${problem}`);
+    if (name === 'run_task') return this._runTask(a, grant, origin);
+    if (name === 'list_tasks') return this._listTasks(a, grant, origin);
+
+    const parsed = parsePublicJobId(a.task_id);
+    if (!parsed) return notATaskId();
+    const { machine, nodeJobId: taskId } = parsed;
+    const publicId = publicJobId(machine, taskId);
+    const node = this.registry.byName(machine);
+    if (!node || node.profile !== 'agent') return taskNotFound(publicId);
+    const refused = this._taskRefusal(grant, origin.scopes, name, node, taskNotFound(publicId));
+    if (refused) return refused;
+    if (!this._online(node.node_id)) return offline(machine);
+    return this._sendTask(name, node, { origin, max_bytes: this.maxBytes, task_id: taskId, ...copied(a, TASK_TOOLS[name]) }, taskId);
+  }
+
+  // Tasks spec §4.2: a node named, else the only one, else ask the client.
+  async _runTask(a, grant, origin) {
+    let node;
+    let by = 'named';
+    if (a.node === undefined || a.node === null) {
+      const eligible = this._place(grant, origin.scopes);
+      if (eligible.length !== 1) {
+        const nodes = eligible.map((r) => ({ name: r.node_name, capabilities: this._capabilities(r), online: true }))
+          .sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
+        return { needs_placement: true, nodes };
+      }
+      [node] = eligible;
+      by = 'only-node';
+    } else {
+      const named = this._namedTaskNode('run_task', a.node, grant, origin.scopes);
+      if (named.refused) return named.refused;
+      ({ node } = named);
+      if (!this._online(node.node_id)) return offline(a.node);
+    }
+    return this._sendTask('run_task', node, { origin, max_bytes: this.maxBytes, task: a.task, placement: { by }, ...copied(a, ['wait_ms']) });
+  }
+
+  // One forward, never repeated (see NOT_SENT_CODES). `taskId`: the node's id
+  // of the task the client named; run_task takes it from the reply. The node
+  // holds the reply for wait_ms, so the forward gets the router's whole timeout
+  // on top of that: a full hold never reads as an unanswered call.
+  async _sendTask(name, node, params, taskId = null) {
+    const machine = node.node_name;
+    const timeoutMs = this.timeoutMs + (params.wait_ms || 0);
+    let reply;
+    try {
+      reply = await this._forward(node.node_id, METHODS[name], params, { timeoutMs });
+    } catch (err) {
+      return this._taskForwardError(err, name, machine, timeoutMs);
+    }
+    if (!isPlainObject(reply)) return badTaskAnswer(name, machine);
+    const publicId = taskId === null ? null : publicJobId(machine, taskId);
+    if (reply.ok === false) {
+      if (publicId !== null && isPlainObject(reply.error) && reply.error.code === 'task_not_found') return taskNotFound(publicId);
+      return this._nodeRefusal(reply, taskId, publicId, machine);
+    }
+    const id = taskId === null ? reply.task_id : taskId;
+    if (typeof id !== 'string' || !NODE_JOB_ID_RE.test(id)) return badTaskAnswer(name, machine);
+    return taskView(machine, { ...reply, task_id: id });
+  }
+
+  _taskForwardError(err, name, machine, timeoutMs) {
+    const code = err ? err.code : null;
+    // A node from before tasks, which is not a reason to look for one.
+    if (code === 'unknown_method') return refusal('capability_unavailable', `capability_unavailable: ${machine} does not run tasks yet; upgrade it`);
+    const unanswered = TASK_UNANSWERED[name];
+    if (unanswered && code !== 'frontdoor_busy' && !NOT_SENT_CODES.has(code)) {
+      log.warn(`${name} on ${machine} went unanswered`, { code });
+      return refusal('task_unconfirmed', `task_unconfirmed: ${machine} did not answer; ${unanswered}`);
+    }
+    if (code === 'timeout') return refusal('node_timeout', `node_timeout: ${machine} did not answer within ${Math.round(timeoutMs / 1000)} s; call ${name} again`);
+    return this._forwardError(err, machine, null);
+  }
+
+  // Every reachable agent node at once, or the one named. A node that does not
+  // answer with a list is named in `unreachable`, so a short list never reads
+  // as all there is. Each node gets the whole page: what it had to leave out
+  // comes back in its left_out.
+  async _listTasks(a, grant, origin) {
+    let targets;
+    if (a.node === undefined || a.node === null) {
+      targets = this.registry.list().filter((r) => r.profile === 'agent' && !this._taskRefusal(grant, origin.scopes, 'list_tasks', r, true));
+    } else {
+      const named = this._namedTaskNode('list_tasks', a.node, grant, origin.scopes);
+      if (named.refused) return named.refused;
+      targets = [named.node];
+    }
+    const params = { origin, max_bytes: this.maxBytes, ...copied(a, ['state']) };
+    const answers = await Promise.all(targets.map(async (r) => {
+      if (!this._online(r.node_id)) return null;
+      try {
+        const reply = await this._forward(r.node_id, METHODS.list_tasks, params);
+        return isPlainObject(reply) && Array.isArray(reply.tasks) ? reply : null;
+      } catch (err) {
+        log.debug(`list_tasks on ${r.node_name} failed: ${err.message}`);
+        return null;
+      }
+    }));
+    const replies = answers.filter(Boolean);
+    const unreachable = targets.filter((_, i) => !answers[i]).map((r) => r.node_name).sort();
+    const rows = targets.flatMap((r, i) => (answers[i] ? answers[i].tasks : [])
+      .filter((row) => isPlainObject(row) && typeof row.task_id === 'string' && NODE_JOB_ID_RE.test(row.task_id))
+      .map((row) => ({ ...taskView(r.node_name, row), machine: r.node_name })));
+    rows.sort((x, y) => (createdAtMs(y) - createdAtMs(x)) || (x.task_id < y.task_id ? -1 : 1));
+    const leftOut = mergedLeftOut(replies, Math.max(0, rows.length - TASK_LIST_MAX));
+    return { tasks: rows.slice(0, TASK_LIST_MAX), unreachable, ...(leftOut ? { left_out: leftOut } : {}) };
+  }
+
+  // As the node last reported them: a change shows at its next connect.
+  _capabilities(record) {
+    const hello = (this.registry.presence(record.node_id) || {}).hello || {};
+    return Array.isArray(hello.capabilities) ? hello.capabilities : ((this.cache.node(record.node_id) || {}).capabilities || []);
+  }
+
   _listMachines(grant, scopes) {
     return this.registry.list()
       .filter((r) => machineVisible(scopes, r.node_name) && machineMatches(grant, REQUIRED_SCOPE.list_machines, r.node_name, r.node_id))
       .map((r) => {
         const p = this.registry.presence(r.node_id) || {};
         const cached = this.cache.node(r.node_id) || {};
-        const hello = p.hello || {};
         const gui = cached.catalog && cached.catalog.gui ? cached.catalog.gui : null;
         return {
           name: r.node_name,
           profile: r.profile,
-          capabilities: Array.isArray(hello.capabilities) ? hello.capabilities : (cached.capabilities || []),
+          capabilities: this._capabilities(r),
           online: Boolean(p.online),
           last_seen: p.last_seen || cached.last_seen || null,
           summary: `Node ${r.node_name} (${r.profile})`,

@@ -122,6 +122,9 @@ function createBridgeDispatcher({
 
   const bridgeContext = {
     ...context,
+    // This copy is made when the bridge opens, before the fleet starts and sets this on
+    // core.context, and it outlasts the fleet's stop: so it asks the core's on every call.
+    isTaskChatRunning: (chatId) => context.isTaskChatRunning?.(chatId) === true,
     runLlmCommand,
     getSettings: scope.getSettings,
     setSettings: scope.setSettings,

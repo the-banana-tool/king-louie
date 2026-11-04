@@ -1,0 +1,27 @@
+{
+  "name": "task-request-bad-site",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": "request",
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "node": {
+      "id": "kl-hnef32472qzibi5r",
+      "name": "gpu-box",
+      "key": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950"
+    }
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-hnef32472qzibi5r",
+    "payload": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsImxlYXNlIjp7ImFsbG93cyI6WyJicm93c2VyLWFjdCJdLCJqb2JfaWQiOiJqb2ItMTc1ODY1MDY1MTIwMS1hMWIyYzMiLCJraW5kIjoidGFzayIsImxpbWl0cyI6W10sIm1heF9taW51dGVzIjoyMCwibmFtZSI6IkZpbmQgYSBkZW50aXN0IiwicmVhc29uIjoiRW50ZXIgdGhlIHRvdGFscyIsInJlc3VtZXMiOm51bGwsInNpdGVzIjpbIkV4YW1wbGUuY29tIl0sInVuYXR0ZW5kZWQiOnRydWUsInVzZCI6Mn0sImxlYXNlX2hhc2giOiI1aTA2cTREQWRkRzRFZVpKRDBSZ1FoWXJWeTU1ZGRzRWtxTFZuUWwzT2hnIiwibGVhc2VfaWQiOiIwYzYyMmY3NS0xZGE5LTRmMTItODQyOC1jMzkyODM2N2IwYWEiLCJub2RlX2lkIjoia2wtaG5lZjMyNDcycXppYmk1ciIsIm5vZGVfbmFtZSI6ImdwdS1ib3giLCJub25jZSI6ImpPY2RMcnZpbkZoUDViVzZUT1B1XzRRLTVvS3BtMHZBdmdObXg4aGd3NVUiLCJvcmlnaW4iOnsiY2xpZW50IjoiY2xhdWRlLmFpIiwiam9iX2lkIjoiam9iLTE3NTg2NTA2NTEyMDEtYTFiMmMzIiwic2Vzc2lvbiI6Im1jcC1zZXNzaW9uLTEifSwicmVxdWVzdF9pZCI6ImJkMmY4M2E3LTU2NTQtNDRjMC1iNGVmLTQ2NWEwOWFiZTQ0NSIsInR5cGUiOiJrbC5sZWFzZS5yZXF1ZXN0IiwidiI6MX0",
+    "sig": "jKDi41oqxHycm8n-oF_d5T8bn5hyh2HApBe7ZxgvMFaOCXhh4x6iXaz5qqNPbkNw7OJXZwMrnLdoYFJIg_5lCg"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "malformed"
+  }
+}

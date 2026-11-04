@@ -69,6 +69,14 @@ function runOrigin({ executorOptions, event, local, helpers }) {
   return { client: 'king-louie', session, job_id: null };
 }
 
+// A task's run, and its children, may also work in the task's work dir (tasks
+// spec §4.3); every other path and every other run keep the node's roots.
+function policyForRun(nodePolicy, taskPolicy) {
+  const workDir = taskPolicy && taskPolicy.workDir;
+  if (!nodePolicy || typeof workDir !== 'string' || !workDir) return nodePolicy;
+  return { ...nodePolicy, allowed_roots: [...(nodePolicy.allowed_roots || []), workDir] };
+}
+
 // Phone-mode options merged into the ToolExecutor, plus the audit listeners.
 function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = null, origin, local, approvalRequester = null }) {
   // phoneApprover.ttlMs validity and the missing-nodePolicy/auditLedger
@@ -120,9 +128,11 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
     });
     // Demo takes spec §7.2: every take refusal, by the tool's name and the
     // code only; never the parameters (a URL, typed text).
+    // Tasks spec §4.8 likewise: a call a finished task may no longer make, and
+    // the owner's no to one beyond its grant.
     executor.on('approvalDenied', ({ toolName, deniedBy, code }) => {
-      if (deniedBy !== 'take') return;
-      append('take.refused', { tool: toolName, code: typeof code === 'string' ? code : null, origin });
+      if (deniedBy !== 'take' && deniedBy !== 'task') return;
+      append(`${deniedBy}.refused`, { tool: toolName, code: typeof code === 'string' ? code : null, origin });
     });
     executor.on('postExecute', ({ toolName, result }) => {
       const ok = Boolean(result) && result.success !== false && result.ok !== false;
@@ -154,7 +164,8 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
     // A marked (local) requester is kept; an unmarked one from a local event
     // is dropped so the on-screen dialog answers (requester null).
     const localRequester = helpers.isLocalRequester(approvalRequester) ? approvalRequester : null;
-    const phone = phoneExecutorOptions({ phoneApprover, auditLedger, nodePolicy, origin, local, approvalRequester: localRequester });
+    const taskPolicy = executorOptions.taskPolicy || (approvalRequester && approvalRequester.taskPolicy) || null;
+    const phone = phoneExecutorOptions({ phoneApprover, auditLedger, nodePolicy: policyForRun(nodePolicy, taskPolicy), origin, local, approvalRequester: localRequester });
     const toolExecutorOptions = { ...phone.options, denyAutoApproval };
     if (refuseUnsafe) {
       toolExecutorOptions.classifyCall = refuseUnsafeClassifier(phone.options.classifyCall || null);

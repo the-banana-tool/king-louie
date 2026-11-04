@@ -8,7 +8,7 @@ package com.example.kinglouie.protocol
  */
 object PushText {
     /** The relay's fcm kinds (`src/frontdoor/push/text.js` KINDS less `grant`, which goes to APNs only). */
-    val KINDS = setOf("approval", "question", "lease", "pairing", "alert", "session_ended", "session_paused", "test")
+    val KINDS = setOf("approval", "question", "lease", "pairing", "alert", "session_ended", "session_paused", "task_ended", "test")
 
     /** The kinds that share the one replaced notification with its running count. */
     val APPROVAL_KINDS = setOf("approval", "question", "lease", "pairing", "alert")
@@ -42,10 +42,11 @@ object PushText {
         }
     }
 
-    /** `session_ended`, `session_paused` and `test`. */
+    /** `session_ended`, `session_paused`, `task_ended` and `test`. */
     fun otherText(kind: String, node: String): String = when (kind) {
         "session_ended" -> on("Session ended", node)
         "session_paused" -> on("Session paused", node) + ": open to continue"
+        "task_ended" -> on("A task ended", node)
         else -> if (node.isEmpty()) "Test notification" else "Test notification from $node"
     }
 
@@ -66,15 +67,16 @@ object PushText {
         joinsApprovals(kind, items) -> APPROVALS_TAG
         kind == "session_ended" -> "ended:$rid"
         kind == "session_paused" -> "paused:$rid"
+        kind == "task_ended" -> "task-ended:$rid"
         else -> "test:$rid"
     }
 
     fun channel(kind: String, items: Int = 1): String =
-        if (!joinsApprovals(kind, items) && (kind == "session_ended" || kind == "session_paused")) SESSIONS_CHANNEL else APPROVALS_CHANNEL
+        if (!joinsApprovals(kind, items) && (kind == "session_ended" || kind == "session_paused" || kind == "task_ended")) SESSIONS_CHANNEL else APPROVALS_CHANNEL
 
-    /** A tap with a count above 1, a test, or a kind with no detail opens the Approvals list. */
+    /** A tap with a count above 1, a test, a finished task (no live view: a task has no frames), or a kind with no detail opens the Approvals list. */
     fun opensList(kind: String, count: Int): Boolean =
-        count > 1 || kind == "test" || kind !in KINDS
+        count > 1 || kind == "test" || kind == "task_ended" || kind !in KINDS
 
     private fun on(what: String, node: String): String = if (node.isEmpty()) what else "$what on $node"
 }

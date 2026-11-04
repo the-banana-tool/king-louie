@@ -21,7 +21,7 @@ const nopush = () => read(APP, 'nopush', ...KT, 'push', 'Push.kt');
 const main = (name) => read(APP, 'main', ...KT, name);
 const pushText = () => read(ROOT, 'mobile', 'android', 'protocol', 'src', 'main', ...KT, 'protocol', 'PushText.kt');
 
-const EIGHT = ['approval', 'question', 'lease', 'pairing', 'alert', 'session_ended', 'session_paused', 'test'];
+const NINE = ['approval', 'question', 'lease', 'pairing', 'alert', 'session_ended', 'session_paused', 'task_ended', 'test'];
 
 function section(text, start, end) {
   const a = text.indexOf(start);
@@ -40,7 +40,7 @@ function appKinds() {
 describe('Android push (spec 3 §7.2)', () => {
   it('the app accepts the relay\'s fcm kinds and ignores any other', () => {
     const kinds = appKinds();
-    assert.deepEqual([...kinds].sort(), [...EIGHT].sort());
+    assert.deepEqual([...kinds].sort(), [...NINE].sort());
     // The relay's list (src/frontdoor/push/text.js) less grant, which goes to
     // APNs only. Until T01 lands the relay knows only the first five; then the
     // two lists must be equal.
@@ -108,7 +108,19 @@ describe('Android push (spec 3 §7.2)', () => {
     assert.match(code(fcm()), /putExtra\(Push\.EXTRA_COUNT, count\)/);
     const pushed = section(main('AppModel.kt'), 'fun openPushed(kind: String, id: String, count: Int = 1)', '\n    }\n');
     assert.match(pushed, /if \(PushText\.opensList\(kind, count\)\) return/);
-    for (const k of EIGHT) assert.ok(pushed.includes(`"${k}"`), `openPushed names ${k}`);
+    for (const k of NINE) assert.ok(pushed.includes(`"${k}"`), `openPushed names ${k}`);
+  });
+
+  it('task_ended: a tap opens the Approvals list, with no live view', () => {
+    const text = pushText();
+    assert.match(section(text, 'fun opensList(kind: String, count: Int): Boolean =', '\n\n'), /kind == "task_ended"/);
+    assert.match(section(text, 'fun otherText(kind: String, node: String): String = when (kind) {', '\n    }'), /"task_ended" -> on\("A task ended", node\)/);
+    const pushed = section(main('AppModel.kt'), 'fun openPushed(kind: String, id: String, count: Int = 1)', '\n    }\n');
+    assert.match(pushed, /"test", "task_ended" -> return@launch/);
+    // Only the lease kinds go to pushedLease, which is what can open a live view.
+    assert.match(pushed, /"lease", "session_paused", "session_ended" -> pushedLease\(api, kind, id\)/);
+    // The relay's payload for it is content-free: the app reads k, rid and n and nothing else of it.
+    assert.ok(!code(fcm()).includes('task_ended'), 'Push.kt treats it through PushText alone');
   });
 });
 

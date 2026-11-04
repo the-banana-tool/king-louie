@@ -44,10 +44,23 @@ class LeaseVectorTest {
                 "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "view-node-sig-valid", "view-tampered-frame",
                 // Revised 2026-10-24: the take lease.
                 "take-grant", "take-grant-minutes-over-cap", "take-request-missing-name", "computer-use-with-unattended", "status-take"
-            ) + listingVectors + readKeyVectors,
+            ) + listingVectors + readKeyVectors + taskRequestsAccepted + taskRequestsRefused + taskGrantsBuilt + taskGrantsRefused + taskStatuses,
             names
         )
     }
+
+    // Revised 2026-11-03: the task lease (tasks stage 1 spec §4.6, §4.9).
+    private val taskRequestsAccepted = listOf("task-request", "task-request-read-only")
+    private val taskRequestsRefused = listOf(
+        "task-request-allows-unsorted", "task-request-allows-repeated", "task-request-allows-unknown", "task-request-resumes",
+        "task-request-sites-over-32", "task-request-bad-site", "task-request-usd-under", "task-request-usd-over", "task-request-usd-fraction",
+        "task-request-attended", "task-request-minutes-over-240", "task-request-with-apps", "task-request-name-hidden", "task-request-name-too-long"
+    )
+    private val taskGrantsBuilt = listOf("task-grant", "task-grant-ignores-take-cap")
+    private val taskGrantsRefused = listOf(
+        "task-grant-with-apps", "task-grant-minutes-over-requested", "task-grant-minutes-over-240", "computer-use-grant-no-apps", "take-grant-no-apps"
+    )
+    private val taskStatuses = listOf("task-status", "task-status-no-name")
 
     // Revised 2026-10-28: the read key (android-slim spec §8.8), run by
     // watchSignedWithTheReadKey below.
@@ -225,6 +238,139 @@ class LeaseVectorTest {
         assertTrue(Leases.isLease(leaseWith("max_minutes", JsonPrimitive(240))))
     }
 
+    private fun taskCard(name: String): LeaseRequest = vector(name).let { LeaseRequest.from(Leases.verifiedMessage(Envelope.fromJson(it["input"]!!), pin(it))!!)!! }
+
+    /** A task's request: no apps, its own sites, allows and usd; empty allows is the card that raises a look-only task's spend. */
+    @Test
+    fun taskRequests() {
+        for (name in taskRequestsAccepted) {
+            val r = taskCard(name)
+            assertTrue(name, r.isTask)
+            assertFalse(name, r.isTake)
+            assertFalse(name, r.isResume)
+            assertTrue(name, r.apps.isEmpty())
+            assertEquals(name, "Find a dentist", r.name)
+            assertEquals(name, listOf("*.example.com"), r.sites)
+            assertEquals(name, 2, r.usd)
+            assertEquals(name, 20, r.maxMinutes)
+            assertTrue(name, r.unattended)
+        }
+        assertEquals(listOf("browser-act"), taskCard("task-request").allows)
+        assertTrue(taskCard("task-request-read-only").allows.isEmpty())
+        for (name in taskRequestsRefused) {
+            val v = vector(name)
+            val message = Leases.verifiedMessage(Envelope.fromJson(v["input"]!!), pin(v)) ?: error("$name verifies against the node pin")
+            assertNull(name, LeaseRequest.from(message))
+            assertFalse(name, Leases.isLease(message["lease"]))
+            assertEquals(name, "malformed", v["expect"]["reason"].str())
+        }
+        assertEquals(500, Leases.TASK_USD_MAX)
+        assertEquals(2, Leases.TASK_USD_MIN)
+        assertEquals(listOf("browser-act", "files-write", "logins", "shell"), Leases.TASK_ALLOWS)
+    }
+
+    /** The card, in the spec's order, host-built from the signed fields. Nothing is cut: the owner approves what it shows. */
+    @Test
+    fun taskCard() {
+        assertEquals(
+            listOf(
+                "Task: Find a dentist", "Sites: *.example.com", "May: click and type in your signed-in browser",
+                "For: 20 minutes", "Spend up to \$2", "Node: gpu-box"
+            ),
+            Leases.taskLines(taskCard("task-request"))
+        )
+        assertEquals("May: read only", Leases.taskLines(taskCard("task-request-read-only"))[2])
+        val base = taskCard("task-request")
+        val sites = List(16) { "s$it.example.com" }
+        val all = base.copy(sites = sites, allows = listOf("browser-act", "files-write", "logins", "shell"), usd = 500, maxMinutes = 240)
+        assertEquals(
+            listOf(
+                "Task: Find a dentist", "Sites: " + sites.joinToString(", "),
+                "May: click and type in your signed-in browser, sign in with saved logins, run shell commands, write files",
+                "For: 240 minutes", "Spend up to \$500", "Node: gpu-box"
+            ),
+            Leases.taskLines(all)
+        )
+        // No sites (a shell-only grant): the line is left out.
+        assertEquals(
+            listOf("Task: Find a dentist", "May: run shell commands", "For: 20 minutes", "Spend up to \$2", "Node: gpu-box"),
+            Leases.taskLines(base.copy(sites = emptyList(), allows = listOf("shell")))
+        )
+        // The name the phone pinned, when the screen has it; escaped whichever it is.
+        assertEquals("Node: pinned-name", Leases.taskLines(base, "pinned-name").last())
+        assertFalse(Leases.taskLines(base, "gpu\u202Ebox").last().contains('\u202E'))
+        assertEquals("Task on gpu-box: Find a dentist", Leases.taskTitle("gpu-box", "Find a dentist"))
+        assertFalse(Leases.taskTitle("gpu\u202Ebox", "Find a dentist").contains('\u202E'))
+        assertEquals("Task on gpu-box ended: Find a dentist (spend_cap)", Leases.taskEnded("gpu-box", "Find a dentist", "spend_cap"))
+        assertEquals("Task on gpu-box ended: Find a dentist", Leases.taskEnded("gpu-box", "Find a dentist", null))
+        assertFalse(Leases.taskEnded("gpu-box", "Find a dentist", "odd\u202Ereason").contains('\u202E'))
+    }
+
+    /** Fix round 1: one minute is reachable, every class has its words, a class with none is not read, and a pending task says task. */
+    @Test
+    fun taskWords() {
+        val base = taskCard("task-request")
+        assertEquals("For: 1 minute", Leases.taskLines(base.copy(maxMinutes = 1))[3])
+        assertEquals("For: 2 minutes", Leases.taskLines(base.copy(maxMinutes = 2))[3])
+        for (allow in Leases.TASK_ALLOWS) assertNotNull(allow, Leases.taskMayWords(allow))
+        assertNull(Leases.taskMayWords("desktop-input"))
+        val lease = Envelope.fromJson(vector("task-request")["input"]!!).message()["lease"].obj()!!
+        assertFalse(Leases.isLease(JsonObject(lease + ("allows" to JsonArray(listOf(JsonPrimitive("desktop-input")))))))
+        assertEquals(Leases.TASK_REQUEST_WAITING_DETAIL, Leases.pendingDetail(false, task = true))
+        assertTrue(Leases.TASK_REQUEST_WAITING_DETAIL.contains("a request for a task"))
+        assertFalse(Leases.TASK_REQUEST_WAITING_DETAIL.contains("computer use"))
+        assertEquals(Leases.MAY_STILL_START_DETAIL, Leases.pendingDetail(true, task = true))
+        assertEquals(Leases.REQUEST_WAITING_DETAIL, Leases.pendingDetail(false))
+    }
+
+    /** Fix round 1: what Stop's prompt may read of a status its pinned node signed. The name only when it is one plain line. */
+    @Test
+    fun taskStopPrompt() {
+        fun signed(name: String) = vector(name).let { Leases.verifiedMessage(Envelope.fromJson(it["input"]!!), pin(it))!! }
+        val task = signed("task-status")
+        assertTrue(Leases.isTaskStatus(task))
+        assertEquals("Find a dentist", Leases.taskStopName(task))
+        // A task with no readable name is still a task: its prompt names the node alone.
+        val noName = signed("task-status-no-name")
+        assertTrue(Leases.isTaskStatus(noName))
+        assertNull(Leases.taskStopName(noName))
+        assertNull(Leases.taskStopName(JsonObject(task + ("name" to JsonPrimitive("Find\u200Ba dentist")))))
+        assertNull(Leases.taskStopName(JsonObject(task + ("name" to JsonPrimitive("x".repeat(61))))))
+        assertFalse(Leases.isTaskStatus(signed("status-take")))
+        assertFalse(Leases.isTaskStatus(signed("status-valid")))
+        assertFalse(Leases.isTaskStatus(null))
+        assertNull(Leases.taskStopName(null))
+    }
+
+    /** A task's grant names no apps and the minutes the card shows; anything else is refused before it is signed. */
+    @Test
+    fun taskGrants() {
+        for (name in taskGrantsBuilt) {
+            assertBuilds(name) { v, e ->
+                assertEquals(name, 0, e["grant"]["apps"].arr()!!.size)
+                Leases.grant(request(v), emptyList(), request(v).maxMinutes, s(e, "device_id"), s(e, "signed_at"))
+            }
+        }
+        for (name in taskGrantsRefused) {
+            val v = vector(name)
+            val e = v["expect"]["message"]!!
+            try {
+                Leases.grant(request(v), e["grant"]["apps"].arr()!!.map { it.str()!! }, e["grant"]["minutes"].int()!!, s(e, "device_id"), s(e, "signed_at"))
+                fail("$name: expected a ProtocolException")
+            } catch (ex: ProtocolException) {
+                // refused before anything is signed
+            }
+        }
+        // Fewer minutes than the card shows is no grant of a task either.
+        val task = request(vector("task-grant"))
+        try {
+            Leases.grant(task, emptyList(), task.maxMinutes - 1, "d-aaaaaaaaaaaaaaaa", "2026-09-23T18:04:16.201Z")
+            fail("expected a ProtocolException")
+        } catch (ex: ProtocolException) {
+            // refused before anything is signed
+        }
+    }
+
     @Test
     fun deny() {
         assertBuilds("deny-valid") { v, e -> Leases.deny(request(v), s(e, "device_id"), s(e, "signed_at")) }
@@ -259,7 +405,7 @@ class LeaseVectorTest {
     /** R-F5-15: a status the pinned node signed gives the token the next watch echoes. */
     @Test
     fun statuses() {
-        for (name in listOf("status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "status-take")) {
+        for (name in listOf("status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "status-take", "task-status")) {
             val v = vector(name)
             val message = Leases.verifiedMessage(Envelope.fromJson(v["input"]!!), pin(v)) ?: error("$name verifies against the node pin")
             val status = LeaseStatus.from(message) ?: error("$name parses")
@@ -295,6 +441,10 @@ class LeaseVectorTest {
         assertNotNull(status("kind" to JsonPrimitive("take"), "name" to JsonPrimitive("A take"), "unattended" to JsonPrimitive(false)))
         assertNull(status("kind" to JsonPrimitive("take"), "name" to JsonPrimitive("A  take"), "unattended" to JsonPrimitive(true)))
         assertNull(status("kind" to JsonPrimitive("screen")))
+        // Revised 2026-11-03: a task as a take: a name, and unattended allowed.
+        assertNull(status("kind" to JsonPrimitive("task")))
+        assertNotNull(status("kind" to JsonPrimitive("task"), "name" to JsonPrimitive("A task"), "unattended" to JsonPrimitive(true)))
+        assertNull(LeaseStatus.from(vector("task-status-no-name").let { Leases.verifiedMessage(Envelope.fromJson(it["input"]!!), pin(it))!! }))
         assertNull(status("kind" to null))
         // Signed by another node's key: not a status of this pin.
         val v = vector("status-valid")

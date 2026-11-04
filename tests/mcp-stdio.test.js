@@ -99,6 +99,7 @@ function fakeEngine(runbooks = {}) {
   return engine;
 }
 
+const { TASK_TOOL_NAMES } = require('../src/fleet/tool-definitions');
 const NODE = { name: 'web-01', profile: 'runbook', capabilities: [], policy: { allowed_roots: [], max_concurrent_jobs: 2 } };
 
 describe('Local Stdio MCP Server: protocol', () => {
@@ -116,8 +117,9 @@ describe('Local Stdio MCP Server: protocol', () => {
     const logs = tools.find((t) => t.name === 'get_job_logs');
     assert.equal(logs.inputSchema.properties.since.type, 'integer');
     assert.match(logs.inputSchema.properties.since.description, /offset/);
-    // A handler called directly does not wait, so its list offers no wait_ms.
-    for (const t of tools) assert.ok(!('wait_ms' in (t.inputSchema.properties || {})), t.name);
+    // A handler called directly does not wait on a job, so its list offers no
+    // wait_ms there. A task's wait is the node's own, on every surface.
+    for (const t of tools.filter((x) => !TASK_TOOL_NAMES.includes(x.name))) assert.ok(!('wait_ms' in (t.inputSchema.properties || {})), t.name);
     c.close();
   });
 
@@ -132,7 +134,7 @@ describe('Local Stdio MCP Server: protocol', () => {
       assert.equal(waitMs.minimum, 0, name);
       assert.equal(waitMs.maximum, 25000, name);
     }
-    for (const t of tools.filter((x) => x.name !== 'send_to_job' && x.name !== 'get_job')) {
+    for (const t of tools.filter((x) => x.name !== 'send_to_job' && x.name !== 'get_job' && !TASK_TOOL_NAMES.includes(x.name))) {
       assert.ok(!('wait_ms' in (t.inputSchema.properties || {})), t.name);
     }
     c.close();
@@ -147,7 +149,7 @@ describe('Local Stdio MCP Server: protocol', () => {
     const c = connect({ handler: new CourierFleetClient({ courier, nodeConfig: NODE }) });
     const { tools } = (await c.request(1, 'tools/list')).result;
     assert.ok(tools.some((t) => t.name === CASE_MCP_TOOLS[0].name));
-    const withWait = tools.filter((t) => 'wait_ms' in (t.inputSchema.properties || {})).map((t) => t.name).sort();
+    const withWait = tools.filter((t) => 'wait_ms' in (t.inputSchema.properties || {})).map((t) => t.name).filter((name) => !TASK_TOOL_NAMES.includes(name)).sort();
     assert.deepEqual(withWait, ['get_job', 'send_to_job']);
     c.close();
   });
@@ -158,7 +160,7 @@ describe('Local Stdio MCP Server: protocol', () => {
     const { FLEET_CHAT_TOOLS } = require('../src/tools/builtin/fleet-chat-tools');
     const frontDoor = FleetRouter.prototype.toolDefinitions.call({ extraTools: new Map() });
     for (const defs of [MCP_TOOLS, frontDoor]) {
-      for (const t of defs) assert.ok(!('wait_ms' in (t.inputSchema.properties || {})), t.name);
+      for (const t of defs.filter((x) => !TASK_TOOL_NAMES.includes(x.name))) assert.ok(!('wait_ms' in (t.inputSchema.properties || {})), t.name);
     }
     for (const t of FLEET_CHAT_TOOLS) assert.ok(!('wait_ms' in (t.parameters.properties || {})), t.name);
   });
@@ -247,8 +249,9 @@ describe('Local Stdio MCP Server: describe_machine', () => {
         }
       }
     });
+    server.handler.capabilityProbes = { platform: 'linux' };
     const res = await server.executeToolCall('describe_machine', { machine: 'gpu-box' });
-    assert.deepEqual(res.capabilities, ['gpu']);
+    assert.deepEqual(res.capabilities, ['gpu', 'shell', 'os:linux']);
     assert.deepEqual(res.allowed_roots, ['/srv']);
     assert.equal(res.max_concurrent_jobs, 3);
     assert.equal(res.policy, undefined);

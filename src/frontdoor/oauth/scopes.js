@@ -115,14 +115,14 @@ function createFleetScopeRegistry() {
 }
 
 function registerFleetScopes(r) {
-  r.register('fleet:read', { tools: ['list_machines', 'describe_machine', 'get_state', 'get_job', 'get_job_logs'], description: 'See machines, their state and their jobs' });
+  r.register('fleet:read', { tools: ['list_machines', 'describe_machine', 'get_state', 'get_job', 'get_job_logs', 'get_task', 'list_tasks'], description: 'See machines, their state, their jobs and their tasks' });
   r.register('fleet:run', { tools: ['run_runbook', 'cancel_job'], description: 'Start read and routine runbooks, and cancel jobs' });
   r.register('fleet:unsafe', {
     tools: ['run_runbook'],
     description: 'Ask for unsafe runbooks and unsafe actions in agent sessions (each one still needs your phone)',
     requires: ['fleet:run', 'fleet:delegate']
   });
-  r.register('fleet:delegate', { tools: ['delegate', 'send_to_job'], description: 'Start and continue agent sessions on agent machines' });
+  r.register('fleet:delegate', { tools: ['delegate', 'send_to_job', 'run_task', 'send_to_task', 'cancel_task'], description: 'Start and continue agent sessions on agent machines. With fleet:unsafe on a machine, also run tasks there, and a task can read that machine\'s non-private cases' });
 }
 
 module.exports = { ScopeRegistry, createFleetScopeRegistry, SCOPE_RE };

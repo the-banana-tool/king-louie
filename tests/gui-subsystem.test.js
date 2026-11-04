@@ -671,19 +671,21 @@ describe('host wiring', () => {
     const handler = new FleetToolHandler({
       nodeConfig: { name: 'gpu-box', profile: 'agent', capabilities: ['cuda'], policy: { allowed_roots: [] } },
       jobManager: { maxConcurrentJobs: 2, jobs: new Map() },
-      gui: () => ({ available: true, capabilities: ['gui.launch'], apps: [{ id: 'calculator', name: 'Calculator' }], limits: [], lease: null })
+      gui: () => ({ available: true, capabilities: ['gui.launch'], apps: [{ id: 'calculator', name: 'Calculator' }], limits: [], lease: null }),
+      capabilityProbes: { platform: 'linux' }
     });
     const [row] = await handler.call('list_machines', {});
-    assert.deepEqual(row.capabilities, ['cuda', 'gui']);
+    assert.deepEqual(row.capabilities, ['cuda', 'gui', 'interactive', 'shell', 'os:linux']);
     assert.deepEqual(row.gui.apps, [{ id: 'calculator', name: 'Calculator' }]);
     const off = new FleetToolHandler({
       nodeConfig: { name: 'gpu-box', profile: 'agent', capabilities: ['cuda'], policy: { allowed_roots: [] } },
       jobManager: { maxConcurrentJobs: 2, jobs: new Map() },
-      gui: () => ({ available: false, capabilities: [], apps: [], limits: [], lease: null })
+      gui: () => ({ available: false, capabilities: [], apps: [], limits: [], lease: null }),
+      capabilityProbes: { platform: 'linux' }
     });
-    assert.deepEqual((await off.call('list_machines', {}))[0].capabilities, ['cuda']);
+    assert.deepEqual((await off.call('list_machines', {}))[0].capabilities, ['cuda', 'shell', 'os:linux']);
     const described = await handler.call('describe_machine', { machine: 'gpu-box' });
-    assert.deepEqual(described.capabilities, ['cuda', 'gui']);
+    assert.deepEqual(described.capabilities, ['cuda', 'gui', 'interactive', 'shell', 'os:linux']);
     assert.ok(!JSON.stringify(described.gui).includes('calc.exe'), 'never paths');
   });
 

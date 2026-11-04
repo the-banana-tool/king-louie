@@ -5,8 +5,9 @@
 // The last three (push spec §7.1) reach `fcm` devices only (C-2): an apns
 // device is never sent one, so its pushes stay byte for byte as before.
 // The kinds a node sends with push.notify (push spec §6.2): a lease's
-// ending or contact pause.
-const SESSION_KINDS = ['session_ended', 'session_paused'];
+// ending or contact pause, and a task's ending (tasks stage 1, keyed by its
+// task id, to every fcm phone). All are content-free: `{ k, rid, n }`.
+const SESSION_KINDS = ['session_ended', 'session_paused', 'task_ended'];
 const FCM_ONLY_KINDS = [...SESSION_KINDS, 'test'];
 const KINDS = ['approval', 'grant', 'pairing', 'alert', 'question', 'lease', ...FCM_ONLY_KINDS];
 const TITLES = {
@@ -18,6 +19,7 @@ const TITLES = {
   lease: 'Session request',
   session_ended: 'Session ended',
   session_paused: 'Session paused',
+  task_ended: 'Task ended',
   test: 'Test'
 };
 

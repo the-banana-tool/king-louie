@@ -49,7 +49,7 @@ function createFcmSender({ serviceAccount, tokenUrl = 'https://oauth2.googleapis
     platforms: ['fcm'],
     async notify(device, payload) {
       const token = await accessToken();
-      const fallbackTtl = payload.kind === 'session_ended' ? SESSION_ENDED_TTL_S : DEFAULT_TTL_S;
+      const fallbackTtl = payload.kind === 'session_ended' || payload.kind === 'task_ended' ? SESSION_ENDED_TTL_S : DEFAULT_TTL_S;
       const secondsLeft = payload.expires_at ? Math.max(0, Math.ceil((Date.parse(payload.expires_at) - now()) / 1000)) : fallbackTtl;
       const data = { rid: String(payload.id), n: sanitizeNodeName(payload.node_name) || '', k: payload.kind };
       const count = countOf(payload.count);

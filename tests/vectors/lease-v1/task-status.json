@@ -1,0 +1,41 @@
+{
+  "name": "task-status",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": null,
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "node": {
+      "id": "kl-hnef32472qzibi5r",
+      "name": "gpu-box",
+      "key": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950"
+    }
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-hnef32472qzibi5r",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJoR01FUlJYYnBTVHByeEVNRF9sWHlnIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MjQ6MTEuMjAxWiIsImdyYW50ZWRfYnkiOnsiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwibmFtZSI6Ik93bmVyIHBob25lIn0sImtpbmQiOiJ0YXNrIiwibGVhc2VfaWQiOiIyNTNlZWJhMC04ZTUyLTQ0OWYtOGY1YS0wZGQxOGFkMzc4MjYiLCJsb2NrZWQiOmZhbHNlLCJuYW1lIjoiRmluZCBhIGRlbnRpc3QiLCJub2RlX2lkIjoia2wtaG5lZjMyNDcycXppYmk1ciIsInJlYXNvbiI6bnVsbCwic2VxIjo1LCJzdGF0ZSI6ImFjdGl2ZSIsInR5cGUiOiJrbC5sZWFzZS5zdGF0dXMiLCJ1bmF0dGVuZGVkIjp0cnVlLCJ2IjoxfQ",
+    "sig": "4hHZfVjkMcZgUZW2s62AmBoUVjl058s5VbwrzEmhyXP4Bs2puYz7chX5Mco5bQBlhK72fskGZo3RLO3fZpm2DA"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "status": {
+      "lease_id": "253eeba0-8e52-449f-8f5a-0dd18ad37826",
+      "seq": 5,
+      "state": "active",
+      "reason": null,
+      "contact_token": "hGMERRXbpSTprxEMD_lXyg",
+      "granted_by": {
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Owner phone"
+      },
+      "kind": "task",
+      "unattended": true,
+      "name": "Find a dentist"
+    }
+  }
+}

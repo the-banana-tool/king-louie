@@ -27,7 +27,13 @@ const EXPECTED = [
   'take-grant', 'take-grant-minutes-over-cap', 'take-request-missing-name', 'computer-use-with-unattended', 'status-take',
   // Revised 2026-10-28: the read key (android-slim spec §8.8). A watch may be
   // signed by either key of its device; a grant or a revoke only by the device key.
-  'watch-read-key', 'watch-read-key-not-applied', 'grant-read-key', 'revoke-read-key'
+  'watch-read-key', 'watch-read-key-not-applied', 'grant-read-key', 'revoke-read-key',
+  // Revised 2026-11-03: the task lease (tasks stage 1 spec §4.6).
+  'task-request', 'task-grant', 'task-status', 'task-status-no-name', 'task-request-allows-unsorted', 'task-request-allows-repeated',
+  'task-request-allows-unknown', 'task-request-resumes', 'task-request-read-only', 'task-request-sites-over-32', 'task-request-bad-site', 'task-request-usd-under',
+  'task-request-usd-over', 'task-request-usd-fraction', 'task-request-attended', 'task-request-minutes-over-240', 'task-request-with-apps',
+  'task-request-name-hidden', 'task-request-name-too-long', 'task-grant-with-apps', 'task-grant-minutes-over-requested', 'task-grant-minutes-over-240',
+  'task-grant-ignores-take-cap', 'computer-use-grant-no-apps', 'take-grant-no-apps'
 ];
 // What the phones consume (android-slim spec §5): iOS consumes PHONE, Android
 // PHONE and the read-key vectors a phone signs (iOS has no read key).
@@ -36,7 +42,13 @@ const PHONE = ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', '
   'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame',
   'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature',
   'listing-other-node', 'listing-wrong-node', 'listing-extra-status', 'listing-duplicate-lease', 'listing-too-many', 'listing-extra-key', 'listing-bad-at',
-  'take-grant', 'take-grant-minutes-over-cap', 'take-request-missing-name', 'computer-use-with-unattended', 'status-take'];
+  'take-grant', 'take-grant-minutes-over-cap', 'take-request-missing-name', 'computer-use-with-unattended', 'status-take',
+  // Revised 2026-11-03: the task lease, every vector of it (lease-v1's last section).
+  'task-request', 'task-grant', 'task-status', 'task-status-no-name', 'task-request-allows-unsorted', 'task-request-allows-repeated',
+  'task-request-allows-unknown', 'task-request-resumes', 'task-request-read-only', 'task-request-sites-over-32', 'task-request-bad-site', 'task-request-usd-under',
+  'task-request-usd-over', 'task-request-usd-fraction', 'task-request-attended', 'task-request-minutes-over-240', 'task-request-with-apps',
+  'task-request-name-hidden', 'task-request-name-too-long', 'task-grant-with-apps', 'task-grant-minutes-over-requested', 'task-grant-minutes-over-240',
+  'task-grant-ignores-take-cap', 'computer-use-grant-no-apps', 'take-grant-no-apps'];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')));
 const byName = new Map(vectors.map((v) => [v.name, v]));
@@ -47,7 +59,7 @@ async function run(v) {
   const g = v.given;
   const now = Date.parse(g.now);
   if (v.name.startsWith('view-')) return L.verifyLeaseView(v.input, { nodeId: g.node.id, nodePublicKeyHex: g.node.key });
-  if (v.name.startsWith('status-')) return verifyStatus(v.input, g.node);
+  if (v.name.startsWith('status-') || v.name.startsWith('task-status')) return verifyStatus(v.input, g.node);
   // A node-signed request checked for its shape (VALIDATORS['kl.lease.request']).
   if (v.check === 'request') return verifyRequest(v.input, g.node);
   // R-F5-20: what a phone checks on a listing, with its own nonce and device id.
@@ -132,7 +144,7 @@ describe('lease-v1 vectors', () => {
   });
 
   it('has exactly the expected set, and phones consume exactly theirs', () => {
-    assert.equal(EXPECTED.length, 55);
+    assert.equal(EXPECTED.length, 80);
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
     const consumedBy = (phone) => vectors.filter((v) => v.consumers.includes(phone)).map((v) => v.name).sort();
     assert.deepEqual(consumedBy('ios'), [...PHONE].sort());
@@ -193,7 +205,7 @@ describe('lease-v1 vectors', () => {
   });
 
   it('the phone-built messages are exactly the signed payloads', () => {
-    for (const name of ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'take-grant', 'revoke-valid', 'watch-valid', 'watch-no-token', 'watch-read-key']) {
+    for (const name of ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'take-grant', 'task-grant', 'revoke-valid', 'watch-valid', 'watch-no-token', 'watch-read-key']) {
       const v = byName.get(name);
       const payload = JSON.parse(Buffer.from(v.input.payload, 'base64url').toString('utf8'));
       assert.deepEqual(payload, v.expect.message, name);
@@ -231,6 +243,128 @@ describe('lease-v1 message shapes', () => {
       const status = open(byName.get('status-valid').input).message;
       assert.equal(L.VALIDATORS['kl.lease.status'](status), true);
       assert.equal(L.VALIDATORS['kl.lease.status']({ ...status, unattended: true }), false);
+    });
+  });
+
+  describe('the task lease (2026-11-03)', () => {
+    const crypto = require('crypto');
+    const { open } = require('../src/approvals/envelope');
+    const { validateMessage } = require('../src/approvals/messages');
+    const { deriveNodeId } = require('../src/mesh/node-identity');
+    const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+    const identity = { nodeId: deriveNodeId(publicKey.export({ type: 'spki', format: 'der' })), nodeName: 'test-node', sign: (b) => crypto.sign(null, b, privateKey) };
+    const TASK = { name: 'Find a dentist', sites: ['*.example.com'], allows: ['browser-act'], usd: 2 };
+    const taskRequest = () => L.buildLeaseRequest({
+      identity, jobId: 'chat:c-1', apps: [], maxMinutes: 20, reason: 'Find a dentist', kind: 'task', task: TASK,
+      origin: { client: 'claude.ai', session: 's-1', job_id: null }
+    }).message;
+    // The request with its lease altered and hashed again, so only the shape can be wrong.
+    const withLease = (change) => {
+      const message = taskRequest();
+      const lease = { ...message.lease, ...change };
+      return { ...message, lease, lease_hash: L.leaseHash(lease) };
+    };
+
+    it('exports the kind, what a task may be allowed and its spend cap', () => {
+      assert.ok(L.LEASE_KINDS.includes('task'));
+      assert.deepEqual(L.TASK_ALLOWS, ['browser-act', 'files-write', 'logins', 'shell']);
+      assert.equal(L.TASK_USD_MAX, 500);
+    });
+
+    it('buildLeaseRequest gives a lease with exactly its keys, unattended and with no apps', () => {
+      const message = taskRequest();
+      assert.deepEqual(Object.keys(message.lease).sort(), ['allows', 'job_id', 'kind', 'limits', 'max_minutes', 'name', 'reason', 'resumes', 'sites', 'unattended', 'usd']);
+      assert.equal(message.lease.kind, 'task');
+      assert.equal(message.lease.unattended, true);
+      assert.equal(message.lease.usd, 2);
+      assert.equal(validateMessage('kl.lease.request', message), null);
+    });
+
+    it('takes no sites (a shell-only grant), 32 sites, every allowance, and the ends of the spend and time ranges', () => {
+      for (const change of [
+        { sites: [], allows: ['shell'] },
+        { allows: [] },
+        { sites: Array.from({ length: 32 }, (_, i) => `s${i}.example.com`) },
+        { allows: [...L.TASK_ALLOWS] },
+        { usd: 500 },
+        { max_minutes: 240 },
+        { name: 'x'.repeat(60) },
+        { name: '\u{1F600}'.repeat(60) }
+      ]) assert.equal(validateMessage('kl.lease.request', withLease(change)), null, JSON.stringify(change));
+    });
+
+    const refused = {
+      'allows unsorted': { allows: ['shell', 'browser-act'] },
+      'allows repeated': { allows: ['shell', 'shell'] },
+      'allows outside TASK_ALLOWS': { allows: ['desktop-input'] },
+      'allows that is not a list': { allows: 'shell' },
+      'sites over 32': { sites: Array.from({ length: 33 }, (_, i) => `s${i}.example.com`) },
+      'a site with capitals': { sites: ['Example.com'] },
+      'a site with no dot': { sites: ['example'] },
+      'a site with a path': { sites: ['example.com/a'] },
+      'usd 1': { usd: 1 },
+      'usd 501': { usd: 501 },
+      'usd that is not an integer': { usd: 2.5 },
+      'usd that is a string': { usd: '2' },
+      'unattended: false': { unattended: false },
+      'max_minutes 241': { max_minutes: 241 },
+      'max_minutes 0': { max_minutes: 0 },
+      'a name with a zero-width character': { name: 'Find\u200Ba dentist' },
+      'a name of two lines': { name: 'Find\na dentist' },
+      'a name of 61 code points': { name: 'x'.repeat(61) },
+      'an empty name': { name: '' },
+      'apps': { apps: [] },
+      'a key of another kind': { browser: true }
+    };
+    for (const [label, change] of Object.entries(refused)) {
+      it(`the validator refuses ${label}`, () => assert.equal(validateMessage('kl.lease.request', withLease(change)), 'malformed'));
+    }
+
+    it('a raise is a fresh request: a task lease never resumes', () => {
+      const message = taskRequest();
+      const lease = { ...message.lease, resumes: message.lease_id };
+      assert.equal(validateMessage('kl.lease.request', { ...message, lease, lease_hash: L.leaseHash(lease) }), 'malformed');
+      assert.equal(L.checkLease(lease), false);
+    });
+
+    it('a lease without any one of its keys is refused', () => {
+      for (const key of Object.keys(taskRequest().lease)) {
+        const { lease } = taskRequest();
+        delete lease[key];
+        assert.equal(L.checkLease(lease), false, key);
+      }
+    });
+
+    it('a grant may name no apps, and the shape still bounds them', () => {
+      const grant = (g) => ({ ...byName.get('grant-valid').expect.message, grant: g });
+      assert.equal(validateMessage('kl.lease.grant', grant({ apps: [], minutes: 20 })), null);
+      assert.equal(validateMessage('kl.lease.grant', grant({ apps: ['Not An Id'], minutes: 20 })), 'malformed');
+      assert.equal(validateMessage('kl.lease.grant', grant({ minutes: 20 })), 'malformed');
+    });
+
+    describe('kl.lease.status', () => {
+      const status = (fields) => open(L.buildLeaseStatus({ identity, leaseId: crypto.randomUUID(), seq: 1, state: 'active', ...fields })).message;
+
+      it('a task needs a name, and may be unattended', () => {
+        assert.equal(validateMessage('kl.lease.status', status({ kind: 'task', unattended: true, name: 'Find a dentist' })), null);
+        assert.equal(validateMessage('kl.lease.status', status({ kind: 'task', unattended: true })), 'malformed');
+        assert.equal(validateMessage('kl.lease.status', status({ kind: 'task', unattended: true, name: 'Find\u200Ba dentist' })), 'malformed');
+        assert.equal(validateMessage('kl.lease.status', status({ kind: 'task', unattended: true, name: 'x'.repeat(61) })), 'malformed');
+      });
+
+      it('buildLeaseStatus keeps the name for every kind but computer_use', () => {
+        assert.equal(status({ kind: 'task', unattended: true, name: 'Find a dentist' }).name, 'Find a dentist');
+        assert.equal(status({ kind: 'take', unattended: true, name: 'A take' }).name, 'A take');
+        assert.equal(status({ kind: 'computer_use', name: 'ignored' }).name, null);
+      });
+
+      it('computer_use keeps unattended: false and name: null; a kind nobody knows is refused', () => {
+        const computerUse = status({});
+        assert.equal(validateMessage('kl.lease.status', computerUse), null);
+        assert.equal(validateMessage('kl.lease.status', { ...computerUse, unattended: true }), 'malformed');
+        assert.equal(validateMessage('kl.lease.status', { ...computerUse, name: 'A name' }), 'malformed');
+        assert.equal(validateMessage('kl.lease.status', { ...computerUse, kind: 'screen_share', name: 'A name' }), 'malformed');
+      });
     });
   });
 

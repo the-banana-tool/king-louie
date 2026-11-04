@@ -64,6 +64,22 @@ describe('push.notify (relay side)', () => {
     assert.equal(h.puts.length, 0);
   });
 
+  it('task_ended goes to every active fcm device on the node, carrying no expiry', async () => {
+    const h = harness();
+    const id = crypto.randomUUID();
+    assert.deepEqual(await h.call({ kind: 'task_ended', id, to_device: null, except_device: null, expires_at: null }), { ok: true });
+    assert.deepEqual(h.pushes.map((p) => p.device).sort(), [devA, devB]);
+    assert.deepEqual(h.pushes[0], { device: h.pushes[0].device, kind: 'task_ended', id, node_name: 'gpu-box', expires_at: null, node_id: NODE });
+    assert.equal(h.puts.length, 0);
+  });
+
+  it('refuses a field push.notify does not define, so nothing else can ride along', async () => {
+    const h = harness();
+    await assert.rejects(h.call(notify({ kind: 'task_ended', title: 'Find a dentist' })), (e) => e.code === 'bad_push');
+    await assert.rejects(h.call(notify({ text: 'x' })), (e) => e.code === 'bad_push');
+    assert.deepEqual(h.pushes, []);
+  });
+
   it('except_device leaves the stopping phone out', async () => {
     const h = harness();
     await h.call(notify({ except_device: devA }));

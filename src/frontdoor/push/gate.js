@@ -18,7 +18,8 @@ const HOUR = 60 * MIN;
 // How long a pushed (node, kind, id) is remembered per device (§6.3).
 const DEDUPE_MS = Object.freeze({
   session_ended: 24 * HOUR,
-  session_paused: 2 * MIN
+  session_paused: 2 * MIN,
+  task_ended: 24 * HOUR
 });
 // approval, question, lease, pairing, alert (and grant, never pushed today).
 const DEFAULT_DEDUPE_MS = 10 * MIN;

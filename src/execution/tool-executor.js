@@ -215,6 +215,10 @@ class ToolExecutor extends EventEmitter {
     // a policy, the policy's decision replaces the approval prompt, and
     // nothing asks a person mid-take. Carried to sub-agents.
     this.takePolicy = options.takePolicy || null;
+    // A task's policy (tasks spec §4.6, src/tasks/policy.js): consulted where
+    // the approval would ask. Unlike a take, what it passes through still asks.
+    // Carried to sub-agents.
+    this.taskPolicy = options.taskPolicy || null;
     // Whether the run's origin is one this node started itself (the desktop,
     // the service's own chat, a stdio session); a take needs one.
     this.nodeLocalOrigin = options.nodeLocalOrigin !== false;
@@ -515,7 +519,12 @@ class ToolExecutor extends EventEmitter {
     }
     const wakeupLookOnly = wakeupBrowser; // the acting ones were refused above
 
-    if (tool.isDangerous(effectiveParameters) && !options.bypassSafety) {
+    // In a task (tasks spec §4.6, ADR 0004) nothing is refused for itself: a
+    // dangerous call goes to the phone over the exact action, as an unsafe tier
+    // no allow lifts. A deny rule or an ended task still refuses it first.
+    const dangerous = tool.isDangerous(effectiveParameters) && !options.bypassSafety;
+    const dangerousAsks = dangerous && !!this.taskPolicy && !this._liveTake();
+    if (dangerous && !dangerousAsks) {
       throw new Error(`Dangerous operation detected: ${toolName}`);
     }
 
@@ -526,8 +535,10 @@ class ToolExecutor extends EventEmitter {
     // Rule evaluation uses the hook-decorated parameters so a hook that
     // normalises a command (e.g. resolving aliases) feeds the same key
     // the user saw in the approval dialog.
-    const { refused: refusedByRuleOrTier, ruleMatch, tierUnsafe, tierReason } = this._rulesAndTier(tool, toolName, effectiveParameters, options, { wakeupLookOnly });
+    const { refused: refusedByRuleOrTier, ruleMatch, tierUnsafe: classifiedUnsafe, tierReason: classifiedReason } = this._rulesAndTier(tool, toolName, effectiveParameters, options, { wakeupLookOnly });
     if (refusedByRuleOrTier) return refusedByRuleOrTier;
+    const tierUnsafe = classifiedUnsafe || dangerousAsks;
+    const tierReason = dangerousAsks ? 'dangerous_operation' : classifiedReason;
     let approvalSource = null;
 
     // A live take (demo takes spec §7.2), after the deny rules and the tier,
@@ -554,6 +565,48 @@ class ToolExecutor extends EventEmitter {
       if (d.allow === true && !d.passthrough && !(tierUnsafe && tierReason === 'path_outside_allowed_roots')) {
         takeAllowed = true;
         approvalSource = { type: 'take' };
+        this.emit('approvalAutoGranted', { toolName, parameters: effectiveParameters, source: approvalSource });
+      }
+    }
+
+    // A task (tasks spec §4.6), at the same point, so the same refusals have
+    // already won and a path outside the allowed roots still asks. An ended
+    // task refuses; an allow runs with no prompt; anything else goes to the
+    // logic below, which asks. A policy that fails asks too. A refuseUnsafe
+    // run keeps its gate whatever the task allows. A live take governs alone.
+    // Unlike a take's, no task allow lifts the owner's own `ask` rule. Every
+    // allow lifts the tool's default gate, and a grant's also an always_confirm
+    // match; every other unsafe tier (a path outside the roots, a command it
+    // cannot read in full, a reason added later) still asks. A call stopped
+    // while the policy waited for a card ends here, before anyone is asked.
+    if (this.taskPolicy && !take) {
+      let d;
+      try {
+        d = await this.taskPolicy.decide(toolName, effectiveParameters, {
+          cwd: options.workingDirectory || this.workingDirectory,
+          signal: options.signal || null
+        });
+      } catch (err) {
+        log.warn('task policy failed', { toolName, error: err?.message ?? String(err) });
+        d = { passthrough: true };
+      }
+      if (d.allow === false) {
+        const refused = { success: false, error: d.error, code: d.code };
+        this.emit('approvalDenied', { toolName, parameters: effectiveParameters, deniedBy: 'task', code: d.code });
+        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
+        return refused;
+      }
+      if (options.signal?.aborted) {
+        const cancelled = { success: false, error: 'Cancelled before execution', cancelled: true };
+        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: cancelled });
+        return cancelled;
+      }
+      const ownerAsks = ruleMatch.matched && ruleMatch.action === 'ask';
+      const tierHolds = tierUnsafe && tierReason !== 'tool_requires_approval'
+        && !(d.look !== true && tierReason === 'matched_always_confirm');
+      if (d.allow === true && !d.passthrough && !this.refuseUnsafe && !ownerAsks && !tierHolds) {
+        takeAllowed = true;
+        approvalSource = { type: 'task' };
         this.emit('approvalAutoGranted', { toolName, parameters: effectiveParameters, source: approvalSource });
       }
     }
@@ -650,6 +703,8 @@ class ToolExecutor extends EventEmitter {
         const mapped = mapApprovalResult(approved, gateMetadata, { timeoutMs: this.approvalTimeoutMs });
         if (!mapped.approved) {
           if (mapped.penalize && this.denialTracker) this.denialTracker.recordDenial(toolName, effectiveParameters);
+          // The owner's no to a task's call beyond its grant (tasks spec §4.8): for the audit, by code.
+          if (mapped.penalize && this.taskPolicy) this.emit('approvalDenied', { toolName, parameters: effectiveParameters, deniedBy: 'task', code: 'phone_denied' });
           const denied = { success: false, error: mapped.refusal.error, deniedBy: mapped.refusal.deniedBy };
           this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
           return denied;
@@ -930,6 +985,10 @@ class ToolExecutor extends EventEmitter {
     if (this.allowedToolNames) requester.allowedToolNames = Object.freeze([...this.allowedToolNames]);
     // A child of a take's run is held to the same take, and to its origin.
     if (this.takePolicy) requester.takePolicy = this.takePolicy;
+    // And of a task's run, to the same task.
+    if (this.taskPolicy) requester.taskPolicy = this.taskPolicy;
+    // A run nothing may pre-approve for has children nothing may pre-approve for.
+    if (this.denyAutoApproval) requester.denyAutoApproval = true;
     requester.nodeLocalOrigin = this.nodeLocalOrigin;
     return this.localOrigin ? markLocalRequester(requester) : requester;
   }

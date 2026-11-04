@@ -501,6 +501,16 @@ class PlaywrightBrowser {
   }
 }
 
+// Whether Playwright's own Chromium is on this machine: what a headless run
+// would launch. Looks at the disk and launches nothing.
+PlaywrightBrowser.chromiumInstalled = () => {
+  try {
+    return fs.existsSync(require('playwright').chromium.executablePath());
+  } catch {
+    return false;
+  }
+};
+
 module.exports = PlaywrightBrowser;
 module.exports.ownerOfPage = (page) => (page && pageOwners.get(page)) || null;
 module.exports.BrowserRefError = BrowserRefError;

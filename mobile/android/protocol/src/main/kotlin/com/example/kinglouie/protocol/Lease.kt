@@ -18,21 +18,26 @@ data class LeaseRequest(
     val requestId: String, val leaseId: String, val nodeId: String, val nodeName: String, val jobId: String,
     val apps: List<LeaseApp>, val maxMinutes: Int, val reason: String, val resumes: String?, val limits: List<String>,
     val originClient: String, val leaseHash: String, val nonce: String, val createdAt: String, val expiresAt: String,
-    /** Revised 2026-10-24 (agent-driven demo takes): `computer_use` or `take`. */
+    /** Revised 2026-10-24 (agent-driven demo takes): `computer_use` or `take`; revised 2026-11-03: or `task`. */
     val kind: String = "computer_use",
-    /** A take's name (one plain line, 1–60 characters); null for computer_use. */
+    /** A take's or a task's name (one plain line, 1–60 characters); null for computer_use. */
     val name: String? = null,
-    /** The hosts a take may visit; empty for computer_use. */
+    /** The hosts a take may visit, or a task may act on (a task may have none); empty for computer_use. */
     val sites: List<String> = emptyList(),
     /** A take's browser allowance: null when it is `true` (browser actions on its sites), else the browser actions it may use. Null for computer_use. */
     val browserActions: List<String>? = null,
     /** Whether a take may fill credentials from the vault; false for computer_use. */
     val credentials: Boolean = false,
-    /** Whether a take runs with no contact window; false for computer_use. */
-    val unattended: Boolean = false
+    /** Whether a take runs with no contact window (a task always does); false for computer_use. */
+    val unattended: Boolean = false,
+    /** Revised 2026-11-03 (tasks stage 1): what a task may do (`TASK_ALLOWS`, sorted; empty on the card that raises a look-only task's spend). Empty for the other kinds. */
+    val allows: List<String> = emptyList(),
+    /** The most a task may spend, in whole dollars (2–500); 0 for the other kinds. */
+    val usd: Int = 0
 ) {
     val isResume: Boolean get() = resumes != null
     val isTake: Boolean get() = kind == "take"
+    val isTask: Boolean get() = kind == "task"
 
     companion object {
         const val TYPE = "kl.lease.request"
@@ -48,15 +53,17 @@ data class LeaseRequest(
             if (!Leases.isLease(lease)) return null
             val kind = lease["kind"].str() ?: return null
             val take = kind == "take"
+            val task = kind == "task"
             if (Digest.sha256B64url(Jcs.bytes(lease)) != leaseHash) return null
             val maxMinutes = lease["max_minutes"].int() ?: return null
-            val apps = (lease["apps"].arr() ?: return null).map { a ->
+            // A task has no apps; every other kind has at least one.
+            val apps = if (task) emptyList() else (lease["apps"].arr() ?: return null).map { a ->
                 LeaseApp(
                     a["id"].str() ?: return null, a["name"].str() ?: return null, a["path"].str() ?: return null,
                     (a["processes"].arr() ?: return null).mapNotNull { it.str() }
                 )
             }
-            if (apps.isEmpty()) return null
+            if (!task && apps.isEmpty()) return null
             return LeaseRequest(
                 message["request_id"].str() ?: return null, message["lease_id"].str() ?: return null,
                 message["node_id"].str() ?: return null, message["node_name"].str() ?: return null,
@@ -65,11 +72,13 @@ data class LeaseRequest(
                 message["origin"]["client"].str() ?: "", leaseHash, message["nonce"].str() ?: return null,
                 message["created_at"].str() ?: return null, message["expires_at"].str() ?: return null,
                 kind = kind,
-                name = if (take) lease["name"].str() else null,
-                sites = if (take) (lease["sites"].arr() ?: JsonArray(emptyList())).mapNotNull { it.str() } else emptyList(),
+                name = if (take || task) lease["name"].str() else null,
+                sites = if (take || task) (lease["sites"].arr() ?: JsonArray(emptyList())).mapNotNull { it.str() } else emptyList(),
                 browserActions = if (take) lease["browser"].arr()?.mapNotNull { it.str() } else null,
                 credentials = take && lease["credentials"].bool() == true,
-                unattended = take && lease["unattended"].bool() == true
+                unattended = (take || task) && lease["unattended"].bool() == true,
+                allows = if (task) (lease["allows"].arr() ?: JsonArray(emptyList())).mapNotNull { it.str() } else emptyList(),
+                usd = if (task) lease["usd"].int() ?: 0 else 0
             )
         }
     }
@@ -88,8 +97,8 @@ data class LeaseStatus(
     val grantedByName: String? = null,
     /**
      * Revised 2026-10-24: the lease's kind, whether it runs unattended
-     * (always false for computer_use), and a take's name (null for
-     * computer_use). A status without them, or whose three do not agree, is
+     * (always false for computer_use), and a take's or a task's name (null
+     * for computer_use). A status without them, or whose three do not agree, is
      * not read (the node's VALIDATORS['kl.lease.status']).
      */
     val kind: String = "computer_use",
@@ -103,9 +112,9 @@ data class LeaseStatus(
             if (m["type"].str() != TYPE) return null
             val kind = m["kind"].str()?.takeIf { it in Leases.LEASE_KINDS } ?: return null
             val unattended = m["unattended"].bool() ?: return null
-            if (kind != "take" && unattended) return null
+            if (kind == "computer_use" && unattended) return null
             val name = m["name"] ?: return null
-            if (if (kind == "take") !Leases.isTakeName(name) else name !is JsonNull) return null
+            if (if (kind == "computer_use") name !is JsonNull else !Leases.isTakeName(name)) return null
             return LeaseStatus(
                 m["lease_id"].str() ?: return null, m["node_id"].str() ?: return null, m["seq"].int() ?: return null,
                 m["state"].str() ?: return null, m["locked"].bool() ?: return null, m["reason"].str(), m["expires_at"].str(),
@@ -198,10 +207,13 @@ object Leases {
     /** Under that row. */
     const val REQUEST_WAITING_DETAIL = "Its computer says a request for computer use is waiting for a phone's answer. This phone does not remember allowing it. An Allow signed before this app was restarted, or on another phone, could still reach it. Stop cancels the request."
 
+    /** The same, for a task's lease. */
+    const val TASK_REQUEST_WAITING_DETAIL = "Its computer says a request for a task is waiting for a phone's answer. This phone does not remember allowing it. An Allow signed before this app was restarted, or on another phone, could still reach it. Stop cancels the request."
+
     /** What the row of a pending lease is called, and what is said under it. */
     fun pendingTitle(nodeName: String, signedGrant: Boolean): String = if (signedGrant) mayStillStartTitle(nodeName) else requestWaitingTitle(nodeName)
 
-    fun pendingDetail(signedGrant: Boolean): String = if (signedGrant) MAY_STILL_START_DETAIL else REQUEST_WAITING_DETAIL
+    fun pendingDetail(signedGrant: Boolean, task: Boolean = false): String = if (signedGrant) MAY_STILL_START_DETAIL else if (task) TASK_REQUEST_WAITING_DETAIL else REQUEST_WAITING_DETAIL
 
     /**
      * Whether a lease that an accepted listing names gets a banner row for
@@ -311,15 +323,21 @@ object Leases {
 
     // ---- the lease, by kind (revised 2026-10-24; checkLease in src/gui/lease-protocol.js) ----
 
-    /** The most minutes a computer_use lease asks for (MAX_MINUTES), and a take (TAKE_MAX_MINUTES). */
+    /** The most minutes a computer_use lease asks for (MAX_MINUTES), and a take or a task (TAKE_MAX_MINUTES). */
     const val MAX_MINUTES = 60
     const val TAKE_MAX_MINUTES = 240
-    val LEASE_KINDS = listOf("computer_use", "take")
+    val LEASE_KINDS = listOf("computer_use", "take", "task")
+
+    /** Revised 2026-11-03 (tasks stage 1): what a task may do, and what it may spend in whole dollars. */
+    val TASK_ALLOWS = listOf("browser-act", "files-write", "logins", "shell")
+    const val TASK_USD_MIN = 2
+    const val TASK_USD_MAX = 500
 
     /** A lease has exactly the keys of its kind (LEASE_KEYS). */
     private val LEASE_KEYS = mapOf(
         "computer_use" to listOf("kind", "job_id", "apps", "max_minutes", "reason", "resumes", "limits"),
-        "take" to listOf("kind", "job_id", "name", "sites", "apps", "browser", "credentials", "max_minutes", "unattended", "reason", "resumes", "limits")
+        "take" to listOf("kind", "job_id", "name", "sites", "apps", "browser", "credentials", "max_minutes", "unattended", "reason", "resumes", "limits"),
+        "task" to listOf("kind", "job_id", "name", "sites", "allows", "max_minutes", "usd", "unattended", "reason", "resumes", "limits")
     )
     private val LEASE_LIMITS = listOf("no_lock_detect", "no_human_yield")
     private val APP_ID = Regex("^[a-z][a-z0-9-]{0,31}$")
@@ -363,7 +381,7 @@ object Leases {
         return true
     }
 
-    /** A take's name: 1–60 characters, one plain line. */
+    /** A take's or a task's name: 1–60 characters, one plain line (checkLeaseName). */
     fun isTakeName(v: JsonElement?): Boolean {
         val s = v.str() ?: return false
         return s.isNotEmpty() && codePoints(s) <= 60 && isPlainLine(s)
@@ -387,9 +405,29 @@ object Leases {
     }
 
     /**
-     * checkLease: exactly the keys of its kind; a job; 1–8 apps, each once;
-     * max_minutes 1–60 (1–240 for a take); a reason; resumes null or a lease
-     * id; the limits known, sorted, each once; and a take's own fields.
+     * The fields only a task has beside its name (checkTaskFields): the hosts
+     * it may act on (none for a shell-only grant), what it may do, sorted, each
+     * once (empty only on the card that raises a look-only task's spend), the
+     * most it may spend. Always unattended, and it never resumes.
+     */
+    private fun isTaskFields(l: JsonObject): Boolean {
+        if (!isTakeName(l["name"])) return false
+        if (!isStringList(l["sites"], 32) { isSite(it) }) return false
+        // A class with no words on the card is not read: Allow signs what the card shows.
+        if (!isStringList(l["allows"], TASK_ALLOWS.size) { it in TASK_ALLOWS && taskMayWords(it) != null }) return false
+        val allows = l["allows"].arr()!!.map { it.str()!! }
+        if (allows.zipWithNext().any { (a, b) -> a >= b }) return false
+        val usd = l["usd"] ?: return false
+        if (!Rules.isInteger(usd)) return false
+        if ((usd.int() ?: return false) !in TASK_USD_MIN..TASK_USD_MAX) return false
+        return l["unattended"].bool() == true && l["resumes"] is JsonNull
+    }
+
+    /**
+     * checkLease: exactly the keys of its kind; a job; 1–8 apps, each once (a
+     * task has none); max_minutes 1–60 (1–240 for a take or a task); a reason;
+     * resumes null or a lease id; the limits known, sorted, each once; and a
+     * take's or a task's own fields.
      */
     fun isLease(v: JsonElement?): Boolean {
         val l = v.obj() ?: return false
@@ -397,37 +435,87 @@ object Leases {
         val keys = LEASE_KEYS[kind] ?: return false
         if (!Rules.hasExactKeys(l, keys)) return false
         val take = kind == "take"
+        val task = kind == "task"
         val jobId = l["job_id"].str() ?: return false
         if (jobId.isEmpty() || codePoints(jobId) > 200) return false
-        val apps = l["apps"].arr() ?: return false
-        if (apps.size !in 1..8 || !apps.all { isApp(it) } || apps.map { it["id"].str() }.toSet().size != apps.size) return false
+        if (!task) {
+            val apps = l["apps"].arr() ?: return false
+            if (apps.size !in 1..8 || !apps.all { isApp(it) } || apps.map { it["id"].str() }.toSet().size != apps.size) return false
+        }
         val mm = l["max_minutes"] ?: return false
         if (!Rules.isInteger(mm)) return false
         val minutes = mm.int() ?: return false
-        if (minutes !in 1..(if (take) TAKE_MAX_MINUTES else MAX_MINUTES)) return false
+        if (minutes !in 1..(if (kind == "computer_use") MAX_MINUTES else TAKE_MAX_MINUTES)) return false
         val reason = l["reason"].str() ?: return false
         if (reason.isEmpty() || codePoints(reason) > 280) return false
         if (l["resumes"] !is JsonNull && !Rules.isUuidV4(l["resumes"])) return false
         if (!isStringList(l["limits"], LEASE_LIMITS.size) { it in LEASE_LIMITS }) return false
         val limits = l["limits"].arr()!!.map { it.str()!! }
         if (limits.zipWithNext().any { (a, b) -> a >= b }) return false
-        return !take || isTakeFields(l)
+        return (!take || isTakeFields(l)) && (!task || isTaskFields(l))
     }
 
     /**
      * The request's own apps, in its order, kept only if the owner left them on.
      * The minutes are at most the request's, and never past the kind's cap
-     * (60, or 240 for a take); the admin's own caps are the node's to check.
+     * (60, or 240 for a take or a task); the admin's own caps are the node's
+     * to check. A task's card has no apps and no choice of minutes, and Allow
+     * signs what it shows: no apps, and exactly its max_minutes.
      */
     fun grant(request: LeaseRequest, apps: List<String>, minutes: Int, deviceId: String, signedAt: String): JsonObject {
         val chosen = apps.toSet()
-        if (chosen.isEmpty() || !request.apps.map { it.id }.containsAll(chosen)) throw ProtocolException("pick at least one of the requested apps")
-        val cap = minOf(request.maxMinutes, if (request.isTake) TAKE_MAX_MINUTES else MAX_MINUTES)
+        if (request.isTask) {
+            if (chosen.isNotEmpty()) throw ProtocolException("a task's grant names no apps")
+            if (minutes != request.maxMinutes) throw ProtocolException("a task's grant is for the minutes its card shows")
+        } else if (chosen.isEmpty() || !request.apps.map { it.id }.containsAll(chosen)) throw ProtocolException("pick at least one of the requested apps")
+        val cap = minOf(request.maxMinutes, if (request.kind == "computer_use") MAX_MINUTES else TAKE_MAX_MINUTES)
         if (minutes !in 1..cap) throw ProtocolException("minutes must be 1–$cap")
         val ordered = request.apps.map { it.id }.filter { it in chosen }
         val grant = JsonObject(mapOf("apps" to JsonArray(ordered.map { jsonString(it) }), "minutes" to jsonNumber(minutes.toString())))
         return decision(request, "grant", grant, deviceId, signedAt)
     }
+
+    /** What a task may do, in the card's words and order (tasks stage 1 spec §4.6). */
+    private val TASK_MAY = listOf(
+        "browser-act" to "click and type in your signed-in browser",
+        "logins" to "sign in with saved logins",
+        "shell" to "run shell commands",
+        "files-write" to "write files"
+    )
+
+    /** A class's words on the card; null for one that has none, which [isLease] refuses. */
+    internal fun taskMayWords(allow: String): String? = TASK_MAY.firstOrNull { it.first == allow }?.second
+
+    /**
+     * A task's card (spec §4.6): the host's lines, in this order, from what
+     * the pinned node signed. Allow signs exactly this, so nothing is cut:
+     * every site is shown. [nodeName] is the pinned name when the screen has
+     * it; the node's own word for itself otherwise.
+     */
+    fun taskLines(request: LeaseRequest, nodeName: String = request.nodeName): List<String> {
+        val lines = ArrayList<String>()
+        lines.add("Task: " + Display.escape(request.name ?: ""))
+        if (request.sites.isNotEmpty()) lines.add("Sites: " + request.sites.joinToString(", ") { Display.escape(it) })
+        val may = TASK_MAY.filter { it.first in request.allows }.map { it.second }
+        lines.add(if (may.isEmpty()) "May: read only" else "May: " + may.joinToString(", "))
+        lines.add(if (request.maxMinutes == 1) "For: 1 minute" else "For: ${request.maxMinutes} minutes")
+        lines.add("Spend up to \$${request.usd}")
+        lines.add("Node: " + Display.escape(nodeName))
+        return lines
+    }
+
+    /** Whether a status message its pinned node signed says it is a task's. Read from the message, so a task whose name cannot be read is still a task. */
+    fun isTaskStatus(message: JsonElement?): Boolean = message["kind"].str() == "task"
+
+    /** The name Stop's prompt may say: only one that passes the plain-line check, else null. */
+    fun taskStopName(message: JsonElement?): String? = message["name"].takeIf { isTakeName(it) }.str()
+
+    /** A running task's row, with its Stop. */
+    fun taskTitle(nodeName: String, name: String): String = "Task on ${Display.escape(nodeName)}: ${Display.escape(name)}"
+
+    /** What a signed `ended` status says of a task, its reason a code of the node's, shown as any free reason is. A task has no live view to say it in. */
+    fun taskEnded(nodeName: String, name: String, reason: String?): String =
+        "Task on ${Display.escape(nodeName)} ended: ${Display.escape(name)}" + if (reason.isNullOrEmpty()) "" else " (${Display.escape(reason)})"
 
     fun deny(request: LeaseRequest, deviceId: String, signedAt: String): JsonObject = decision(request, "deny", JsonNull, deviceId, signedAt)
 

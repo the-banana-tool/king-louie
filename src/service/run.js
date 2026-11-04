@@ -170,6 +170,7 @@ function loadProfile(profile) {
         });
         let core;
         let fleet = null;
+        let ownPushQueue = null;
         // Fleet stage 5: desktop apps through the session helper (null when
         // gui is off or no helper is installed). configDir falls back to the
         // same per-platform admin dir service-wiring uses. Neither
@@ -280,9 +281,27 @@ function loadProfile(profile) {
           // Fleet stage 4 §3.7: the runbook engine, JobManager, delegate
           // sessions and the fleet link methods, hosted by the service.
           const { startFleetNode } = require('../fleet/start');
-          fleet = await startFleetNode({ dataDir, nodeConfig, approvals, core, adminUid, deps: { leaseManager: gui ? gui.leases : null, takeManager: gui ? gui.takes : null } });
+          const { agentCapabilityProbes } = require('../fleet/capabilities');
+          const leaseManager = gui ? gui.leases : null;
+          // A task's push goes whether or not the GUI is on (tasks spec §4.6);
+          // with it, the queue is the lease manager's.
+          if (!leaseManager) {
+            const { PushQueue } = require('../gui/push-queue');
+            ownPushQueue = new PushQueue({ relayClient: approvals.relayClient });
+            ownPushQueue.start();
+          }
+          fleet = await startFleetNode({
+            dataDir, nodeConfig, approvals, core, adminUid,
+            deps: {
+              leaseManager,
+              takeManager: gui ? gui.takes : null,
+              pushQueue: leaseManager ? leaseManager.pushQueue : ownPushQueue,
+              capabilityProbes: deps.capabilityProbes || agentCapabilityProbes({ core, dataDir, hosting })
+            }
+          });
           if (gui) await gui.start();
         } catch (err) {
+          if (ownPushQueue) ownPushQueue.stop();
           if (gui) await gui.stop().catch(() => {});
           if (fleet) await fleet.stop().catch(() => {});
           // Don't leave a half-started core (and its cron timers) behind.
@@ -301,9 +320,16 @@ function loadProfile(profile) {
           // dispatcher, say) — never skip one and leave cron timers, stores
           // or a live relay link running.
           // The GUI stops before all of them: it ends every lease
-          // service_stopped and closes the helper channel first.
+          // service_stopped and closes the helper channel first. Tasks stop
+          // before the GUI: a lease ending under a running turn would read
+          // as the task's own end.
           stop: async () => {
             try {
+              if (fleet) await fleet.stopTasks();
+              if (ownPushQueue) {
+                await ownPushQueue.drain();
+                ownPushQueue.stop();
+              }
               if (gui) await gui.stop();
             } finally {
               try {

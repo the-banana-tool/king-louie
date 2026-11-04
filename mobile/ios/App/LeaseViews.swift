@@ -15,7 +15,9 @@ struct LeaseRequestsSection: View {
                     NavigationLink { LeaseRequestView(item: item) } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(Display.escape(item.nodeName)).font(.headline)
-                            if item.request.isTake, let name = item.request.name {
+                            if item.request.isTask, let name = item.request.name {
+                                Text("Task: \(Display.escape(name))")
+                            } else if item.request.isTake, let name = item.request.name {
                                 Text("Take: \(Display.escape(name))")
                             } else {
                                 Text(item.request.isResume ? "Resume computer use" : "Computer use: \(item.request.apps.map { Display.escape($0.name) }.joined(separator: ", "))")
@@ -98,7 +100,13 @@ struct LeaseRequestView: View {
 
     var body: some View {
         Form {
-            if item.request.isTake {
+            if item.request.isTask {
+                // The whole card (tasks stage 1 spec §4.6), the host's lines from what the node signed.
+                // No app toggles and no stepper: a task has no apps, and Allow signs the minutes it shows.
+                Section("Task") {
+                    ForEach(Leases.taskLines(item.request, nodeName: item.nodeName), id: \.self) { Text($0) }
+                }
+            } else if item.request.isTake {
                 // A take, in this order: its name, unattended, how long, the
                 // sites and what it may do there, the apps, the reason.
                 Section("Take") {
@@ -129,16 +137,23 @@ struct LeaseRequestView: View {
             }
             Section {
                 Button("Allow") {
-                    Task { await model.decideLease(item, apps: chosen, minutes: minutes, grant: true); dismiss() }
+                    Task {
+                        if item.request.isTask {
+                            await model.decideLease(item, apps: [], minutes: item.request.maxMinutes, grant: true)
+                        } else {
+                            await model.decideLease(item, apps: chosen, minutes: minutes, grant: true)
+                        }
+                        dismiss()
+                    }
                 }
-                .disabled(chosen.isEmpty || model.decidingLease.contains(item.id))
+                .disabled((chosen.isEmpty && !item.request.isTask) || model.decidingLease.contains(item.id))
                 Button("Deny", role: .destructive) {
                     Task { await model.decideLease(item, apps: [], minutes: 1, grant: false); dismiss() }
                 }
                 .disabled(model.decidingLease.contains(item.id))
             }
         }
-        .navigationTitle(item.request.isTake ? "Take" : "Computer use")
+        .navigationTitle(item.request.isTask ? "Task" : (item.request.isTake ? "Take" : "Computer use"))
         .onAppear {
             chosen = Set(item.request.apps.map { $0.id })
             minutes = item.request.maxMinutes
@@ -251,7 +266,11 @@ struct LeaseBanner: View {
             ForEach(model.bannerLeases) { lease in
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        if let take = takeTitle(lease) {
+                        if let task = model.runningTask(lease) {
+                            // No live view: a task has no frames. This phone gets no push when one finishes
+                            // (`task_ended` is fcm only): the row goes on a signed ended status.
+                            Text(lease.state == "pending" ? model.bannerTitle(lease) : Leases.taskTitle(nodeName: lease.nodeName, name: task))
+                        } else if let take = takeTitle(lease) {
                             Button(take) { model.showLease(lease) }
                         } else {
                             Button(model.bannerTitle(lease)) { model.showLease(lease) }

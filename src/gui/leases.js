@@ -382,6 +382,15 @@ class LeaseManager extends EventEmitter {
         credentials: lease.take.credentials === true
       });
     }
+    // A task's too (spec 2026-11-03 §4.6): what it may do and spend, never the reason text.
+    if (lease && lease.kind === 'task' && lease.task && (kind === 'lease.requested' || kind === 'lease.granted')) {
+      Object.assign(data, {
+        name: lease.task.name,
+        sites: Array.isArray(lease.task.sites) ? [...lease.task.sites] : [],
+        allows: Array.isArray(lease.task.allows) ? [...lease.task.allows] : [],
+        usd: lease.task.usd
+      });
+    }
     const failed = (err) => this.log.warn(`audit ${kind} failed: ${err.message}`);
     try {
       Promise.resolve(this.audit.append({ kind, data })).catch(failed);
@@ -401,7 +410,7 @@ class LeaseManager extends EventEmitter {
   // (nodeLocalOrigin), and only while gui.take.enabled is on.
   // leaseId: the id a new lease gets, minted by the caller (newLeaseId) so it
   // knows its own lease without watching events; a fresh one when not given.
-  async request({ jobId, origin, appIds, minutes, reason, signal = null, kind = 'computer_use', take = null, nodeLocalOrigin = true, leaseId = null }) {
+  async request({ jobId, origin, appIds, minutes, reason, signal = null, kind = 'computer_use', take = null, task = null, nodeLocalOrigin = true, leaseId = null }) {
     // R-F5-7: a lease is bound to a job. A run with neither a job id nor a
     // chat id has none, and is refused before anything else is looked at.
     if (typeof jobId !== 'string' || !jobId) throw new GuiError('job_required', 'this run has no job or chat to bind a lease to');
@@ -415,6 +424,9 @@ class LeaseManager extends EventEmitter {
       if (nodeLocalOrigin === false) throw new GuiError('take_requires_local_origin', 'a take is started only from a session this node started itself');
       if (!take || typeof take !== 'object' || Array.isArray(take)) throw new GuiError('invalid_params', 'a take needs its "take" block');
     }
+    // A task (spec 2026-11-03 §4.6) has no apps, is not gated on gui.take and may come from any origin.
+    const isTask = kind === 'task';
+    if (isTask && (!task || typeof task !== 'object' || Array.isArray(task))) throw new GuiError('invalid_params', 'a task needs its "task" block');
     if (!this.available()) throw new GuiError('approval_unavailable');
     // Fourth security review, finding 1 (R-F5-17): on Windows the service
     // asks again, before every new request, whether it can write the
@@ -430,11 +442,11 @@ class LeaseManager extends EventEmitter {
       throw new GuiError('capability_unavailable', IDENTITY_MESSAGE);
     }
     const cfg = this.guiConfig;
-    if (!Array.isArray(appIds) || appIds.length < 1 || appIds.length > 8 || new Set(appIds).size !== appIds.length
-      || appIds.some((id) => !Object.hasOwn(cfg.apps, id))) {
+    if (!isTask && (!Array.isArray(appIds) || appIds.length < 1 || appIds.length > 8 || new Set(appIds).size !== appIds.length
+      || appIds.some((id) => !Object.hasOwn(cfg.apps, id)))) {
       throw new GuiError('invalid_params', '"apps" must be 1–8 distinct allowlisted app ids');
     }
-    const max = isTake ? Math.min(cfg.take.maxMinutes, L.TAKE_MAX_MINUTES) : Math.min(cfg.lease.maxMinutes, L.MAX_MINUTES);
+    const max = isTask ? L.TAKE_MAX_MINUTES : isTake ? Math.min(cfg.take.maxMinutes, L.TAKE_MAX_MINUTES) : Math.min(cfg.lease.maxMinutes, L.MAX_MINUTES);
     if (!Number.isInteger(minutes) || minutes < 1 || minutes > max) throw new GuiError('invalid_params', `"minutes" must be 1–${max}`);
     // R-F5-7: a job that is not known to be open gets no lease; nothing is sent.
     if (!this._jobIsOpen(jobId)) throw new GuiError('job_closed', 'that job is not open on this node');
@@ -453,9 +465,11 @@ class LeaseManager extends EventEmitter {
     let lease = cur;
     if (!lease) {
       lease = {
-        leaseId: leaseId || newLeaseId(), jobId, origin, reason: String(reason), requestedApps: [...appIds], maxMinutes: minutes,
-        // kind and the take's block as requested; an unattended take has no contact window and never pauses (R-D1-7).
-        kind, take: isTake ? take : null, unattended: isTake && take.unattended === true, name: isTake ? take.name : null,
+        leaseId: leaseId || newLeaseId(), jobId, origin, reason: String(reason), requestedApps: isTask ? [] : [...appIds], maxMinutes: minutes,
+        // kind and the take's or task's block as requested; an unattended take or task has no contact window and never pauses (R-D1-7).
+        // A task's allows sorted and unique here, so the audit says what the phone signs.
+        kind, take: isTake ? take : null, task: isTask ? { ...task, allows: [...new Set(task.allows)].sort() } : null,
+        unattended: isTask || (isTake && take.unattended === true), name: isTake ? take.name : isTask ? task.name : null,
         // expiresAt is on the wall clock (what the phone is shown), expiresMono the same moment on the monotonic one.
         // grantedBy: the device whose grant made this lease (R-F5-15, R-F5-18): the only one that
         // resumes it or keeps it in contact. Any enrolled phone may stop it or watch it.
@@ -519,7 +533,7 @@ class LeaseManager extends EventEmitter {
       identity: this.approvals.identity, nodeName: this.nodeName, jobId: lease.jobId,
       apps: ids.map((id) => ({ id, name: cfg.apps[id].name, path: cfg.apps[id].path, processes: cfg.apps[id].processes })),
       maxMinutes, reason: lease.reason, resumes: resume, limits, origin: lease.origin, now, leaseId: lease.leaseId,
-      kind: lease.kind, take: lease.take
+      kind: lease.kind, take: lease.take, task: lease.task
     });
     const entry = {
       request_id: message.request_id, lease_id: message.lease_id, nonce: message.nonce, lease_hash: message.lease_hash,
