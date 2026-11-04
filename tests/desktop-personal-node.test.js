@@ -42,13 +42,74 @@ function recording(entries, me = ME) {
   return fn;
 }
 
+// Attach stage 2 §6.4 (C-4): a machine with nothing on it. Paths are win32
+// strings the injected `exists` answers for; nothing real is read.
+describe('detectPersonalNode: fresh', () => {
+  const env = { LOCALAPPDATA: 'C:\\Users\\owner\\AppData\\Local', ProgramData: 'C:\\ProgramData', SystemRoot: 'C:\\Windows' };
+  const DATA = path.win32.join(env.LOCALAPPDATA, 'KingLouie', 'node', 'data');
+  const CONFIG = path.win32.join(env.LOCALAPPDATA, 'KingLouie', 'node', 'config');
+  const FLEET_MARKER = path.win32.join(env.ProgramData, 'KingLouie', 'config', 'service.json');
+  const nobody = [null, null, null, null];
+  // schtasks: exit 1 is "not registered"; exit 0 with no principal tells nothing.
+  const taskMissing = (file, args, opts, cb) => cb(Object.assign(new Error('no task'), { code: 1 }), Buffer.alloc(0), Buffer.alloc(0));
+  const taskUnreadable = (file, args, opts, cb) => cb(null, Buffer.from('<Task/>'), Buffer.alloc(0));
+  const runnerFor = (extra = {}) => createPersonalNodeRunner({
+    platform: 'win32', env, inspectOwners: recording(nobody), exists: () => false, execFile: taskMissing, ...extra
+  });
+
+  it('an empty layout is fresh, at personalDataDir(), with the owner\'s SID', async () => {
+    assert.deepStrictEqual(await runnerFor().detectPersonalNode(), { personal: false, fresh: true, dataDir: DATA, configDir: CONFIG, me: ME });
+  });
+
+  it('any one of node.yaml, service.json or the data dir at the personal path is not fresh', async () => {
+    for (const present of [path.win32.join(CONFIG, 'node.yaml'), path.win32.join(CONFIG, 'service.json'), DATA]) {
+      const out = await runnerFor({ exists: (p) => p === present }).detectPersonalNode();
+      assert.strictEqual(out.fresh, false, present);
+      assert.strictEqual(out.personal, false, present);
+    }
+  });
+
+  it('a fleet layout is not fresh and not personal, with today\'s fields', async () => {
+    const out = await runnerFor({ exists: (p) => p === FLEET_MARKER }).detectPersonalNode();
+    assert.strictEqual(out.fresh, false);
+    assert.strictEqual(out.personal, false);
+    assert.strictEqual(out.reason, 'missing');
+  });
+
+  it('a task that is there, or cannot be read, is not fresh', async () => {
+    const out = await runnerFor({ execFile: taskUnreadable }).detectPersonalNode();
+    assert.strictEqual(out.fresh, false);
+  });
+
+  it('owners that cannot be read, and no LOCALAPPDATA, are not fresh', async () => {
+    const failed = await runnerFor({ inspectOwners: async () => { throw new Error('powershell gone'); } }).detectPersonalNode();
+    assert.strictEqual(failed.fresh, false);
+    assert.strictEqual(failed.reason, 'unreadable');
+    const noLocal = await runnerFor({ env: { ProgramData: env.ProgramData, SystemRoot: env.SystemRoot } }).detectPersonalNode();
+    assert.strictEqual(noLocal.fresh, false);
+  });
+
+  it('a recorded data dir is never fresh, and schtasks is not asked', async () => {
+    let asked = 0;
+    const execFile = (file, args, opts, cb) => { asked += 1; taskMissing(file, args, opts, cb); };
+    const out = await runnerFor({ execFile }).detectPersonalNode({ dataDir: DATA });
+    assert.strictEqual(out.fresh, false);
+    assert.strictEqual(asked, 0);
+  });
+
+  it('off Windows it is never fresh', async () => {
+    const out = await runnerFor({ platform: 'linux' }).detectPersonalNode();
+    assert.strictEqual(out.fresh, false);
+  });
+});
+
 describe('detectPersonalNode', () => {
   it('says personal when the config dir, node.yaml and the data dir are owned by me', async () => {
     const { configDir, dataDir, nodeYaml, file } = layout();
     const inspectOwners = recording([mine, null, mine, mine]);
     const runner = createPersonalNodeRunner({ platform: 'win32', env: {}, bridgeFile: file, inspectOwners });
     const out = await runner.detectPersonalNode();
-    assert.deepStrictEqual(out, { personal: true, name: 'laptop-01', dataDir, configDir, me: ME });
+    assert.deepStrictEqual(out, { personal: true, fresh: false, name: 'laptop-01', dataDir, configDir, me: ME });
     assert.deepStrictEqual(inspectOwners.calls, [[configDir, file, nodeYaml, dataDir]]);
   });
 

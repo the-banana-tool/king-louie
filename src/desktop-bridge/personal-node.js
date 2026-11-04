@@ -11,6 +11,8 @@
 //   hosting: personal; the rule is pairing.js's judgePersonalPaths, never a
 //   copy), and, from the same single inspector call, the bridge file's trust
 //   (inspectLocal, C-1);
+// - is this machine empty, so a node can be installed from nothing (`fresh`,
+//   attach stage 2 §6.4, C-4);
 // - is the logon task registered, enabled and this account's (queryTask: the
 //   task's XML, never schtasks' localised text, C-10);
 // - is a node running on the data dir (nodeRunning: the pidfile names a live
@@ -25,7 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile: execFileCallback, spawn: spawnDefault } = require('child_process');
 const { createLogger } = require('../logging');
-const { adminConfigDir } = require('../platform/paths');
+const { adminConfigDir, personalDataDir, fleetLayoutExists } = require('../platform/paths');
 const { windowsSchtasksExe, windowsPowerShellExe, windowsSystemRoot } = require('../platform/windows-paths');
 const { shown } = require('../service/commands/io');
 const { isServiceCommandLine } = require('../service/commands/stop');
@@ -44,6 +46,8 @@ const STOP_TIMEOUT_MS = 90000;
 const OUTPUT_CAP = 1024 * 1024;
 const LOG_TAIL_BYTES = 256 * 1024;
 const FAILED_TO_START = 'service failed to start';
+const NODE_YAML = 'node.yaml';
+const SERVICE_JSON = 'service.json';
 
 function createPersonalNodeRunner(deps = {}) {
   const env = deps.env || process.env;
@@ -60,6 +64,7 @@ function createPersonalNodeRunner(deps = {}) {
   const isRunning = deps.isRunning || ((pid) => pidfile.isRunning(pid));
   const commandLineOf = deps.commandLineOf || ((pid) => defaultCommandLineOf(pid, { platform, env, execFile }));
   const whoAmI = deps.whoAmI || (() => defaultWhoAmI({ env, execFile }));
+  const exists = deps.exists || fs.existsSync;
   const testOverride = env.KL_TEST_MODE === '1' && Boolean(env.KL_DESKTOP_BRIDGE_FILE);
   // The SID the last inspector call reported: queryTask compares the task's
   // principal with it.
@@ -107,12 +112,33 @@ function createPersonalNodeRunner(deps = {}) {
     return { personal: false, dataDir: path.join(configDir, '..', 'data'), configDir, reason: 'not-windows' };
   }
 
-  // §5.2: is there a personal node here (or for the recorded data dir).
+  // Attach stage 2 §6.4 (C-4): nothing of a personal node at
+  // personalDataDir(), no fleet layout, and no task: what Install may start
+  // from. An answer that tells nothing (owners unread, schtasks not run) is
+  // not fresh. → the fresh answer, or null.
+  async function freshLayout(report) {
+    const dataDir = personalDataDir({ platform, env });
+    if (!dataDir) return null;
+    const configDir = adminConfigDir({ platform, dataDir });
+    if (fleetLayoutExists({ env, exists })) return null;
+    if ([path.win32.join(configDir, NODE_YAML), path.win32.join(configDir, SERVICE_JSON), dataDir].some((p) => exists(p))) return null;
+    const task = await queryTask({ me: report.me });
+    if (task.state !== 'missing') return null;
+    return { personal: false, fresh: true, dataDir, configDir, me: report.me };
+  }
+
+  // §5.2: is there a personal node here (or for the recorded data dir, which
+  // is never fresh: a record says something was installed).
   async function detectPersonalNode({ dataDir } = {}) {
     const file = bridgeFileFor(dataDir);
-    if (platform !== 'win32' || testOverride) return notApplicable(file);
+    if (platform !== 'win32' || testOverride) return { ...notApplicable(file), fresh: false };
     const { paths, report } = await inspect(file);
-    return judgeNode(file, paths, report);
+    const node = judgeNode(file, paths, report);
+    if (!node.personal && !dataDir && node.reason !== 'unreadable') {
+      const fresh = await freshLayout(report);
+      if (fresh) return fresh;
+    }
+    return { ...node, fresh: false };
   }
 
   // C-1: the bridge file's trust (readTrustedBridgeFile's result, with its

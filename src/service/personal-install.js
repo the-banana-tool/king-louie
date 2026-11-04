@@ -32,6 +32,7 @@ const REBOOT_LINE = 'a logon task: after a reboot the node is down until you log
 const BINARY_LINE = (bin) => `binary:     ${bin}, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed`;
 const ALREADY_RUNNING = (pid) => `King Louie Node is already running (pid ${pid}); the task starts it at your next logon.`;
 const FFMPEG_LINE = 'ffmpeg is not on PATH: a take that records needs it. Install it as yourself: winget install Gyan.FFmpeg';
+const NO_CHROME_LINE = 'no chrome.exe found: takes and desktop apps are off; add gui.apps.chrome and gui.browser to node.yaml to turn them on';
 
 const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
@@ -136,10 +137,27 @@ function readYaml(file) {
   }
 }
 
+// With no relay and no front door, whether the node's client is the window:
+// <configDir>/service.json loads with the desktop bridge on (attach stage 2
+// §6.4). → the same answer as defaultStartable.
+function bridgeStartable(configDir) {
+  const { loadServiceConfig, CONFIG_FILE } = require('./config');
+  if (!fs.existsSync(path.join(configDir, CONFIG_FILE))) return { ok: false, why: NOTHING_PAIRED };
+  const uid = typeof process.geteuid === 'function' ? process.geteuid() : -1;
+  let features;
+  try {
+    ({ features } = loadServiceConfig(path.join(path.dirname(configDir), 'data'), {}, { adminConfigDir: configDir, adminUid: uid }));
+  } catch (err) {
+    return { ok: false, why: `${CONFIG_FILE} does not load (${shown(err.message)})` };
+  }
+  return features.desktopBridge === true ? { ok: true } : { ok: false, why: NOTHING_PAIRED };
+}
+
 // Whether the node.yaml in configDir is one the started task would run:
 // it loads through loadNodeConfig with hosting: personal and
-// approvers.relay set or a front door pinned in <configDir>/front-door.json
-// (what the node links to: service-wiring.js prefers the pin).
+// approvers.relay set, a front door pinned in <configDir>/front-door.json
+// (what the node links to: service-wiring.js prefers the pin), or the desktop
+// bridge on.
 // → { ok: true } or { ok: false, why } (one line).
 function defaultStartable(configDir) {
   let config;
@@ -156,7 +174,7 @@ function defaultStartable(configDir) {
   try {
     st = fs.lstatSync(path.join(configDir, FRONT_DOOR_PIN));
   } catch (err) {
-    if (err.code === 'ENOENT') return { ok: false, why: NOTHING_PAIRED };
+    if (err.code === 'ENOENT') return bridgeStartable(configDir);
     return { ok: false, why: `${FRONT_DOOR_PIN} cannot be read (${shown(err.message)})` };
   }
   if (st.isSymbolicLink()) return { ok: false, why: `${FRONT_DOOR_PIN} is a link, which the node refuses` };
@@ -199,16 +217,19 @@ function resolveDeps(deps, io) {
 const scalar = (v) => `'${String(v).replace(/'/g, "''")}'`;
 
 // The values node.yaml gets, as dotted paths, in the order they are written.
+// chrome null: none found and none named, so desktop apps and takes are off.
 function wantedLeaves({ name, chrome, provider, model }) {
   const leaves = [
     ['name', name],
     ['profile', 'agent'],
     ['hosting', 'personal'],
-    ['gui.enabled', true],
-    ['gui.apps.chrome', chrome],
-    ['gui.take.enabled', true],
-    ['gui.take.max_minutes', 240],
-    ['gui.browser', 'chrome']
+    ...(chrome ? [
+      ['gui.enabled', true],
+      ['gui.apps.chrome', chrome],
+      ['gui.take.enabled', true],
+      ['gui.take.max_minutes', 240],
+      ['gui.browser', 'chrome']
+    ] : [['gui.enabled', false]])
   ];
   if (provider) leaves.push(['delegate.provider', provider]);
   if (model) leaves.push(['delegate.model', model]);
@@ -221,13 +242,15 @@ function renderNodeYaml({ name, chrome, provider, model }) {
     'profile: agent',
     'hosting: personal',
     'gui:',
-    '  enabled: true',
-    '  apps:',
-    `    chrome: ${scalar(chrome)}`,
-    '  take:',
-    '    enabled: true',
-    '    max_minutes: 240',
-    '  browser: chrome'
+    ...(chrome ? [
+      '  enabled: true',
+      '  apps:',
+      `    chrome: ${scalar(chrome)}`,
+      '  take:',
+      '    enabled: true',
+      '    max_minutes: 240',
+      '  browser: chrome'
+    ] : ['  enabled: false'])
   ];
   if (provider || model) {
     lines.push('delegate:');
@@ -237,9 +260,21 @@ function renderNodeYaml({ name, chrome, provider, model }) {
   return `${lines.join('\n')}\n`;
 }
 
+// Whether a node.yaml's text names a browser of its own.
+function namesBrowser(text) {
+  try {
+    const parsed = parseYaml(text);
+    return Boolean(parsed && parsed.gui && parsed.gui.browser !== undefined);
+  } catch {
+    return false;
+  }
+}
+
 // The wanted lines an existing node.yaml does not have (any `name` will do,
-// and a browser it already names is its own choice).
-function missingLines(text, wanted) {
+// and a browser it already names is its own choice). A gui the file has off
+// is its own choice too, unless this install was told a browser (browserNamed),
+// and install never asks anyone to turn a gui off.
+function missingLines(text, wanted, { browserNamed = false } = {}) {
   let parsed;
   try {
     parsed = parseYaml(text);
@@ -249,8 +284,11 @@ function missingLines(text, wanted) {
   if (!parsed || typeof parsed !== 'object') return null;
   const at = (dotted) => dotted.split('.').reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), parsed);
   const hasBrowser = at('gui.browser') !== undefined;
+  const guiOff = at('gui.enabled') === false && !browserNamed;
   return wanted
     .filter(([key]) => key !== 'name' && !(hasBrowser && (key === 'gui.browser' || key === 'gui.apps.chrome')))
+    .filter(([key, value]) => !(key === 'gui.enabled' && value === false))
+    .filter(([key]) => !(guiOff && key.startsWith('gui.')))
     .filter(([key, value]) => at(key) !== value)
     .map(([key, value]) => `${key}: ${typeof value === 'string' ? scalar(value) : value}`);
 }
@@ -293,8 +331,9 @@ async function install({ flags, io, c }) {
   const configDir = path.join(path.dirname(dataDir), 'config');
   const yamlPath = path.join(configDir, NODE_YAML);
 
-  const chrome = flags.browser || c.findChrome();
-  if (!chrome) return refuse(io, 'no chrome.exe found; pass --browser <path>');
+  // No Chrome is no reason to stop (C-6): the window needs no browser, and
+  // gui stays off until node.yaml says otherwise.
+  const chrome = flags.browser || c.findChrome() || null;
   const wanted = { name: c.hostname(), chrome, provider: flags.provider, model: flags.model };
   const yaml = renderNodeYaml(wanted);
   try {
@@ -306,7 +345,8 @@ async function install({ flags, io, c }) {
   const account = c.whoAmI();
   const existing = readYaml(yamlPath);
   if (existing && existing.error) return refuse(io, `Could not read ${yamlPath}: ${existing.error.message}`);
-  const missing = existing ? missingLines(existing.text, wantedLeaves(wanted)) : null;
+  const missing = existing ? missingLines(existing.text, wantedLeaves(wanted), { browserNamed: Boolean(flags.browser) }) : null;
+  const noBrowser = !chrome && !(existing && namesBrowser(existing.text));
   // The task is started only when the node.yaml it will run is one that
   // starts: a fresh one has no relay yet, and pair starts it.
   const start = existing ? c.startable(configDir) : { ok: false, why: NOTHING_PAIRED };
@@ -343,9 +383,10 @@ async function install({ flags, io, c }) {
   } else {
     io.stdout.write(`${yamlPath} exists and install keeps it; it has every line install would write.\n`);
   }
+  if (noBrowser) io.stdout.write(`${NO_CHROME_LINE}\n`);
   // A warning, not a refusal: a take that records refuses recorder_missing
   // later with the same remedy.
-  if (!c.findFfmpeg()) io.stdout.write(`${FFMPEG_LINE}\n`);
+  else if (!c.findFfmpeg()) io.stdout.write(`${FFMPEG_LINE}\n`);
   if (runningPid) io.stdout.write(`${ALREADY_RUNNING(runningPid)}\n`);
   if (leftover) io.stdout.write(`${fleetData} exists but no fleet config file is beside it: every command ignores it, and it may be removed.\n`);
 

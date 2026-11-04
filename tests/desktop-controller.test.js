@@ -648,13 +648,15 @@ const PERSONAL_DATA_DIR = 'C:\\Users\\owner\\AppData\\Local\\KingLouie\\node\\da
 const OWNER_SID = 'S-1-5-21-1000-2000-3000-1001';
 
 function fakeRunner({
-  personal = true, running = false, task = 'registered', failure = null,
+  personal = true, fresh = false, running = false, task = 'registered', failure = null,
   cli = () => ({ code: 0, stdout: '', stderr: '', json: { ok: true } }),
   trust = () => ({ ok: false, code: 'BRIDGE_FILE_MISSING', error: 'No local service found.' }),
   stop = () => ({ ok: true }), unpairCode = 0
 } = {}) {
   const calls = [];
-  const node = personal
+  const node = fresh
+    ? { personal: false, fresh: true, dataDir: PERSONAL_DATA_DIR, configDir: 'C:\\Users\\owner\\AppData\\Local\\KingLouie\\node\\config', me: OWNER_SID }
+    : personal
     ? { personal: true, name: 'laptop-01', dataDir: PERSONAL_DATA_DIR, configDir: 'C:\\Users\\owner\\AppData\\Local\\KingLouie\\node\\config', me: OWNER_SID }
     : { personal: false, dataDir: 'C:\\ProgramData\\KingLouie\\data', configDir: 'C:\\ProgramData\\KingLouie\\config', reason: 'not-personal' };
   const runner = {
@@ -1526,6 +1528,31 @@ describe('desktop controller: Install from the pane (§8)', () => {
       assert.strictEqual(out.code, 'NOT_PERSONAL');
     }
     assert.deepStrictEqual(runner.calls.filter(([c]) => c === 'detectPersonalNode').map(([, a]) => a), [{ dataDir: PERSONAL_DATA_DIR }, { dataDir: PERSONAL_DATA_DIR }]);
+    assert.ok(!runner.calls.some(([c]) => c === 'runCli'));
+    controller.dispose();
+  });
+
+  // Attach stage 2 §6.4 (C-4): installing from nothing.
+  it('a fresh machine: the preview and the install target personalDataDir()', async () => {
+    const runner = fakeRunner({ personal: false, fresh: true, task: 'missing', cli: () => ({ code: 0, stdout: 'will set up\n', stderr: '', json: null }) });
+    const { controller } = controllerFor({ extra: { nodeRunner: runner } });
+    const preview = await controller.nodeInstallPreview();
+    assert.deepStrictEqual(preview, { ok: true, lines: ['will set up'] });
+    assert.deepStrictEqual(runner.calls.find(([c]) => c === 'runCli')[1], ['install', '--personal', '--dry-run', '--data-dir', PERSONAL_DATA_DIR]);
+    assert.deepStrictEqual(runner.calls.find(([c]) => c === 'detectPersonalNode')[1], {});
+    const out = await controller.nodeInstall({ confirmed: true });
+    assert.strictEqual(out.ok, true);
+    assert.deepStrictEqual(runner.calls.filter(([c]) => c === 'runCli')[1][1], ['install', '--personal', '--yes', '--data-dir', PERSONAL_DATA_DIR]);
+    assert.strictEqual(runner.calls.find(([c]) => c === 'queryTask')[1].me, OWNER_SID);
+    controller.dispose();
+  });
+
+  it('a recorded pairing is never installed for by a fresh answer (C-7)', async () => {
+    const runner = fakeRunner({ personal: false, fresh: true, task: 'missing' });
+    const { controller, state } = controllerFor({ extra: { nodeRunner: runner } });
+    state.setPairing(personalPairing());
+    const out = await controller.nodeInstallPreview();
+    assert.strictEqual(out.code, 'NOT_PERSONAL');
     assert.ok(!runner.calls.some(([c]) => c === 'runCli'));
     controller.dispose();
   });

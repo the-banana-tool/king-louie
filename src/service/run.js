@@ -27,7 +27,9 @@ function assertEnabledListenersBound(core, features) {
   // The webhook one assigns its handle synchronously and is kicked off
   // fire-and-forget, so callers must await core.whenListenersSettled() first.
   if (features.gateway && !core.getGatewayServer()?.wss) missing.push('gateway');
-  if (features.webhooks && !core.getWebhookServer()?.httpServer) missing.push('webhooks');
+  // On a personal node's default, a listener with nothing to serve is not
+  // absent: it has not been asked for yet (webhooksOnDemand in create-core.js).
+  if (features.webhooks && !core.getWebhookServer()?.httpServer && !core.webhookListenerIdle?.()) missing.push('webhooks');
   if (missing.length === 0) return;
   throw new Error(
     `refusing to run without ${missing.join(' and ')}: ${missing.length > 1 ? 'those listeners are' : 'that listener is'} `
@@ -118,7 +120,7 @@ function loadProfile(profile) {
       // helper endpoint under a temp dir or a personal node's channel;
       // deps.personalOwner reaches assertPersonalOwner). runService passes
       // its own deps through, which are none outside tests.
-      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, localInference = null, caseChecks = null, adminUid, configDir, executors, deps = {} }) {
+      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, localInference = null, caseChecks = null, adminUid, configDir, executors, webhooksOnDemand = false, deps = {} }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -211,6 +213,7 @@ function loadProfile(profile) {
             ...servicePorts,
             ...desktopBridge.coreDeps,
             features,
+            webhooksOnDemand: hosting === 'personal' && webhooksOnDemand === true,
             ports,
             workingDirectory: workspace,
             // Cases stage 4: the owner identity and contact addresses, from
@@ -349,6 +352,7 @@ function loadProfile(profile) {
           },
           startBackgroundChecks: () => core.models.startBackgroundChecks(),
           masterKeySource: servicePorts.masterKeySource,
+          core,
           desktopBridge,
           approvals,
           fleet,
@@ -484,11 +488,13 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
     let running;
     let profile;
     try {
-      const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
+      // The same node.yaml and rules the agent profile's start reads next.
+      const readHosting = () => require('./node-config').loadNodeConfig(adminDirOptions({ dataDir, adminUid })).hosting;
+      const config = loadServiceConfig(dataDir, { profile: profileOverride }, { readHosting, ...(adminUid === undefined ? {} : { adminUid }) });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
       const startProfile = deps.startProfile || ((opts) => loadProfile(profile).start(opts));
-      running = await startProfile({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, serviceConfig: config, deps });
+      running = await startProfile({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, webhooksOnDemand: config.webhooksOnDemand === true, serviceConfig: config, deps });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

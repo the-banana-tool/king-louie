@@ -1093,7 +1093,8 @@ function createDesktopController({
 
   // §8: which data dir Install is for, and whose task it reads after.
   // The disk is read every time (C-7): a recorded data dir only says where
-  // to look, and must still be a personal node's.
+  // to look, and must still be a personal node's. With none recorded, a
+  // machine with nothing on it may be installed on (attach stage 2 §6.4).
   async function installTarget() {
     if (!nodeRunner) return null;
     const recorded = personalDataDir();
@@ -1104,7 +1105,8 @@ function createDesktopController({
       log.warn(`personal node read failed: ${err.message}`);
       return null;
     }
-    if (!local || !local.personal || !local.dataDir) return null;
+    if (!local || !local.dataDir) return null;
+    if (!local.personal && !(local.fresh === true && !recorded)) return null;
     if (recorded && !samePath(local.dataDir, recorded)) return null;
     return { dataDir: local.dataDir, me: local.me };
   }

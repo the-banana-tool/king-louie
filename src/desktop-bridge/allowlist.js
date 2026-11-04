@@ -93,6 +93,9 @@ const LONG_CHANNELS = new Set([
   // Served by a personal node only. A clone (60 s) then npm install (120 s), a
   // fetch per skill, a model call, a server's connect (or every server's).
   'skill:install', 'skill:update', 'skill:checkUpdates',
+  // A skill's own code: it runs as long as it runs, and a 120 s timeout while
+  // it goes on invites a resend.
+  'skill:execute', 'skill:handleMessage',
   'workflow:plan', 'workflow:planAndExecute',
   'settings:mcpSave', 'settings:mcpReload'
 ]);

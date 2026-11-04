@@ -347,7 +347,7 @@ describe('allowlist under hosting', () => {
   });
 
   it('a pane\'s call that can outlast the default timeout gets the long bound', () => {
-    for (const ch of ['skill:install', 'skill:update', 'skill:checkUpdates', 'workflow:plan', 'workflow:planAndExecute', 'settings:mcpSave', 'settings:mcpReload']) {
+    for (const ch of ['skill:install', 'skill:update', 'skill:checkUpdates', 'skill:execute', 'skill:handleMessage', 'workflow:plan', 'workflow:planAndExecute', 'settings:mcpSave', 'settings:mcpReload']) {
       assert.strictEqual(channelTimeoutMs(ch, 120000), LONG_CHANNEL_TIMEOUT_MS, ch);
     }
   });

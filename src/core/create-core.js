@@ -277,6 +277,9 @@ function createCore(deps = {}) {
   // checking — which is how service mode could report itself ready with
   // `features.webhooks` on and no webhook listener (src/service/run.js).
   let webhookListenerSettled = Promise.resolve();
+  // A personal node's default (src/service/config.js): features.webhooks on,
+  // but nothing binds until a webhook or a contact relay needs the listener.
+  let webhookListenerIdle = false;
   let workflowEngine;
   let plannerExecutor;
   let agentExecutorAdapter;
@@ -3211,12 +3214,26 @@ function createCore(deps = {}) {
     webhookRegistry = new WebhookRegistry(store);
     webhookHandler = new WebhookHandler(webhookRegistry, sessionManager, agentExecutorAdapter);
     webhookServer = new WebhookServer(gatewayServer, webhookHandler, { port: ports.webhook });
-    if (features.webhooks) {
-      // Still not awaited here — a slow bind must not hold up start() for the
-      // Electron host — but the promise is kept so a host that needs to know
-      // can wait for it (core.whenListenersSettled).
+    // Still not awaited here — a slow bind must not hold up start() for the
+    // Electron host — but the promise is kept so a host that needs to know
+    // can wait for it (core.whenListenersSettled).
+    const startWebhookListener = () => {
       webhookListenerSettled = webhookServer.start()
         .catch(err => log.warn(`Webhook server start failed: ${err.message}`));
+    };
+    if (features.webhooks) {
+      const needed = deps.webhooksOnDemand !== true
+        || webhookRegistry.list().length > 0
+        || Object.keys(deps.contactConfig?.relays || {}).length > 0;
+      if (needed) {
+        startWebhookListener();
+      } else {
+        webhookListenerIdle = true;
+        webhookRegistry.once('webhook:registered', () => {
+          webhookListenerIdle = false;
+          startWebhookListener();
+        });
+      }
     }
 
     // Initialize mesh networking (peer-to-peer communication between king-louie instances)
@@ -4034,6 +4051,7 @@ function createCore(deps = {}) {
     // listener enabled, and the guard itself never ran.
     getGatewayServer: () => gatewayServer,
     getWebhookServer: () => webhookServer,
+    webhookListenerIdle: () => webhookListenerIdle,
     whenListenersSettled: () => webhookListenerSettled
   };
 }
