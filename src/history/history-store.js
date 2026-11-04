@@ -6,6 +6,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { DatabaseSync } = require('node:sqlite');
 const chunkIndex = require('./chunk-index');
 const embeddingIndex = require('./embedding-index');
@@ -55,16 +56,28 @@ const LIST_SQL = `
   LEFT JOIN messages p ON p.chat_id = c.id AND p.seq = a.last_seq
   ORDER BY c.position, c.rowid`;
 
+function immutableUri(dbPath) {
+  const url = pathToFileURL(path.resolve(dbPath));
+  url.searchParams.set('immutable', '1');
+  return url.href;
+}
+
 class HistoryStore {
   // allowOlderSchema (read-only only): open a file at any schema version from
   // 1 to the latest without upgrading it, for callers that read only chats
   // and messages (desktop import from an H1 profile). Its index methods then
   // find nothing, and setCalibration throws.
-  static open(dbPath, { readonly = false, allowOlderSchema = false, now, chunkOptions } = {}) {
+  // immutable (read-only only): SQLite's immutable=1, for a file nothing is
+  // writing and whose WAL is empty. A plain read-only open of a WAL database
+  // leaves -wal and -shm beside it; this one touches nothing and reads only
+  // the main file, so the caller checks first that there is no WAL to read
+  // (snapshotHistoryFile, src/migration/desktop-history.js).
+  static open(dbPath, { readonly = false, allowOlderSchema = false, immutable = false, now, chunkOptions } = {}) {
     if (!dbPath || typeof dbPath !== 'string') throw new TypeError('HistoryStore.open needs a file path or ":memory:".');
     const memory = dbPath === ':memory:';
     if (!memory && !readonly) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    const db = new DatabaseSync(dbPath, readonly ? { readOnly: true } : {});
+    if (immutable && (!readonly || memory)) throw new TypeError('An immutable open is read-only, of a file.');
+    const db = new DatabaseSync(immutable ? immutableUri(dbPath) : dbPath, readonly ? { readOnly: true } : {});
     let version;
     try {
       db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
