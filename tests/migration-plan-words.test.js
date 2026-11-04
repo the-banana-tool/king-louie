@@ -209,3 +209,28 @@ describe('the words on a personal node', () => {
     assert.match(dir.items.find((i) => i.category === 'allowedDirectory').note, /the service cannot read/);
   });
 });
+
+describe('a refusal on a personal node says the node', () => {
+  it('a kept rule and a system job', async () => {
+    const { core, importer } = await nodeService();
+    const rule = { tool: 'Bash', pattern: 'git *', action: 'allow' };
+    const plan = await planOf(importer, { permissionRules: [rule], cron: [{ id: 'sys', name: 'sys' }] });
+    importer.scope.addPermissionRule = () => false;
+    const { results } = await importer.apply({ planId: plan.planId, batch: [
+      { category: 'permissionRule', key: 'Bash|git *|allow', value: rule },
+      { category: 'cron', key: 'sys', value: { id: 'sys', system: true } }
+    ] });
+    assert.match(results[0].note, /kept the node's rule/);
+    assert.match(results[1].error, /the node makes its own/);
+    assert.ok(core);
+  });
+
+  it('a fleet import keeps its words', async () => {
+    const { importer } = await nodeService({ hosting: 'service' });
+    const rule = { tool: 'Bash', pattern: 'git *', action: 'allow' };
+    const plan = await planOf(importer, { permissionRules: [rule] });
+    importer.scope.addPermissionRule = () => false;
+    const { results } = await importer.apply({ planId: plan.planId, batch: [{ category: 'permissionRule', key: 'Bash|git *|allow', value: rule }] });
+    assert.match(results[0].note, /kept the service's rule/);
+  });
+});

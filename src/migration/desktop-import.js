@@ -892,7 +892,7 @@ class DesktopImporter {
         items[items.length - 1].incomplete = true;
       } else if (!this.personal) {
         if (done('case', dir)) add('case', dir, 'skip-present');
-        else add('case', dir, 'needs-attention', 'a case with this directory already exists on the service');
+        else add('case', dir, 'needs-attention', `a case with this directory already exists on the ${this.where}`);
       // On record, and the source is what landed: the node's own work since (its
       // sweep commits what it finds within a minute) is no reason to doubt it.
       } else if (await recordedLandingHolds(path.join(root, dir), done('case', dir), c)) {
@@ -1020,7 +1020,7 @@ class DesktopImporter {
   }
 
   requireCipher() {
-    if (this.cipher && !this.cipher.isEncryptionAvailable()) throw new ImportError('ENCRYPTION_UNAVAILABLE', 'Encryption unavailable in the service.');
+    if (this.cipher && !this.cipher.isEncryptionAvailable()) throw new ImportError('ENCRYPTION_UNAVAILABLE', `Encryption unavailable in the ${this.where}.`);
   }
 
   requireSecretString(value) {
@@ -1071,7 +1071,7 @@ class DesktopImporter {
         // value says which, so that refusal is reported rather than
         // appearing to have imported the rule (fix round 2, residual I3).
         const added = this.scope.addPermissionRule({ tool, pattern, action, source: 'desktop-import' });
-        return added ? {} : { note: "kept the service's rule" };
+        return added ? {} : { note: `kept the ${this.where}'s rule` };
       }
       case 'alwaysApprove':
         ctx.setToolAlwaysApprove(item.key, true);
@@ -1094,7 +1094,7 @@ class DesktopImporter {
         // System jobs (C2's cases:wakeups) belong to the receiving core, which
         // creates its own. The offline import --from writer adds straight to the
         // cron store, so refuse one here whatever the desktop sent.
-        if (value.system === true) throw new ImportError('BAD_VALUE', 'a system job is not imported; the service makes its own');
+        if (value.system === true) throw new ImportError('BAD_VALUE', `a system job is not imported; the ${this.where} makes its own`);
         // Written only if the id is still absent (fix round 1, I4).
         if (this.targets.cron.has(item.key)) {
           return { note: `a cron job with this id was added to the ${this.where} after the plan was made; not overwritten` };
