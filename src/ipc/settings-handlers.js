@@ -478,7 +478,11 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
   ipcMain.handle('settings:vaultList', wrapHandler('settings:vaultList', async () => {
     const vaultKeys = paneVault().list();
-    return { ok: true, keys: vaultKeys, count: vaultKeys.length };
+    // referable: what a ${vault:<key>} reference may suggest. Contact credentials and
+    // keys with a backslash are what the resolver refuses; a local server's key is the
+    // administrator's, and no reference should hand it to an MCP server.
+    const referable = vaultKeys.filter((k) => !isContactVaultKey(k) && !isLocalServerVaultKey(k) && !k.includes('\\'));
+    return { ok: true, keys: vaultKeys, count: vaultKeys.length, referable };
   }));
 
   // Which of these names the store holds a secret under that decrypts, and which it

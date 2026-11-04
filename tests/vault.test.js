@@ -335,3 +335,44 @@ describe('a rename never overwrites another secret', () => {
     assert.strictEqual(vault.get('two'), 'second');
   });
 });
+
+describe('what the MCP env form suggests', () => {
+  const { JsonFileStore } = require('../src/platform/json-file-store');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const cipher = { encryptString: (s) => `E:${s}`, decryptString: (s) => s.slice(2) };
+  const tmpDir = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-vault-'));
+    after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    return dir;
+  };
+  function setup() {
+    const dir = tmpDir();
+    const store = new JsonFileStore({ dir, name: 'config' });
+    const vault = createVault({ store, cipher });
+    const handlers = new Map();
+    require('../src/ipc/settings-handlers').registerSettingsHandlers({ handle: (c, fn) => handlers.set(c, fn) }, { vaultStore: store, encryptToken: cipher.encryptString, decryptToken: cipher.decryptString });
+    const call = async (channel, arg) => { const a = await handlers.get(channel)({}, arg); return a.data && a.ok !== false ? { ok: a.ok, ...a.data } : a; };
+    return { dir, store, vault, call };
+  }
+
+  it('every key to the pane, and only what a reference may name to the form', async () => {
+    const { vault, store, call } = setup();
+    vault.set('github', 'one');
+    vault.set('browser_cred:p:example.com', 'two');
+    vault.set('contact.relay', 'three');
+    vault.set('Local.box', 'four');
+    store.set('__vault_back\\slash', 'E:five');
+    const answer = await call('settings:vaultList');
+    assert.ok(answer.keys.includes('contact.relay'), 'the pane still lists it');
+    assert.deepStrictEqual([...answer.referable].sort(), ['browser_cred:p:example.com', 'github']);
+  });
+
+  it('the form reads that list, not every key', () => {
+    const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    const body = renderer.slice(renderer.indexOf('async function getVaultKeysForAutocomplete'), renderer.indexOf('async function addMcpEnvRow'));
+    assert.match(body, /result\.referable/);
+    assert.doesNotMatch(body, /result\.keys/);
+  });
+});

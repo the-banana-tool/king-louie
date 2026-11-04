@@ -5198,7 +5198,7 @@ function renderMcpServers(servers = []) {
 async function getVaultKeysForAutocomplete() {
   try {
     const result = await window.electron.settings.vaultList();
-    return result?.ok ? (result.keys || []) : [];
+    return result?.ok ? (result.referable || []) : [];
   } catch {
     return [];
   }
