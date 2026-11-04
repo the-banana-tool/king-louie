@@ -181,7 +181,10 @@ class ContactRouter {
   channelStatus(channelId) {
     const a = this.adapter(channelId);
     if (!a) return { enabled: false, configured: false, reason: 'not enabled in this host' };
-    if (!a.contactConfigured()) return { enabled: true, configured: false, reason: 'no owner target is configured' };
+    if (!a.contactConfigured()) {
+      const why = typeof a.contactNotConfiguredReason === 'function' ? a.contactNotConfiguredReason() : null;
+      return why ? { enabled: true, configured: false, reason: why, sealing: true } : { enabled: true, configured: false, reason: 'no owner target is configured' };
+    }
     return { enabled: true, configured: true };
   }
 
@@ -235,6 +238,7 @@ class ContactRouter {
     // its tokens are on disk before the send, so a crash right after a
     // non-idempotent send (Telegram, Discord, the phone) still leaves every
     // token and button of the sent message resolvable.
+    const seal = typeof adapter.contactSealState === 'function' ? adapter.contactSealState() : null;
     const record = {
       channel: channelId,
       at: this.clock().toISOString(),
@@ -244,8 +248,8 @@ class ContactRouter {
       idempotencyKey: id,
       status: 'sending',
       items: message.items.map((i) => ({ n: i.n, caseId: i.caseId, questionId: i.questionId, token: i.token, kind: i.kind, answerable: i.answerable })),
-      // Only the phone seals; the phone's answers are held to this (R-SP-4).
-      ...(typeof adapter.sealsQuestions === 'function' && adapter.sealsQuestions() ? { sealed: true } : {})
+      // Only the phone seals; its answers and the ladder's re-sends read these (R-SP-4).
+      ...(seal ? { sealed: true, sealedTo: seal.readers } : {})
     };
     this.state.recordDelivery(id, record);
     let sent;
@@ -256,7 +260,9 @@ class ContactRouter {
       throw err;
     }
     this.state.recordDelivery(id, { ...record, externalRef: sent?.externalRef ?? null, relayId: sent?.relayId ?? null, status: 'sent' });
-    return { deliveryId: id, externalRef: sent?.externalRef ?? null, batchToken: token };
+    const out = { deliveryId: id, externalRef: sent?.externalRef ?? null, batchToken: token };
+    if (seal && !seal.devices.every((device) => Object.hasOwn(seal.readers, device))) out.readableByAll = false;
+    return out;
   }
 
   // { meta, record }; both null when the case is gone, record null when the

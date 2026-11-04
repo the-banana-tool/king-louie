@@ -23,9 +23,9 @@ const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
 const { createSealPolicy } = require('../src/approvals/seal-policy');
 const { generateBoxKey } = require('../src/approvals/node-box-key');
-const { sealContent, isSealedShape } = require('../src/approvals/seal');
+const { sealContent, isSealedShape, boxKeyFingerprint } = require('../src/approvals/seal');
 const { validateMessage } = require('../src/approvals/messages');
-const { LadderEngine } = require('../src/cases/ladder');
+const { LadderEngine, RESEALS_PER_TICK } = require('../src/cases/ladder');
 const { LoopbackChannel } = require('./helpers/loopback-channel');
 
 const dirs = [];
@@ -50,7 +50,7 @@ function fakeLink() {
 // sealing: the phone holds a box key and the node a real seal policy on it.
 // sealFrom: 'later' leaves the policy off the channel until the test sets it,
 // so the two questions below go out clear.
-async function world({ records = null, sealing = false, sealFrom = 'start' } = {}) {
+async function world({ records = null, sealing = false, sealFrom = 'start', presenceByConfigured = false } = {}) {
   const phone = createFakePhone({ name: 'Owner phone', boxKey: sealing });
   const stranger = createFakePhone({ name: 'Other phone' });
   const store = await approverStoreWith(records ? records(phone) : [phone.approverRecord({ boxKey: sealing })]);
@@ -66,7 +66,7 @@ async function world({ records = null, sealing = false, sealFrom = 'start' } = {
   const policy = defaultPolicy();
   const link = fakeLink();
   const adapters = new Map();
-  const presence = new Presence({ file: path.join(data, 'contact', 'presence.json'), getPolicy: () => policy, clock, isEnabled: (c) => adapters.has(c) });
+  const presence = new Presence({ file: path.join(data, 'contact', 'presence.json'), getPolicy: () => policy, clock, isEnabled: (c) => (presenceByConfigured ? Boolean(adapters.get(c)?.contactConfigured()) : adapters.has(c)) });
   const router = new ContactRouter({ state, runtime, adapters, presence, clock });
   const sealPolicy = sealing ? createSealPolicy({ approverStore: store, identity: node, dataDir: data }) : null;
   const mobile = new MobileAppChannel({ link, approverStore: store, identity: node, sealPolicy: sealFrom === 'start' ? sealPolicy : null, getRouter: () => router, presence, clock });
@@ -89,6 +89,31 @@ async function world({ records = null, sealing = false, sealFrom = 'start' } = {
   const fg = (overrides = {}) => ({ deviceId: phone.deviceId, foreground: true, at: clock().toISOString(), ...overrides });
   const answerOf = (qid = q.id) => runtime.questions(info.id).get(qid).answer;
   return { phone, stranger, store, node, runtime, router, mobile, link, info, q, q2, token, token2, answer, fg, call, ping, answerOf, presence, now, advance, sealPolicy, state, adapters, policy, clock, data };
+}
+
+// A real ladder on the world's router: mobile first, then telegram, for every urgency.
+function ladderOn(w, steps = [{ channel: 'mobile', afterMin: 0 }, { channel: 'telegram', afterMin: 0 }], options = {}) {
+  const telegram = new LoopbackChannel({ id: 'telegram', owner: 'telegram-owner', caps: {} });
+  w.adapters.set('telegram', telegram);
+  const policy = { ...w.policy, digest: null, ladders: { high: steps, normal: steps, low: steps } };
+  const ladder = new LadderEngine({ state: w.state, casesRoot: w.runtime.root, runtime: w.runtime, router: w.router, presence: w.presence, getPolicy: () => policy, clock: w.clock, dataDir: w.data, ...options });
+  return { ladder, telegram, policy };
+}
+
+// A latched policy whose keys a test sets: `keys` is device id to box JWK.
+function settablePolicy(w, keys) {
+  const p = {
+    keys,
+    why: 'no active phone holds a box key. Enroll a phone or apply its box key',
+    senderId: w.node.nodeId,
+    nodeBox: w.node.box.jwk,
+    sealing: () => true,
+    canSeal: () => Object.keys(p.keys).length > 0,
+    recipients: () => ({ ...p.keys, [w.node.nodeId]: w.node.box.jwk }),
+    whyNot: () => (Object.keys(p.keys).length > 0 ? null : p.why)
+  };
+  w.mobile.sealPolicy = p;
+  return p;
 }
 
 // A kl.question.answer as an updated phone builds it: sealed to the node's box,
@@ -463,12 +488,24 @@ describe('sealed questions: the ask', () => {
     assert.deepStrictEqual(listed.envelope, w.link.sent[0].envelope);
   });
 
-  it('the delivery says it was sealed from before the send; a clear one has no such key', async () => {
+  it('the delivery says it was sealed, and to whom, on disk before the send; a clear one has no such key', async () => {
     const w = await world({ sealing: true });
-    const sealedDelivery = w.state.resolve(w.token, { channel: 'mobile' }).delivery;
-    assert.strictEqual(sealedDelivery.sealed, true);
+    const onDisk = [];
+    const realSend = w.link.send;
+    w.link.send = async (envelope, opts) => {
+      onDisk.push(JSON.parse(fs.readFileSync(path.join(w.state.dir, 'deliveries.json'), 'utf8')));
+      return realSend(envelope, opts);
+    };
+    const { deliveryId } = await w.router.deliver('mobile', [{ caseId: w.info.id, caseTitle: w.info.title, token: w.token, record: w.q }]);
+    assert.strictEqual(onDisk.length, 1);
+    const seen = onDisk[0].deliveries ? onDisk[0].deliveries[deliveryId] : onDisk[0][deliveryId];
+    assert.strictEqual(seen.status, 'sending');
+    assert.strictEqual(seen.sealed, true);
+    assert.deepStrictEqual(seen.sealedTo, { [w.phone.deviceId]: boxKeyFingerprint(w.phone.boxJwk) });
     const clearWorld = await world();
-    assert.ok(!('sealed' in clearWorld.state.resolve(clearWorld.token, { channel: 'mobile' }).delivery));
+    const clearDelivery = clearWorld.state.resolve(clearWorld.token, { channel: 'mobile' }).delivery;
+    assert.ok(!('sealed' in clearDelivery));
+    assert.ok(!('sealedTo' in clearDelivery));
   });
 });
 
@@ -546,7 +583,7 @@ describe('sealed questions: latched with nobody to seal to', () => {
     w.advance(120000);
     await ladder.tick();
     const entry = w.state.ladder().entries[`${w.info.id}/${q3.id}`];
-    assert.deepStrictEqual(entry.attempts.filter((a) => a.channel === 'mobile').map((a) => [a.outcome, a.reason]), [['skipped', 'not-configured']]);
+    assert.deepStrictEqual(entry.attempts.filter((a) => a.channel === 'mobile').map((a) => [a.outcome, a.reason]), [['skipped', 'sealing']]);
     assert.ok(!entry.attempts.some((a) => a.channel === 'mobile' && a.outcome === 'sent'));
     assert.deepStrictEqual(entry.attempts.filter((a) => a.channel === 'telegram').map((a) => a.outcome), ['sent']);
     assert.strictEqual(w.link.sent.length, before, 'nothing went to the relay');
@@ -555,13 +592,283 @@ describe('sealed questions: latched with nobody to seal to', () => {
     assert.ok(telegram.sent.length >= 1);
   });
 
-  it('a latched node with no phone at all sends nothing and asks for nothing', async () => {
+  it('a latched node with no phone left: the ladder skips for sealing, and the status says why', async () => {
     const w = await world({ sealing: true });
-    fs.mkdirSync(path.join(w.data, 'approvals'), { recursive: true });
     assert.strictEqual(w.sealPolicy.sealing(), true);
     w.store.addToOverlay(w.phone.deviceId);
     assert.strictEqual(w.mobile.devices().length, 0);
-    await assert.rejects(w.mobile.sendContact({ items: [item(w)] }), (err) => err.code === 'not-configured');
+    const before = w.link.sent.length;
+    const status = w.router.channelStatus('mobile');
+    assert.strictEqual(status.configured, false);
+    assert.strictEqual(status.sealing, true);
+    assert.strictEqual(status.reason, w.sealPolicy.whyNot());
+    assert.match(status.reason, /no active phone holds a box key/);
+    const { ladder } = ladderOn(w);
+    w.advance(120000);
+    await ladder.tick();
+    const entry = w.state.ladder().entries[`${w.info.id}/${w.q.id}`];
+    assert.deepStrictEqual(entry.attempts.filter((a) => a.channel === 'mobile').map((a) => [a.outcome, a.reason]), [['skipped', 'sealing']]);
+    assert.strictEqual(w.link.sent.length, before);
+  });
+
+  it('with no seal policy the reason stays what it was', async () => {
+    const w = await world();
+    w.store.addToOverlay(w.phone.deviceId);
+    assert.deepStrictEqual(w.router.channelStatus('mobile'), { enabled: true, configured: false, reason: 'no owner target is configured' });
+  });
+
+  it('the present rung: a phone in front on a latched node is not present, so the ladder tries the next rung', async () => {
+    const other = createFakePhone({ name: 'Tablet' });
+    const w = await world({ sealing: true, presenceByConfigured: true, records: (phone) => [phone.approverRecord({ boxKey: true }), other.approverRecord()] });
+    assert.deepStrictEqual(await w.ping(w.fg()), { ok: true });
+    assert.strictEqual(w.presence.presentChannel(), 'mobile', 'it can be read: it is present');
+    w.store.addToOverlay(w.phone.deviceId);
+    assert.deepStrictEqual(await w.ping(w.fg({ deviceId: other.deviceId })), { ok: true });
+    assert.strictEqual(w.mobile.contactConfigured(), false);
+    assert.notStrictEqual(w.presence.presentChannel(), 'mobile');
+    const before = w.link.sent.length;
+    const { ladder, telegram } = ladderOn(w, [{ channel: 'present', afterMin: 0 }, { channel: 'telegram', afterMin: 0 }]);
+    w.advance(120000);
+    await ladder.tick();
+    const entry = w.state.ladder().entries[`${w.info.id}/${w.q.id}`];
+    assert.deepStrictEqual(entry.attempts.map((a) => `${a.channel}:${a.outcome}`), ['present:absent', 'telegram:sent']);
+    assert.strictEqual(w.link.sent.length, before);
+    assert.ok(telegram.sent.length >= 1);
+  });
+});
+
+describe('sealed questions: back to the phone once it can read', () => {
+  const asksOf = (w, token) => w.link.sent.filter((x) => x.opts.push.id === token);
+  const entryOf = (w, q = w.q) => w.state.ladder().entries[`${w.info.id}/${q.id}`];
+  const mobileAttempts = (e) => e.attempts.filter((a) => a.channel === 'mobile');
+
+  it('held back: one warning with the reason, however many ticks; the key arrives: one re-send on the same token, which the phone opens', async () => {
+    const w = await world({ sealing: true });
+    const p = settablePolicy(w, {});
+    const warnings = [];
+    const { ladder } = ladderOn(w, undefined, { warnOwner: (text) => warnings.push(text) });
+    w.advance(120000);
+    await ladder.tick();
+    await ladder.tick();
+    await ladder.tick();
+    const entry = entryOf(w);
+    assert.deepStrictEqual(mobileAttempts(entry).map((a) => [a.outcome, a.reason]), [['skipped', 'sealing']]);
+    assert.strictEqual(warnings.length, 1);
+    assert.ok(warnings[0].includes(p.why), warnings[0]);
+    for (const secret of ['41k', 'Lakeside', w.info.id, w.q.id, entry.token]) assert.ok(!warnings[0].includes(secret));
+
+    p.keys[w.phone.deviceId] = w.phone.boxJwk;
+    const before = asksOf(w, entry.token).length;
+    assert.strictEqual(before, 0);
+    await ladder.tick();
+    const sent = asksOf(w, entry.token);
+    assert.strictEqual(sent.length, 1);
+    const opened = w.phone.open(sent[0].envelope, 'kl.question.ask').message;
+    assert.strictEqual(opened.token, entry.token);
+    assert.strictEqual(opened.question_id, w.q.id);
+    await ladder.tick();
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, entry.token).length, 1, 'once');
+    assert.strictEqual(entryOf(w).token, entry.token);
+    assert.strictEqual(warnings.length, 1);
+    // An ordinary answer on the live token counts.
+    const reply = sealedAnswer(w, { clear: { token: entry.token, signed_at: w.clock().toISOString() } });
+    assert.strictEqual((await w.call(reply)).ok, true);
+    assert.strictEqual(w.answerOf().optionId, 'a');
+  });
+
+  it('a new episode warns again, and a changed reason does too', async () => {
+    const w = await world({ sealing: true });
+    const p = settablePolicy(w, {});
+    const warnings = [];
+    const { ladder } = ladderOn(w, undefined, { warnOwner: (text) => warnings.push(text) });
+    w.advance(120000);
+    await ladder.tick();
+    p.why = 'the approver set is not trusted: a test said so';
+    await ladder.tick();
+    assert.strictEqual(warnings.length, 2);
+    assert.ok(warnings[1].includes(p.why));
+    p.keys[w.phone.deviceId] = w.phone.boxJwk;
+    await ladder.tick();
+    delete p.keys[w.phone.deviceId];
+    await w.runtime.questions(w.info.id).create({ kind: 'question', urgency: 'high', text: 'Take the counter?', options: [] });
+    w.advance(120000);
+    await ladder.tick();
+    assert.strictEqual(warnings.length, 3);
+  });
+
+  it('a sealed delivery that lacks a phone which now holds a key is sent once more, and a stale key once per new key', async () => {
+    const second = createFakePhone({ name: 'Tablet', boxKey: true });
+    const w = await world({ sealing: true, records: (phone) => [phone.approverRecord({ boxKey: true }), second.approverRecord()] });
+    const p = settablePolicy(w, { [w.phone.deviceId]: w.phone.boxJwk });
+    const { ladder } = ladderOn(w);
+    w.advance(120000);
+    await ladder.tick();
+    const token = entryOf(w).token;
+    const perSend = 2; // one message per active device
+    assert.strictEqual(asksOf(w, token).length, perSend);
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, perSend, 'nothing new: nothing sent');
+
+    p.keys[second.deviceId] = second.boxJwk;
+    await ladder.tick();
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, perSend * 2);
+    const last = asksOf(w, token)[perSend * 2 - 1];
+    assert.strictEqual(second.open(last.envelope, 'kl.question.ask').message.token, token);
+
+    // The first phone was Reset: same device, new key.
+    const newKey = generateBoxKey().jwk;
+    const oldKey = p.keys[w.phone.deviceId];
+    p.keys[w.phone.deviceId] = newKey;
+    await ladder.tick();
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, perSend * 3);
+    // Its old key back again was already sent to.
+    p.keys[w.phone.deviceId] = oldKey;
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, perSend * 3);
+    assert.strictEqual(entryOf(w).token, token);
+  });
+
+  it('a clear delivery is not re-sent: it could be read', async () => {
+    const w = await world({ sealing: true, sealFrom: 'later' });
+    const { ladder } = ladderOn(w);
+    w.advance(120000);
+    await ladder.tick();
+    const token = entryOf(w).token;
+    assert.strictEqual(asksOf(w, token).length, 1);
+    w.mobile.sealPolicy = w.sealPolicy;
+    await ladder.tick();
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, 1);
+  });
+
+  it('no storm: a node with many open questions sends a few a tick, each exactly once', async () => {
+    const w = await world({ sealing: true });
+    const p = settablePolicy(w, {});
+    const { ladder } = ladderOn(w);
+    const open = [w.q, w.q2];
+    for (let i = 0; i < 12; i += 1) open.push(w.runtime.questions(w.info.id).create({ kind: 'question', urgency: 'high', text: `Question ${i}?`, options: [] }));
+    w.advance(120000);
+    await ladder.tick();
+    p.keys[w.phone.deviceId] = w.phone.boxJwk;
+    const before = w.link.sent.length;
+    await ladder.tick();
+    assert.strictEqual(w.link.sent.length - before, RESEALS_PER_TICK);
+    for (let i = 0; i < 5; i += 1) await ladder.tick();
+    assert.strictEqual(w.link.sent.length - before, open.length);
+    for (const q of open) assert.strictEqual(asksOf(w, entryOf(w, q).token).length, 1, q.id);
+  });
+
+  it('a link that is down spends nothing; a send that fails is not tried again for that key', async () => {
+    const w = await world({ sealing: true });
+    const p = settablePolicy(w, {});
+    const { ladder } = ladderOn(w);
+    w.advance(120000);
+    await ladder.tick();
+    const token = entryOf(w).token;
+    p.keys[w.phone.deviceId] = w.phone.boxJwk;
+    w.link.canDeliver = () => ({ ok: false, reason: 'down' });
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, 0);
+    assert.deepStrictEqual(mobileAttempts(entryOf(w)).map((a) => a.outcome), ['skipped']);
+    w.link.canDeliver = () => ({ ok: true });
+    const realSend = w.link.send;
+    w.link.send = async () => { throw new Error('relay said no'); };
+    await ladder.tick();
+    assert.deepStrictEqual(mobileAttempts(entryOf(w)).map((a) => a.outcome).slice(0, 2), ['skipped', 'failed']);
+    w.link.send = realSend;
+    const attempts = entryOf(w).attempts.length;
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, 0);
+    assert.strictEqual(entryOf(w).attempts.length, attempts);
+  });
+
+  it('away or quiet hours hold a re-send back without spending it', async () => {
+    const w = await world({ sealing: true });
+    const p = settablePolicy(w, {});
+    const held = { away: { until: new Date(w.clock().getTime() + 3600000).toISOString(), mode: 'email-only' } };
+    const { ladder, policy } = ladderOn(w);
+    w.advance(120000);
+    await ladder.tick();
+    const token = entryOf(w).token;
+    p.keys[w.phone.deviceId] = w.phone.boxJwk;
+    policy.away = held.away;
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, 0);
+    policy.away = null;
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, 1);
+  });
+
+  it('an answered question is not sent again', async () => {
+    const w = await world({ sealing: true });
+    const p = settablePolicy(w, {});
+    const { ladder } = ladderOn(w);
+    w.advance(120000);
+    await ladder.tick();
+    const token = entryOf(w).token;
+    await w.runtime.answerQuestion(w.info.id, w.q.id, { optionId: 'a', channel: 'in-app', quote: 'Yes' }).catch(() => w.runtime.questions(w.info.id).close(w.q.id, { reason: 'test' }));
+    p.keys[w.phone.deviceId] = w.phone.boxJwk;
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, 0);
+  });
+
+  it('a re-send cut off by a restart does not move the ladder on', async () => {
+    const w = await world({ sealing: true });
+    const p = settablePolicy(w, {});
+    const { ladder } = ladderOn(w);
+    w.advance(120000);
+    await ladder.tick();
+    const entry = entryOf(w);
+    const step = entry.step;
+    p.keys[w.phone.deviceId] = w.phone.boxJwk;
+    const realDeliver = w.router.deliver.bind(w.router);
+    w.router.deliver = async () => { throw new Error('crash stand-in'); };
+    await ladder.tick();
+    w.router.deliver = realDeliver;
+    const after = mobileAttempts(entryOf(w)).pop();
+    after.outcome = 'inFlight';
+    w.state.saveLadder();
+    ladder.recovered = false;
+    await ladder.tick();
+    assert.strictEqual(entryOf(w).step, step);
+    assert.strictEqual(after.outcome, 'unknown');
+  });
+
+  it('a briefing stops at sent only when every active phone is in the seal', async () => {
+    const second = createFakePhone({ name: 'Tablet', boxKey: true });
+    const w = await world({ sealing: true, records: (phone) => [phone.approverRecord({ boxKey: true }), second.approverRecord()] });
+    const p = settablePolicy(w, { [w.phone.deviceId]: w.phone.boxJwk });
+    const { ladder, telegram } = ladderOn(w);
+    const brief = w.runtime.questions(w.info.id).create({ kind: 'briefing', urgency: 'high', text: 'The lot sold.', options: [] });
+    w.advance(120000);
+    await ladder.tick();
+    const entry = entryOf(w, brief);
+    assert.strictEqual(entry.attempts.find((a) => a.channel === 'mobile').outcome, 'sent');
+    assert.strictEqual(entry.stopped, false, 'the tablet cannot read it');
+    await ladder.tick();
+    assert.deepStrictEqual(entryOf(w, brief).attempts.filter((a) => a.channel === 'telegram').map((a) => a.outcome), ['sent']);
+    assert.ok(telegram.sent.length >= 1);
+
+    p.keys[second.deviceId] = second.boxJwk;
+    const all = w.runtime.questions(w.info.id).create({ kind: 'briefing', urgency: 'high', text: 'The cheque cleared.', options: [] });
+    w.advance(120000);
+    await ladder.tick();
+    const whole = entryOf(w, all);
+    assert.strictEqual(whole.attempts.find((a) => a.channel === 'mobile').outcome, 'sent');
+    assert.strictEqual(whole.stopped, true);
+    assert.ok(!whole.attempts.some((a) => a.channel === 'telegram'));
+  });
+
+  it('a briefing sent clear stops at sent, as before', async () => {
+    const w = await world();
+    const { ladder } = ladderOn(w);
+    const brief = w.runtime.questions(w.info.id).create({ kind: 'briefing', urgency: 'high', text: 'The lot sold.', options: [] });
+    w.advance(120000);
+    await ladder.tick();
+    assert.strictEqual(entryOf(w, brief).stopped, true);
   });
 });
 
@@ -739,13 +1046,22 @@ describe('sealed questions: a clear answer', () => {
     assert.deepStrictEqual(await again.handleAnswer({ envelope: w.answer() }), { ok: false, error: 'sealed_required' });
   });
 
-  it('a question sent clear and then sealed under one token takes the newest ask\'s rule', async () => {
+  it('a question sent clear and then sealed under one token still takes the clear answer: that clear ask really left', async () => {
     const w = await world({ sealing: true, sealFrom: 'later' });
     w.mobile.sealPolicy = w.sealPolicy;
     w.advance(60000);
     await w.router.deliver('mobile', [{ caseId: w.info.id, caseTitle: w.info.title, token: w.token, record: w.q }]);
-    assert.deepStrictEqual(await w.call(w.answer()), { ok: false, error: 'sealed_required' });
-    assert.strictEqual((await w.call(sealedAnswer(w))).ok, true);
+    assert.strictEqual(w.state.resolve(w.token, { channel: 'mobile' }).delivery.sealed, true, 'the newest is sealed');
+    assert.strictEqual((await w.call(w.answer())).ok, true);
+    assert.strictEqual(w.answerOf().optionId, 'a');
+  });
+
+  it('a delivery refused while latched is not a clear ask that left', async () => {
+    const w = await world({ sealing: true });
+    const token = w.state.newToken();
+    w.mobile.sealPolicy = { sealing: () => true, canSeal: () => false, recipients: () => ({}), senderId: w.node.nodeId, nodeBox: w.node.box.jwk, whyNot: () => 'no phone' };
+    await assert.rejects(w.router.deliver('mobile', [{ caseId: w.info.id, caseTitle: w.info.title, token, record: w.q }]));
+    assert.deepStrictEqual(await w.call(w.answer({ token })), { ok: false, error: 'unknown_question' }, 'the rung never recorded it');
   });
 
   it('a sealed answer against a clear ask is accepted: it tells the relay less', async () => {

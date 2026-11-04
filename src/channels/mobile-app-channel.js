@@ -27,7 +27,7 @@
 // proves nothing about who wrote it.
 const { ChannelPlugin, ContactDeliveryError } = require('./channel-plugin');
 const { seal, nodeSigner, isDeviceJwk } = require('../approvals/envelope');
-const { sealContent, openSealed, splitMessage, isSealedShape, SealError } = require('../approvals/seal');
+const { sealContent, openSealed, splitMessage, isSealedShape, boxKeyFingerprint, SealError } = require('../approvals/seal');
 const { verifyDeviceEnvelope, NonceCache, bytesSha256 } = require('../approvals/verify-device');
 const messages = require('../approvals/messages');
 const { TOKEN_RE } = require('../cases/contact-format');
@@ -51,6 +51,7 @@ const MAX_TEXT = 4000;
 const MAX_TITLE = 200;
 const MAX_LABEL = 200;
 const MAX_OPTIONS = 6;
+const UNSEALABLE = 'sealing is on and no phone can read it';
 
 // approval-v1 §5's hidden code points (Cc, Zl/Zp, Bidi_Control,
 // Default_Ignorable_Code_Point as of Unicode 15.1), the list F3's
@@ -206,16 +207,46 @@ class MobileAppChannel extends ChannelPlugin {
     }
   }
 
-  // The router writes this on the delivery before it sends, so whether an ask
-  // went sealed outlives a restart or a crash mid-send. A latch only goes one way,
-  // and a policy that cannot answer counts as sealing.
-  sealsQuestions() {
-    if (!this.sealPolicy) return false;
+  // Null while this channel sends clear, or does not send at all. Otherwise:
+  // blocked (nobody to seal to) and why; readers, each active phone that holds a
+  // box key with that key's fingerprint; devices, every active phone; deliverable,
+  // whether the relay link is up. The router writes readers on a delivery before
+  // it sends, so whom an ask was sealed to outlives a restart or a crash mid-send,
+  // and the ladder compares them with who can read now. A latch only goes one
+  // way, and a policy that cannot answer counts as sealing.
+  contactSealState() {
+    if (!this.sealPolicy || !this.link || !this.isEnabled()) return null;
+    let sealing = true;
     try {
-      return this.sealPolicy.sealing() === true;
+      sealing = this.sealPolicy.sealing() === true;
     } catch {
-      return true;
+      // stays true
     }
+    if (!sealing) return null;
+    const blocked = this._sealBlocked();
+    const readers = {};
+    if (!blocked) {
+      for (const [id, jwk] of Object.entries(this.sealPolicy.recipients())) {
+        if (messages.DEVICE_ID_RE.test(id)) readers[id] = boxKeyFingerprint(jwk);
+      }
+    }
+    const can = typeof this.link.canDeliver === 'function' ? this.link.canDeliver() : { ok: true };
+    return { blocked, why: blocked ? this._sealWhyNot() : null, readers, devices: this.devices(), deliverable: !(can && can.ok === false) };
+  }
+
+  _sealWhyNot() {
+    try {
+      if (typeof this.sealPolicy.whyNot === 'function') return this.sealPolicy.whyNot() || UNSEALABLE;
+    } catch {
+      // the fixed sentence
+    }
+    return UNSEALABLE;
+  }
+
+  // Why this channel is off, where the router's generic reason would be wrong.
+  contactNotConfiguredReason() {
+    const state = this.contactSealState();
+    return state && state.blocked ? state.why : null;
   }
 
   onContactReply(handler) {
@@ -268,8 +299,8 @@ class MobileAppChannel extends ChannelPlugin {
     try {
       return messages.sealTargets(this.sealPolicy);
     } catch {
-      this.log.debug('a question was not sent to the phones: sealing is on and no phone can read it');
-      throw new ContactDeliveryError('not-configured', 'sealing is on and no phone can read it');
+      this.log.debug(`a question was not sent to the phones: ${UNSEALABLE}`);
+      throw new ContactDeliveryError('not-configured', UNSEALABLE);
     }
   }
 
@@ -369,9 +400,11 @@ class MobileAppChannel extends ChannelPlugin {
       return this._refuse('answer', 'unknown_question');
     }
     // A clear answer goes only with a clear ask: a phone that read a sealed ask
-    // seals its reply, so this is a downgrade or a fault, and its words should
-    // not count as if nothing had happened.
-    if (!sealedAnswer && found.delivery.sealed === true) return this._refuse('answer', 'sealed_required');
+    // seals its reply, so with no clear ask of this token it is a fault. Only the
+    // newest delivery is not enough: a re-send or digest can sit over a clear ask
+    // a phone really holds, and a relay replaying that one gains nothing it had
+    // not already seen.
+    if (!sealedAnswer && !router.state.hasClearDelivery(m.token, 'mobile')) return this._refuse('answer', 'sealed_required');
     // Ruling T17-bound, second layer: free text may name no question but its
     // own (the router also treats a bound reply's text as the body only).
     if (m.answer.text !== undefined) {

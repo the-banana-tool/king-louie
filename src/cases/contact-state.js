@@ -149,6 +149,12 @@ class ContactState {
     return null;
   }
 
+  // Whether a delivery on this channel carried the token with no seal. One that
+  // failed counts: part of it may have gone, and if none did nobody holds it.
+  hasClearDelivery(token, channel) {
+    return Object.values(this.deliveries()).some((d) => d.channel === channel && d.sealed !== true && (d.items || []).some((it) => it.token === token));
+  }
+
   isKnownToken(token) {
     return Boolean(this.resolve(token));
   }

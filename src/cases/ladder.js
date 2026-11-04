@@ -27,6 +27,11 @@ const DAY = 24 * 3600 * 1000;
 const ASYNC_FAILURES = new Set(['failed', 'bounced', 'no-answer', 'busy']);
 const CLOSED_CASE = new Set(['done', 'abandoned']);
 const LOCK_FILE = '.contact.lock';
+// The one channel that seals, and how many questions a new box key may send
+// back to it per tick. Each goes as a delivery of its own: a batch over the
+// channel's size would cut the text and take the options away.
+const SEAL_CHANNEL = 'mobile';
+const RESEALS_PER_TICK = 5;
 
 const iso = (ms) => new Date(ms).toISOString();
 const isDir = (p) => {
@@ -40,7 +45,7 @@ const isDir = (p) => {
 class LadderEngine {
   constructor({
     state, casesRoot, runtime, router, presence, getPolicy = () => ({}), clock = () => new Date(), tickMs = 30000,
-    dataDir = null, hostName = os.hostname(), log = createLogger('contact/ladder')
+    dataDir = null, hostName = os.hostname(), warnOwner = null, log = createLogger('contact/ladder')
   } = {}) {
     this.state = state;
     this.casesRoot = casesRoot;
@@ -60,6 +65,8 @@ class LadderEngine {
     this.recovered = false;
     this.notConfiguredLogged = new Set();
     this.warned = new Set();
+    this.warnOwner = warnOwner;
+    this.heldWarned = null;
   }
 
   // ---- The cases-root lease ----
@@ -256,9 +263,11 @@ class LadderEngine {
     e.nextAt = iso(Math.max(Date.parse(e.nextAt), sentMs + Math.max(gap, 0)));
   }
 
-  // 8. A briefing (never has options) stops after its first sent step.
-  _afterSent(entry) {
-    if (entry.kind === 'briefing') entry.stopped = true;
+  // 8. A briefing (never has options) stops after its first sent step, unless
+  // that step was sealed and some active phone was not in the seal: it would stop
+  // on a rung the owner's phone cannot read.
+  _afterSent(entry, sent = null) {
+    if (entry.kind === 'briefing' && sent?.readableByAll !== false) entry.stopped = true;
   }
 
   _attempt(entry, fields) {
@@ -405,6 +414,8 @@ class LadderEngine {
       result.failed += r.failed;
     }
 
+    await this._reseal(policy, now, retiring);
+
     // 7. Exhaust.
     for (const e of Object.values(ladder.entries)) {
       if (retiring.includes(`${e.caseId}/${e.questionId}`) || e.expired || e.stopped || e.step < e.steps.length) continue;
@@ -476,7 +487,7 @@ class LadderEngine {
         this.notConfiguredLogged.add(`${channel}|${day}`);
         this.log.info(`contact channel ${channel} is not configured; skipping it (${status.reason})`);
       }
-      this._attempt(e, { channel, outcome: 'skipped', reason: 'not-configured' });
+      this._attempt(e, { channel, outcome: 'skipped', reason: status.sealing ? 'sealing' : 'not-configured' });
       this._advance(e, policy, { now: nowMs });
       return { kind: 'next' };
     }
@@ -543,7 +554,7 @@ class LadderEngine {
     for (const e of entries) this._attempt(e, { channel, outcome: 'inFlight', deliveryId, batchToken, idempotencyKey: deliveryId, mirrored: false });
     this.state.saveLadder();
     try {
-      await this.router.deliver(channel, items, { deliveryId, batchToken });
+      const sent = await this.router.deliver(channel, items, { deliveryId, batchToken });
       const sentMs = this.clock().getTime();
       for (const e of entries) {
         const a = e.attempts[e.attempts.length - 1];
@@ -551,7 +562,7 @@ class LadderEngine {
         const deferred = e.quietDeferred;
         this._advance(e, policy);
         if (deferred) this._keepSpacing(e, sentMs);
-        this._afterSent(e);
+        this._afterSent(e, sent);
       }
       out.delivered += entries.length;
     } catch (err) {
@@ -568,6 +579,78 @@ class LadderEngine {
     }
     this.state.saveLadder();
     return out;
+  }
+
+  // Whether this entry's phone rung was held back or sealed.
+  _sealMarked(e, deliveries) {
+    return e.attempts.some((a) => a.channel === SEAL_CHANNEL && (a.reason === 'sealing' || deliveries[a.deliveryId]?.sealed === true));
+  }
+
+  // The phone keys that can read now and that this entry has neither been sealed
+  // to nor been re-sent for. A key is a device and its fingerprint, so a phone
+  // that was Reset counts as new, and each new key buys at most one re-send.
+  _unsentKeys(e, deliveries, readers) {
+    const covered = new Set(Object.keys(e.sealResends || {}));
+    for (const a of e.attempts) {
+      if (a.channel !== SEAL_CHANNEL || a.outcome !== 'sent') continue;
+      for (const [id, fp] of Object.entries(deliveries[a.deliveryId]?.sealedTo || {})) covered.add(`${id}:${fp}`);
+    }
+    return Object.entries(readers).map(([id, fp]) => `${id}:${fp}`).filter((key) => !covered.has(key));
+  }
+
+  // One warning for one reason while a question is held back, never per tick.
+  _warnHeld(why) {
+    if (this.heldWarned === why) return;
+    this.heldWarned = why;
+    const text = `Questions cannot reach your phone: ${why}. They stay on your other contact channels.`;
+    this.log.warn(text);
+    if (!this.warnOwner) return;
+    Promise.resolve().then(() => this.warnOwner(text)).catch((err) => this.log.warn(`the sealing warning did not go out: ${err.message}`));
+  }
+
+  // Sealed phones: a rung skipped for sealing, or a sealed delivery some phone
+  // could not read, goes back to the phone when a key arrives, on the same token.
+  // This sits outside the steps: nothing here moves the ladder, a stopped or
+  // exhausted entry is still eligible, and what cannot go now spends nothing.
+  async _reseal(policy, now, retiring) {
+    const seal = this.router.adapter(SEAL_CHANNEL)?.contactSealState?.() || null;
+    const deliveries = this.state.deliveries();
+    const live = Object.values(this.state.ladder().entries).filter((e) => !e.expired && !retiring.includes(`${e.caseId}/${e.questionId}`) && this._sealMarked(e, deliveries));
+    const held = (e) => e.attempts.some((a) => a.channel === SEAL_CHANNEL && a.reason === 'sealing')
+      && !e.attempts.some((a) => a.channel === SEAL_CHANNEL && a.outcome === 'sent');
+    if (seal?.blocked && live.some(held)) {
+      this._warnHeld(seal.why);
+      return;
+    }
+    this.heldWarned = null;
+    if (!seal || seal.blocked || !seal.deliverable) return;
+    const nowMs = now.getTime();
+    if (policy.away && Date.parse(policy.away.until) > nowMs) return;
+    const quiet = policy.quietHours && this.presence.inQuietHours(now);
+    const caps = this.router.adapter(SEAL_CHANNEL).contactCapabilities() || {};
+    const due = live
+      .filter((e) => (!e.pinnedChannel || e.pinnedChannel === SEAL_CHANNEL) && !(quiet && caps.interrupts && !policy.quietHours.breakthrough.includes(e.urgency)))
+      .map((e) => ({ e, keys: this._unsentKeys(e, deliveries, seal.readers) }))
+      .filter(({ keys }) => keys.length > 0)
+      .sort((a, b) => String(a.e.startedAt).localeCompare(String(b.e.startedAt)))
+      .slice(0, RESEALS_PER_TICK);
+    for (const { e, keys } of due) {
+      const item = this._item(e);
+      if (!item || !this._stillLeased()) continue;
+      const deliveryId = this.state.newDeliveryId();
+      e.sealResends = { ...e.sealResends, ...Object.fromEntries(keys.map((key) => [key, now.toISOString()])) };
+      const a = this._attempt(e, { channel: SEAL_CHANNEL, outcome: 'inFlight', deliveryId, reseal: true, mirrored: false });
+      this.state.saveLadder();
+      try {
+        await this.router.deliver(SEAL_CHANNEL, [item], { deliveryId });
+        a.outcome = 'sent';
+      } catch (err) {
+        a.outcome = 'failed';
+        a.error = err instanceof ContactDeliveryError ? { code: err.code, message: err.message } : { code: 'unreachable', message: err.message };
+        a.mirrored = true;
+        this.log.warn(`a re-send to the phone failed: ${a.error.code}: ${a.error.message}`);
+      }
+    }
   }
 
   // Restarts: an inFlight relay attempt is re-sent with the same key; any
@@ -601,6 +684,8 @@ class LadderEngine {
         const a = e.attempts[e.attempts.length - 1];
         a.outcome = 'unknown';
         a.mirrored = true;
+        // A re-send sits outside the steps: it has nothing to move on from.
+        if (a.reseal) continue;
         e.step += 1;
         e.nextAt = iso(nowMs);
       }
@@ -702,4 +787,4 @@ class LadderEngine {
   }
 }
 
-module.exports = { LadderEngine, LOCK_FILE };
+module.exports = { LadderEngine, LOCK_FILE, RESEALS_PER_TICK };
