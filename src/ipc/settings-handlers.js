@@ -462,6 +462,9 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
   // ── Vault ────────────────────────────────────────────────
   const VAULT_PREFIX = '__vault_';
+  const blockedText = (key, blocker) => (blocker === key
+    ? `"${key}" has other secrets stored under it, so it cannot be used as a name.`
+    : `"${key}" cannot be used as a name: the secret "${blocker}" is in its way.`);
   let _vaultStore = context.vaultStore || null;
   const getVaultStore = () => {
     if (_vaultStore) return _vaultStore;
@@ -470,11 +473,11 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     return _vaultStore;
   };
 
+  // Reads and refusals only: the writes below encrypt with what they are handed.
+  const paneVault = () => createVault({ store: getVaultStore(), cipher: { encryptString: encryptToken, decryptString: decryptToken } });
+
   ipcMain.handle('settings:vaultList', wrapHandler('settings:vaultList', async () => {
-    const allKeys = Object.keys(getVaultStore().store || {});
-    const vaultKeys = allKeys
-      .filter((k) => k.startsWith(VAULT_PREFIX))
-      .map((k) => k.slice(VAULT_PREFIX.length));
+    const vaultKeys = paneVault().list();
     return { ok: true, keys: vaultKeys, count: vaultKeys.length };
   }));
 
@@ -500,6 +503,8 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     if (!key || typeof key !== 'string') return { ok: false, error: 'Key is required.' };
     if (!value || typeof value !== 'string') return { ok: false, error: 'Value is required.' };
     if (!encryptToken) return { ok: false, error: 'Encryption unavailable.' };
+    const blocker = paneVault().blockedBy(key.trim());
+    if (blocker) return { ok: false, error: blockedText(key.trim(), blocker) };
     const encrypted = encryptToken(value);
     getVaultStore().set(`${VAULT_PREFIX}${key.trim()}`, encrypted);
     return { ok: true, message: `Secret "${key.trim()}" saved.` };
@@ -507,9 +512,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
   ipcMain.handle('settings:vaultDelete', wrapHandler('settings:vaultDelete', async (_event, { key } = {}) => {
     if (!key || typeof key !== 'string') return { ok: false, error: 'Key is required.' };
-    const storeKey = `${VAULT_PREFIX}${key}`;
-    if (!getVaultStore().has(storeKey)) return { ok: false, error: `No secret found for "${key}".` };
-    getVaultStore().delete(storeKey);
+    if (!paneVault().delete(key)) return { ok: false, error: `No secret found for "${key}".` };
     return { ok: true, message: `Secret "${key}" deleted.` };
   }));
 
@@ -518,16 +521,20 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     if (!newKey || typeof newKey !== 'string') return { ok: false, error: 'New key is required.' };
     const oldStoreKey = `${VAULT_PREFIX}${oldKey}`;
     const newStoreKey = `${VAULT_PREFIX}${newKey.trim()}`;
+    // Only a stored secret can be updated, and never onto a name a write would destroy.
+    const vault = paneVault();
+    if (!vault.holds(oldKey)) return { ok: false, error: `No secret found for "${oldKey}".` };
+    const blocker = vault.blockedBy(newKey.trim());
+    if (blocker) return { ok: false, error: blockedText(newKey.trim(), blocker) };
 
     if (value && typeof value === 'string') {
       // Update both key name and value
       if (!encryptToken) return { ok: false, error: 'Encryption unavailable.' };
-      if (oldStoreKey !== newStoreKey) getVaultStore().delete(oldStoreKey);
       getVaultStore().set(newStoreKey, encryptToken(value));
+      if (oldStoreKey !== newStoreKey) getVaultStore().delete(oldStoreKey);
     } else if (oldStoreKey !== newStoreKey) {
       // Rename key only — move the encrypted blob
-      const existing = getVaultStore().get(oldStoreKey);
-      if (!existing) return { ok: false, error: `No secret found for "${oldKey}".` };
+      const existing = vaultNodeAt(getVaultStore().store, oldKey);
       getVaultStore().set(newStoreKey, existing);
       getVaultStore().delete(oldStoreKey);
     }

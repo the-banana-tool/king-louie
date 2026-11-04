@@ -16,7 +16,8 @@ const path = require('path');
 const { parseCaseYaml } = require('../cases/case-store');
 const { BUILTIN_IDS } = require('../cases/executors/builtins');
 const { mergeSettings } = require('../core/settings');
-const { importedSettingsKeys, settingDigest, userProfileDigest, EXCLUDED, isReservedVaultKey, hasPrototypePart, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS, MAX_CHAT_PART_BYTES, MAX_CHAT_BYTES } = require('./desktop-import');
+const { readVaultEntries, hasPrototypePart } = require('../platform/vault');
+const { importedSettingsKeys, settingDigest, userProfileDigest, EXCLUDED, isReservedVaultKey, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS, MAX_CHAT_PART_BYTES, MAX_CHAT_BYTES } = require('./desktop-import');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 // A desktop store file or a case file bigger than this is refused rather
@@ -43,9 +44,8 @@ function withoutTooLarge(chat, maxMessageBytes) {
 }
 
 // electron-store nests a key at each dot, so browser_cred:<profile>:<host.tld> is
-// an object under a truncated name. Each entry by its whole key, from the string
-// leaves; a key stored flat reads the same. No part of a key may be a prototype
-// key. What is there and cannot be read is said, never dropped unsaid.
+// an object under a truncated name (readVaultEntries reads each whole). What is there
+// and cannot be read is said, never dropped unsaid.
 // Each setting that could move, as the node would hold it. None when it will not merge.
 function settingDigests(settings) {
   let merged;
@@ -58,27 +58,7 @@ function settingDigests(settings) {
   return Object.fromEntries(importedSettingsKeys('personal').filter((key) => settings[key] !== undefined).map((key) => [key, settingDigest(key, merged[key], { profiles })]));
 }
 
-const VAULT_STORE_PREFIX = '__vault_';
 const VAULT_UNREAD_NOTE = 'this stored vault entry is not in a form the move can read; it stays on this computer and in the backup';
-const MAX_VAULT_DEPTH = 64;
-function readVaultEntries(config, attention) {
-  const entries = new Map();
-  const unread = (key) => attention.push({ category: 'vault', key, note: VAULT_UNREAD_NOTE });
-  const walk = (key, value, depth) => {
-    if (!value) return;
-    if (!key || hasPrototypePart(key)) unread(key);
-    else if (typeof value === 'string') {
-      if (entries.has(key)) unread(key);
-      else entries.set(key, value);
-    } else if (typeof value === 'object' && !Array.isArray(value) && depth < MAX_VAULT_DEPTH) {
-      for (const part of Object.keys(value)) walk(`${key}.${part}`, value[part], depth + 1);
-    } else unread(key);
-  };
-  for (const k of Object.keys(config)) {
-    if (k.startsWith(VAULT_STORE_PREFIX)) walk(k.slice(VAULT_STORE_PREFIX.length), config[k], 0);
-  }
-  return entries;
-}
 
 // Windows residual (fix round 1, I3): there is no owner check on win32. The
 // owner SID of each file could be read through the installers' handle-based
@@ -254,7 +234,8 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     : crypto.createHash('sha256').update(fs.realpathSync.native(userDataDir)).digest('hex').slice(0, 16);
 
   const settings = chatData.settings && typeof chatData.settings === 'object' ? chatData.settings : {};
-  const vaultEntries = readVaultEntries(config, attention);
+  const { entries: vaultEntries, unread: vaultUnread } = readVaultEntries(config);
+  for (const key of vaultUnread) attention.push({ category: 'vault', key, note: VAULT_UNREAD_NOTE });
   // Since history stage H1 a profile's chats live in history.sqlite; any
   // that could not be migrated are still in chat-data.json. The store wins
   // for an id both hold. `history` is readHistoryChats' result, read by the

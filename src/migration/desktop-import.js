@@ -16,6 +16,7 @@ const { writeFileAtomic } = require('../desktop-bridge/pairing');
 const { MESSAGES, LIMITS } = require('../desktop-bridge/protocol');
 const { normalizeDirectory } = require('../desktop-bridge/desktop-scope');
 const { guardCheck } = require('../platform/write-guard');
+const { hasPrototypePart } = require('../platform/vault');
 const { CHATS_OUT_OF_ORDER } = require('./migration-verify');
 const { isContactVaultKey } = require('../cases/contact-settings');
 const { isLocalServerVaultKey } = require('../models/local-vault-keys');
@@ -155,9 +156,6 @@ const tooLargeNote = (c, exists) => `chat "${String(c.title || c.id).slice(0, 80
 // never moves, on any host: a contact credential and a local server's key are the
 // administrator's there.
 const isReservedVaultKey = (key) => isContactVaultKey(key) || isLocalServerVaultKey(key);
-const PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-// A store walks a key's parts as object keys, so this is no name for a secret.
-const hasPrototypePart = (key) => String(key).split('.').some((part) => PROTOTYPE_KEYS.has(part));
 const reservedVaultNote = (key, where) => (isContactVaultKey(key)
   ? `Vault entry ${key} is a contact channel's credential. It stays on this computer and in the backup: on the ${where}, contact credentials are set only by its administrator.`
   : `Vault entry ${key} is a local server's key. It stays on this computer and in the backup: on the ${where}, a local server and its key come only from its service.json.`);
@@ -1703,7 +1701,6 @@ module.exports = {
   ALLOWLIST_CHANNELS,
   SECRET_CATEGORIES,
   isReservedVaultKey,
-  hasPrototypePart,
   CATEGORY_ORDER,
   EXCLUDED,
   PLAN_TTL_MS,
