@@ -24,9 +24,11 @@ object Messages {
      * The `device` object of an enrollment. `name` is 1–64 UTF-16 units. With
      * `readKey` (android-slim §8.2) it has a fifth member, `read_key`: a P-256
      * JWK on the curve whose point is not the device key's. The device id
-     * still derives from the device key (`x`, `y`) alone.
+     * still derives from the device key (`x`, `y`) alone. With `boxKey`
+     * (sealed phones, R-SP-10) it has `box_key`: a P-256 JWK on the curve whose
+     * point is neither of the other two.
      */
-    fun device(deviceId: String, name: String, platform: String, x: String, y: String, readKey: JsonObject? = null): JsonObject {
+    fun device(deviceId: String, name: String, platform: String, x: String, y: String, readKey: JsonObject? = null, boxKey: JsonObject? = null): JsonObject {
         val fields = linkedMapOf<String, JsonElement>(
             "device_id" to jsonString(deviceId),
             "name" to jsonString(name),
@@ -34,8 +36,9 @@ object Messages {
             "public_key" to jwk(x, y)
         )
         if (readKey != null) fields["read_key"] = readKey
+        if (boxKey != null) fields["box_key"] = boxKey
         val device = JsonObject(fields)
-        if (!Rules.isDevice(device)) throw ProtocolException("not a valid device (name is 1–64 UTF-16 units; a read key is a P-256 key other than the device key)")
+        if (!Rules.isDevice(device)) throw ProtocolException("not a valid device (name is 1–64 UTF-16 units; a read or box key is a P-256 key other than the device's others)")
         return device
     }
 
@@ -78,8 +81,55 @@ object Messages {
         return readKeyFingerprint(jwk["x"].str()!!, jwk["y"].str()!!)
     }
 
-    /** kl.approval.response for a node-signed request message. */
+    /**
+     * kl.device.box_key (R-SP-10), as [readKeyStatement]: the device key's
+     * statement of its box key, for a phone enrolled before it. `expiresAt` is
+     * after `createdAt` by at most 7 days.
+     */
+    fun boxKeyStatement(deviceId: String, boxKey: JsonObject, createdAt: String, expiresAt: String, nonce: String): JsonObject = checked(
+        "kl.device.box_key",
+        JsonObject(
+            mapOf(
+                "v" to jsonNumber("1"),
+                "type" to jsonString("kl.device.box_key"),
+                "device_id" to jsonString(deviceId),
+                "box_key" to boxKey,
+                "created_at" to jsonString(createdAt),
+                "expires_at" to jsonString(expiresAt),
+                "nonce" to jsonString(nonce)
+            )
+        )
+    )
+
+    /** What people compare for a box key (R-SP-10): `b-` and the device id's rule, in groups of four. `boxKeyFingerprint` in src/approvals/seal.js. */
+    fun boxKeyFingerprint(x: String, y: String): String {
+        Identifiers.deviceId(x, y) // checks the coordinates and the curve
+        val id = Identifiers.deviceId(byteArrayOf(0x04) + B64Url.decode(x) + B64Url.decode(y), "b-")
+        return "b-" + Identifiers.fingerprintGroups(id)
+    }
+
+    fun boxKeyFingerprint(jwk: JsonElement): String {
+        if (!Rules.isDeviceJwk(jwk)) throw ProtocolException("not a P-256 JWK")
+        return boxKeyFingerprint(jwk["x"].str()!!, jwk["y"].str()!!)
+    }
+
+    /**
+     * kl.approval.response for a node-signed clear request message. A sealed one
+     * is refused: nothing is decided over what was not opened and held to its
+     * hash ([responseToOpened]).
+     */
     fun response(request: JsonElement, decision: String, deviceId: String, signedAt: String): JsonObject {
+        if (request.obj()?.containsKey("sealed") == true) throw ProtocolException("a sealed request is answered from what it opened to")
+        return buildResponse(request, decision, deviceId, signedAt)
+    }
+
+    /** kl.approval.response for a sealed request, from what it opened to ([PhoneView.opened]), which must pass [validateOpenedRequest]. */
+    fun responseToOpened(opened: JsonObject, decision: String, deviceId: String, signedAt: String): JsonObject {
+        validateOpenedRequest(opened)?.let { throw ProtocolException("not an opened request: $it") }
+        return buildResponse(opened, decision, deviceId, signedAt)
+    }
+
+    private fun buildResponse(request: JsonElement, decision: String, deviceId: String, signedAt: String): JsonObject {
         fun field(k: String) = request[k].str() ?: throw ProtocolException("not a request: $k")
         return checked(
             "kl.approval.response",
@@ -194,6 +244,24 @@ object Messages {
         return if (rule(m)) null else "malformed"
     }
 
+    /**
+     * A sealed kl.approval.request after opening (clear part and content
+     * together): null, or the reason a phone refuses it (`malformed`,
+     * `action_hash_mismatch`). The hash is held to the content here, before
+     * anything is shown (R-SP-2). `validateOpenedRequest` in src/approvals/messages.js.
+     */
+    fun validateOpenedRequest(m: JsonObject): String? {
+        val v = m["v"]
+        if (m["type"].str() != "kl.approval.request" || v == null || !Rules.isOne(v)) return "malformed"
+        val salt = m["salt"]
+        if (!Rules.isClearRequest(JsonObject(m - "node_box" - "salt")) || !Rules.isDeviceJwk(m["node_box"]) || !Rules.isHash(salt)) return "malformed"
+        return try {
+            if (Seal.saltedHash(salt.str()!!, m.getValue("action")) == m["action_hash"].str()) null else "action_hash_mismatch"
+        } catch (e: SealException) {
+            "malformed"
+        }
+    }
+
     private fun checked(type: String, message: JsonObject): JsonObject {
         val reason = validate(type, message)
         if (reason != null) throw ProtocolException("not a valid $type: $reason")
@@ -265,6 +333,7 @@ internal object Rules {
         "kl.device.enroll" to ::enroll,
         "kl.device.revoke" to ::revoke,
         "kl.device.read_key" to ::readKey,
+        "kl.device.box_key" to ::boxKey,
         "kl.audit.slice" to ::auditSlice
     )
 
@@ -279,6 +348,7 @@ internal object Rules {
     const val ENROLL_MAX_MS = 10L * 60 * 1000
     const val REVOKE_MAX_MS = 7L * 24 * 60 * 60 * 1000
     const val READ_KEY_MAX_MS = 7L * 24 * 60 * 60 * 1000
+    const val BOX_KEY_MAX_MS = 7L * 24 * 60 * 60 * 1000
     val PLATFORMS = listOf("ios", "android", "demo")
 
     // shapes
@@ -358,15 +428,21 @@ internal object Rules {
 
     private val DEVICE_KEYS = listOf("device_id", "name", "platform", "public_key")
 
-    /** The four keys of today, or exactly those and `read_key`: a P-256 JWK whose point is not `public_key`'s (android-slim §8.2). */
+    /**
+     * The four keys of today, or exactly those and `read_key` (android-slim §8.2)
+     * and `box_key` (R-SP-10): each a P-256 JWK whose point is no other key's here.
+     */
     fun isDevice(v: JsonElement?): Boolean {
         val d = v.obj() ?: return false
         val withReadKey = d.containsKey("read_key")
-        if (!hasExactKeys(d, if (withReadKey) DEVICE_KEYS + "read_key" else DEVICE_KEYS)) return false
+        val withBoxKey = d.containsKey("box_key")
+        if (!hasExactKeys(d, DEVICE_KEYS + (if (withReadKey) listOf("read_key") else emptyList()) + (if (withBoxKey) listOf("box_key") else emptyList()))) return false
         val name = d["name"].str() ?: return false
         if (name.length !in 1..64) return false
         if (!isOneOf(d["platform"], PLATFORMS) || !isDeviceJwk(d["public_key"]) || !isDeviceId(d["device_id"])) return false
         if (withReadKey && (!isDeviceJwk(d["read_key"]) || samePoint(d["read_key"], d["public_key"]))) return false
+        if (withBoxKey && (!isDeviceJwk(d["box_key"]) || samePoint(d["box_key"], d["public_key"]))) return false
+        if (withReadKey && withBoxKey && samePoint(d["box_key"], d["read_key"])) return false
         return Identifiers.deviceId(d["public_key"]["x"].str()!!, d["public_key"]["y"].str()!!) == d["device_id"].str()
     }
 
@@ -406,10 +482,18 @@ internal object Rules {
         return hasExactKeys(o, keys) && o.values.all { it is JsonNull || withinLength(it, ORIGIN_STRING_MAX) }
     }
 
-    private fun request(m: JsonObject): Boolean =
+    /** What both shapes of a request hold in clear. */
+    private fun requestClearFields(m: JsonObject): Boolean =
+        isUuidV4(m["request_id"]) && isNodeId(m["node_id"]) && withinLength(m["node_name"], NODE_NAME_MAX) &&
+            isHash(m["action_hash"]) && isTimestamp(m["created_at"]) && isTimestamp(m["expires_at"]) && isNonce(m["nonce"])
+
+    fun isClearRequest(m: JsonObject): Boolean =
         hasExactKeys(m, listOf("v", "type", "request_id", "node_id", "node_name", "action", "action_hash", "origin", "created_at", "expires_at", "nonce")) &&
-            isUuidV4(m["request_id"]) && isNodeId(m["node_id"]) && withinLength(m["node_name"], NODE_NAME_MAX) && action(m["action"]) &&
-            isHash(m["action_hash"]) && origin(m["origin"]) && isTimestamp(m["created_at"]) && isTimestamp(m["expires_at"]) && isNonce(m["nonce"])
+            requestClearFields(m) && action(m["action"]) && origin(m["origin"])
+
+    /** A sealed one (R-SP-4): whoever opens it checks its action and origin ([Messages.validateOpenedRequest]). */
+    private fun request(m: JsonObject): Boolean =
+        isClearRequest(m) || (Seal.isSealedShape("kl.approval.request", m) && requestClearFields(m) && isDeviceJwk(m["node_box"]))
 
     private fun response(m: JsonObject): Boolean =
         hasExactKeys(m, listOf("v", "type", "request_id", "node_id", "action_hash", "nonce", "decision", "expires_at", "device_id", "signed_at")) &&
@@ -447,6 +531,14 @@ internal object Rules {
         if (!isDeviceId(m["device_id"]) || !isDeviceJwk(m["read_key"])) return false
         if (!isTimestamp(m["created_at"]) || !isTimestamp(m["expires_at"]) || !isNonce(m["nonce"])) return false
         return spanWithin(m, READ_KEY_MAX_MS)
+    }
+
+    /** kl.device.box_key, as [readKey]. */
+    private fun boxKey(m: JsonObject): Boolean {
+        if (!hasExactKeys(m, listOf("v", "type", "device_id", "box_key", "created_at", "expires_at", "nonce"))) return false
+        if (!isDeviceId(m["device_id"]) || !isDeviceJwk(m["box_key"])) return false
+        if (!isTimestamp(m["created_at"]) || !isTimestamp(m["expires_at"]) || !isNonce(m["nonce"])) return false
+        return spanWithin(m, BOX_KEY_MAX_MS)
     }
 
     private fun auditSlice(m: JsonObject): Boolean {

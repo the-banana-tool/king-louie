@@ -176,9 +176,11 @@ class DeviceKey private constructor(private val publicKey: ECPublicKey) {
 
         /**
          * Made at the first real pairing (never in demo mode), with a new
-         * read key beside it (android-slim §8.1): an enrollment carries both.
-         * A read key that cannot be made leaves the phone as one enrolled
-         * before the read key; the §8.7 set-up makes it later.
+         * read key (android-slim §8.1) and box key (R-SP-10) beside it: an
+         * enrollment carries all three. A read key that cannot be made leaves
+         * the phone as one enrolled before the read key; the §8.7 set-up makes
+         * it later. A box key that cannot be made leaves it with none: it reads
+         * nothing sealed, and Settings says so.
          */
         fun create(): DeviceKey {
             fun spec(strongBox: Boolean) = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
@@ -198,15 +200,20 @@ class DeviceKey private constructor(private val publicKey: ECPublicKey) {
                 generator.generateKeyPair()
             }
             runCatching { ReadKey.create() }.onFailure { runCatching { ReadKey.delete() } }
+            runCatching { BoxKey.create() }.onFailure { runCatching { BoxKey.delete() } }
             return DeviceKey(pair.public as ECPublicKey)
         }
 
-        /** Removes the device key and the read key with it (Reset, or a device key Android invalidated). */
+        /** Removes the device key, and the read key and box key with it (Reset, or a device key Android invalidated). */
         fun delete() {
             try {
                 keyStore().deleteEntry(ALIAS)
             } finally {
-                ReadKey.delete()
+                try {
+                    ReadKey.delete()
+                } finally {
+                    BoxKey.delete()
+                }
             }
         }
     }

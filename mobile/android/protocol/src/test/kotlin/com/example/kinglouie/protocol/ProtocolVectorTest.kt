@@ -70,7 +70,7 @@ class ProtocolVectorTest {
         assertEquals(
             setOf("jcs", "device-id-p256", "device-id-ed25519", "request-valid", "request-bad-node-signature",
                 "request-unpinned-node", "request-malformed", "request-display", "request-display-edge",
-                "request-malformed-equivalent-keys", "enroll-console", "audit-slice", "phone-api-auth") + readKeyVectors,
+                "request-malformed-equivalent-keys", "enroll-console", "audit-slice", "phone-api-auth") + readKeyVectors + sealedVectors,
             names
         )
     }
@@ -78,6 +78,12 @@ class ProtocolVectorTest {
     // Revised 2026-10-28: the read key (android-slim spec §8.8), run by
     // readKeyAuth, consoleEnrollWithReadKey and readKeyStatement below.
     private val readKeyVectors = setOf("phone-api-auth-read", "enroll-console-read-key", "read-key-valid")
+
+    // Revised 2026-11-04: sealed phones (R-SP-1, R-SP-2, R-SP-4, R-SP-10), run by SealVectorTest.
+    private val sealedVectors = setOf(
+        "seal-open", "seal-not-recipient", "seal-tampered-ct", "seal-tampered-clear", "seal-hash-mismatch", "seal-content-not-jcs", "seal-content-clear-key", "seal-pad-not-spaces",
+        "request-sealed-display", "enroll-console-box-key", "box-key-valid", "question-ask-sealed", "question-answer-sealed"
+    )
 
     @Test
     fun jcs() {
@@ -124,7 +130,7 @@ class ProtocolVectorTest {
             "request-display", "request-display-edge", "request-malformed-equivalent-keys")) {
             val v = vector(name)
             val pins = v["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }
-            assertEquals(name, v["expect"], Display.view(v["input"]!!, pins).json)
+            assertEquals(name, v["expect"], Display.view(v["input"]!!, pins, sealedSeen = emptySet()).json)
         }
     }
 
@@ -176,7 +182,7 @@ class ProtocolVectorTest {
         for (variant in variants) {
             assertNotEquals(text, variant)
             val forged = envelope.copy(payload = B64Url.encode(variant.toByteArray()))
-            assertEquals(variant, "malformed", Display.view(forged.json, pins).reason)
+            assertEquals(variant, "malformed", Display.view(forged.json, pins, sealedSeen = emptySet()).reason)
             throwsProtocol { forged.message() }
         }
     }
@@ -200,7 +206,7 @@ class ProtocolVectorTest {
         val message = JsonObject(request + mapOf("action" to edited, "action_hash" to jsonString(Digest.sha256B64url(Jcs.bytes(edited)))))
         val envelope = sealEd25519(message, web01["id"].str()!!, nodeKey("web-01"))
         assertTrue(envelope.verifyEd25519(web01["spki"].str()!!))
-        val view = Display.view(envelope.json, listOf(NodePin(web01["id"].str()!!, "web-01", web01["spki"].str()!!)))
+        val view = Display.view(envelope.json, listOf(NodePin(web01["id"].str()!!, "web-01", web01["spki"].str()!!)), sealedSeen = emptySet())
         assertEquals("malformed", view.reason)
     }
 
@@ -610,11 +616,11 @@ class ProtocolVectorTest {
 
         val fleet = DemoFleet()
         assertEquals(listOf("gpu-box", "laptop", "web-01"), fleet.pins.map { it.name })
-        val view = Display.view(fleet.request(2, "systemctl restart site").json, fleet.pins)
+        val view = Display.view(fleet.request(2, "systemctl restart site").json, fleet.pins, sealedSeen = emptySet())
         assertTrue(view.reason, view.shown)
         assertEquals("web-01", view.display["node"]["name"].str())
         // A long command still makes a valid request: the summary is cut to 300 code points.
-        assertTrue(Display.view(fleet.request(0, "x".repeat(400)).json, fleet.pins).shown)
+        assertTrue(Display.view(fleet.request(0, "x".repeat(400)).json, fleet.pins, sealedSeen = emptySet()).shown)
         assertTrue(fleet.deviceId.startsWith("d-"))
     }
 

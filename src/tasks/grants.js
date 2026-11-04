@@ -10,7 +10,7 @@
 
 const { createLogger } = require('../logging');
 const { TASK_USD_MAX } = require('../gui/lease-protocol');
-const { newLeaseId } = require('../gui/leases');
+const { newLeaseId, SEAL_REASON } = require('../gui/leases');
 const { plainCut, taskTitle } = require('./values');
 
 const log = createLogger('tasks/grants');
@@ -170,6 +170,8 @@ class GrantHandle {
     this.card = null;
     const reason = lease.endReason;
     if (STOP_REASONS.has(reason)) this._settle({ kind: 'stopped', raise: card.raise });
+    // No phone can read this node's messages. A running task's grant is gone and no card can ask again.
+    else if (reason === SEAL_REASON) this._settle(card.granted ? { kind: 'unsealable', raise: card.raise } : { kind: 'unavailable', raise: card.raise, code: 'capability_unavailable' });
     else if (card.granted) this._settle({ kind: 'expired', raise: card.raise });
     else if (reason === 'denied') this._settle({ kind: 'denied', raise: card.raise });
     else if (reason !== 'request_expired') this._settle({ kind: 'unavailable', raise: card.raise, code: reason === 'node_identity_invalid' ? 'capability_unavailable' : reason });

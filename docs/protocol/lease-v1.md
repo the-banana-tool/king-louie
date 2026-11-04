@@ -45,6 +45,10 @@ Node-signed (Ed25519, `kid` = `node_id`): `kl.lease.request`, `kl.lease.status`,
   // and drags give their position in the screenshot.
 ```
 
+A sealing node sends `kl.lease.request`, `kl.lease.status` and `kl.lease.view` in
+the sealed shape ("Revised 2026-11-04: sealed phones"). `kl.lease.grant`,
+`kl.lease.revoke`, `kl.lease.watch` and `kl.lease.listing` are never sealed.
+
 Rules: `lease.apps` 1–8 unique ids from `gui.apps`; `max_minutes` 1–60 and ≤
 `gui.lease.max_minutes`; `reason` ≤ 280 (model-written: phones label it "Agent's
 reason (unverified)"); `resumes` is `null` or equals `lease_id`; `limits` ⊆
@@ -440,8 +444,7 @@ changes shape.
 - **Audit.** The `lease.watch` entry adds `key` (`device` or `read`) beside
   `device_id` and `contact`.
 
-Vectors: four more, 55 in all (`node tests/vectors/lease-v1/generate.js
---check` says `55 vectors match`). An approver in `given.approvers[]` may
+Vectors: four more, 55 at this revision. An approver in `given.approvers[]` may
 carry `read_key`, and a read-key vector's `expect` adds `key: 'read'` where
 it is accepted.
 
@@ -496,8 +499,7 @@ Rules:
   still says `unattended: false`, `name: null`; every other kind carries a name
   as above, and a boolean `unattended`.
 
-Vectors: twenty-five more, 80 in all (`node tests/vectors/lease-v1/generate.js
---check` says `80 vectors match`). The node and both phones consume every one;
+Vectors: twenty-five more, 80 at this revision. The node and both phones consume every one;
 every grant vector here carries `given.request` and `expect.message`, and a phone
 refuses to build the refused ones. A phone is stricter than check 12 on a
 task's minutes: its card has no choice of them, so its grant is exactly
@@ -527,3 +529,81 @@ revision reads no task status, so a node with a task shows there as "Could not
 confirm": upgrade nodes before phones. Android gets the `task_ended` push
 (approval-v1 §8), and a tap opens the Approvals list. iOS gets no such push
 (it is fcm only): its banner row goes when a signed `ended` status arrives.
+
+## Revised 2026-11-04: sealed phones
+
+Sealed phones plan `docs/superpowers/plans/2026-11-04-sealed-phones.md`, R-SP-2,
+R-SP-4, R-SP-5, R-SP-8, R-SP-9. The format, the box key, the switch and the latch
+are approval-v1's "Revised 2026-11-04: sealed phones", whose table says what each
+type seals. A node with no phone holding a box key sends the clear shapes above.
+
+- **Request.** `lease`, `origin` and `salt` are sealed; the clear part adds
+  `node_box`. `lease_hash` = b64url(SHA-256(raw(`salt`) ‖ JCS(`lease`))), `salt` 32
+  random bytes in base64url. A phone recomputes from what it opened and refuses
+  `lease_hash_mismatch` before anything is shown. So the relay does not see the
+  apps, the minutes asked for, the reason, a take's or task's name and sites, or
+  what a task may do and spend.
+- **Grant.** Its shape does not change: the phone signs the salted `lease_hash` as
+  received. Check 12 recomputes with the salt the node kept on the pending entry
+  (`lease_changed`), so a clear request still pending when sealing turns on keeps
+  its unsalted rule. The grant is clear: `decision`, and `grant.apps` and
+  `grant.minutes`.
+- **Status.** Only `name` is sealed. `lease_id`, `seq`, `state`, `locked`, `reason`,
+  `expires_at`, `contact_token`, `granted_by`, `kind` and `unattended` stay clear,
+  so a phone that cannot open it still has the state, makes contact and can Stop. It
+  keeps the last name it read (in memory, per lease), or shows `(sealed)`.
+- **View.** `foreground`, `frame`, `frame_dropped` and `actions` are sealed. A phone
+  that cannot open one has its clear part.
+- **Frame cap.** A sealed frame travels as base64 inside JSON inside base64url, 16/9
+  of its size, and a view stays ≤ 256 KiB (`VIEW_MAX_BYTES`). So while the node seals
+  the raw frame is at most `SEALED_FRAME_MAX_BYTES` = 138240 (135 KiB), under the
+  configured `max_frame_bytes`. A frame still over it is captured again smaller, then
+  goes as `frame: null, frame_dropped: true`. The content is padded to a multiple of
+  256 bytes (approval-v1's "The pad"), which the cap leaves room for, and a sealed
+  status's `name` no longer shows in its length.
+- **Listing.** `kl.lease.listing` stays fully clear, and `verifyLeaseListing` opens
+  nothing: a relay can neither hide a lease nor read a name.
+- **A clear request held while the link was down** is never sent once the node seals:
+  `_relayUp` builds a new sealed one, and the old one is unknown to a grant.
+
+**When no phone can read it** (`sealing()` true, `canSeal()` false):
+
+- A new request is refused `capability_unavailable: gui (no_sealed_recipient: <why>)`,
+  before `approval_unavailable` and with nothing sent.
+- No view is captured or sent.
+- A running lease, or one waiting for its grant, ends with the reason
+  `no_sealed_recipient`. The check runs when a revoke is staged, every 5 seconds, before
+  every input, and at a live-view tick with a watcher. Its owner could no longer see
+  frames, and no resume could go. Later input says `capability_unavailable`. A grant
+  arriving then answers `{ state: 'ended', reason: 'no_sealed_recipient' }`.
+- A status still goes, never clear: `name` is sealed to the node alone, or to a
+  throwaway key if the node has no box key. Its clear part still works, so the listing
+  verifies, Stop works, and the phone sees `ended, no_sealed_recipient` signed by the node.
+- A take ends with that reason and keeps its recording. A task ends `failed` with it.
+
+A grantor with no box key while another phone holds one: the lease goes on. That phone
+cannot read the name or frames, but sees the state, makes contact and can Stop.
+
+**Audit.** `lease.requested` and `lease.granted` hold no `name`, no `sites` and no
+reason text. They keep `job_id`, `lease_id`, `kind`, `request_id`, `apps`, `minutes`,
+`resumes`, for a take `credentials`, for a task `allows` and `usd`, and on a grant
+`device_id`. Those ids and numbers are in the relay's mirror.
+
+**Codes.** `no_sealed_recipient` (a status `reason`, and the cause inside
+`capability_unavailable`), `lease_hash_mismatch`, `clear_after_sealed` (a clear
+request from a node this phone has verified a sealed message from), `key_locked`,
+`not_recipient`, `open_failed`. A sealed request a phone cannot read shows the row and
+line of approval-v1's revision, with no Allow or Deny. Its label is the status's `kind`,
+if a status came with it, else `Request`.
+
+Vectors: six more, 86 in all (`node tests/vectors/lease-v1/generate.js --check` says
+`86 vectors match`). Every sealed one holds a padded content.
+
+| Vector | Consumers | What |
+|---|---|---|
+| `request-sealed` | node, ios, android | `check: 'request'`; opens to the lease, its salted hash holds |
+| `grant-to-sealed` | node, ios, android | `expect.message`: a grant over the salted hash, byte for byte; accepted |
+| `grant-sealed-lease-changed` | node | check 12: `lease_changed` |
+| `status-sealed` | node, ios, android | the clear fields, and the name once opened |
+| `view-sealed` | node, ios, android | the clear fields, and the content once opened |
+| `listing-with-sealed-status` | node, ios, android | accepted with nothing opened |

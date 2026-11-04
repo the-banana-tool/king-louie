@@ -9,8 +9,12 @@ struct LeaseRequestsSection: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        if !model.leaseRequests.isEmpty || !model.leaseStatusRows.isEmpty {
+        if !model.leaseRequests.isEmpty || !model.leaseStatusRows.isEmpty || !model.unreadableRows(AppModel.leaseRef).isEmpty {
             Section("Computer use") {
+                // R-SP-6, R-SP-15: what cannot be read or answered, with no decision.
+                ForEach(model.unreadableRows(AppModel.leaseRef)) { row in
+                    UnreadableRow(row: row)
+                }
                 ForEach(model.leaseRequests) { item in
                     NavigationLink { LeaseRequestView(item: item) } label: {
                         VStack(alignment: .leading, spacing: 4) {
@@ -98,7 +102,17 @@ struct LeaseRequestView: View {
         }
     }
 
+    // `item` is what was tapped. The model says whether it can still be decided: a
+    // first sealed open from its node (R-SP-15), an answer or its expiry takes it away.
     var body: some View {
+        if model.leaseRequests.contains(where: { $0.id == item.id }) {
+            requestForm
+        } else {
+            Text("This request is gone.").foregroundStyle(.secondary)
+        }
+    }
+
+    private var requestForm: some View {
         Form {
             if item.request.isTask {
                 // The whole card (tasks stage 1 spec §4.6), the host's lines from what the node signed.

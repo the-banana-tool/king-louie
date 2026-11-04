@@ -14,7 +14,8 @@ const os = require('os');
 const path = require('path');
 const { canonicalize } = require('../../../src/platform/jcs');
 const { seal, fromB64url, verifyEs256, nodeSigner, deviceIdFromJwk } = require('../../../src/approvals/envelope');
-const { enrollMac, phoneAuthString, READ_KEY_MAX_MS } = require('../../../src/approvals/messages');
+const { enrollMac, phoneAuthString, READ_KEY_MAX_MS, BOX_KEY_MAX_MS } = require('../../../src/approvals/messages');
+const { sealContent, saltedHash, splitMessage } = require('../../../src/approvals/seal');
 const { deriveNodeId, base32Encode } = require('../../../src/mesh/node-identity');
 const { AuditLedger, entryHash } = require('../../../src/audit/audit-ledger');
 const { phoneView, phoneReadAuthString } = require('./phone-reference');
@@ -57,7 +58,8 @@ const kidOf = (entry) => (entry.read_key_of ? deviceIdFromJwk(KEYS.devices[entry
 
 function loadSigCache() {
   const cache = new Map();
-  const keys = Object.values(KEYS.devices).map((d) => ({ kid: kidOf(d), jwk: d.jwk }));
+  // A box key only agrees keys: it signs nothing.
+  const keys = Object.values(KEYS.devices).filter((d) => !d.box_key_of).map((d) => ({ kid: kidOf(d), jwk: d.jwk }));
   const walk = (v, apiJwks) => {
     if (!v || typeof v !== 'object') return;
     if (v.alg === 'ES256' && typeof v.kid === 'string' && typeof v.payload === 'string' && typeof v.sig === 'string') {
@@ -105,6 +107,17 @@ function deviceSigner(name, cache) {
       cache.set(`api:${d.jwk.x}:${text}`, sig);
       return sig;
     }
+  };
+}
+
+// A key-agreement key from fixed bytes, for a vector's ephemeral key.
+function fixedBox(d) {
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.setPrivateKey(d);
+  const pub = ecdh.getPublicKey();
+  return {
+    jwk: { kty: 'EC', crv: 'P-256', x: pub.subarray(1, 33).toString('base64url'), y: pub.subarray(33, 65).toString('base64url') },
+    agree: (jwk) => ecdh.computeSecret(Buffer.concat([Buffer.from([0x04]), fromB64url(jwk.x), fromB64url(jwk.y)]))
   };
 }
 
@@ -158,7 +171,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     }, nodeSigner(identity));
   };
   const pinnedWeb = [{ id: web.nodeId, key: web.key }];
-  const phoneVector = (name, env, pinned) => add({ name, consumers: ['ios', 'android'], given: { now: NOW, pinned_nodes: pinned }, input: env, expect: phoneView(env, pinned) });
+  const phoneVector = (name, env, pinned) => add({ name, consumers: ['ios', 'android'], given: { now: NOW, pinned_nodes: pinned }, input: env, expect: phoneView(env, { pinned }) });
 
   const req = request(web, 'main', toolActionLit);
   phoneVector('request-valid', req, pinnedWeb);
@@ -301,21 +314,21 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   // ── Enrollment and revocation ─────────────────────────────────────────────
   const code = sha('console code').toString('base64url');
   const codeId = codeIdOf('console');
-  // readKey: the read key's public half, sent beside the device key (android-slim §8.2).
-  const deviceOf = (dev, platform = 'android', readKey = null) => ({
-    device_id: dev.id, name: `Phone ${dev.id.slice(2, 6)}`, platform, public_key: dev.jwk, ...(readKey ? { read_key: readKey } : {})
+  // readKey, boxKey: public halves sent beside the device key (android-slim §8.2, R-SP-10).
+  const deviceOf = (dev, platform = 'android', readKey = null, boxKey = null) => ({
+    device_id: dev.id, name: `Phone ${dev.id.slice(2, 6)}`, platform, public_key: dev.jwk, ...(readKey ? { read_key: readKey } : {}), ...(boxKey ? { box_key: boxKey } : {})
   });
-  const consoleEnroll = (dev, macCode, { readKey = null, label = `enroll ${dev.id}` } = {}) => {
-    const base = { v: 1, type: 'kl.device.enroll', device: deviceOf(dev, 'android', readKey), enrolled_by: null, created_at: NOW, expires_at: iso(NOW_MS + 600000), nonce: nonceOf(label), code_id: codeId };
+  const consoleEnroll = (dev, macCode, { readKey = null, boxKey = null, label = `enroll ${dev.id}` } = {}) => {
+    const base = { v: 1, type: 'kl.device.enroll', device: deviceOf(dev, 'android', readKey, boxKey), enrolled_by: null, created_at: NOW, expires_at: iso(NOW_MS + 600000), nonce: nonceOf(label), code_id: codeId };
     return seal({ ...base, code_mac: enrollMac(macCode, base) }, dev);
   };
   const consoleGiven = { now: iso(NOW_MS + 60000), code_id: codeId, code, allow_test_keys: true };
   add({ name: 'enroll-console', consumers: ['node', 'ios', 'android'], given: consoleGiven, input: consoleEnroll(C, code), expect: { accepted: true, reason: null, device_id: C.id } });
   add({ name: 'enroll-console-bad-mac', consumers: ['node'], given: consoleGiven, input: consoleEnroll(C, sha('wrong code').toString('base64url')), expect: { accepted: false, reason: 'bad_mac', device_id: null } });
 
-  const signedEnroll = (by, dev, { platform = 'ios', readKey = null } = {}) => seal({
-    v: 1, type: 'kl.device.enroll', device: deviceOf(dev, platform, readKey), enrolled_by: by.id, created_at: NOW, expires_at: iso(NOW_MS + 600000),
-    nonce: nonceOf(readKey ? `signed ${by.id} ${dev.id} read key` : `signed ${by.id} ${dev.id}`)
+  const signedEnroll = (by, dev, { platform = 'ios', readKey = null, boxKey = null } = {}) => seal({
+    v: 1, type: 'kl.device.enroll', device: deviceOf(dev, platform, readKey, boxKey), enrolled_by: by.id, created_at: NOW, expires_at: iso(NOW_MS + 600000),
+    nonce: nonceOf(`signed ${by.id} ${dev.id}${readKey ? ' read key' : ''}${boxKey ? ' box key' : ''}`)
   }, by);
   const revoke = (by, target) => seal({ v: 1, type: 'kl.device.revoke', device_id: target.id, revoked_by: by.id, reason: 'lost phone', created_at: NOW, expires_at: iso(NOW_MS + 3600000), nonce: nonceOf(`revoke ${by.id} ${target.id}`) }, by);
   const stageGiven = { now: iso(NOW_MS + 60000), approvers: [approver(A), approver(B)], overlay: [], allow_test_keys: true };
@@ -360,6 +373,34 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   // Dated more than five minutes past the node's clock.
   stageVector('read-key-from-the-future', [seal(readKeyStatement(A, AR.jwk, { created: NOW_MS + 10 * 60000, label: `read key ${A.id} future` }), A)],
     [{ state: 'rejected', reason: 'from_the_future' }], [A.id, B.id]);
+
+  // ── The box key (sealed phones, R-SP-10): as the read key, the node's ───────
+  const AB = KEYS.devices.A_box.jwk;
+  const BB = KEYS.devices.B_box.jwk;
+  add({
+    name: 'enroll-console-box-key', consumers: ['node', 'ios', 'android'], given: consoleGiven,
+    input: consoleEnroll(A, code, { boxKey: AB, label: `enroll ${A.id} box key` }),
+    expect: { accepted: true, reason: null, device_id: A.id, box_key: AB }
+  });
+  // A box key that is the read key beside it: the shape is wrong.
+  add({
+    name: 'enroll-console-box-key-equal', consumers: ['node'], given: consoleGiven,
+    input: consoleEnroll(A, code, { readKey: AR.jwk, boxKey: AR.jwk, label: `enroll ${A.id} box key equal` }),
+    expect: { accepted: false, reason: 'malformed', device_id: null, box_key: null }
+  });
+  stageVector('enroll-signed-box-key', [signedEnroll(A, B, { platform: 'android', boxKey: BB })], [{ state: 'staged' }], [A.id],
+    { approvers: [approver(A)] }, { expect: { staged_box_keys: [BB] } });
+  const boxKeyStatement = (dev, boxKey, { created = NOW_MS, label = `box key ${dev.id}` } = {}) => ({
+    v: 1, type: 'kl.device.box_key', device_id: dev.id, box_key: boxKey,
+    created_at: iso(created), expires_at: iso(created + BOX_KEY_MAX_MS), nonce: nonceOf(label)
+  });
+  const boxStatement = boxKeyStatement(A, AB);
+  stageVector('box-key-valid', [seal(boxStatement, A)], [{ state: 'box-key-pending-apply' }], [A.id, B.id], {}, { consumers: ['node', 'ios', 'android'], expect: { staged_box_keys: [AB] } });
+  // The same statement signed by the device's read key: only the device key may.
+  stageVector('box-key-wrong-signer', [seal(boxStatement, AR)], [{ state: 'rejected', reason: 'bad_signature' }], [A.id, B.id]);
+  // Not newer than the key the record holds: a relay's replay of an old statement.
+  stageVector('box-key-stale', [seal(boxKeyStatement(A, AB, { created: NOW_MS - 60000, label: `box key ${A.id} stale` }), A)],
+    [{ state: 'rejected', reason: 'stale' }], [A.id, B.id], { approvers: [approver(A, { box_key: BB, box_key_at: NOW }), approver(B)] });
 
   // ── History slice ─────────────────────────────────────────────────────────
   const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-vector-audit-'));
@@ -408,6 +449,148 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     given: { device: { device_id: A.id, jwk: A.jwk, read_jwk: AR.jwk }, key: 'read', method: 'POST', path: apiPath, timestamp, body },
     input: { signing_string: readSigning, signature: AR.signText(readSigning) },
     expect: { signing_string: readSigning, body_sha256: crypto.createHash('sha256').update(body).digest('base64url'), accepted: true, accepted_by_device_key: false }
+  });
+
+  // ── The seal (sealed phones, R-SP-1, R-SP-2, R-SP-4) ───────────────────────
+  // Sealed by web-01. The input is the message the signed envelope would
+  // carry; the signature is another layer and is not what these test. A phone
+  // refuses action_hash_mismatch itself, after opening: openSealed does not
+  // read the action.
+  const sealType = 'kl.approval.request';
+  const boxA = { [A.id]: KEYS.devices.A_box.jwk };
+  const boxB = { [B.id]: KEYS.devices.B_box.jwk };
+  const sealParts = (label, actionHash = null) => {
+    const salt = sha(`seal salt ${label}`).toString('base64url');
+    const content = { action: toolActionLit, origin: { client: 'gateway', session: 'chat-1', job_id: null }, salt };
+    const clear = {
+      v: 1, type: sealType, request_id: uuidOf(`seal ${label}`), node_id: web.nodeId, node_name: web.nodeName,
+      action_hash: actionHash || saltedHash(salt, toolActionLit), created_at: NOW, expires_at: iso(NOW_MS + 300000),
+      nonce: nonceOf(`seal ${label}`), node_box: KEYS.nodes['web-01'].box.jwk
+    };
+    return { clear, content };
+  };
+  const sealedRequest = (label, { recipients = { ...boxA, ...boxB }, actionHash = null } = {}) => {
+    const { clear, content } = sealParts(label, actionHash);
+    const random = (n) => (n === 32 ? sha(`seal cek ${label}`) : sha(`seal iv ${label}`).subarray(0, n));
+    const message = sealContent({ type: sealType, senderId: web.nodeId, clear, content, recipients, ephemeral: fixedBox(sha(`seal epk ${label}`)), random });
+    return { message, full: { ...clear, ...content } };
+  };
+  const flipFirstByte = (b64) => {
+    const bytes = Buffer.from(fromB64url(b64));
+    bytes[0] ^= 0x01;
+    return bytes.toString('base64url');
+  };
+  const sealVector = (name, input, reason, message = null) => add({
+    name, consumers: ['node', 'ios', 'android'], given: { box: { device_id: A.id, d: KEYS.devices.A_box.d }, type: sealType }, input, expect: { reason, message }
+  });
+
+  const sealedMain = sealedRequest('main');
+  sealVector('seal-open', sealedMain.message, null, sealedMain.full);
+  sealVector('seal-not-recipient', sealedRequest('not recipient', { recipients: boxB }).message, 'not_recipient');
+  const sealedForCt = sealedRequest('tampered ct').message;
+  sealVector('seal-tampered-ct', { ...sealedForCt, sealed: { ...sealedForCt.sealed, ct: flipFirstByte(sealedForCt.sealed.ct) } }, 'open_failed');
+  // A relay moves one request's sealed object onto another request's clear part.
+  sealVector('seal-tampered-clear', { ...sealedRequest('moved onto').message, sealed: sealedRequest('moved from').message.sealed }, 'open_failed');
+  // Opens, but the clear hash is today's unsalted one and not the content's.
+  const unsalted = crypto.createHash('sha256').update(canonicalize(toolActionLit)).digest('base64url');
+  sealVector('seal-hash-mismatch', sealedRequest('hash mismatch', { actionHash: unsalted }).message, 'action_hash_mismatch');
+  // A sender that does not follow the format, which sealContent refuses to be:
+  // R-SP-1 by hand over any plaintext bytes. Both tags hold; only the content is wrong.
+  const gcmSealed = (key, iv, plaintext, aad = null) => {
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
+    if (aad) cipher.setAAD(aad);
+    const body = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    return Buffer.concat([body, cipher.getAuthTag()]);
+  };
+  const handSealed = (label, clear, plaintext) => {
+    const eph = fixedBox(sha(`seal epk ${label}`));
+    const cek = sha(`seal cek ${label}`);
+    const iv = sha(`seal iv ${label}`).subarray(0, 12);
+    const info = Buffer.from(`kl-seal-v1\n${sealType}\n${web.nodeId}\n${A.id}`, 'utf8');
+    const kek = Buffer.from(crypto.hkdfSync('sha256', eph.agree(KEYS.devices.A_box.jwk), Buffer.alloc(0), info, 32));
+    const ct = gcmSealed(cek, iv, plaintext, Buffer.from(canonicalize(clear), 'utf8'));
+    const wrap = gcmSealed(kek, Buffer.alloc(12), cek);
+    return { ...clear, sealed: { v: 1, epk: eph.jwk, iv: iv.toString('base64url'), ct: ct.toString('base64url'), keys: { [A.id]: wrap.toString('base64url') } } };
+  };
+  // The right keys and values in another order: JSON, but not the JCS bytes.
+  const notJcs = sealParts('content not jcs');
+  sealVector('seal-content-not-jcs', handSealed('content not jcs', notJcs.clear, Buffer.from(JSON.stringify({ salt: notJcs.content.salt, origin: notJcs.content.origin, action: notJcs.content.action }), 'utf8')), 'content_malformed');
+  // JCS bytes, but the content overrules a key the AAD covers.
+  const clearKey = sealParts('content clear key');
+  sealVector('seal-content-clear-key', handSealed('content clear key', clearKey.clear, Buffer.from(canonicalize({ ...clearKey.content, node_name: 'other-node' }), 'utf8')), 'content_malformed');
+  // A pad holds only spaces: anything else in it could carry a second message.
+  const notSpaces = sealParts('pad not spaces');
+  sealVector('seal-pad-not-spaces', handSealed('pad not spaces', notSpaces.clear, Buffer.from(canonicalize({ ...notSpaces.content, pad: '  x ' }), 'utf8')), 'content_malformed');
+
+  // ── Sealed tool approvals (R-SP-2, R-SP-5): a node-signed sealed request ────
+  // To both phones and the node itself, as a node sends one. The response vectors
+  // are the node's; the phones read the request.
+  const webBox = KEYS.nodes['web-01'].box.jwk;
+  const signedSealedRequest = (label, action, origin) => {
+    const salt = sha(`sealed request salt ${label}`).toString('base64url');
+    const clear = {
+      v: 1, type: sealType, request_id: uuidOf(`sealed request ${label}`), node_id: web.nodeId, node_name: web.nodeName,
+      action_hash: saltedHash(salt, action), created_at: NOW, expires_at: iso(NOW_MS + 300000), nonce: nonceOf(`sealed request ${label}`), node_box: webBox
+    };
+    const random = (n) => (n === 32 ? sha(`sealed request cek ${label}`) : sha(`sealed request iv ${label}`).subarray(0, n));
+    const message = sealContent({
+      type: sealType, senderId: web.nodeId, clear, content: { action, origin, salt }, recipients: { ...boxA, ...boxB, [web.nodeId]: webBox },
+      ephemeral: fixedBox(sha(`sealed request epk ${label}`)), random
+    });
+    return { envelope: seal(message, nodeSigner(web)), salt, message };
+  };
+  // The action and origin of request-display, so the two displays are one.
+  const sealedDisplay = signedSealedRequest('display', runbookAction, { client: 'stdio-mcp', session: null, job_id: 'job-1' });
+  const boxOfA = { device_id: A.id, d: KEYS.devices.A_box.d };
+  add({
+    name: 'request-sealed-display', consumers: ['node', 'ios', 'android'], given: { now: NOW, pinned_nodes: pinnedWeb, box: boxOfA },
+    input: sealedDisplay.envelope, expect: phoneView(sealedDisplay.envelope, { pinned: pinnedWeb, box: boxOfA })
+  });
+  const sealedPending = signedSealedRequest('response', toolActionLit, { client: 'gateway', session: 'chat-1', job_id: null });
+  const respondSealed = (overrides = {}) => respond(A, {
+    request_id: sealedPending.message.request_id, action_hash: sealedPending.message.action_hash, nonce: sealedPending.message.nonce, expires_at: sealedPending.message.expires_at, ...overrides
+  });
+  const sealedGiven = { pending: [{ envelope: sealedPending.envelope, salt: sealedPending.salt }] };
+  nodeVector('response-approve-sealed', null, respondSealed(), { accepted: true, reason: null }, sealedGiven);
+  nodeVector('response-reject-sealed-changed-parameter', 12, respondSealed(), { accepted: false, reason: 'action_changed' }, {
+    ...sealedGiven, current_action: { ...toolActionLit, params: { command: 'git push --force origin main' }, summary: 'Bash(git push --force origin main)' }
+  });
+  nodeVector('response-reject-sealed-hash-unsalted', 10, respondSealed({ action_hash: unsalted }), { accepted: false, reason: 'action_hash_mismatch' }, sealedGiven);
+
+  // ── Sealed questions (R-SP-4): the ask to both phones and the node, the answer
+  // to the node. A phone builds the answer from given.ask and given.answer, sealed
+  // to the ask's node_box.
+  const askType = 'kl.question.ask';
+  const fullAsk = {
+    v: 1, type: askType, node_id: web.nodeId, token: '7QD4KM', kind: 'question', urgency: 'high', expires_at: null, node_box: webBox,
+    case_id: 'mfz1k2-0a1b2c3d', question_id: 'q-0012', case_title: 'Lakeside lot', text: 'Accept the 41k offer?', options: [{ id: 'a', label: 'Yes' }, { id: 'b', label: 'No' }]
+  };
+  const askSplit = splitMessage(askType, fullAsk);
+  const sealedAsk = sealContent({
+    type: askType, senderId: web.nodeId, clear: askSplit.clear, content: askSplit.content, recipients: { ...boxA, ...boxB, [web.nodeId]: webBox },
+    ephemeral: fixedBox(sha('sealed ask epk')), random: (n) => (n === 32 ? sha('sealed ask cek') : sha('sealed ask iv').subarray(0, n))
+  });
+  add({
+    name: 'question-ask-sealed', consumers: ['node', 'ios', 'android'], given: { box: boxOfA, type: askType, node_public_key: web.key },
+    input: seal(sealedAsk, nodeSigner(web)), expect: { reason: null, message: fullAsk }
+  });
+  const answerType = 'kl.question.answer';
+  const fullAnswer = {
+    v: 1, type: answerType, node_id: web.nodeId, token: fullAsk.token, device_id: A.id, nonce: nonceOf('sealed answer'), signed_at: NOW,
+    case_id: fullAsk.case_id, question_id: fullAsk.question_id, answer: { option_id: 'a' }
+  };
+  const answerSplit = splitMessage(answerType, fullAnswer);
+  const sealedReply = sealContent({
+    type: answerType, senderId: A.id, clear: answerSplit.clear, content: answerSplit.content, recipients: { [web.nodeId]: webBox },
+    ephemeral: fixedBox(sha('sealed answer epk')), random: (n) => (n === 32 ? sha('sealed answer cek') : sha('sealed answer iv').subarray(0, n))
+  });
+  add({
+    name: 'question-answer-sealed', consumers: ['node', 'ios', 'android'],
+    given: {
+      box: { node_id: web.nodeId, d: KEYS.nodes['web-01'].box.d }, type: answerType, device: { device_id: A.id, jwk: A.jwk },
+      ask: fullAsk, answer: fullAnswer.answer, nonce: fullAnswer.nonce, signed_at: NOW
+    },
+    input: seal(sealedReply, A), expect: { reason: null, message: fullAnswer }
   });
 
   return vectors;

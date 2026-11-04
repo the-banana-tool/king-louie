@@ -88,6 +88,9 @@ async function runMcp({ dataDir, io, deps = {} }) {
     const ports = buildServicePorts({ dataDir, onPathWritten: (p) => written.push(p) });
     const approvals = await startMcpApprovals({
       dataDir, nodeConfig: nodeCfg, ports,
+      // At each write: this function has returned, and its finally has run, long
+      // before the latch is first written.
+      onPathWritten: (p) => restoreDataDirOwnership(dataDir, [p], io.ownership),
       ...(deps.configDir ? { configDir: deps.configDir } : {}),
       ...(deps.adminUid === undefined ? {} : { approverStoreOptions: { adminUid: deps.adminUid } })
     });

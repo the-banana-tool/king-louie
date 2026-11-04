@@ -17,8 +17,17 @@
 // The relay link lives on `this.link`, never `this.relay`: the router's
 // relayOf() treats `relay.name` as "served by that contact relay", and relay
 // events must never be routed here.
+//
+// Sealed (sealed phones, R-SP-4, R-SP-5): once the seal policy says so, an ask's
+// case, question, title, text and options go inside the seal, and so do an
+// answer's case, question and answer. Latched with nobody to seal to, this
+// channel reports itself not configured and sendContact refuses, so the ladder
+// goes on to its other rungs; a question never goes out clear. A sealed answer's
+// signature is checked before it is opened: a box key is public, so an open
+// proves nothing about who wrote it.
 const { ChannelPlugin, ContactDeliveryError } = require('./channel-plugin');
-const { seal, nodeSigner } = require('../approvals/envelope');
+const { seal, nodeSigner, isDeviceJwk } = require('../approvals/envelope');
+const { sealContent, openSealed, splitMessage, isSealedShape, boxKeyFingerprint, SealError } = require('../approvals/seal');
 const { verifyDeviceEnvelope, NonceCache, bytesSha256 } = require('../approvals/verify-device');
 const messages = require('../approvals/messages');
 const { TOKEN_RE } = require('../cases/contact-format');
@@ -31,6 +40,7 @@ const QUESTION_ID = /^q-\d{4,}$/;
 const CASE_ID = /^[A-Za-z0-9._-]{1,80}$/;
 const OPTION_ID = /^[a-z0-9-]{1,16}$/;
 const ANSWER_KEYS = ['answer', 'case_id', 'device_id', 'node_id', 'nonce', 'question_id', 'signed_at', 'token', 'type', 'v'];
+const ASK_KEYS = ['case_id', 'case_title', 'expires_at', 'kind', 'node_id', 'options', 'question_id', 'text', 'token', 'type', 'urgency', 'v'];
 // Presence pings (ruling T17-presence): older than this are ignored; one
 // repeat of the same state per device per PRESENCE_MIN_GAP_MS (a change of
 // state always applies); a ping older than the last applied one is ignored.
@@ -41,6 +51,7 @@ const MAX_TEXT = 4000;
 const MAX_TITLE = 200;
 const MAX_LABEL = 200;
 const MAX_OPTIONS = 6;
+const UNSEALABLE = 'sealing is on and no phone can read it';
 
 // approval-v1 §5's hidden code points (Cc, Zl/Zp, Bidi_Control,
 // Default_Ignorable_Code_Point as of Unicode 15.1), the list F3's
@@ -82,18 +93,42 @@ function validAnswer(a) {
 
 const exactKeys = (m, keys) => JSON.stringify(Object.keys(m).sort()) === JSON.stringify(keys);
 
-// The kl.question.answer shape (§3.9), checked by verifyDeviceEnvelope.
-function validateAnswerMessage(m) {
-  return exactKeys(m, ANSWER_KEYS)
-    && messages.NODE_ID_RE.test(m.node_id) && CASE_ID.test(String(m.case_id)) && QUESTION_ID.test(String(m.question_id))
-    && TOKEN_RE.test(String(m.token)) && validAnswer(m.answer) && messages.NONCE_RE.test(m.nonce)
-    && messages.isTimestamp(m.signed_at) && messages.DEVICE_ID_RE.test(m.device_id);
+const isText = (v) => typeof v === 'string';
+const isId = (re, v) => isText(v) && re.test(v);
+
+// What an answer holds in clear, whichever form it has.
+const answerClearFields = (m) => isId(messages.NODE_ID_RE, m.node_id) && isId(TOKEN_RE, m.token) && isId(messages.NONCE_RE, m.nonce)
+  && messages.isTimestamp(m.signed_at) && isId(messages.DEVICE_ID_RE, m.device_id);
+
+// The whole kl.question.answer (§3.9): a clear one as sent, a sealed one once opened.
+function isWholeAnswer(m) {
+  return exactKeys(m, ANSWER_KEYS) && answerClearFields(m)
+    && isId(CASE_ID, m.case_id) && isId(QUESTION_ID, m.question_id) && validAnswer(m.answer);
 }
 
-try {
-  messages.registerMessageValidator('kl.question.answer', validateAnswerMessage);
-} catch (err) {
-  if (!/already has a validator/.test(err.message)) throw err;
+// The form verifyDeviceEnvelope checks. A sealed one's content is not read here:
+// handleAnswer holds it to isWholeAnswer after the signature, once it is open.
+function validateAnswerMessage(m) {
+  if (isSealedShape('kl.question.answer', m)) return answerClearFields(m);
+  return isWholeAnswer(m);
+}
+
+const askClearFields = (m) => isId(messages.NODE_ID_RE, m.node_id) && isId(TOKEN_RE, m.token) && isText(m.kind) && isText(m.urgency)
+  && (m.expires_at === null || messages.isTimestamp(m.expires_at));
+
+// kl.question.ask, clear or sealed. The node builds these; a phone checks its own.
+function validateAskMessage(m) {
+  if (isSealedShape('kl.question.ask', m)) return askClearFields(m) && isDeviceJwk(m.node_box);
+  return exactKeys(m, m.node_box === undefined ? ASK_KEYS : [...ASK_KEYS, 'node_box'].sort()) && askClearFields(m) && isId(CASE_ID, m.case_id) && isId(QUESTION_ID, m.question_id)
+    && isText(m.case_title) && isText(m.text) && Array.isArray(m.options) && (m.node_box === undefined || isDeviceJwk(m.node_box));
+}
+
+for (const [type, validator] of [['kl.question.answer', validateAnswerMessage], ['kl.question.ask', validateAskMessage]]) {
+  try {
+    messages.registerMessageValidator(type, validator);
+  } catch (err) {
+    if (!/already has a validator/.test(err.message)) throw err;
+  }
 }
 
 function linkError(err) {
@@ -107,13 +142,14 @@ class MobileAppChannel extends ChannelPlugin {
   // link: F3's RelayClient; approverStore: the admin <configDir>/approvers/ set;
   // identity: this node's identity; getRouter(): the ContactRouter.
   constructor({
-    link, approverStore, identity, nonces = new NonceCache({}), getRouter = () => null, presence = null,
+    link, approverStore, identity, sealPolicy = null, nonces = new NonceCache({}), getRouter = () => null, presence = null,
     isEnabled = () => true, clock = () => new Date(), log = createLogger('contact/mobile')
   } = {}) {
     super({ id: 'mobile', label: 'King Louie app', capabilities: ['send'] });
     this.link = link;
     this.approverStore = approverStore;
     this.identity = identity;
+    this.sealPolicy = sealPolicy;
     this.nonces = nonces;
     this.getRouter = getRouter;
     this.presenceTracker = presence;
@@ -123,6 +159,7 @@ class MobileAppChannel extends ChannelPlugin {
     this.replyHandler = null;
     // deviceId → { foreground, at (ordering key), changedAt (node clock) }.
     this.lastPresence = new Map();
+    this.sealBlockedLogged = false;
   }
 
   async initialize() {}
@@ -151,6 +188,67 @@ class MobileAppChannel extends ChannelPlugin {
     return this.contactCapabilities() ? 'enrolled-devices' : null;
   }
 
+  // R-SP-5. The capabilities stay as they are: a phone can still answer what it
+  // already holds. Only sending stops, and the ladder goes to its next rung.
+  contactConfigured() {
+    if (!super.contactConfigured()) return false;
+    const blocked = this._sealBlocked();
+    if (blocked && !this.sealBlockedLogged) this.log.debug('sealing is on and no phone can read it: this rung is skipped');
+    this.sealBlockedLogged = blocked;
+    return !blocked;
+  }
+
+  _sealBlocked() {
+    try {
+      messages.sealTargets(this.sealPolicy);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  // Null while this channel sends clear, or does not send at all. Otherwise:
+  // blocked (nobody to seal to) and why; readers, each active phone that holds a
+  // box key with that key's fingerprint; devices, every active phone; deliverable,
+  // whether the relay link is up. The router writes readers on a delivery before
+  // it sends, so whom an ask was sealed to outlives a restart or a crash mid-send,
+  // and the ladder compares them with who can read now. A latch only goes one
+  // way, and a policy that cannot answer counts as sealing.
+  contactSealState() {
+    if (!this.sealPolicy || !this.link || !this.isEnabled()) return null;
+    let sealing = true;
+    try {
+      sealing = this.sealPolicy.sealing() === true;
+    } catch {
+      // stays true
+    }
+    if (!sealing) return null;
+    const blocked = this._sealBlocked();
+    const readers = {};
+    if (!blocked) {
+      for (const [id, jwk] of Object.entries(this.sealPolicy.recipients())) {
+        if (messages.DEVICE_ID_RE.test(id)) readers[id] = boxKeyFingerprint(jwk);
+      }
+    }
+    const can = typeof this.link.canDeliver === 'function' ? this.link.canDeliver() : { ok: true };
+    return { blocked, why: blocked ? this._sealWhyNot() : null, readers, devices: this.devices(), deliverable: !(can && can.ok === false) };
+  }
+
+  _sealWhyNot() {
+    try {
+      if (typeof this.sealPolicy.whyNot === 'function') return this.sealPolicy.whyNot() || UNSEALABLE;
+    } catch {
+      // the fixed sentence
+    }
+    return UNSEALABLE;
+  }
+
+  // Why this channel is off, where the router's generic reason would be wrong.
+  contactNotConfiguredReason() {
+    const state = this.contactSealState();
+    return state && state.blocked ? state.why : null;
+  }
+
   onContactReply(handler) {
     this.replyHandler = typeof handler === 'function' ? handler : null;
   }
@@ -169,7 +267,9 @@ class MobileAppChannel extends ChannelPlugin {
     const signer = nodeSigner(this.identity);
     for (const item of message.items || []) {
       const options = item.answerable === false ? [] : (item.options || []).slice(0, MAX_OPTIONS);
-      const envelope = seal({
+      // Read for each message built (R-SP-5), and before anything of it exists.
+      const targets = this._askTargets();
+      const ask = {
         v: 1,
         type: 'kl.question.ask',
         node_id: this.identity.nodeId,
@@ -182,7 +282,8 @@ class MobileAppChannel extends ChannelPlugin {
         text: clean(item.text, MAX_TEXT, { newlines: true }),
         options: options.map((o) => ({ id: String(o.id), label: clean(o.label, MAX_LABEL) })),
         expires_at: item.expiresAt || null
-      }, signer);
+      };
+      const envelope = seal(targets ? this._sealAsk(ask, targets) : ask, signer);
       for (const device of devices) {
         try {
           await this.link.send(envelope, { push: { kind: 'question', id: item.token }, to_device: device });
@@ -192,6 +293,39 @@ class MobileAppChannel extends ChannelPlugin {
       }
     }
     return { deliveryId: meta.deliveryId || null, externalRef: null };
+  }
+
+  _askTargets() {
+    try {
+      return messages.sealTargets(this.sealPolicy);
+    } catch {
+      this.log.debug(`a question was not sent to the phones: ${UNSEALABLE}`);
+      throw new ContactDeliveryError('not-configured', UNSEALABLE);
+    }
+  }
+
+  // Never falls back to the clear ask.
+  _sealAsk(ask, targets) {
+    try {
+      const { clear, content } = splitMessage('kl.question.ask', { ...ask, node_box: targets.nodeBox });
+      return sealContent({ type: 'kl.question.ask', senderId: targets.senderId, clear, content, recipients: targets.recipients });
+    } catch (err) {
+      if (err instanceof SealError) throw new ContactDeliveryError('rejected', 'the question could not be sealed');
+      throw err;
+    }
+  }
+
+  // Call only on a message whose signature verified. → { message } or { reason }.
+  _openAnswer(message) {
+    if (!this.identity.box) return { reason: 'open_failed' };
+    let opened;
+    try {
+      opened = openSealed({ type: 'kl.question.answer', message, recipientId: this.identity.nodeId, agree: this.identity.box.agree });
+    } catch (err) {
+      if (!(err instanceof SealError)) throw err;
+      return { reason: err.reason === 'content_malformed' ? 'malformed' : 'open_failed' };
+    }
+    return isWholeAnswer(opened.message) ? { message: opened.message } : { reason: 'malformed' };
   }
 
   // Verified, fresh, single use: { ok, message, deviceId, bytes } or a refusal.
@@ -250,13 +384,27 @@ class MobileAppChannel extends ChannelPlugin {
   async handleAnswer(params = {}) {
     const v = this._verify(params, 'kl.question.answer');
     if (!v.ok) return this._refuse('answer', v.reason);
-    const m = v.message;
+    // Signer and device are bound by now. What steers the answer below comes from
+    // inside the seal and is held to what the live token names.
+    const sealedAnswer = Object.hasOwn(v.message, 'sealed');
+    let m = v.message;
+    if (sealedAnswer) {
+      const opened = this._openAnswer(v.message);
+      if (opened.reason) return this._refuse('answer', opened.reason);
+      m = opened.message;
+    }
     const router = this.getRouter();
     const found = router ? router.state.resolve(m.token, { channel: 'mobile' }) : null;
     if (!found || !found.item || found.delivery.channel !== 'mobile'
       || found.item.caseId !== m.case_id || found.item.questionId !== m.question_id) {
       return this._refuse('answer', 'unknown_question');
     }
+    // A clear answer goes only with a clear ask: a phone that read a sealed ask
+    // seals its reply, so with no clear ask of this token it is a fault. Only the
+    // newest delivery is not enough: a re-send or digest can sit over a clear ask
+    // a phone really holds, and a relay replaying that one gains nothing it had
+    // not already seen.
+    if (!sealedAnswer && !router.state.hasClearDelivery(m.token, 'mobile')) return this._refuse('answer', 'sealed_required');
     // Ruling T17-bound, second layer: free text may name no question but its
     // own (the router also treats a bound reply's text as the body only).
     if (m.answer.text !== undefined) {

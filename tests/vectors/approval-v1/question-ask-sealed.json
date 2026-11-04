@@ -1,0 +1,54 @@
+{
+  "name": "question-ask-sealed",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    },
+    "type": "kl.question.ask",
+    "node_public_key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-c2ubd6jjqumalzt5",
+    "payload": "eyJleHBpcmVzX2F0IjpudWxsLCJraW5kIjoicXVlc3Rpb24iLCJub2RlX2JveCI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6InRzWUc2ZmZVcGJqczkwUnp3RlF5RUZxS194a3piTzJYZkFVLXk3M01KTXciLCJ5IjoicVNsd2Y4a2xSR1BVU3BTQXdvR1d2eEZoZU9HTktWa200YXhPclplVUpZUSJ9LCJub2RlX2lkIjoia2wtYzJ1YmQ2ampxdW1hbHp0NSIsInNlYWxlZCI6eyJjdCI6IkNXMTY2T0xETmhSMWJHZ3F5MlJvSEZzeThjd2Y0MEdPdVdKejNsOVU1bTBfc0xPNVpTZWRqckZsNUtCSkszMnMzYUFTWVVmVF9LSXJlZkl4WWRxU1JJenpTSm15N2pFS0hvT2F2eDhUdFZVQW5qOGt3ZjFmQ1BCaXBTc0FKMUhLTHVacEQ0dEM5VEtjcWM3WXRjMTBzbHk2YTNYbXJpZlgtVFY2S0pRZ0Uwdjh5SjdDSVJOZEZnQ2R2TU0wd3RVNk1fS2lmQWstcWhXUHNIVFhneUxRU1p3OXJHOUh6YUNIT2JTc3R0NGZtYXlBak9VTnM2Z29ENUlURG1VaDJwS2tlSzRjcHdCVEZtTm9tV041eXlzVHQwTFpWZmN1Smo0S29UYXYxcm12WVlTUFRqTnVPYmxoZTVfLU1ZMDJ5NTBrV1NBRGVVdmxDOGtlNl92Q1BOcGhKc0toUnpKaDA0ekh6RVZnbGpLdER1ayIsImVwayI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6ImJ5OVpTZzVyRWpUcThoTDU3T2pYTmRGVWpWa2RsVmpwTEZaQ2F1V1FsU0kiLCJ5IjoidFEzclBpNTZtSUU4cmtmZ2NaY2wxVDhTeWJZTjI5dF92RjVzNTMwdXJUZyJ9LCJpdiI6IkQ3Q2VPWGVHbmJTRXY1Y3EiLCJrZXlzIjp7ImQtM3Ztd3JpaGhkYm5pdDRvaSI6Im90Y1ctcmI4Z1B5b0d2ZmNsZ2VLSkRLd3lNcUxYcEFCb2duQlJGVFFrMnRDcmtqVHUyUVdaZldfZ3ZKWElNQlQiLCJkLTZ4ZGxieGdsaG52ZmEzbHciOiJxWUVsbXEwMjdQMFdkM3ZuSzBSYmNlUm9BdWl6dzdTNGc3eEpLM0Ntbzl3TUtDZHBNU0J1NHF0aHNPbmRiWW4wIiwia2wtYzJ1YmQ2ampxdW1hbHp0NSI6Ik9iNW1TNGlLMnpPVlYwdHllc0k0VWJ5TDZrT3c2WjI4dXZwRWduaXNZbTZQSjExdmFqa2lXaEdlczFkeEEzWk4ifSwidiI6MX0sInRva2VuIjoiN1FENEtNIiwidHlwZSI6ImtsLnF1ZXN0aW9uLmFzayIsInVyZ2VuY3kiOiJoaWdoIiwidiI6MX0",
+    "sig": "Vj9oGvF4QuWZdRA1qtGCcIevsUiRN1-pWKtUNlIw0S-6K2x8yj_oNBHayONhkq9Vj8ntiNBNNc7CQKo1LZMKCA"
+  },
+  "expect": {
+    "reason": null,
+    "message": {
+      "v": 1,
+      "type": "kl.question.ask",
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "token": "7QD4KM",
+      "kind": "question",
+      "urgency": "high",
+      "expires_at": null,
+      "node_box": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw",
+        "y": "qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ"
+      },
+      "case_id": "mfz1k2-0a1b2c3d",
+      "question_id": "q-0012",
+      "case_title": "Lakeside lot",
+      "text": "Accept the 41k offer?",
+      "options": [
+        {
+          "id": "a",
+          "label": "Yes"
+        },
+        {
+          "id": "b",
+          "label": "No"
+        }
+      ]
+    }
+  }
+}

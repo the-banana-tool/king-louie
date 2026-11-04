@@ -119,7 +119,9 @@ describe('handshake', () => {
     const fg = await channel.request('foreground', {}, { jobId: 'job-1' });
     assert.equal(fg.image, '/usr/bin/gedit');
     assert.equal(backend.calls[backend.calls.length - 1].name, 'foreground');
-    assert.ok(audits.some((a) => a.kind === 'gui.helper.connected'));
+    const connected = audits.find((a) => a.kind === 'gui.helper.connected');
+    assert.ok(connected);
+    assert.ok(!('user' in connected.data), 'the mirrored ledger names no account');
   });
 
   it('the service proof is checked first: a helper with another secret never sends auth', async () => {

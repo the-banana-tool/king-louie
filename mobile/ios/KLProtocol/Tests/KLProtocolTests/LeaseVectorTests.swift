@@ -28,7 +28,7 @@ final class LeaseVectorTests: XCTestCase {
     func request(_ v: JSONValue) throws -> LeaseRequest {
         let envelope = try Envelope(json: v["given"]!["request"]!)
         let message = try XCTUnwrap(Leases.verifiedMessage(envelope, pin: pin(v)), "the request verifies against the node pin")
-        return try XCTUnwrap(LeaseRequest(message: message))
+        return try XCTUnwrap(LeaseRequest(message: message, sealedSeen: []))
     }
 
     func assertBuilds(_ name: String, _ build: (JSONValue, JSONValue) throws -> JSONValue) throws {
@@ -50,7 +50,9 @@ final class LeaseVectorTests: XCTestCase {
                                "listing-too-many", "listing-extra-key", "listing-bad-at",
                                // Revised 2026-10-24: the take lease.
                                "take-grant", "take-grant-minutes-over-cap", "take-request-missing-name", "computer-use-with-unattended",
-                               "status-take"]
+                               "status-take", "listing-with-sealed-status",
+                               // Revised 2026-11-04: sealed (sealed phones, R-SP-2, R-SP-4, R-SP-9).
+                               "request-sealed", "grant-to-sealed", "status-sealed", "view-sealed"]
                                + Self.taskRequestsAccepted + Self.taskRequestsRefused + Self.taskGrantsBuilt + Self.taskGrantsRefused + Self.taskStatuses))
     }
 
@@ -67,7 +69,9 @@ final class LeaseVectorTests: XCTestCase {
                                  "listing-other-device", "listing-bad-signature",
                                  // Fourth security review: another pinned node's listing, an extra status beside one, and the shape.
                                  "listing-other-node", "listing-wrong-node", "listing-extra-status", "listing-duplicate-lease",
-                                 "listing-too-many", "listing-extra-key", "listing-bad-at"]
+                                 "listing-too-many", "listing-extra-key", "listing-bad-at",
+                                 // Revised 2026-11-04: a sealed status is listed without being opened (R-SP-9).
+                                 "listing-with-sealed-status"]
 
     /// R-F5-20: a node's listing is taken whole or not at all.
     func testListings() throws {
@@ -209,7 +213,7 @@ final class LeaseVectorTests: XCTestCase {
         for name in ["take-request-missing-name", "computer-use-with-unattended"] {
             let v = try vector(name)
             let message = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)), name)
-            XCTAssertNil(LeaseRequest(message: message), name)
+            XCTAssertNil(LeaseRequest(message: message, sealedSeen: []), name)
             XCTAssertFalse(Leases.isLease(message["lease"]), name)
             XCTAssertEqual(v["expect"]!["reason"]!.stringValue, "malformed", name)
         }
@@ -243,7 +247,7 @@ final class LeaseVectorTests: XCTestCase {
 
     func taskCard(_ name: String) throws -> LeaseRequest {
         let v = try vector(name)
-        return try XCTUnwrap(LeaseRequest(message: try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)))), name)
+        return try XCTUnwrap(LeaseRequest(message: try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v))), sealedSeen: []), name)
     }
 
     /// task-request's message with some of its lease changed and hashed again.
@@ -254,7 +258,7 @@ final class LeaseVectorTests: XCTestCase {
         for (k, value) in changes { lease[k] = value }
         m["lease"] = .object(lease)
         m["lease_hash"] = .string(Digest.sha256B64url(JCS.data(.object(lease))))
-        return try XCTUnwrap(LeaseRequest(message: .object(m)))
+        return try XCTUnwrap(LeaseRequest(message: .object(m), sealedSeen: []))
     }
 
     /// A task's request: no apps, its own sites, allows and usd; empty allows is the card that raises a look-only task's spend.
@@ -276,7 +280,7 @@ final class LeaseVectorTests: XCTestCase {
         for name in Self.taskRequestsRefused {
             let v = try vector(name)
             let message = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)), name)
-            XCTAssertNil(LeaseRequest(message: message), name)
+            XCTAssertNil(LeaseRequest(message: message, sealedSeen: []), name)
             XCTAssertFalse(Leases.isLease(message["lease"]), name)
             XCTAssertEqual(v["expect"]!["reason"]!.stringValue, "malformed", name)
         }
@@ -474,14 +478,290 @@ final class LeaseVectorTests: XCTestCase {
         guard case .object(var m) = signed, case .object(var lease)? = m["lease"] else { return XCTFail("fixture") }
         lease["max_minutes"] = .number("60")
         m["lease"] = .object(lease)
-        XCTAssertNil(LeaseRequest(message: .object(m)))
+        XCTAssertNil(LeaseRequest(message: .object(m), sealedSeen: []))
+    }
+
+    // MARK: sealed (R-SP-2, R-SP-4, R-SP-9, R-SP-15)
+
+    func boxKeys() throws -> JSONValue {
+        try JSONParser.parse(try Data(contentsOf: Self.root.appendingPathComponent("tests/vectors/approval-v1/keys.json")))
+    }
+
+    func signed(_ v: JSONValue) throws -> JSONValue {
+        try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)), "verifies against the node pin")
+    }
+
+    func opener(_ v: JSONValue) throws -> Opener {
+        try openerOf(v["given"]!["box"]!)
+    }
+
+    /// Another phone's box under this one's id: a wrap that does not open.
+    func wrongBox(_ v: JSONValue) throws -> Opener {
+        let d = try boxKeys()["devices"]!["B_box"]!["d"]!.stringValue!
+        return Seal.opener(recipientId: v["given"]!["box"]!["device_id"]!.stringValue!, agree: try softwareAgree(text: d))
+    }
+
+    func locked(_ v: JSONValue) -> Opener {
+        lockedOpener(v["given"]!["box"]!["device_id"]!.stringValue!)
+    }
+
+    /// full sealed afresh to phone A, as a node would: for what no vector holds.
+    func sealedToA(_ type: String, _ full: JSONValue) throws -> JSONValue {
+        let parts = try Seal.split(type: type, full: full)
+        let devices = try boxKeys()["devices"]!
+        return try Seal.seal(type: type, senderId: full["node_id"]!.stringValue!, clear: parts.clear, content: parts.content,
+                             recipient: (id: devices["A"]!["id"]!.stringValue!, key: devices["A_box"]!["jwk"]!))
+    }
+
+    /// The vector's sealed message, opened with its own box.
+    func opened(_ v: JSONValue, _ type: String) throws -> JSONValue {
+        let box = v["given"]!["box"]!
+        return try Seal.open(type: type, message: try signed(v), recipientId: box["device_id"]!.stringValue!, agree: try softwareAgree(text: box["d"]!.stringValue!))
+    }
+
+    func testASealedRequest() throws {
+        let v = try vector("request-sealed")
+        let message = try signed(v)
+        for key in ["lease", "origin", "salt"] { XCTAssertNil(message[key], key) }
+        let check = LeaseRequest.check(message, open: try opener(v), sealedSeen: [])
+        XCTAssertNil(check.reason)
+        XCTAssertEqual(check.seal, .opened)
+        let request = try XCTUnwrap(check.request)
+        XCTAssertEqual(LeaseRequest(message: message, open: try opener(v), sealedSeen: []), request)
+        let expect = v["expect"]!["status"]!
+        XCTAssertEqual(request.leaseHash, expect["lease_hash"]!.stringValue)
+        XCTAssertEqual(request.apps.map { $0.id }, ["calculator", "notepad"])
+        XCTAssertEqual(request.maxMinutes, 15)
+        XCTAssertEqual(request.reason, expect["lease"]!["reason"]!.stringValue)
+        XCTAssertEqual(request.originClient, expect["origin"]!["client"]!.stringValue)
+        // The hash is the salted one, not the rule of a clear request.
+        XCTAssertEqual(try Seal.saltedHash(salt: expect["salt"]!.stringValue!, value: expect["lease"]!), expect["lease_hash"]!.stringValue)
+
+        // Not this phone's to open: no request to answer, and the reason says why.
+        let noOpener = LeaseRequest.check(message, sealedSeen: [])
+        XCTAssertEqual(noOpener.reason, "not_recipient")
+        XCTAssertEqual(noOpener.seal, .unread)
+        XCTAssertNil(noOpener.request)
+        XCTAssertNil(LeaseRequest(message: message, sealedSeen: []))
+        XCTAssertEqual(LeaseRequest.check(message, open: try wrongBox(v), sealedSeen: []).reason, "open_failed")
+        // A locked key: its own reason, no decision, and it does not mark the node.
+        let lockedCheck = LeaseRequest.check(message, open: locked(v), sealedSeen: [])
+        XCTAssertEqual(lockedCheck.reason, "key_locked")
+        XCTAssertEqual(lockedCheck.seal, .unread)
+        XCTAssertNil(lockedCheck.request)
+        // Content that is no such content.
+        let malformed = LeaseRequest.check(message, open: contentMalformedOpener, sealedSeen: [])
+        XCTAssertEqual(malformed.reason, "malformed")
+        XCTAssertEqual(malformed.seal, .unread)
+        XCTAssertNil(malformed.request)
+        // A sealed request whose clear part is short is not one.
+        XCTAssertEqual(LeaseRequest.check(withField(message, "node_box", nil), open: try opener(v), sealedSeen: []).reason, "malformed")
+    }
+
+    /// R-SP-2: what is opened is held to the signed hash before anything is shown.
+    func testASealedRequestWhoseHashDoesNotHold() throws {
+        let v = try vector("request-sealed")
+        let type = LeaseRequest.messageType
+        let full = try opened(v, type)
+        let lease = full["lease"]!
+        let box = try opener(v)
+        func reason(_ edited: JSONValue) throws -> String? {
+            LeaseRequest.check(try sealedToA(type, edited), open: box, sealedSeen: []).reason
+        }
+        let changed = LeaseRequest.check(try sealedToA(type, withField(full, "lease", withField(lease, "max_minutes", .number("60")))), open: box, sealedSeen: [])
+        XCTAssertEqual(changed.reason, "lease_hash_mismatch")
+        XCTAssertNil(changed.request)
+        XCTAssertEqual(changed.seal, .opened)
+        // The unsalted hash of the same lease does not stand in for the salted one.
+        XCTAssertEqual(try reason(withField(full, "lease_hash", .string(Digest.sha256B64url(JCS.data(lease))))), "lease_hash_mismatch")
+        // Opened and not what a request holds.
+        XCTAssertEqual(try reason(withField(full, "origin", .string("x"))), "malformed")
+        XCTAssertEqual(try reason(withField(full, "salt", nil)), "malformed")
+        XCTAssertEqual(try reason(withField(full, "lease", withField(lease, "kind", .string("screen")))), "malformed")
+        XCTAssertEqual(try reason(withField(full, "salt", .string("short"))), "malformed")
+        // resumes names this request's own lease or nothing, whatever the hash says: each is hashed again here, so it holds.
+        func resuming(_ leaseId: String) throws -> JSONValue {
+            let edited = withField(lease, "resumes", .string(leaseId))
+            return withField(withField(full, "lease", edited), "lease_hash", .string(try Seal.saltedHash(salt: full["salt"]!.stringValue!, value: edited)))
+        }
+        XCTAssertEqual(try reason(try resuming("0f8e7c2a-5b1d-4c3e-9a7f-2d6b8e1c4a90")), "malformed")
+        XCTAssertNil(try reason(try resuming(full["lease_id"]!.stringValue!)))
+    }
+
+    /// The grant is built over the salted hash as received, byte for byte, and its shape does not change.
+    func testAGrantToASealedRequest() throws {
+        let v = try vector("grant-to-sealed")
+        let e = v["expect"]!["message"]!
+        let message = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["given"]!["request"]!), pin: pin(v)))
+        let request = try XCTUnwrap(LeaseRequest(message: message, open: try opener(v), sealedSeen: []))
+        let built = try Leases.grant(to: request, apps: e["grant"]!["apps"]!.arrayValue!.compactMap { $0.stringValue }, minutes: e["grant"]!["minutes"]!.intValue!,
+                                     deviceId: e["device_id"]!.stringValue!, signedAt: e["signed_at"]!.stringValue!)
+        XCTAssertEqual(built, e)
+        XCTAssertEqual(JCS.data(built), try Envelope(json: v["input"]!).payloadData())
+        XCTAssertEqual(built["lease_hash"], message["lease_hash"])
+    }
+
+    func testASealedStatus() throws {
+        let v = try vector("status-sealed")
+        let message = try signed(v)
+        XCTAssertNil(message["name"])
+        let expect = v["expect"]!["status"]!
+        let status = try XCTUnwrap(LeaseStatus(message: message, open: try opener(v)))
+        XCTAssertEqual(status.name, expect["name"]!.stringValue)
+        XCTAssertEqual(status.seal, .opened)
+        XCTAssertEqual(status.leaseId, expect["lease_id"]!.stringValue)
+        XCTAssertEqual(status.seq, expect["seq"]!.intValue)
+        XCTAssertEqual(status.state, expect["state"]!.stringValue)
+        XCTAssertEqual(status.contactToken, expect["contact_token"]!.stringValue)
+        XCTAssertEqual(status.grantedByDevice, expect["granted_by"]!["device_id"]!.stringValue)
+        XCTAssertEqual(status.grantedByName, expect["granted_by"]!["name"]!.stringValue)
+        XCTAssertEqual(status.kind, expect["kind"]!.stringValue)
+        XCTAssertTrue(status.unattended)
+
+        // R-SP-9: a reader that cannot open it still takes everything but the name.
+        let readers: [(Opener?, String)] = [(nil, "not_recipient"), (try wrongBox(v), "open_failed"), (locked(v), "key_locked"), (contentMalformedOpener, "content_malformed")]
+        for (open, reason) in readers {
+            let unread = try XCTUnwrap(LeaseStatus(message: message, open: open), reason)
+            XCTAssertNil(unread.name, reason)
+            XCTAssertEqual(unread.seal, .unread, reason)
+            XCTAssertEqual(unread.state, expect["state"]!.stringValue, reason)
+            XCTAssertEqual(unread.contactToken, expect["contact_token"]!.stringValue, reason)
+            XCTAssertEqual(unread.kind, expect["kind"]!.stringValue, reason)
+            XCTAssertTrue(Leases.isLive(state: unread.state), reason)
+        }
+        XCTAssertTrue(Leases.isTaskStatus(message))
+        XCTAssertNil(Leases.taskStopName(message))
+        // Sealed in another shape: not read.
+        XCTAssertNil(LeaseStatus(message: withField(message, "seq", nil), open: try opener(v)))
+        XCTAssertNil(LeaseStatus(message: withField(message, "name", .string("x")), open: try opener(v)))
+        // Opened to no name or a bad one: kept unread, never dropped, so a live lease keeps its row.
+        let full = try opened(v, LeaseStatus.messageType)
+        for edited in [withField(full, "name", nil), withField(full, "name", .string("a  b")), withField(full, "name", .null)] {
+            let kept = try XCTUnwrap(LeaseStatus(message: try sealedToA(LeaseStatus.messageType, edited), open: try opener(v)))
+            XCTAssertNil(kept.name)
+            XCTAssertEqual(kept.seal, .unread)
+            XCTAssertEqual(kept.state, expect["state"]!.stringValue)
+        }
+        // A clear status is as it was.
+        let clear = try XCTUnwrap(LeaseStatus(message: try signed(try vector("status-valid"))))
+        XCTAssertEqual(clear.seal, .clear)
+    }
+
+    func testAListingNeedsNothingOpened() throws {
+        let v = try vector("listing-with-sealed-status")
+        let g = v["given"]!
+        let statuses = try g["statuses"]!.arrayValue!.map { try Envelope(json: $0) }
+        let check = Leases.verifyListing(try Envelope(json: v["input"]!), pin: pin(v), nonce: g["nonce"]!.stringValue!, deviceId: g["device_id"]!.stringValue!, statuses: statuses)
+        XCTAssertTrue(check.accepted, check.reason ?? "")
+        let listed = Leases.listedStatuses(check, pin: pin(v))
+        XCTAssertEqual(listed.map { $0.state }, ["active"])
+        XCTAssertNil(listed[0].name)
+        // With the box, the same listing gives the name.
+        let d = try boxKeys()["devices"]!["A_box"]!["d"]!.stringValue!
+        let named = Leases.listedStatuses(check, pin: pin(v), open: Seal.opener(recipientId: g["device_id"]!.stringValue!, agree: try softwareAgree(text: d)))
+        XCTAssertEqual(named.map { $0.name }, ["Find a dentist"])
+        // An opener that fails still lists the lease.
+        XCTAssertEqual(Leases.listedStatuses(check, pin: pin(v), open: contentMalformedOpener).map { $0.state }, ["active"])
+    }
+
+    func testASealedView() throws {
+        let v = try vector("view-sealed")
+        let envelope = try Envelope(json: v["input"]!)
+        let expect = v["expect"]!["status"]!
+        let check = Leases.verifyView(envelope, pin: pin(v), open: try opener(v))
+        XCTAssertEqual(check.accepted, v["expect"]!["accepted"]!.boolValue!)
+        XCTAssertNil(check.reason)
+        let view = try XCTUnwrap(check.view)
+        XCTAssertEqual(view.seal, .opened)
+        XCTAssertEqual(view.leaseId, expect["lease_id"]!.stringValue)
+        XCTAssertEqual(view.toDevice, expect["to_device"]!.stringValue)
+        XCTAssertEqual(view.foregroundAppId, expect["foreground"]!["app_id"]!.stringValue)
+        XCTAssertEqual(view.foregroundMatches, expect["foreground"]!["matches"]!.boolValue)
+        XCTAssertEqual(view.frame, Data(base64Encoded: expect["frame"]!["data"]!.stringValue!))
+        XCTAssertFalse(view.frameDropped)
+        XCTAssertEqual(view.actions.map { $0.tool }, ["Type"])
+
+        // Not this phone's to open: the clear part alone, a reason, and still a contact token to echo.
+        let readers: [(Opener?, String)] = [(nil, "not_recipient"), (try wrongBox(v), "open_failed"), (locked(v), "key_locked")]
+        for (open, reason) in readers {
+            let unread = Leases.verifyView(envelope, pin: pin(v), open: open)
+            XCTAssertTrue(unread.accepted, reason)
+            XCTAssertEqual(unread.reason, reason)
+            let u = try XCTUnwrap(unread.view, reason)
+            XCTAssertEqual(u.seal, .unread, reason)
+            XCTAssertNil(u.frame, reason)
+            XCTAssertTrue(u.actions.isEmpty, reason)
+            XCTAssertEqual(u.toDevice, expect["to_device"]!.stringValue, reason)
+            XCTAssertNotNil(u.contactToken, reason)
+        }
+        // Content that is no such content.
+        let malformed = Leases.verifyView(envelope, pin: pin(v), open: contentMalformedOpener)
+        XCTAssertFalse(malformed.accepted)
+        XCTAssertEqual(malformed.reason, "malformed")
+        XCTAssertNil(malformed.view)
+    }
+
+    func testWhatAViewChecksInside() throws {
+        let v = try vector("view-sealed")
+        let p = pin(v)
+        let box = try opener(v)
+        let full = try opened(v, "kl.lease.view")
+        let sign = try ed25519Signer(seedHex: try boxKeys()["nodes"]!["web-01"]!["seed"]!.stringValue!)
+        func viewOf(_ m: JSONValue) throws -> (accepted: Bool, reason: String?, view: LeaseView?) {
+            let envelope = try Envelope.seal(try sealedToA("kl.lease.view", m), alg: "Ed25519", kid: p.id, sign: sign)
+            return Leases.verifyView(envelope, pin: p, open: box)
+        }
+        XCTAssertTrue(try viewOf(full).accepted)
+        let other = withField(full["frame"]!, "sha256", .string(Digest.sha256B64url(Data("other".utf8))))
+        XCTAssertEqual(try viewOf(withField(full, "frame", other)).reason, "frame_hash_mismatch")
+        XCTAssertEqual(try viewOf(withField(full, "actions", nil)).reason, "malformed")
+        XCTAssertEqual(try viewOf(withField(full, "foreground", .string("x"))).reason, "malformed")
+    }
+
+    /// Verify first: a view signed by another key is not opened.
+    func testTheViewsSignatureComesBeforeTheOpen() throws {
+        let v = try vector("view-sealed")
+        let real = try opener(v)
+        var calls = 0
+        let spy: Opener = { type, message in
+            calls += 1
+            return try real(type, message)
+        }
+        let other = NodePin(id: pin(v).id, name: pin(v).name, key: try boxKeys()["nodes"]!["gpu-box"]!["spki"]!.stringValue!)
+        XCTAssertEqual(Leases.verifyView(try Envelope(json: v["input"]!), pin: other, open: spy).reason, "bad_signature")
+        XCTAssertEqual(calls, 0)
+        XCTAssertTrue(Leases.verifyView(try Envelope(json: v["input"]!), pin: pin(v), open: spy).accepted)
+        XCTAssertEqual(calls, 1)
+    }
+
+    /// R-SP-15: a clear request from a node seen sealing offers no decision; a status or a view is not held to it.
+    func testAClearRequestAfterSealed() throws {
+        let granting = try vector("grant-valid")
+        let clear = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: granting["given"]!["request"]!), pin: pin(granting)))
+        let nodeId = pin(granting).id
+        let refused = LeaseRequest.check(clear, sealedSeen: [nodeId])
+        XCTAssertEqual(refused.reason, "clear_after_sealed")
+        XCTAssertNil(refused.request)
+        XCTAssertNil(LeaseRequest(message: clear, sealedSeen: [nodeId]))
+        XCTAssertEqual(LeaseRequest.check(clear, sealedSeen: []).seal, .clear)
+        XCTAssertNotNil(LeaseRequest(message: clear, sealedSeen: []))
+        // Another node seen sealing is not this one.
+        XCTAssertNotNil(LeaseRequest(message: clear, sealedSeen: ["kl-aaaaaaaaaaaaaaaa"]))
+        let sealed = try vector("request-sealed")
+        XCTAssertNotNil(LeaseRequest(message: try signed(sealed), open: try opener(sealed), sealedSeen: [pin(sealed).id]))
+        XCTAssertNotNil(LeaseStatus(message: try signed(try vector("status-valid"))))
+        let view = try vector("view-node-sig-valid")
+        let viewed = Leases.verifyView(try Envelope(json: view["input"]!), pin: pin(view))
+        XCTAssertTrue(viewed.accepted)
+        XCTAssertNil(viewed.reason)
+        XCTAssertEqual(viewed.view?.seal, .clear)
     }
 
     func testDemoLeaseRequestParses() throws {
         let fleet = DemoFleet()
         let envelope = try fleet.leaseRequest(on: 0, apps: ["calculator"], minutes: 15)
         let message = try XCTUnwrap(Leases.verifiedMessage(envelope, pin: fleet.pins[0]))
-        XCTAssertEqual(LeaseRequest(message: message)?.apps.first?.id, "calculator")
+        XCTAssertEqual(LeaseRequest(message: message, sealedSeen: [])?.apps.first?.id, "calculator")
     }
 
     /// R-F5-18: which leases get a banner, and what a phone says of one it did not grant.

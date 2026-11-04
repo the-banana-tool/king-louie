@@ -5,7 +5,7 @@
 const { createLogger } = require('../logging');
 const { canonicalize, sha256b64url } = require('../platform/jcs');
 const {
-  buildRequest, buildStatus, toolAction, actionHash, MessageError, TTL_MAX_MS, clampTtl
+  buildRequest, buildStatus, toolAction, actionHash, normalizeOrigin, MessageError, TTL_MAX_MS, clampTtl
 } = require('./messages');
 const { verifyDeviceEnvelope, bytesSha256 } = require('./verify-device');
 const { PendingRequests } = require('./pending-store');
@@ -13,10 +13,15 @@ const { PendingRequests } = require('./pending-store');
 const log = createLogger('approvals/phone-approver');
 
 const DEFAULT_UNAVAILABLE = 'Phone approval unavailable: no enrolled device or no relay link on this node. Nothing ran.';
+const UNSEALABLE = 'no phone can read a sealed approval';
+const SEALED_TOO_LARGE = 'A sealed approval holds about 130 KB of parameters. Write it in smaller pieces. Nothing ran.';
+const SHAPE_REFUSALS = ['malformed', 'bad_request'];
+const RELAY_TOO_OLD = 'relay_too_old';
+const RELAY_TOO_OLD_TEXT = 'Phone approval unavailable (relay_too_old): the relay or front door is older than this node and refuses what it seals. Upgrade it first. Nothing ran.';
 
 class PhoneApprover {
   constructor({ identity, nodeName = null, approverStore, link, auditLedger, ttlMs = TTL_MAX_MS, now = Date.now,
-    setTimer = setTimeout, clearTimer = clearTimeout, buildRequest: build = buildRequest } = {}) {
+    setTimer = setTimeout, clearTimer = clearTimeout, buildRequest: build = buildRequest, sealPolicy = null } = {}) {
     if (!identity || !approverStore || !auditLedger) throw new TypeError('PhoneApprover needs identity, approverStore and auditLedger');
     this.identity = identity;
     this.nodeName = nodeName || identity.nodeName;
@@ -28,6 +33,7 @@ class PhoneApprover {
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.build = build;
+    this.sealPolicy = sealPolicy;
     this.pendingRequests = new PendingRequests({ now });
     this.stopped = false;
     this._onConnected = () => this._resubmitAll();
@@ -91,20 +97,29 @@ class PhoneApprover {
 
   async requestAction(action, { origin = null, signal = null, currentAction } = {}) {
     if (typeof currentAction !== 'function') throw new TypeError('currentAction required');
+    // Ahead of the availability checks: an untrusted store or a revoke that
+    // left nobody is also "nobody to seal to", and it is denied as that.
+    if (!this.stopped && this.sealRefusal()) return this._denyUnsealable();
     const unavailable = this.unavailableReason();
     if (unavailable) return this._outcome('unavailable', { reason: unavailable });
 
     let built;
     try {
-      built = this.build({ identity: this.identity, action, origin, ttlMs: this.ttlMs, now: this.now() });
+      built = this.build({ identity: this.identity, action, origin, ttlMs: this.ttlMs, now: this.now(), sealPolicy: this.sealPolicy });
     } catch (err) {
+      if (err instanceof MessageError && err.reason === 'no_sealed_recipient') return this._denyUnsealable();
+      if (err instanceof MessageError && err.sealed) return { ...this._outcome('error', { reason: err.reason }), sealed: true };
       if (err instanceof MessageError) return this._outcome('error', { reason: err.reason });
       throw err;
     }
     const { message, envelope, bytes } = built;
+    const salt = built.salt || null;
+    // An origin is sealed with the action (R-SP-4), so a sealed request's job id
+    // stays out of the mirrored ledger too.
+    const jobId = salt ? null : normalizeOrigin(origin).job_id;
     const ids = { request_id: message.request_id, action_hash: message.action_hash };
     try {
-      await this._audit('approval.request', { job_id: message.origin.job_id, envelope });
+      await this._audit('approval.request', { job_id: jobId, envelope });
     } catch (err) {
       log.error(`approval.request not audited, so not sent: ${err.message}`);
       return this._outcome('error', { ...ids, reason: 'audit_unavailable' });
@@ -115,16 +130,19 @@ class PhoneApprover {
     // to the link, or a request built just before shutdown could still be
     // submitted, answered and approved after stop().
     if (this.stopped) {
-      this._auditBestEffort('approval.outcome', { request_id: message.request_id, state: 'withdrawn', reason: 'the service is stopping', job_id: message.origin.job_id });
+      this._auditBestEffort('approval.outcome', { request_id: message.request_id, state: 'withdrawn', reason: 'the service is stopping', job_id: jobId });
       return this._outcome('unavailable', { ...ids, reason: 'the service is stopping' });
     }
     if (signal && signal.aborted) {
-      this._auditBestEffort('approval.outcome', { request_id: message.request_id, state: 'withdrawn', reason: null, job_id: message.origin.job_id });
+      this._auditBestEffort('approval.outcome', { request_id: message.request_id, state: 'withdrawn', reason: null, job_id: jobId });
       return this._outcome('withdrawn', ids);
     }
 
     return new Promise((resolve) => {
-      const entry = { request: message, envelope, bytes, currentAction, resolve, signal, timer: null, onAbort: null, deciding: false };
+      // `salt` is this request's hash rule, kept for its whole life: a box key
+      // applied while it is pending changes the next request, not this one.
+      // `summary` is for pending(): a sealed message no longer holds it.
+      const entry = { request: message, envelope, bytes, salt, jobId, origin, summary: action ? action.summary : null, currentAction, resolve, signal, timer: null, onAbort: null, deciding: false };
       this.pendingRequests.add(entry);
       const delay = Math.max(0, Date.parse(message.expires_at) - this.now());
       entry.timer = this.setTimer(() => this._finish(message.request_id, 'expired', { statusState: 'expired' }), delay);
@@ -137,19 +155,92 @@ class PhoneApprover {
     });
   }
 
+  // R-SP-5: sealing and nobody to seal to, with why, else null. A policy that
+  // cannot answer counts. For a caller that must not say a request went.
+  sealRefusal() {
+    if (!this.sealPolicy) return null;
+    let detail = UNSEALABLE;
+    try {
+      if (!this.sealPolicy.sealing() || this.sealPolicy.canSeal()) return null;
+      if (typeof this.sealPolicy.whyNot === 'function') detail = this.sealPolicy.whyNot() || UNSEALABLE;
+    } catch {
+      detail = UNSEALABLE;
+    }
+    return { reason: 'no_sealed_recipient', detail };
+  }
+
+  _denyUnsealable() {
+    this._auditBestEffort('approval.outcome', { request_id: null, state: 'refused', reason: 'no_sealed_recipient', job_id: null });
+    const refusal = this.sealRefusal();
+    return { ...this._outcome('deny', { reason: 'no_sealed_recipient' }), detail: refusal ? refusal.detail : UNSEALABLE };
+  }
+
+  // An older relay's validator knows only the clear shape, and answers a sealed
+  // request one of these every time, so a reconnect will not help. It ends now,
+  // with why, rather than hold its tool until the request expires. Leases and
+  // questions go by message.submit, whose relay checks no shape: they get through.
+  _submitFailed(entry, err) {
+    if (entry.salt && SHAPE_REFUSALS.includes(err.code)) {
+      if (!this.warnedOldRelay) log.warn(`the relay refused a sealed request (${err.code}): it is probably older than this node. Upgrade order is relay before node.`);
+      this.warnedOldRelay = true;
+      this._finish(entry.request.request_id, 'unavailable', { reason: RELAY_TOO_OLD, statusState: 'refused' });
+      return;
+    }
+    log.warn(`approval.submit failed; will resubmit on reconnect: ${err.message}`);
+  }
+
   // While the link is down the request stays pending; `connected` resubmits
   // every unexpired one (R16), since a restarted relay has an empty cache.
   _submit(entry) {
     if (!this.link || !this.link.isConnected()) return;
     Promise.resolve()
       .then(() => this.link.submit(entry.envelope))
-      .catch((err) => log.warn(`approval.submit failed; will resubmit on reconnect: ${err.message}`));
+      .catch((err) => this._submitFailed(entry, err));
   }
 
   _resubmitAll() {
     for (const entry of this.pendingRequests.list()) {
-      if (this.now() <= Date.parse(entry.request.expires_at)) this._submit(entry);
+      if (this.now() > Date.parse(entry.request.expires_at)) continue;
+      if (entry.salt === null && this._sealingNow()) this._rebuild(entry);
+      else this._submit(entry);
     }
+  }
+
+  // A policy that cannot answer counts as sealing: requestAction then refuses.
+  _sealingNow() {
+    if (!this.sealPolicy) return false;
+    try {
+      return this.sealPolicy.sealing() === true;
+    } catch {
+      return true;
+    }
+  }
+
+  // A clear request held with the link down, and this node seals now: it never
+  // goes out (LeaseManager#_rebuild). The whole request path runs again from the
+  // kept currentAction, audit first, which seals it or ends it with the cause.
+  // A decision already being audited is left to finish.
+  _rebuild(entry) {
+    if (entry.deciding) return;
+    const { request_id: requestId } = entry.request;
+    let action;
+    try {
+      action = entry.currentAction();
+    } catch {
+      this._finish(requestId, 'deny', { reason: 'action_changed', statusState: 'refused' });
+      return;
+    }
+    this.pendingRequests.take(requestId);
+    entry.finishedCause = 'withdrawn';
+    this.clearTimer(entry.timer);
+    if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
+    this._auditBestEffort('approval.outcome', { request_id: requestId, state: 'withdrawn', reason: 'sealed_now', job_id: entry.jobId });
+    this._sendStatus(requestId, 'withdrawn', null, 'sealed_now');
+    this.requestAction(action, { origin: entry.origin, signal: entry.signal, currentAction: entry.currentAction })
+      .then(entry.resolve, (err) => {
+        log.error(`a held request could not be sealed: ${err.message}`);
+        entry.resolve(this._outcome('error', { reason: 'seal_failed' }));
+      });
   }
 
   _sendStatus(requestId, state, deviceId, reason) {
@@ -177,9 +268,11 @@ class PhoneApprover {
     entry.finishedCause = cause || decision;
     this.clearTimer(entry.timer);
     if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
-    this._auditBestEffort('approval.outcome', { request_id: requestId, state: statusState || decision, reason, job_id: entry.request.origin.job_id });
+    this._auditBestEffort('approval.outcome', { request_id: requestId, state: statusState || decision, reason, job_id: entry.jobId });
     if (statusState) this._sendStatus(requestId, statusState, deviceId, reason);
-    entry.resolve(this._outcome(decision, { request_id: requestId, device_id: deviceId, action_hash: entry.request.action_hash, reason }));
+    const outcome = this._outcome(decision, { request_id: requestId, device_id: deviceId, action_hash: entry.request.action_hash, reason });
+    // A caller that re-checks the action against outcome.action_hash needs it.
+    entry.resolve(entry.salt ? { ...outcome, salt: entry.salt } : outcome);
   }
 
   _reject(envelope, requestId, deviceId, reason) {
@@ -227,7 +320,7 @@ class PhoneApprover {
     // 12. The action, rebuilt from live state, is still the one approved.
     let live = null;
     try {
-      live = actionHash(entry.currentAction());
+      live = actionHash(entry.currentAction(), { salt: entry.salt });
     } catch {
       live = null;
     }
@@ -241,7 +334,7 @@ class PhoneApprover {
     // 13. Audited before it counts; on failure nothing is consumed and the phone may retry.
     entry.deciding = true;
     try {
-      await this._audit('approval.response', { request_id: requestId, device_id: deviceId, decision: message.decision, envelope, job_id: req.origin.job_id });
+      await this._audit('approval.response', { request_id: requestId, device_id: deviceId, decision: message.decision, envelope, job_id: entry.jobId });
     } catch (err) {
       entry.deciding = false;
       log.error(`approval.response not audited, so not accepted: ${err.message}`);
@@ -260,7 +353,7 @@ class PhoneApprover {
     // guarantee the approval covers what will actually run.
     let liveAfterAudit = null;
     try {
-      liveAfterAudit = actionHash(entry.currentAction());
+      liveAfterAudit = actionHash(entry.currentAction(), { salt: entry.salt });
     } catch {
       liveAfterAudit = null;
     }
@@ -312,20 +405,28 @@ class PhoneApprover {
       case 'approve':
         return true;
       case 'deny':
+        // Not the owner's no, so not counted as one by the denial tracker.
+        if (outcome.reason === 'no_sealed_recipient') return refuse('unavailable', `Denied (no_sealed_recipient): this node seals its approvals and ${outcome.detail || UNSEALABLE}. Nothing ran.`);
+        return false;
       case 'withdrawn':
         return false;
       case 'expired':
         return 'timeout';
       case 'error':
         if (outcome.reason === 'audit_unavailable') return refuse('audit', 'Audit ledger unavailable; nothing ran.');
+        if (outcome.sealed) return refuse('unavailable', SEALED_TOO_LARGE);
         return refuse('unavailable', `Action cannot be shown on the phone (${outcome.reason}); nothing ran.`);
       default:
+        if (outcome.reason === RELAY_TOO_OLD) return refuse('unavailable', RELAY_TOO_OLD_TEXT);
         return refuse('unavailable', outcome.reason ? `Phone approval unavailable: ${outcome.reason}. Nothing ran.` : DEFAULT_UNAVAILABLE);
     }
   }
 
+  // Holds the summary of a sealed request too: its only caller is the loopback
+  // bridge to this node's own paired window (bridge.approvalsStatus). Nothing
+  // here goes on a relay path.
   pending() {
-    return this.pendingRequests.list().map((e) => ({ request_id: e.request.request_id, expires_at: e.request.expires_at, summary: e.request.action.summary }));
+    return this.pendingRequests.list().map((e) => ({ request_id: e.request.request_id, expires_at: e.request.expires_at, summary: e.summary }));
   }
 
   stop() {

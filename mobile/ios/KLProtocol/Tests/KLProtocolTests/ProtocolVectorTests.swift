@@ -33,10 +33,16 @@ final class ProtocolVectorTests: XCTestCase {
         // The vector set has no fixed size (approval-v1 §9); the iOS set is exact.
         let vectors = try allVectors()
         let names = Set(vectors.filter { ($0["consumers"]?.arrayValue ?? []).contains(.string("ios")) }.compactMap { $0["name"]?.stringValue })
-        XCTAssertEqual(names, ["jcs", "device-id-p256", "device-id-ed25519", "request-valid", "request-bad-node-signature",
+        XCTAssertEqual(names, Self.sealedVectors.union(["jcs", "device-id-p256", "device-id-ed25519", "request-valid", "request-bad-node-signature",
                                "request-unpinned-node", "request-malformed", "request-display", "request-display-edge",
-                               "request-malformed-equivalent-keys", "enroll-console", "audit-slice", "phone-api-auth"])
+                               "request-malformed-equivalent-keys", "enroll-console", "audit-slice", "phone-api-auth"]))
     }
+
+    // Revised 2026-11-04: sealed phones (R-SP-1, R-SP-2, R-SP-4, R-SP-10), run by SealVectorTests.
+    static let sealedVectors: Set<String> = [
+        "seal-open", "seal-not-recipient", "seal-tampered-ct", "seal-tampered-clear", "seal-hash-mismatch", "seal-content-not-jcs", "seal-content-clear-key", "seal-pad-not-spaces",
+        "request-sealed-display", "enroll-console-box-key", "box-key-valid", "question-ask-sealed", "question-answer-sealed"
+    ]
 
     func testJcs() throws {
         let v = try vector("jcs")
@@ -64,7 +70,7 @@ final class ProtocolVectorTests: XCTestCase {
                      "request-display", "request-display-edge", "request-malformed-equivalent-keys"] {
             let v = try vector(name)
             let pins = (v["given"]?["pinned_nodes"]?.arrayValue ?? []).map { NodePin(id: $0["id"]!.stringValue!, name: "", key: $0["key"]!.stringValue!) }
-            let view = Display.view(v["input"]!, pinned: pins)
+            let view = Display.view(v["input"]!, pinned: pins, sealedSeen: [])
             XCTAssertEqual(view.json, v["expect"], name)
         }
     }
@@ -105,7 +111,7 @@ final class ProtocolVectorTests: XCTestCase {
         for variant in variants {
             XCTAssertNotEqual(variant, text)
             let forged = Envelope(alg: envelope.alg, kid: envelope.kid, payload: Base64URL.encode(Data(variant.utf8)), sig: envelope.sig)
-            XCTAssertEqual(Display.view(forged.json, pinned: pins).reason, "malformed", variant)
+            XCTAssertEqual(Display.view(forged.json, pinned: pins, sealedSeen: []).reason, "malformed", variant)
         }
     }
 
@@ -341,7 +347,7 @@ final class ProtocolVectorTests: XCTestCase {
         let fleet = DemoFleet()
         XCTAssertEqual(fleet.pins.map { $0.name }, ["gpu-box", "laptop", "web-01"])
         let request = try fleet.request(on: 2, command: "systemctl restart site")
-        let view = Display.view(request.json, pinned: fleet.pins)
+        let view = Display.view(request.json, pinned: fleet.pins, sealedSeen: [])
         XCTAssertTrue(view.shown)
         XCTAssertEqual(view.display?["node"]?["name"], .string("web-01"))
     }

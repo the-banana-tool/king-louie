@@ -273,7 +273,7 @@ describe('the CLI knows identity', () => {
     for (const argv of [['identity', 'show', '--yes'], ['status', '--yes']]) {
       t = io();
       assert.equal(await main(argv, t.io), 2, argv.join(' '));
-      assert.match(t.errors(), /"--yes" is only valid for "desktop pair", "device apply", "identity record", "session install" and "session uninstall"/);
+      assert.match(t.errors(), /"--yes" is only valid for "desktop pair", "device apply", "device unseal", "identity record", "session install" and "session uninstall"/);
     }
     for (const argv of [['identity', 'show', '--replace'], ['session', 'install', '--user', 'alice', '--replace'], ['doctor', '--replace']]) {
       t = io();

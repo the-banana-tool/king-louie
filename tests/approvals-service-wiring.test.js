@@ -360,6 +360,62 @@ describe('createRelayDispatcher: device.read_key', () => {
   });
 });
 
+describe('createRelayDispatcher: device.box_key', () => {
+  function fakeAuditLedger() {
+    const entries = [];
+    return { entries, append: async (entry) => { entries.push(entry); return { ...entry, seq: entries.length }; } };
+  }
+  function boxKeyStatement(phone) {
+    const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const { kty, crv, x, y } = publicKey.export({ format: 'jwk' });
+    const now = Date.now();
+    return phone.sign({
+      v: 1, type: 'kl.device.box_key', device_id: phone.deviceId, box_key: { kty, crv, x, y },
+      created_at: new Date(now).toISOString(), expires_at: new Date(now + 60000).toISOString(), nonce: crypto.randomBytes(32).toString('base64url')
+    });
+  }
+
+  it('stages a box-key statement and audits it as device.staged, typed from the envelope', async () => {
+    const phone = createFakePhone();
+    const auditLedger = fakeAuditLedger();
+    const seen = [];
+    const approverStore = { stage: (envelope) => { seen.push(envelope); return { state: 'box-key-pending-apply' }; } };
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore, auditLedger, courierPump: null });
+    const envelope = boxKeyStatement(phone);
+    assert.deepEqual(await dispatch('device.box_key', { envelope }), { state: 'box-key-pending-apply' });
+    assert.equal(seen.length, 1);
+    assert.equal(auditLedger.entries[0].kind, 'device.staged');
+    assert.equal(auditLedger.entries[0].data.type, 'kl.device.box_key');
+    assert.equal(auditLedger.entries[0].data.device_id, phone.deviceId);
+  });
+
+  it('a duplicate or an applied box key audits nothing', async () => {
+    const phone = createFakePhone();
+    for (const state of ['duplicate', 'applied']) {
+      const auditLedger = fakeAuditLedger();
+      const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore: { stage: () => ({ state }) }, auditLedger, courierPump: null });
+      assert.deepEqual(await dispatch('device.box_key', { envelope: boxKeyStatement(phone) }), { state });
+      assert.equal(auditLedger.entries.length, 0);
+    }
+  });
+
+  it('refuses any other message type sent as device.box_key, and a box-key statement sent as any other method', async () => {
+    const phone = createFakePhone();
+    const auditLedger = fakeAuditLedger();
+    const approverStore = { stage: () => { throw new Error('must not stage'); } };
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore, auditLedger, courierPump: null });
+    const refused = { state: 'rejected', reason: 'malformed' };
+    assert.deepEqual(await dispatch('device.box_key', { envelope: phone.revoke(createFakePhone().deviceId) }), refused);
+    assert.deepEqual(await dispatch('device.box_key', { envelope: readKeyStatement(phone) }), refused);
+    assert.deepEqual(await dispatch('device.box_key', { envelope: { not: 'an envelope' } }), refused);
+    assert.deepEqual(await dispatch('device.enroll', { envelope: boxKeyStatement(phone) }), refused);
+    assert.deepEqual(await dispatch('device.revoke', { envelope: boxKeyStatement(phone) }), refused);
+    assert.deepEqual(await dispatch('device.read_key', { envelope: boxKeyStatement(phone) }), refused);
+    assert.equal(auditLedger.entries.length, 6);
+    assert.ok(auditLedger.entries.every((e) => e.kind === 'device.rejected'));
+  });
+});
+
 describe('startMcpApprovals', () => {
   it('uses the courier: refused at once while the service is stopped, and audits as mcp', async () => {
     const phone = createFakePhone();

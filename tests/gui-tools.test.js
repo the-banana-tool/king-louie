@@ -549,10 +549,11 @@ describe('input tools', () => {
     const { AuditLedger } = require('../src/audit/audit-ledger');
     const { LiveView } = require('../src/gui/live-view');
     const { phoneExecutorOptions } = require('../src/approvals/executor-options');
+    const { paramsHmac } = require('../src/approvals/audit-fields');
     const { canonicalize } = require('../src/platform/jcs');
     const { addSink } = require('../src/logging');
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gui-audit-'));
-    const identity = testNodeIdentity({ key: 'gpu-box' });
+    const identity = testNodeIdentity({ box: true });
     const ledger = new AuditLedger({ dir: path.join(dataDir, 'audit'), identity });
     const logged = [];
     const removeSink = addSink((record) => logged.push(record));
@@ -617,16 +618,17 @@ describe('input tools', () => {
         '(not a key name) x1', '(not a key name) x1', '(not a key name) x1',
         'ctrl+s x1', 'ctrl+v x1', 'enter x2'
       ]);
-      // The hash in a tier decision is taken over the same form.
+      // The mark in a tier decision is taken over the same form, under the node's key (R-SP-7).
       const decisions = entries.filter((e) => e.kind === 'tier.decision' && ['Type', 'Key'].includes(e.data.tool));
       assert.ok(decisions.length >= 12);
-      const hashOf = (value) => crypto.createHash('sha256').update(canonicalize(value)).digest('base64url');
+      const hashOf = (value) => paramsHmac(value, identity);
       const allowedHashes = new Set([{ length: 20 }, { length: 2080 }, { keys: '(a character)', repeat: 1 }, { keys: '(a character)', repeat: 3 },
         { keys: '(not a key name)', repeat: 1 }, { keys: 'ctrl+s', repeat: 1 }, { keys: 'enter', repeat: 2 }, { keys: 'ctrl+v', repeat: 1 }].map(hashOf));
-      for (const d of decisions) assert.ok(allowedHashes.has(d.data.params_sha256), `${d.data.tool}: the hash is of the redacted form`);
+      for (const d of decisions) assert.ok(allowedHashes.has(d.data.params_hmac), `${d.data.tool}: the mark is of the redacted form`);
       // Other tools keep the hash of what they were called with.
       const leaseDecision = entries.find((e) => e.kind === 'tier.decision' && e.data.tool === 'RequestLease');
-      assert.equal(leaseDecision.data.params_sha256, crypto.createHash('sha256').update(canonicalize({ apps: ['calculator'], minutes: 10, reason: 'Enter the totals' })).digest('base64url'));
+      assert.equal(leaseDecision.data.params_hmac, paramsHmac({ apps: ['calculator'], minutes: 10, reason: 'Enter the totals' }, identity));
+      assert.ok(entries.every((e) => !('params_sha256' in e.data)));
 
       const statusJson = fs.readFileSync(path.join(dataDir, 'session', 'status.json'), 'utf8');
       const ledgerFiles = fs.readdirSync(path.join(dataDir, 'audit')).map((f) => fs.readFileSync(path.join(dataDir, 'audit', f), 'utf8')).join('\n');

@@ -14,6 +14,7 @@ const path = require('path');
 const { seal, open, nodeSigner, verifyEs256, deviceIdFromJwk } = require('../../../src/approvals/envelope');
 const { deriveNodeId } = require('../../../src/mesh/node-identity');
 const L = require('../../../src/gui/lease-protocol');
+const { sealContent, splitMessage } = require('../../../src/approvals/seal');
 
 const DIR = __dirname;
 const KEYS = require('../approval-v1/keys.json');
@@ -472,6 +473,95 @@ function buildVectors() {
     name: 'task-status-no-name', consumers: PHONES, check: null, given: viewGiven,
     input: statusEnvelope('task-status-no-name', { seq: 5, kind: 'task', unattended: true, name: null }), expect: reject('malformed')
   });
+
+  // Revised 2026-11-04: sealed (sealed phones, R-SP-2, R-SP-4, R-SP-9). The node is
+  // web-01, whose box key is in keys.json. The phones read all but the changed lease,
+  // which only a node can refuse. given.box is what the reader opens with.
+  const webBox = KEYS.nodes['web-01'].box.jwk;
+  const sealedTo = { [DEVICES.A.id]: KEYS.devices.A_box.jwk, [DEVICES.B.id]: KEYS.devices.B_box.jwk, [WEB.nodeId]: webBox };
+  const webGiven = { node: { id: WEB.nodeId, name: 'web-01', key: WEB.spkiHex }, box: { device_id: DEVICES.A.id, d: KEYS.devices.A_box.d } };
+  const sealedForm = (label, type, full) => {
+    const { clear, content } = splitMessage(type, full);
+    const ecdh = crypto.createECDH('prime256v1');
+    ecdh.setPrivateKey(sha(`lease seal epk ${label}`));
+    const pub = ecdh.getPublicKey();
+    const ephemeral = {
+      jwk: { kty: 'EC', crv: 'P-256', x: pub.subarray(1, 33).toString('base64url'), y: pub.subarray(33, 65).toString('base64url') },
+      agree: (jwk) => ecdh.computeSecret(Buffer.concat([Buffer.from([0x04]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]))
+    };
+    const random = (n) => (n === 32 ? sha(`lease seal cek ${label}`) : sha(`lease seal iv ${label}`).subarray(0, n));
+    return seal(sealContent({ type, senderId: WEB.nodeId, clear, content, recipients: sealedTo, ephemeral, random }), nodeSigner(WEB));
+  };
+  const sealedRequest = (label) => {
+    const { message } = L.buildLeaseRequest({
+      identity: WEB, nodeName: 'web-01', jobId: JOB, apps: appsFor(['calculator', 'notepad']), maxMinutes: 15, reason: 'Enter the totals', limits: [],
+      origin: { client: 'claude.ai', session: 'mcp-session-1', job_id: JOB }, now: NOW_MS,
+      requestId: uuidOf(`request ${label}`), leaseId: uuidOf(`lease ${label}`), nonce: nonceOf(`request ${label}`)
+    });
+    const salt = sha(`lease salt ${label}`).toString('base64url');
+    const full = { ...message, lease_hash: L.leaseHash(message.lease, salt), node_box: webBox, salt };
+    return { full, salt, envelope: sealedForm(label, 'kl.lease.request', full) };
+  };
+  {
+    const { full, envelope } = sealedRequest('sealed');
+    out.push({
+      name: 'request-sealed', consumers: PHONES, check: 'request', given: { ...webGiven }, input: envelope,
+      expect: { ...accepted, status: { lease: full.lease, origin: full.origin, salt: full.salt, lease_hash: full.lease_hash } }
+    });
+    // The phone signs the salted hash it recomputed; the node re-checks with the salt it kept.
+    const message = grantMessage(full, { minutes: 10 });
+    out.push({
+      name: 'grant-to-sealed', consumers: PHONES, check: null,
+      given: { ...base(), ...webGiven, pending: [{ ...pendingOf(full), salt: full.salt }], request: envelope },
+      input: phoneSeal('A', message), expect: { ...accepted, message }
+    });
+  }
+  {
+    const { full, envelope } = sealedRequest('sealed changed');
+    out.push({
+      name: 'grant-sealed-lease-changed', consumers: ['node'], check: 12,
+      given: { ...base(), ...webGiven, pending: [{ ...pendingOf(full), lease: { ...full.lease, reason: 'Something else' }, salt: full.salt }], request: envelope },
+      input: phoneSeal('A', grantMessage(full, { minutes: 10 })), expect: reject('lease_changed')
+    });
+  }
+  const sealedStatus = (label, seq) => {
+    const { message } = open(L.buildLeaseStatus({
+      identity: WEB, leaseId: uuidOf(`lease ${label}`), seq, state: 'active', locked: false, reason: null, expiresAt: NOW_MS + 20 * 60000,
+      contactToken: tokenOf(`status ${label}`), grantedBy: { deviceId: DEVICES.A.id, name: 'Owner phone' }, kind: 'task', unattended: true, name: TASK_LEASE.name, now: NOW_MS
+    }));
+    return { message, envelope: sealedForm(label, 'kl.lease.status', message) };
+  };
+  {
+    const { message, envelope } = sealedStatus('status-sealed', 5);
+    out.push({
+      name: 'status-sealed', consumers: PHONES, check: null, given: { ...webGiven }, input: envelope,
+      expect: { ...accepted, status: { lease_id: message.lease_id, seq: 5, state: 'active', contact_token: message.contact_token, granted_by: message.granted_by, kind: 'task', unattended: true, name: TASK_LEASE.name } }
+    });
+  }
+  {
+    const data = sha('lease-v1 sealed frame bytes').toString('base64');
+    const frame = { mime: 'image/jpeg', width: 960, height: 640, sha256: crypto.createHash('sha256').update(Buffer.from(data, 'base64')).digest('base64url'), data };
+    const { message } = open(L.buildLeaseView({
+      identity: WEB, leaseId: uuidOf('lease view sealed'), seq: 8, toDevice: DEVICES.A.id, state: 'active', locked: false, remainingS: 512,
+      foreground: { app_id: 'calculator', matches: true }, frame, frameDropped: false,
+      actions: [{ seq: 41, at: iso(NOW_MS), tool: 'Type', summary: 'Typed 6 characters', result: 'ok' }], contactToken: tokenOf('view sealed'), now: NOW_MS
+    }));
+    out.push({
+      name: 'view-sealed', consumers: PHONES, check: null, given: { ...webGiven }, input: sealedForm('view-sealed', 'kl.lease.view', message),
+      expect: { ...accepted, status: { lease_id: message.lease_id, to_device: DEVICES.A.id, foreground: message.foreground, frame, frame_dropped: false, actions: message.actions } }
+    });
+  }
+  {
+    // R-SP-9: nothing is opened to check a listing, so there is no given.box here.
+    const { message, envelope } = sealedStatus('listing sealed', 6);
+    const nonce = nonceOf('listing-with-sealed-status');
+    out.push({
+      name: 'listing-with-sealed-status', consumers: PHONES, check: null,
+      given: { node: webGiven.node, nonce, device_id: DEVICES.A.id, statuses: [envelope] },
+      input: L.buildLeaseListing({ identity: WEB, toDevice: DEVICES.A.id, nonce, statuses: [envelope], now: NOW_MS }),
+      expect: { ...accepted, leases: [{ lease_id: message.lease_id, seq: 6, state: 'active' }] }
+    });
+  }
   return out;
 }
 

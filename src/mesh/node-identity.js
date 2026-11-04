@@ -1,5 +1,6 @@
 const crypto = require('crypto');
-const { MeshIdentity, saveIdentity, loadIdentity } = require('./mesh-identity');
+const { MeshIdentity, saveIdentity, loadIdentity, saveBoxKey } = require('./mesh-identity');
+const { generateBoxKey, createBox } = require('../approvals/node-box-key');
 const { createLogger } = require('../logging');
 
 const log = createLogger('node-identity');
@@ -55,6 +56,8 @@ class NodeIdentity extends MeshIdentity {
     super(config);
     this.nodeName = config.nodeName || config.displayName || 'unnamed-node';
     this.nodeId = deriveNodeId(this.publicKey);
+    // { jwk, agree } (sealed phones, R-SP-3); null until a box key is stored.
+    this.box = this.boxKeyD ? createBox(this.boxKeyJwk, this.boxKeyD) : null;
   }
 
   getPublicIdentity() {
@@ -66,10 +69,38 @@ class NodeIdentity extends MeshIdentity {
   }
 }
 
-function getOrGenerateNodeIdentity(store, cipher, nodeName = 'unnamed-node') {
+// An identity with no box key gets one, and the record gains it. A key that
+// could not be stored is not used: the next start would have another, so `box`
+// stays null and the seal policy refuses (canSeal() false), and the identity
+// itself goes on as it was.
+function freshBoxKey() {
+  const { jwk, d } = generateBoxKey();
+  return { boxKeyJwk: jwk, boxKeyD: d };
+}
+
+function fillBoxKey(identity, store, cipher) {
+  const { jwk, d } = generateBoxKey();
+  try {
+    saveBoxKey(store, cipher, jwk, d);
+  } catch (err) {
+    log.warn(`could not store a box key for node ${identity.nodeId}: ${err.message}`);
+    return;
+  }
+  identity.boxKeyJwk = jwk;
+  identity.boxKeyD = d;
+  identity.box = createBox(jwk, d);
+}
+
+// `fillBox` is for the service's start and nothing else. One service runs per
+// data dir (its pidfile), so one process makes the key; two fillers could each
+// keep a different one. Every other path (the admin CLI, standalone `mcp`, a
+// relay) loads what is stored, and has `box: null` when the record has none.
+// The fill reads the record from disk first, so a key already there is adopted.
+function getOrGenerateNodeIdentity(store, cipher, nodeName = 'unnamed-node', { fillBox = false } = {}) {
+  if (fillBox && typeof store.reload === 'function') store.reload();
   let identity = loadIdentity(store, cipher);
   if (!identity) {
-    identity = new NodeIdentity({ nodeName });
+    identity = new NodeIdentity({ nodeName, ...(fillBox ? freshBoxKey() : {}) });
     saveIdentity(store, identity, cipher);
     log.info(`Generated new Node Identity ${identity.nodeId} for node "${nodeName}"`);
   } else if (!(identity instanceof NodeIdentity)) {
@@ -81,8 +112,11 @@ function getOrGenerateNodeIdentity(store, cipher, nodeName = 'unnamed-node') {
       publicKey: identity.publicKey,
       privateKey: identity.privateKey,
       tlsCert: identity.tlsCert,
-      tlsKey: identity.tlsKey
+      tlsKey: identity.tlsKey,
+      boxKeyJwk: identity.boxKeyJwk,
+      boxKeyD: identity.boxKeyD
     });
+    if (fillBox && !identity.box) fillBoxKey(identity, store, cipher);
   }
   return identity;
 }

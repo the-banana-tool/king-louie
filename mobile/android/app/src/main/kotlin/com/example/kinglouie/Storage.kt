@@ -27,8 +27,8 @@ class OwnerMessage(message: String) : Exception(message)
 
 /**
  * What the app keeps (mobile/PRIVACY.md): relay pin, node pins, mode, push
- * token, and the read key's set-up (android-slim §8.7). The keys live in the
- * Keystore.
+ * token, the read key's set-up (android-slim §8.7), the box key's, and the nodes
+ * it has verified a sealed message from. The keys live in the Keystore.
  */
 class Storage(context: Context) {
     private val prefs = context.getSharedPreferences("kl.state", Context.MODE_PRIVATE)
@@ -70,6 +70,20 @@ class Storage(context: Context) {
             JsonObject(mapOf("id" to jsonString(it.id), "name" to jsonString(it.name), "key" to jsonString(it.key)))
         }))).apply()
 
+    /**
+     * The nodes this phone has verified a sealed message from, by node id
+     * (R-SP-15). Only a sealed message past the signature adds one (AppModel.noteSeal);
+     * Reset clears it with the rest, and nothing else takes one away. A one-way
+     * mark, so it is on disk before anything goes on (commit, not apply).
+     */
+    var sealedSeen: Set<String>
+        get() = prefs.getString("sealedSeen", null)?.let { text ->
+            runCatching { JsonText.parse(text).arr()!!.map { it.str()!! }.toSet() }.getOrNull()
+        } ?: emptySet()
+        set(v) {
+            prefs.edit().putString("sealedSeen", Jcs.serialize(JsonArray(v.sorted().map { jsonString(it) }))).commit()
+        }
+
     /** The signed `kl.device.read_key` statement (an envelope, JSON), kept until it expires to re-post it (§8.7). */
     var readKeyStatement: String?
         get() = prefs.getString("readKeyStatement", null)
@@ -86,6 +100,28 @@ class Storage(context: Context) {
     var readKeyUnknown: Boolean
         get() = prefs.getBoolean("readKeyUnknown", false)
         set(v) = prefs.edit().putBoolean("readKeyUnknown", v).apply()
+
+    /** The signed `kl.device.box_key` statement, kept until it expires to re-post it (R-SP-10). */
+    var boxKeyStatement: String?
+        get() = prefs.getString("boxKeyStatement", null)
+        set(v) = prefs.edit().putString("boxKeyStatement", v).apply()
+
+    /** What each node answered to that statement, by node id, in this app's words (BoxKeyNodes). */
+    var boxKeyNodes: Map<String, String>
+        get() = prefs.getString("boxKeyNodes", null)?.let { text ->
+            runCatching { JsonText.parse(text).obj()!!.mapValues { it.value.str()!! } }.getOrNull()
+        } ?: emptyMap()
+        set(v) = prefs.edit().putString("boxKeyNodes", Jcs.serialize(JsonObject(v.mapValues { jsonString(it.value) }))).apply()
+
+    /** A statement of this box key went to every node, or every pinned node enrolled with it (BoxKeyNodes.sent). */
+    var boxKeySent: Boolean
+        get() = prefs.getBoolean("boxKeySent", false)
+        set(v) = prefs.edit().putBoolean("boxKeySent", v).apply()
+
+    /** This phone's Keystore would not make a box key. */
+    var boxKeyRefused: Boolean
+        get() = prefs.getBoolean("boxKeyRefused", false)
+        set(v) = prefs.edit().putBoolean("boxKeyRefused", v).apply()
 
     /** The pairing state, to put back when a pairing does not finish. */
     data class Snapshot(val mode: AppMode, val relayUrl: String?, val relaySpki: String?, val nodes: List<NodePin>, val frontDoorId: String?)
@@ -110,7 +146,9 @@ class PendingItem(
     val fullText: Map<String, String>,
     val receivedAtMs: Long,
     val expiresInMs: Long,
-    initialStatus: String?
+    initialStatus: String?,
+    /** A sealed request: what it opened to, which `message` also is and the response is built from. Null for a clear one. */
+    val opened: JsonObject? = null
 ) {
     var status by mutableStateOf(initialStatus)
 
@@ -123,6 +161,14 @@ class PendingItem(
     /** From receipt, on the monotonic clock. */
     val timeLeftMs: Long get() = (expiresInMs - (SystemClock.elapsedRealtime() - receivedAtMs)).coerceAtLeast(0)
 }
+
+/**
+ * A message a pinned node signed that this phone cannot read or may not answer
+ * (R-SP-6, R-SP-15): its verified clear facts and why. Kept apart from the stores
+ * a press or a detail reads, so no decision can reach it. [ref] is unique across
+ * kinds: the kind's prefix and its own id.
+ */
+data class UnreadableItem(val ref: String, val nodeId: String, val nodeName: String, val label: String, val reason: String, val expiresAtMs: Long?)
 
 /** A node pairing waiting on the front door, with when this phone first saw it (its time left counts from there). */
 data class PairingItem(val request: PairingRequest, val receivedAtMs: Long) {

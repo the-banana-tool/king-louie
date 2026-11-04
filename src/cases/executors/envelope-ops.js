@@ -90,7 +90,8 @@ function grantCheckOptions(reg, caseId, envelopeId) {
     auditScanEntries: reg.settings().auditScanEntries,
     approverStore: trust.approverStore,
     nodeId: trust.nodeId,
-    nodePublicKey: trust.nodePublicKey
+    nodePublicKey: trust.nodePublicKey,
+    nodeBox: trust.box
   };
 }
 
@@ -125,6 +126,9 @@ async function requestEnvelopeUnsafe(reg, { caseId, turnId = null, signal = null
   if (entry.authority === 'signed') {
     approver = reg.getPhoneApprover();
     if (!approver) return { ok: false, error: 'signed approval unavailable' };
+    // Before the question: nothing is written, and nobody is told it went.
+    const refusal = typeof approver.sealRefusal === 'function' ? approver.sealRefusal() : null;
+    if (refusal) return { ok: false, error: `Envelope refused (${refusal.reason}): ${refusal.detail}.` };
   }
   const store = new EnvelopeStore(meta.dir);
   const env = {
@@ -227,11 +231,12 @@ function requestIdHolder(reg, caseId, envelopeId, requestId) {
 }
 
 // The action hash the phone must have signed for this envelope as it is now,
-// or null when the envelope is missing or malformed.
-function liveActionHash(reg, caseId, env) {
+// or null when the envelope is missing or malformed. `salt` is the outcome's,
+// when its request was sealed (R-SP-2).
+function liveActionHash(reg, caseId, env, salt = null) {
   try {
     const helpers = approvalHelpers();
-    return env ? helpers.actionHash(signedAction(env, caseId, helpers)) : null;
+    return env ? helpers.actionHash(signedAction(env, caseId, helpers), { salt }) : null;
   } catch {
     return null;
   }
@@ -248,7 +253,7 @@ async function activateSigned(reg, caseId, envelopeId, outcome) {
     return false;
   }
   // Ruling T10-hash: an envelope reads active only when its grant would verify.
-  if (outcome.action_hash !== liveActionHash(reg, caseId, env)) {
+  if (outcome.action_hash !== liveActionHash(reg, caseId, env, outcome.salt || null)) {
     journal(reg, caseId, `Envelope ${envelopeId} not activated: phone request ${outcome.request_id} approved a different action.`);
     return false;
   }
@@ -283,7 +288,25 @@ async function activateSigned(reg, caseId, envelopeId, outcome) {
   return true;
 }
 
+// A request that never went to a phone (a delta's second request, on a node that
+// has stopped being able to seal). Its own map, never pendingSignedGrants: an
+// entry there is a grant.
+function journalUnsealable(reg, caseId, envelopeId, outcome) {
+  journal(reg, caseId, `Envelope ${envelopeId} did not go to the phone (${outcome.reason}): ${outcome.detail || 'no phone can read it'}.`);
+}
+
 async function applySignedOutcome(reg, caseId, envelopeId, outcome) {
+  if (outcome && outcome.decision === 'deny' && outcome.reason === 'no_sealed_recipient') {
+    log.warn(`Signed approval for ${envelopeId} did not go to the phone: ${outcome.reason}.`);
+    try {
+      await reg.caseRuntime.systemAction(caseId, `envelope unsealable ${envelopeId}`, () => journalUnsealable(reg, caseId, envelopeId, outcome));
+    } catch (err) {
+      if (!err || err.name !== 'CaseBusyError') throw err;
+      reg.pendingSignedRefusals = reg.pendingSignedRefusals || new Map();
+      reg.pendingSignedRefusals.set(grantKey(caseId, envelopeId), outcome);
+    }
+    return { applied: false, decision: 'deny', error: outcome.reason };
+  }
   if (!outcome || outcome.decision !== 'approve') {
     log.info(`Signed approval for ${envelopeId} ended ${outcome?.decision || 'without an outcome'}; it stays requested.`);
     return { applied: false, decision: outcome?.decision || null };
@@ -297,7 +320,7 @@ async function applySignedOutcome(reg, caseId, envelopeId, outcome) {
     log.warn(`Signed approval for ${envelopeId} reuses request ${outcome.request_id} (already granted ${holder}); ignored.`);
     return { applied: false, error: `request ${outcome.request_id} already granted ${holder}` };
   }
-  const live = liveActionHash(reg, caseId, new EnvelopeStore(reg.caseDir(caseId)).get(envelopeId));
+  const live = liveActionHash(reg, caseId, new EnvelopeStore(reg.caseDir(caseId)).get(envelopeId), outcome.salt || null);
   if (!live || outcome.action_hash !== live) {
     log.warn(`Signed approval for ${envelopeId} (request ${outcome.request_id}) is for a different action; ignored.`);
     return { applied: false, error: 'the phone approved a different action; request it again' };
@@ -319,6 +342,11 @@ async function applySignedOutcome(reg, caseId, envelopeId, outcome) {
 
 // Turn-start hook: the lock is already held.
 async function applyPendingSignedGrants(reg, caseId) {
+  for (const [key, outcome] of [...(reg.pendingSignedRefusals || [])]) {
+    if (!key.startsWith(`${caseId}/`)) continue;
+    journalUnsealable(reg, caseId, key.slice(caseId.length + 1), outcome);
+    reg.pendingSignedRefusals.delete(key);
+  }
   for (const [key, outcome] of [...reg.pendingSignedGrants]) {
     if (!key.startsWith(`${caseId}/`)) continue;
     await activateSigned(reg, caseId, key.slice(caseId.length + 1), outcome);

@@ -4,6 +4,7 @@ const { ensureServicePaths } = require('../platform/paths');
 const { resolveMasterKey, verifyKeyCheck } = require('../platform/master-key');
 const { createAesGcmCipher } = require('../platform/cipher');
 const { createHeadlessPrompter } = require('../platform/prompter');
+const { keepStoredBoxKey } = require('../mesh/mesh-identity');
 
 // `onPathWritten` receives every path these ports create or write inside the
 // data dir, including later store writes. The admin CLI collects them so it
@@ -28,7 +29,7 @@ function buildServicePorts({ dataDir, chatDataDefaults = {}, onPathWritten = nul
   if (!masterKey) ({ key, source } = resolveMasterKey({ dataDir: paths.dataDir, onPath: record }));
   return {
     paths,
-    store: new JsonFileStore({ dir: paths.dataDir, name: 'chat-data', defaults: chatDataDefaults, onWrite: record }),
+    store: new JsonFileStore({ dir: paths.dataDir, name: 'chat-data', defaults: chatDataDefaults, onWrite: record, beforeSave: keepStoredBoxKey }),
     vaultStore: new JsonFileStore({ dir: paths.dataDir, name: 'config', onWrite: record }),
     cipher: createAesGcmCipher(key),
     prompter: createHeadlessPrompter(),

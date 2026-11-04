@@ -1,0 +1,96 @@
+{
+  "name": "request-sealed-display",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "pinned_nodes": [
+      {
+        "id": "kl-c2ubd6jjqumalzt5",
+        "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+      }
+    ],
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    }
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-c2ubd6jjqumalzt5",
+    "payload": "eyJhY3Rpb25faGFzaCI6Img0SC1CdHVyY0ZPOTNZMVYyd0xwVEtwbkcxZU5ZSy1lTVltZUJmNi1DSlkiLCJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsIm5vZGVfYm94Ijp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoidHNZRzZmZlVwYmpzOTBSendGUXlFRnFLX3hremJPMlhmQVUteTczTUpNdyIsInkiOiJxU2x3ZjhrbFJHUFVTcFNBd29HV3Z4RmhlT0dOS1ZrbTRheE9yWmVVSllRIn0sIm5vZGVfaWQiOiJrbC1jMnViZDZqanF1bWFsenQ1Iiwibm9kZV9uYW1lIjoid2ViLTAxIiwibm9uY2UiOiJxWlVLT0xrVDlIVncwbnB5MFJsbE1ISlo5Q2lVMEhsb3JBelV2cWt0aHk4IiwicmVxdWVzdF9pZCI6IjBlNzU5MDBjLTg1ZDktNGQwZi04ZGI1LWI3YTIzNTVhNmJkMiIsInNlYWxlZCI6eyJjdCI6Ikt1eWF5c0VSMlBzM1hzTGljUFk3LWE4ZTdjcUREdTNtSzZXYS0wNk5RM1Jqd0FhSU8yQ3RxYUxiVkhZejl5QTJzUXIzM2NleEI5VzgtUVR1OFlTTTNUblNfbDFLNzVQaHZQVTgzbS1nQUVxZjNfS2E2cEI5QUZrdUZvYVYyeG5SWndaVmNveGRGNS1TZ29hZlpGMy1Dcnl5UlgwZHlfRnBMYVVqTlRuVUtERGRwc3BjUFJ0cTA2bk1hV1BBTThrazJVZ1BQMXdjUU0ta2ZVcFZQZWpnbzAxNk9aQ1MyMDhEUElfTXFVX2FJSXpvUEQtMnpaenpZbTZmWWk1T1FCcWZhaGdJVXdpbGVKTG9OQ2xZb1RyN0d4QTBVejVlU05IcFZsYV9xU2hHbUZjd1YzNGFlQk56UHFyUzNRdVhHa1RHS29BSUl6RE9xU04yWElaWmNwUXhCdVJNUWpGMU8yRWlaclRPRmdmQWhBYlI3ZmlmOTl5b3FWWDZQdWJnSjhsZU1ORU9OZ1hEcUk4eUtUNjFGR2Rvd0pIbmxSNi1XNXo4QUN4VlFSQmlSX1hUUDdFSUR1THFCRjRQbHVMTGVZdmVXSTB1clBDY3NMeVl5YUNxdXRVcWpEMVd0anlpOE0wQmRJSHppR3Q3Nm9zOEpMMmNuZXp6bVYyTHIwbjV3ZkxCRG13TG94R05PbTNWckZLN2hZWTNEeWZuTk1SbGQxNEViY2JxcEFCRjliblFXODRqczEybG5BR2F3djdOVjgzU3gwQjhvRmR1R3RrSUtsaUx1SUcxTzdGYlhvTGE4dmJHakhnMzNyTXhSdU92UFdmZGhTQUxjajh0MW1LZ1hIQVBHRVZ3a2FMdkNmZFh5RXFPUGFKM0pPN25NOF9EeXlzYzFQdnlFd2hXMW9wWGE2bFhQX25OMlVFOUl0dzNISElIMU04bEw3OU80QkswQk1sQ3hHR1pIejM2V25jRTRWSFNTY1lpNHdvdHE0cVpnMkRxcTd5TlFBS2dLSTlIRDhVclk4YXhrZlYxclp1cjVzY05peWFNcUpNMU85c3BuN2J4UFRxOG44V2hWNmNHMGRlV1RacmRnZzJoT05xWWhYTmVWeWo5SlRDcy04ZTh5ZlRYZ0dNc0FyQk9McjNreU1yekM3b3kzZlRVcTRaZmhSN1RjUkN4dDQ3aFYtVXIwVTQ2THVQQ0dVTTJ2cnNIOXptMWNGaThfRWFDb3hSeXY2cW5oTHFuSFVjdjVXR0RXTGw4b0kyTWRzS0ZPX1NaVWxxVFhXb3lMYWRwQkRneTZfMGI0N2hqeWZhZko3SjFpZG5tbXh0ZzdiVm9DWmQ1bGQ3MmItRk84TkZobDZwMWZ1RGVSbjNkdWlaaHc4U21CMVJKOC1kLXFsd29SWjFXRzlnM3lLUV85dkhPYlVTWjRDZjRTLVNfc09yMUpod1dDdEZOTldOb0VyQ0cxT3RpYk51X3EzTFE0ME1nUE1RUnNmVFpQWDFVSzQyOWZoZ3hBMjA0MWI5bnAxT2hyRHZVTFo3YjIzMHZKamV1TlBNSEVhSHc1YlRsaTlkM1NNdnlqWUhGSUprTUUtWjlCd2Y5NGtPcHlqV0FXLUh1UURMRW5YYlVLTmwySzZMUVJqb0I1NUNGVFBuYWxEejNFemk1NTdUSXk2ai14SkVSUklMekVTOXFrWHBkQzhOcVh6Vktvcjk2bkRhTnlucWlqOVdMOS1PMnBVaGRjWWZqSVBVTlBNZjEwWll0R09BVlhtd1ZvY0JWZzduMHRNMXY4d0djb21SY28xZm83UW0zT2I2cUxkQkFia0RFV1VNUjZLREpHNG4xZmJiaFpEUUJiR3Zfc2I0dWo5eDEwQUxXQnVERXdEU1N2Y0M4U01EOXpTUFZBLVAxSFlyOXkyMWRTLTRuRENNX21SbmZUbGo3NVVjWm5YV3cwa0Y3UWtEc3NNdDFBWFl3UnFLODdQRDVKaEZBNEhDenllXzlDRmd4WW1Eb2pkanNuLTB1Wkx5REo1TkRVN0VkVk5jSnVwX2lWWUQxd3JLRmJ0YWJieFRMUE0xa1dPNGRGQVMzenIydEZDZVQyOFE3UmZsX0hZbFV3b01BbmFQU1ZxOVFxVTh1T2ttMmdTWGVUNGVQWG1rV3ZIUjF3WGJMMENnRlhrTUxPMjNmNkRITklvU0dxS0VjRkFHMDFOS3Awd2dWZmxLckRmWi1NSllrVEs2MWU0R1B2dmVSRDJITDMtMXpnejNXdU9Nc3N5alV4YU1NaVBfX3JvVlJiQWZJV3RoUkJKckVwYzM5OHRGbFdpSG96bEJyWktYVl96SzhGVUI5WFBLdGN2NkxwVE9kaXNnNkxmR0ZRN3JFZGRfRkpUMHdYMTVhUjhXcXNpNFI5TDMxOE1aWGNlZG9BQTJNSDNWRmU0UUVKSjFaWDRyVXFDYmN4M3RMQk9md0otOEV4WmZJNzFVd2FHTlpUOU9zWVZheWxPN1NzcXdqbXcwR2trd3c4OTQ5czltV2VTS3ZnSkVIU21sd0QwRVloR0I3Sk5taEo1UElBN0lLZnBHb00xVUNWaDBqSmlQY2RDWFhYRGl3OURYcjcwUkRVOUFoR050SHJhdko4QmFIZEFReVJPY3QzSmZlRlhMbXlmNzE0cFVaU08tdGtUel9vWDZWb2RhMTMwTWlrbmZTU2R0SDllbExFSzVYOGlwV084MERDVXI0aTQzcUY5a2lLMVFySWlFd0lTQ2RMaGZTbC1xNzlYZGlFZ0lOd0RiZ0RlNzBNck1CQTdIbDd4TTZ0ZlFrTEZNbUdrLTJnWUJBOG16NkxxaTRiVnF3eGFuaGQ2b2lYN3FHZjZfb1FKTktjWWlJOXNIczBGUExrTE9aYlhZUzlsMi1EN0hneVhJbmFISjdmekN6SDNHb1NpVHBmNEtGaHdIdG5rMkl1dkNoYkFOZ00zYWxfdmdvcDF1S1hlakx1SlMta2pUbDdLMDhsdkJ6V3JpNGpWWTY4RlVPWlF2TzRYOTBZQk9BdHBxN094bE5Qdk9kcmZsa0I5VWJWRF8tZk1yRFVqU1FjWU5LemdlMGRoZVFzb0FIVmt0TXkzbUFRV2dFdkY4alJfS19la2w0VXcxbTRxQW1TSEdoUC1INk80bmwtVFBiM1hvZ3lTTk1CSHd4Umw0RHdfMkNyM3haRjI5dDJTM0t2QXdyZUQtaEFQZFpSZVJ0TnZqU2w0WHZwOE1kbWZjR2NVRm1hN2VydlRQb2lGVGRlbTIwclliSXJ5eHI1bXpvWHJJZ1duVVdXNWJNZEJRMmRtTFhYV1V1ZG5SQVJmYVlsOTRMV0VDcFhmRnQ5Y2hnYmE3ak5LbTNxb3dVYjdENEs1ZlNYRHg5S1VhNFQ1dFVpVkdiUWZjZlBsdGZHRmNLeWhIYkFNcHhfeUtoUzF2RkF2TFdoZG1xd2tycE5IVkhVOUs0amlBNENDSjJKU3hpRDUtZW1GbFBySG5FWWl3ZEVBaTBCaE84V3d6T1hLdC13YlE0eDZ4R08wY0FwYU4tSDJoeG14alVoZWljTzcweXFkYW4zUnYzYllmN3RzTTFGdzFhTldxelpfVEpUSEh5WUdnSUlsLS05bm9hQ2F3R09ELXpJa0pDaVFJLVZNTHhPTjh5TUtYQzNZc3BzM0ZuRjJLU0djdmdrUmxqWjdSU2FvMWVQZThvRE4tNXJsNnl5SGlfbDlScDQ2UUZabGhrd0RiQmxhV0pxU19ndE5XaTFObjJzQjdmX2I2RUdWM2JWb3ZpQzAtZlhvWGZPWkttYVpzZk1aOVBxcWRTQzR3NXJEWlJ6Q0ZPN1FGamxWTVYtR09Nb09UTUFLS09DNXJIZ3U5ZDYyMGJULVdHTVFUT0hLSjFBSkZ3SG5EVGFHUVpTMTRQVWI1dV9VZnhkNTNUVnBSLU1DaFZtWDVIci0zazNsMWhhaUItM1dlOFlWbGZOM3VQYjhhSi02cXIwYmV6YTdOakdUSnpTQS1LU3ZaZXB0WDdxMFQ3XzNmVm5VOF9qN3BSTmp3RU5IUVUyX0hxOUxyOGVmWGhUVHN2dFAyT01zY2d4OHN5SUF2YW1OSmg3VmRDa01BTjV4YXhSU2plUWJGVjhWN3lPU2FocjFTbWExbThFSWNPeDN0TXFjQ25kbzBxTkF6Ukt5dzc5M3MyX20zNzFMcms2MG1hN3BqeG9HREs1WWh5eUY2RVFLcTd1SGkxMUdqUWd3ZVV2YVdRM3FYdk9TaVZZUmpveWxMZkJ2YzBtaUU5ZGt6aEN1SEZuMWp0bHJwWnBoT0pLUUFxMUdfWEZmaGJycHVSMm52bENzNlAwcjlYS3VoMlloMEFVUnVMdUNWaVBaLU5QemhhS291WEtOQU44U1BYMmdyOHVtM1BBN3hsbjFaNF9YTkkzcjFndndEZ1hLcUpCUTdsX1pwWHRBN3lBWmhWMWNkanU2T0p3Y0VQWFlOT2ZEZi1pSzdsVlhiTmF1eUNyZzZhZXQyd3I5alVVeG9HWVI2UjVsTTAxUlFDYU1Uc2l6d2I4NjZXZVZrUnJ6U2NTUWRqSjRycnJVOHdobW5SVHQ5RTN1cnJnSnNsMTVmRnptcWxZM1dJbWhBbTVkSzB6OVA2UWp6Z1RhVDBpcXFGODdfeml3V1NTYVFMSmF6NFF5SXJoYnN1bXVnOHE4RDlUSWNYWUw4b1ZSUTVXNmtJWnFKZWJnR29udEpEUHN5UGQ1VTIzY1N0NUpBRHh4SC0xbTFjNnZKQnpEV1oteHNRM3VfSnRNUlJCOGVseXF4ejJ6MTdkb0R2OHRrY3pOT3pZR3F5aWp4NnJRQnZSVnU0cTZ4bERrazdza0ZGck9Vd2NJX3dqWUJJeDBMN0JiQmxjU255UXVrRkpBclZubmM0aXFLTkxtSnN6OUJUZGJRa3FQeXhKMWNUM1p6MDlCVG1mNmNJaG93b2RQZmp1LVFrOHZsU2dveER2aXBHMzVIUkx6RTdKMzN2eGNGV1pIbVNaRV9rMHo0Qktac1lSTk5Oc2xETmI5QUpNaUtQdFBJc0prN3hBOTZheGNSOTBHYnNkZmpRUmkwLUZGWWFWMm1Ndm1OYjg0N0lKOXA0UDdxckd5aVF5dTdDVmY5TkJmaVQtRHUxRkZqX2V1bzI4MjVQd0hrWFcxWHN3Vk5TMXRlaDdUQmtDZ0EzQ09NTnE2MkdqVUJrX3EwTTBZRElqWXp3X3pJS25waDBpQ2ZmVmJjeTZ4Sk9wb21VdzFCdmVJYlhRUmdtZ1oyYl9aOHBkVTNzUGNxamJxY3E1Y1cySnN0NzV4OE9hclRnb3BhcGhFS1d0dmhVTXRTNXhkNU1FeFViZkFyMndOcUFtdHF5ODM5OVg0QkpKSGFBU2RqcGhnMjF6TEhQajVoUDJiRmVPT016bHpHWFdKY1VPMXVvNXVYclB2Qkt2M0xSd085QVNJb2xRMFdqdjNXcTVZR2hVLWNxdEhKMm9EY3NqSTJjVlk1UmhBIiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiYnBDcXdIMTAweDdYZ3hwSmdvdWRQWVBkSXM3c3Z0M2VjYmZUSDZUY1ZSayIsInkiOiJUcmJfekxhZEY1cFlYMy13cUpfazhNSWtYSXBDUzREcklUbDBiWXJkN2ZFIn0sIml2IjoiU0s2eVd2Zks4RGZPcjl3VCIsImtleXMiOnsiZC0zdm13cmloaGRibml0NG9pIjoieXo5MnQxSXFSdk5sMnlLZlM2X0FjQUNBNmVpSXFYMjdVcVVaYUtkQUtFOW56QXlBa0F1QXVob01OSXNPQXh4cCIsImQtNnhkbGJ4Z2xobnZmYTNsdyI6Ik5oVXk1ckxnVUFCY3VSVHFxMWhjQ2F2d3lJM204TjVLOHB4c3VudEZOU2ozeUFvcmZvVDBPN1dKQzBUUkRiNUkiLCJrbC1jMnViZDZqanF1bWFsenQ1IjoiZ3RqRzhtYkFsM3VNWUVpeEFfYzB3T0dHZ2FTdU9tYWNBSzgtbWN0MV9XSzd6YjNwMjctX3hsaUFHMVY1TjUwWCJ9LCJ2IjoxfSwidHlwZSI6ImtsLmFwcHJvdmFsLnJlcXVlc3QiLCJ2IjoxfQ",
+    "sig": "bOCDt1EmY238QoOsJe1A5aTxx1ErPqicbNL3qMsKi1s1N3Mb38U9yPZpEkCAgmgVtkZKV-kYqz2fCar9_z9_BQ"
+  },
+  "expect": {
+    "shown": true,
+    "reason": null,
+    "display": {
+      "node": {
+        "id": "kl-c2ubd6jjqumalzt5",
+        "name": "web-01"
+      },
+      "kind": "runbook",
+      "name": "site.pull_and_restart",
+      "summary": "Run runbook site.pull_and_restart on web-01",
+      "cwd": "/srv/site",
+      "origin": {
+        "client": "stdio-mcp",
+        "job_id": "job-1",
+        "session": null
+      },
+      "items": [
+        {
+          "path": "params.dry_run",
+          "text": "false",
+          "tail": null,
+          "hidden": 0
+        },
+        {
+          "path": "params.note",
+          "text": "line1‹U+000A›line2‹U+200B›",
+          "tail": null,
+          "hidden": 0
+        },
+        {
+          "path": "params.ratio",
+          "text": "0.5",
+          "tail": null,
+          "hidden": 0
+        },
+        {
+          "path": "params.ref",
+          "text": "main‹U+202E›gnp.exe",
+          "tail": null,
+          "hidden": 0
+        },
+        {
+          "path": "params.retries",
+          "text": "5",
+          "tail": null,
+          "hidden": 0
+        },
+        {
+          "path": "params.script",
+          "text": "echo start && xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "tail": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx && echo end",
+          "hidden": 826
+        },
+        {
+          "path": "steps[0]",
+          "text": "git -C /srv/site fetch --prune origin",
+          "tail": null,
+          "hidden": 0
+        },
+        {
+          "path": "steps[1]",
+          "text": "{\"check\":{\"expect_status\":200,\"http_get\":\"https://www.example.com/healthz\",\"retries\":5}}",
+          "tail": null,
+          "hidden": 0
+        }
+      ]
+    }
+  }
+}

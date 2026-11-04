@@ -78,7 +78,7 @@ class LeaseNonces {
   add(nonce, sha256) { this.seen.set(nonce, sha256); }
 }
 const NO_NONCES = Object.freeze({ get: () => null });
-const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', device_revoked: 'lease_revoked', expired: 'lease_expired', job_closed: 'job_closed', node_identity_invalid: 'capability_unavailable' };
+const END_ERROR = { denied: 'lease_denied', request_expired: 'lease_request_expired', revoked: 'lease_revoked', device_revoked: 'lease_revoked', expired: 'lease_expired', job_closed: 'job_closed', node_identity_invalid: 'capability_unavailable', no_sealed_recipient: 'capability_unavailable' };
 // Why a suspended lease ends instead of asking to resume: the
 // administrator's record of this node's identity can no longer be trusted
 // (fifth security review, finding 4). Another value of a status's free
@@ -89,6 +89,13 @@ const IDENTITY_MESSAGE = 'gui (node_identity_invalid: the record of this node id
 // enrolled, unrevoked approver, and how often the node looks (an
 // administrator's "device revoke" or "device apply" only writes a file).
 const GRANTOR_REVOKED_REASON = 'device_revoked';
+// Why a lease ends when this node seals and no phone can read it (sealed phones,
+// R-SP-5). Its frames have stopped and it could send no resume request, so the
+// owner could not see what it does: it does not go on acting blind. Its statuses
+// still go, sealed to the node alone (statusTargets, lease-protocol.js), so a
+// phone sees the state and the end, and its listing and Stop keep working.
+const SEAL_REASON = 'no_sealed_recipient';
+const sealMessage = (why) => `gui (${SEAL_REASON}: ${why})`;
 const GRANTOR_CHECK_MS = 5000;
 
 class LeaseManager extends EventEmitter {
@@ -106,9 +113,9 @@ class LeaseManager extends EventEmitter {
   // `clock` (tests) gets that one clock for both.
   constructor({ approvals, guiConfig, broker = null, audit = null, nodeName = null, clock = Date.now, monotonic = null,
     timers = { setTimeout, clearTimeout }, jobOpen = () => false, identityProbe = null, log = createLogger('gui/leases'),
-    pushQueue = null } = {}) {
+    pushQueue = null, sealPolicy = null } = {}) {
     super();
-    Object.assign(this, { approvals, guiConfig, broker, audit, clock, timers, jobOpen, identityProbe, log });
+    Object.assign(this, { approvals, guiConfig, broker, audit, clock, timers, jobOpen, identityProbe, log, sealPolicy });
     // push.notify hints (push spec §6.2): a granted lease ending, a contact
     // pause. The GUI's other parts reach it here (a TakeManager queues its
     // restart endings with enqueue; the GUI's stop awaits drain).
@@ -308,13 +315,46 @@ class LeaseManager extends EventEmitter {
   // an audit entry), whatever state it is in; a lease still waiting for
   // its first grant has no granting device. Called when a revoke is staged,
   // before every input, and every GRANTOR_CHECK_MS while a lease is live.
+  // Nor does it outlive every phone that could read it (SEAL_REASON): a device
+  // revoked or a store gone bad is what changes that, so it is looked at here.
   checkGrantingDevices({ refresh = false } = {}) {
     const store = this.approvals.approverStore;
     if (refresh && store && typeof store.refresh === 'function') store.refresh();
     for (const lease of this.leases) {
-      if (lease.state === 'ended' || lease.grantedBy === null) continue;
-      if (!this._grantorActive(lease)) this._end(lease, GRANTOR_REVOKED_REASON);
+      if (lease.state === 'ended') continue;
+      if (lease.grantedBy !== null && !this._grantorActive(lease)) this._end(lease, GRANTOR_REVOKED_REASON);
+      else {
+        const why = this.sealProblem();
+        if (why) this._endUnsealable(lease, why);
+      }
     }
+  }
+
+  // Is this node sealing? What cannot be told counts as yes.
+  sealing() {
+    try {
+      return Boolean(this.sealPolicy && this.sealPolicy.sealing());
+    } catch {
+      return true;
+    }
+  }
+
+  // R-SP-5: null, or why this node seals and no phone can read it now. Read at
+  // every use. A policy that cannot be read counts as nobody to seal to.
+  sealProblem() {
+    if (!this.sealPolicy) return null;
+    try {
+      if (!this.sealPolicy.sealing() || this.sealPolicy.canSeal()) return null;
+      return (typeof this.sealPolicy.whyNot === 'function' && this.sealPolicy.whyNot()) || 'no phone can read a sealed lease';
+    } catch {
+      return 'the seal policy could not be read';
+    }
+  }
+
+  _endUnsealable(lease, why) {
+    lease.sealWhy = why;
+    this.log.error(`a computer-use lease ended: this node seals what it sends and ${why}`, { reason: SEAL_REASON });
+    this._end(lease, SEAL_REASON);
   }
 
   // While the lease lives: look again every GRANTOR_CHECK_MS.
@@ -373,20 +413,15 @@ class LeaseManager extends EventEmitter {
   _audit(kind, lease, extra = {}) {
     if (!this.audit) return;
     // Every entry names the lease's kind; a take's request and grant also say what the
-    // phone was asked to approve (spec 2026-10-24 §7.2), its name but never its reason text.
+    // phone was asked to approve (spec 2026-10-24 §7.2). The ledger is served to the
+    // relay's mirror, so never its name, its sites or its reason text (R-SP-7).
     const data = { job_id: lease ? lease.jobId : null, lease_id: lease ? lease.leaseId : null, kind: lease ? lease.kind : null, ...extra };
     if (lease && lease.kind === 'take' && lease.take && (kind === 'lease.requested' || kind === 'lease.granted')) {
-      Object.assign(data, {
-        name: lease.take.name,
-        sites: Array.isArray(lease.take.sites) ? [...lease.take.sites] : [],
-        credentials: lease.take.credentials === true
-      });
+      Object.assign(data, { credentials: lease.take.credentials === true });
     }
-    // A task's too (spec 2026-11-03 §4.6): what it may do and spend, never the reason text.
+    // A task's too (spec 2026-11-03 §4.6): what it may do and spend, and no more.
     if (lease && lease.kind === 'task' && lease.task && (kind === 'lease.requested' || kind === 'lease.granted')) {
       Object.assign(data, {
-        name: lease.task.name,
-        sites: Array.isArray(lease.task.sites) ? [...lease.task.sites] : [],
         allows: Array.isArray(lease.task.allows) ? [...lease.task.allows] : [],
         usd: lease.task.usd
       });
@@ -427,6 +462,14 @@ class LeaseManager extends EventEmitter {
     // A task (spec 2026-11-03 §4.6) has no apps, is not gated on gui.take and may come from any origin.
     const isTask = kind === 'task';
     if (isTask && (!task || typeof task !== 'object' || Array.isArray(task))) throw new GuiError('invalid_params', 'a task needs its "task" block');
+    // R-SP-5: nothing goes clear, so nothing goes. A suspended lease of this job,
+    // which this call would have asked to resume, ends with it.
+    const unsealable = this.sealProblem();
+    if (unsealable) {
+      const held = this.current();
+      if (held && held.jobId === jobId && held.state === 'suspended') this._endUnsealable(held, unsealable);
+      throw new GuiError('capability_unavailable', sealMessage(unsealable));
+    }
     if (!this.available()) throw new GuiError('approval_unavailable');
     // Fourth security review, finding 1 (R-F5-17): on Windows the service
     // asks again, before every new request, whether it can write the
@@ -482,6 +525,8 @@ class LeaseManager extends EventEmitter {
         tokens: new Map(), tokenIssued: 0, tokenUsedUpTo: 0, lastStatus: null
       };
       this.leases.push(lease);
+      // A lease nobody has granted yet does not wait out its request once no phone can read it.
+      if (this.sealPolicy) this._armGrantorCheck(lease);
       this._sendRequest(lease, { resume: false, probed: true });
     } else {
       // A suspended lease whose resume request lapsed: ask again.
@@ -529,15 +574,28 @@ class LeaseManager extends EventEmitter {
     const ids = resume ? lease.apps : lease.requestedApps;
     const maxMinutes = resume ? Math.max(1, Math.ceil(this.remainingMs(lease) / 60000)) : lease.maxMinutes;
     const limits = this.broker && typeof this.broker.capability === 'function' ? this.broker.capability().limits || [] : [];
-    const { message, envelope } = L.buildLeaseRequest({
-      identity: this.approvals.identity, nodeName: this.nodeName, jobId: lease.jobId,
-      apps: ids.map((id) => ({ id, name: cfg.apps[id].name, path: cfg.apps[id].path, processes: cfg.apps[id].processes })),
-      maxMinutes, reason: lease.reason, resumes: resume, limits, origin: lease.origin, now, leaseId: lease.leaseId,
-      kind: lease.kind, take: lease.take, task: lease.task
-    });
+    let built;
+    try {
+      built = L.buildLeaseRequest({
+        identity: this.approvals.identity, nodeName: this.nodeName, jobId: lease.jobId,
+        apps: ids.map((id) => ({ id, name: cfg.apps[id].name, path: cfg.apps[id].path, processes: cfg.apps[id].processes })),
+        maxMinutes, reason: lease.reason, resumes: resume, limits, origin: lease.origin, now, leaseId: lease.leaseId,
+        kind: lease.kind, take: lease.take, task: lease.task, sealPolicy: this.sealPolicy
+      });
+    } catch (err) {
+      if (err.reason !== SEAL_REASON) throw err;
+      // A request the node would send by itself (a resume) ends the lease, like
+      // a record it cannot trust; request()'s own caller is told.
+      const why = this.sealProblem() || 'no phone can read a sealed lease';
+      this._endUnsealable(lease, why);
+      if (probed) throw new GuiError('capability_unavailable', sealMessage(why));
+      return;
+    }
+    const { message, envelope } = built;
+    // lease and salt are what the phone will have opened: the node re-checks a grant against them.
     const entry = {
       request_id: message.request_id, lease_id: message.lease_id, nonce: message.nonce, lease_hash: message.lease_hash,
-      expires_at: message.expires_at, lease: message.lease, resume, ref: lease, envelope, delivered: false
+      expires_at: message.expires_at, lease: built.lease, salt: built.salt, resume, ref: lease, envelope, delivered: false
     };
     entry.timer = this._timer(() => this._requestExpired(entry), L.REQUEST_TTL_MS);
     this.pending.set(entry.request_id, entry);
@@ -611,6 +669,13 @@ class LeaseManager extends EventEmitter {
       this._end(lease, 'expired');
       return this._reply(lease, { state: 'ended' });
     }
+    // A grant on a request sent before nobody could read this node (a clear one,
+    // say) does not activate: a take would start its browser and recorder on it.
+    const unsealable = this.sealProblem();
+    if (unsealable) {
+      this._endUnsealable(lease, unsealable);
+      return this._reply(lease, { state: 'ended', reason: SEAL_REASON });
+    }
     lease.apps = [...m.grant.apps];
     if (!entry.resume) {
       lease.grantedBy = r.deviceId;
@@ -627,7 +692,7 @@ class LeaseManager extends EventEmitter {
     if (entry.resume) lease.typed.navigate();
     else lease.typed.reset();
     this._audit(entry.resume ? 'lease.resumed' : 'lease.granted', lease, {
-      request_id: m.request_id, apps: lease.apps, minutes: m.grant.minutes, device_id: r.deviceId
+      request_id: m.request_id, apps: lease.apps, minutes: m.grant.minutes, resumes: entry.resume ? lease.leaseId : null, device_id: r.deviceId
     });
     if (entry.resume && this.broker) this.broker.focusApp(lease.apps).catch(() => {});
     // R-F5-15: the grant is the granting device's first contact.
@@ -743,6 +808,7 @@ class LeaseManager extends EventEmitter {
       if (last && last.endReason === 'expired') throw new GuiError('lease_expired', 'call RequestLease for a new lease');
       if (last && last.endReason === 'job_closed') throw new GuiError('job_closed', 'the job this lease belonged to is not open');
       if (last && last.endReason === IDENTITY_REASON) throw new GuiError('capability_unavailable', IDENTITY_MESSAGE);
+      if (last && last.endReason === SEAL_REASON) throw new GuiError('capability_unavailable', sealMessage(last.sealWhy));
       throw new GuiError('lease_required', 'call RequestLease first');
     }
     if (lease.state === 'pending') throw new GuiError('lease_pending', 'waiting for the phone');
@@ -838,11 +904,21 @@ class LeaseManager extends EventEmitter {
 
   _relayUp() {
     const now = this.clock();
-    for (const entry of this.pending.values()) {
-      if (!entry.delivered && now <= Date.parse(entry.expires_at)) this._deliver(entry);
+    for (const entry of [...this.pending.values()]) {
+      if (entry.delivered || now > Date.parse(entry.expires_at)) continue;
+      if (entry.salt === null && this.sealing()) this._rebuild(entry);
+      else this._deliver(entry);
     }
     const lease = this.current();
     if (lease && lease.state === 'suspended' && lease.suspendReason !== CONTACT_REASON && ![...this.pending.values()].some((p) => p.ref === lease)) this._sendRequest(lease, { resume: true });
+  }
+
+  // A clear request held with the link down, and this node seals now: it never
+  // goes out. A new one is built, which seals it, or ends the lease with the cause.
+  _rebuild(entry) {
+    this.timers.clearTimeout(entry.timer);
+    this.pending.delete(entry.request_id);
+    this._sendRequest(entry.ref, { resume: entry.resume });
   }
 
   // Ends one lease by id (a take ends only the lease its own request made).
@@ -878,7 +954,8 @@ class LeaseManager extends EventEmitter {
     }
     if (this.broker) this.broker.releaseAll().catch(() => {});
     if (!['revoked', 'expired', 'denied'].includes(reason)) this._audit('lease.ended', lease, { reason });
-    this._settle(lease, new GuiError(END_ERROR[reason] || 'lease_required', END_ERROR[reason] ? (reason === IDENTITY_REASON ? IDENTITY_MESSAGE : null) : reason));
+    const endDetail = reason === IDENTITY_REASON ? IDENTITY_MESSAGE : reason === SEAL_REASON ? sealMessage(lease.sealWhy) : null;
+    this._settle(lease, new GuiError(END_ERROR[reason] || 'lease_required', END_ERROR[reason] ? endDetail : reason));
     this._status(lease);
     // Push spec §6.1 (C-3): a lease that ran pushes its ending once, to every
     // phone but the one that ended it; one that never ran pushes nothing.
@@ -916,7 +993,7 @@ class LeaseManager extends EventEmitter {
       reason: lease.endReason || lease.suspendReason || null, expiresAt: lease.expiresAt,
       contactToken,
       grantedBy: lease.grantedBy ? { deviceId: lease.grantedBy, name: lease.grantedByName } : null,
-      kind: lease.kind, unattended: lease.unattended === true, name: lease.name || null, now: this.clock()
+      kind: lease.kind, unattended: lease.unattended === true, name: lease.name || null, now: this.clock(), sealPolicy: this.sealPolicy
     });
     lease.lastStatus = envelope;
     // What that status says, when it was signed and with which token: a listing reuses it while all three still hold.
@@ -997,4 +1074,4 @@ class LeaseManager extends EventEmitter {
   }
 }
 
-module.exports = { LeaseManager, newLeaseId, CONTACT_REASON, CONTACT_MAX_S, GRANTOR_REVOKED_REASON, GRANTOR_CHECK_MS, LIST_RESIGN_MS };
+module.exports = { LeaseManager, newLeaseId, CONTACT_REASON, CONTACT_MAX_S, GRANTOR_REVOKED_REASON, GRANTOR_CHECK_MS, LIST_RESIGN_MS, SEAL_REASON };

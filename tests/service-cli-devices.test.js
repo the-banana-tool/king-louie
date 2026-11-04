@@ -7,6 +7,7 @@ const path = require('path');
 const { PassThrough } = require('stream');
 const { main } = require('../src/service/cli');
 const { runEnrollDevice, runDevice, describeAge } = require('../src/service/commands/devices');
+const { writeLatch } = require('../src/approvals/seal-policy');
 const { CourierPump } = require('../src/approvals/courier');
 const { ApproverStore } = require('../src/approvals/approver-store');
 const { checkApproverDir } = require('../src/approvals/approver-store');
@@ -141,6 +142,42 @@ describe('enroll-device', () => {
     assert.equal(open(done.enroll).message.device.device_id, phone.deviceId);
     const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: null });
     assert.deepEqual(ledger.tail(1).map((e) => [e.kind, e.writer, e.data.device_id]), [['device.enrolled', 'cli', phone.deviceId]]);
+  });
+
+  it('on a latched node a claim with no box key says the phone will see nothing; otherwise the prompt is as it was', async () => {
+    const warning = /this phone will see nothing from this node/;
+    const plain = await enroll('n');
+    assert.doesNotMatch(plain.io.text.out, warning);
+
+    const latched = node();
+    writeLatch(latched.dataDir);
+    const { pump, calls } = servicePump(latched);
+    assert.ok(pump && calls);
+    const io = streamIo();
+    const phone = createFakePhone({ name: 'Pixel 9' });
+    const running = runEnrollDevice({ ...latched, io, deps });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope: phone.enroll({ codeId: qr.code_id, code: qr.code }) });
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    assert.match(io.text.out, warning);
+    assert.ok(io.text.out.indexOf('see nothing') < io.text.out.indexOf('does the phone show'), 'said before the question');
+    io.stdin.write('y\n');
+    assert.equal(await running, 0);
+
+    const withBox = node();
+    writeLatch(withBox.dataDir);
+    const boxed = servicePump(withBox);
+    const boxIo = streamIo();
+    const boxPhone = createFakePhone({ name: 'Pixel 9', boxKey: true });
+    const boxRun = runEnrollDevice({ ...withBox, io: boxIo, deps });
+    const boxText = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(boxIo.text.out), 'the pairing code');
+    const boxQr = decodeQr(boxText[1]);
+    boxed.pump.deliver(boxed.pump.routeFor('enroll.claim', { code_id: boxQr.code_id }), 'enroll.claim', { code_id: boxQr.code_id, envelope: boxPhone.enroll({ device: boxPhone.device({ boxKey: true }), codeId: boxQr.code_id, code: boxQr.code }) });
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(boxIo.text.out), 'the prompt');
+    assert.doesNotMatch(boxIo.text.out, warning);
+    boxIo.stdin.write('n\n');
+    await boxRun;
   });
 
   // Personal hosting (spec 2026-10-25 §6, last row): the owner runs it
@@ -384,6 +421,223 @@ describe('the read key in the device commands', () => {
   });
 });
 
+// Sealed phones, R-SP-10: the box key's fingerprint, the same way.
+describe('the box key in the device commands', () => {
+  const crypto = require('crypto');
+  const { boxKeyFingerprint, readKeyFingerprint, iso, randomNonce } = require('../src/approvals/messages');
+  function boxJwk() {
+    const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const { kty, crv, x, y } = publicKey.export({ format: 'jwk' });
+    return { kty, crv, x, y };
+  }
+  function statement(phone, jwk, now = Date.now()) {
+    return phone.sign({ v: 1, type: 'kl.device.box_key', device_id: phone.deviceId, box_key: jwk, created_at: iso(now), expires_at: iso(now + 24 * 60 * 60 * 1000), nonce: randomNonce() });
+  }
+  function stagedNode(records) {
+    const n = node();
+    for (const r of records) fs.writeFileSync(path.join(n.configDir, 'approvers', `${r.device_id}.json`), JSON.stringify(r), { mode: 0o644 });
+    const store = new ApproverStore({ dir: path.join(n.configDir, 'approvers'), stagedDir: path.join(n.dataDir, 'approvals', 'staged'), ...storeOptions });
+    return { n, store };
+  }
+
+  it('enroll-device names the box key before asking, and the record keeps it', async () => {
+    const n = node();
+    const { pump, calls } = servicePump(n);
+    const io = streamIo();
+    const phone = createFakePhone({ name: 'Pixel 9' });
+    const box = boxJwk();
+    const running = runEnrollDevice({ ...n, io, deps });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    const envelope = phone.enroll({ device: { ...phone.device({ readKey: true }), box_key: box }, codeId: qr.code_id, code: qr.code });
+    pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope });
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    assert.ok(io.text.out.includes(` with a read key ${readKeyFingerprint(phone.readJwk)} with a box key ${boxKeyFingerprint(box)} — does the phone show the same? [y/N]`), io.text.out);
+    io.stdin.write('y\n');
+    assert.equal(await running, 0);
+    await waitFor(() => calls.some(([m]) => m === 'enroll.done'), 'enroll.done');
+    const record = JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${phone.deviceId}.json`), 'utf8'));
+    assert.deepEqual(record.box_key, box);
+    assert.equal(record.box_key_at, open(envelope).message.created_at);
+  });
+
+  it('enroll-device without a box key asks as before', async () => {
+    const n = node();
+    const { pump } = servicePump(n);
+    const io = streamIo();
+    const phone = createFakePhone();
+    const running = runEnrollDevice({ ...n, io, deps });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope: phone.enroll({ codeId: qr.code_id, code: qr.code }) });
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    assert.doesNotMatch(io.text.out, /box key/);
+    io.stdin.write('n\n');
+    assert.equal(await running, 1);
+  });
+
+  // A console enrollment over a record that holds a box key. Runs to the
+  // prompt or to its refusal, with the claim built from `device(phone)`.
+  async function reEnroll(record, device, phone) {
+    const n = node();
+    const file = path.join(n.configDir, 'approvers', `${phone.deviceId}.json`);
+    fs.writeFileSync(file, JSON.stringify(record), { mode: 0o644 });
+    const { pump, calls } = servicePump(n);
+    const io = streamIo();
+    const running = runEnrollDevice({ ...n, io, deps });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    const envelope = phone.enroll({ device, codeId: qr.code_id, code: qr.code });
+    pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope });
+    return { n, file, calls, io, running, envelope };
+  }
+
+  it('enroll-device refuses a claim with no box key for an active record that holds one, before asking', async () => {
+    const phone = createFakePhone({ name: 'Pixel 9' });
+    const held = boxJwk();
+    const record = { ...phone.approverRecord(), box_key: held, box_key_at: iso(Date.now() - 60000) };
+    const { n, file, calls, io, running } = await reEnroll(record, phone.device({ readKey: true }), phone);
+    const before = fs.readFileSync(file, 'utf8');
+    // Answered up front: a build that wrongly asks must not wait out the code.
+    io.stdin.write('n\n');
+    assert.equal(await running, 1);
+    assert.doesNotMatch(io.text.out, /does the phone show the same/);
+    assert.ok(io.text.err.includes(`device revoke ${phone.deviceId}`), io.text.err);
+    assert.match(io.text.err, /Reset the phone/);
+    assert.match(io.text.err, /Nothing was enrolled/);
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    assert.deepEqual(JSON.parse(before).box_key, held);
+    await waitFor(() => calls.some(([m]) => m === 'enroll.done'), 'enroll.done');
+    const [, params] = calls.find(([m]) => m === 'enroll.done');
+    assert.equal(open(params.envelope).message.refused, true);
+    const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: null });
+    assert.deepEqual(ledger.tail(5).filter((e) => e.kind === 'device.enrolled'), []);
+  });
+
+  it('enroll-device shows both fingerprints when a claim replaces a box key, and writes the new one after y', async () => {
+    const phone = createFakePhone({ name: 'Pixel 9' });
+    const held = boxJwk();
+    const next = boxJwk();
+    const record = { ...phone.approverRecord(), box_key: held, box_key_at: iso(Date.now() - 60000) };
+    const { file, calls, io, running, envelope } = await reEnroll(record, { ...phone.device(), box_key: next }, phone);
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    io.stdin.write('y\n');
+    assert.equal(await running, 0);
+    assert.ok(io.text.out.includes(` with a box key ${boxKeyFingerprint(next)}, replacing box key ${boxKeyFingerprint(held)} — does the phone show the same? [y/N]`), io.text.out);
+    await waitFor(() => calls.some(([m]) => m === 'enroll.done'), 'enroll.done');
+    const written = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(written.box_key, next);
+    assert.equal(written.box_key_at, open(envelope).message.created_at);
+  });
+
+  it('enroll-device with the box key the record already holds asks with no replacing line', async () => {
+    const phone = createFakePhone();
+    const held = boxJwk();
+    const record = { ...phone.approverRecord(), box_key: held };
+    const { io, running } = await reEnroll(record, { ...phone.device(), box_key: { ...held } }, phone);
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    io.stdin.write('n\n');
+    assert.equal(await running, 1);
+    assert.ok(io.text.out.includes(` with a box key ${boxKeyFingerprint(held)} — does the phone`), io.text.out);
+    assert.doesNotMatch(io.text.out, /replacing/);
+  });
+
+  it('a record no store would trust does not block a re-enrollment', async () => {
+    const phone = createFakePhone();
+    // Its box key is the device key: checkApproverRecord refuses this file.
+    const record = { ...phone.approverRecord(), box_key: { ...phone.jwk } };
+    const { io, running } = await reEnroll(record, phone.device(), phone);
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    io.stdin.write('n\n');
+    assert.equal(await running, 1);
+    assert.doesNotMatch(io.text.out, /replacing/);
+  });
+
+  it('device apply passes a staged file\'s device_id through shown, in the list and in the result', async () => {
+    const a = createFakePhone({ name: 'Owner phone' });
+    const { n } = stagedNode([a.approverRecord()]);
+    const forged = `d-forged\n${a.deviceId}: box key set`;
+    const now = Date.now();
+    const stagedDir = path.join(n.dataDir, 'approvals', 'staged');
+    fs.mkdirSync(stagedDir, { recursive: true });
+    const plant = (message) => fs.writeFileSync(path.join(stagedDir, `${message.nonce}.json`), JSON.stringify({ received_at: iso(now), envelope: a.sign(message) }));
+    const window = { created_at: iso(now), expires_at: iso(now + 60000) };
+    plant({ v: 1, type: 'kl.device.box_key', device_id: forged, box_key: boxJwk(), ...window, nonce: randomNonce() });
+    plant({ v: 1, type: 'kl.device.read_key', device_id: forged, read_key: boxJwk(), ...window, nonce: randomNonce() });
+    plant({ v: 1, type: 'kl.device.revoke', device_id: forged, revoked_by: forged, reason: 'lost', ...window, nonce: randomNonce() });
+    plant({ v: 1, type: 'kl.device.enroll', device: { device_id: forged }, enrolled_by: forged, ...window, nonce: randomNonce() });
+    const io = streamIo();
+    assert.equal(await runDevice({ sub: 'apply', flags: { yes: true }, ...n, io, deps }), 0);
+    assert.ok(!io.text.out.includes(forged), io.text.out);
+    assert.doesNotMatch(io.text.out, new RegExp(`^${a.deviceId}: box key set`, 'm'));
+    assert.match(io.text.out, /hidden or control characters removed/);
+    assert.match(io.text.out, /: rejected: malformed/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${a.deviceId}.json`), 'utf8')).box_key, undefined);
+  });
+
+  it('device apply shows a staged box-key statement with its fingerprint, asks, writes it after y, audits it, and device list shows it', async () => {
+    const a = createFakePhone({ name: 'Owner phone' });
+    const { n, store } = stagedNode([a.approverRecord()]);
+    await store.ready();
+    const box = boxJwk();
+    assert.equal(store.stage(statement(a, box)).state, 'box-key-pending-apply');
+    const onDisk = () => JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${a.deviceId}.json`), 'utf8'));
+
+    let io = streamIo();
+    let running = runDevice({ sub: 'apply', flags: {}, ...n, io, deps });
+    await waitFor(() => /Apply these\? \[y\/N\]/.test(io.text.out), 'the question');
+    assert.ok(io.text.out.includes(`box key  ${a.deviceId}  "Owner phone"  ${boxKeyFingerprint(box)}  signed by the device itself`), io.text.out);
+    io.stdin.write('n\n');
+    assert.equal(await running, 0);
+    assert.equal(onDisk().box_key, undefined);
+
+    io = streamIo();
+    running = runDevice({ sub: 'apply', flags: {}, ...n, io, deps });
+    await waitFor(() => /Apply these\? \[y\/N\]/.test(io.text.out), 'the question');
+    io.stdin.write('y\n');
+    assert.equal(await running, 0);
+    assert.ok(io.text.out.includes(`${a.deviceId}: box key set`), io.text.out);
+    assert.deepEqual(onDisk().box_key, box);
+    const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: null });
+    assert.deepEqual(ledger.tail(1).map((e) => [e.kind, e.data.device_id]), [['device.box_key_set', a.deviceId]]);
+
+    io = streamIo();
+    assert.equal(await runDevice({ sub: 'list', ...n, io, deps }), 0);
+    assert.ok(io.text.out.includes(`${a.deviceId}  Owner phone (android)  box key ${boxKeyFingerprint(box)}  active`), io.text.out);
+  });
+
+  it('device apply says rejected for a statement it will not write, and audits nothing', async () => {
+    const a = createFakePhone({ name: 'Owner phone' });
+    const current = boxJwk();
+    const setAt = iso(Date.now());
+    const { n } = stagedNode([{ ...a.approverRecord(), box_key: current, box_key_at: setAt }]);
+    const older = a.sign({ v: 1, type: 'kl.device.box_key', device_id: a.deviceId, box_key: boxJwk(), created_at: iso(Date.now() - 60000), expires_at: iso(Date.now() + 60000), nonce: randomNonce() });
+    const { message } = open(older);
+    const stagedDir = path.join(n.dataDir, 'approvals', 'staged');
+    fs.mkdirSync(stagedDir, { recursive: true });
+    fs.writeFileSync(path.join(stagedDir, `${message.nonce}.json`), JSON.stringify({ received_at: iso(Date.now()), envelope: older }));
+    const io = streamIo();
+    assert.equal(await runDevice({ sub: 'apply', flags: { yes: true }, ...n, io, deps }), 0);
+    assert.ok(io.text.out.includes(`${a.deviceId}: rejected: stale`), io.text.out);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${a.deviceId}.json`), 'utf8')).box_key, current);
+    const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: null });
+    assert.equal(ledger.tail(5).filter((e) => e.kind === 'device.box_key_set').length, 0);
+  });
+
+  it('device apply names the box key a staged enrollment carries', async () => {
+    const a = createFakePhone();
+    const { n, store } = stagedNode([a.approverRecord()]);
+    await store.ready();
+    const b = createFakePhone();
+    const box = boxJwk();
+    store.stage(a.enroll({ device: { ...b.device(), box_key: box } }));
+    const io = streamIo();
+    assert.equal(await runDevice({ sub: 'apply', flags: { yes: true }, ...n, io, deps }), 0);
+    assert.ok(io.text.out.includes(`enroll  ${b.deviceId}  with a box key ${boxKeyFingerprint(box)}  signed by ${a.deviceId}`), io.text.out);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${b.deviceId}.json`), 'utf8')).box_key, box);
+  });
+});
+
 describe('device list | revoke | apply', () => {
   it('the real CLI entry accepts --yes for "device apply" and refuses it for every other device command', async () => {
     const n = node();
@@ -575,6 +829,167 @@ describe('doctor', () => {
     await store.ready();
     assert.equal(store.stage(b.revoke(a.deviceId)).state, 'revoked-pending-apply');
     assert.equal(await count(), '1');
+  });
+
+  // Sealed phones, R-SP-11.
+  describe('the box key rows', () => {
+    const crypto = require('crypto');
+    const { fingerprintGroups } = require('../src/approvals/envelope');
+    const boxJwk = () => {
+      const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+      const { kty, crv, x, y } = publicKey.export({ format: 'jwk' });
+      return { kty, crv, x, y };
+    };
+    const put = (n, record) => fs.writeFileSync(path.join(n.configDir, 'approvers', `${record.device_id}.json`), JSON.stringify(record), { mode: 0o644 });
+    // The identity record as the service's start leaves it (doctor reads only whether it holds a box key).
+    const boxRecord = (n) => fs.writeFileSync(path.join(n.dataDir, 'chat-data.json'), JSON.stringify({ mesh: { identity: { publicKey: 'ab', boxKeyJwk: boxJwk(), encryptedBoxKey: 'x' } } }));
+    const rows = async (n) => {
+      const results = await runDoctor({ dataDir: n.dataDir, platform: 'win32' });
+      return { sealing: results.find((r) => r.check === 'sealing to phones'), without: results.find((r) => r.check === 'phones without a box key') };
+    };
+
+    it('no phones: off, none', async () => {
+      const { sealing, without } = await rows(node());
+      assert.deepEqual([sealing.ok, sealing.detail], [true, 'off: no phone has a box key yet']);
+      assert.deepEqual([without.ok, without.detail], [true, 'none']);
+    });
+
+    it('a phone with no box key: off, and its fingerprint', async () => {
+      const n = node();
+      const a = createFakePhone();
+      put(n, a.approverRecord());
+      const { sealing, without } = await rows(n);
+      assert.equal(sealing.detail, 'off: no phone has a box key yet');
+      assert.equal(without.detail, fingerprintGroups(a.deviceId));
+    });
+
+    it('counts the phones sealed to, and lists only the active ones without a box key', async () => {
+      const n = node();
+      const [a, b, c, d, gone] = [1, 2, 3, 4, 5].map(() => createFakePhone());
+      put(n, { ...a.approverRecord(), box_key: boxJwk() });
+      put(n, { ...b.approverRecord(), box_key: boxJwk() });
+      put(n, c.approverRecord());
+      put(n, d.approverRecord());
+      put(n, gone.approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' }));
+      boxRecord(n);
+      const { sealing, without } = await rows(n);
+      assert.equal(sealing.detail, 'on (2 phones)');
+      assert.deepEqual(without.detail.split(', ').sort(), [fingerprintGroups(c.deviceId), fingerprintGroups(d.deviceId)].sort());
+    });
+
+    it('a revoked phone that held a box key is not counted, and every phone holding one says none', async () => {
+      const n = node();
+      const a = createFakePhone();
+      const b = createFakePhone();
+      put(n, { ...a.approverRecord(), box_key: boxJwk() });
+      put(n, { ...b.approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' }), box_key: boxJwk() });
+      boxRecord(n);
+      const { sealing, without } = await rows(n);
+      assert.equal(sealing.detail, 'on (1 phone)');
+      assert.equal(without.detail, 'none');
+    });
+
+    // R-SP-5: the latch. A node that has sealed and has nobody to seal to is not "off".
+    const latch = (n, text = '{"v":1,"latched_at":"2026-11-04T10:00:00.000Z"}') => {
+      fs.mkdirSync(path.join(n.dataDir, 'approvals'), { recursive: true });
+      fs.writeFileSync(path.join(n.dataDir, 'approvals', 'sealing.json'), text);
+    };
+
+    it('latched with no phone to seal to: on, but no phone can read it, and it fails the row', async () => {
+      const n = node();
+      latch(n);
+      put(n, { ...createFakePhone().approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' }), box_key: boxJwk() });
+      const { sealing } = await rows(n);
+      assert.deepEqual([sealing.ok, sealing.detail], [false, 'on, but no phone can read it: enroll or apply a box key']);
+    });
+
+    it('a latch that cannot be read says the same', async () => {
+      const n = node();
+      latch(n, 'not json');
+      const { sealing } = await rows(n);
+      assert.deepEqual([sealing.ok, sealing.detail], [false, 'on, but no phone can read it: enroll or apply a box key']);
+    });
+
+    it('latched with a phone to seal to is simply on', async () => {
+      const n = node();
+      latch(n);
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      boxRecord(n);
+      const { sealing } = await rows(n);
+      assert.deepEqual([sealing.ok, sealing.detail], [true, 'on (1 phone)']);
+    });
+
+    it('a phone to seal to and no box key in the identity record fails the row', async () => {
+      const n = node();
+      latch(n);
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      let { sealing } = await rows(n);
+      assert.deepEqual([sealing.ok, sealing.detail], [false, 'on, but this node has no box key: restart the service']);
+      fs.writeFileSync(path.join(n.dataDir, 'chat-data.json'), JSON.stringify({ mesh: { identity: { publicKey: 'ab' } } }));
+      ({ sealing } = await rows(n));
+      assert.equal(sealing.ok, false);
+    });
+
+    it('a phone to seal to and a latch that cannot be written fails the row', async () => {
+      const n = node();
+      fs.mkdirSync(path.join(n.dataDir, 'approvals', 'sealing.json'), { recursive: true });
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      boxRecord(n);
+      const { sealing } = await rows(n);
+      assert.equal(sealing.ok, false);
+      assert.match(sealing.detail, /^on, but the latch cannot be written/);
+    });
+
+    it('a damaged latch file with a phone to seal to: on, and the next message replaces it', async () => {
+      const n = node();
+      fs.mkdirSync(path.join(n.dataDir, 'approvals'), { recursive: true });
+      fs.writeFileSync(path.join(n.dataDir, 'approvals', 'sealing.json'), 'garbage');
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      boxRecord(n);
+      const { sealing } = await rows(n);
+      assert.deepEqual([sealing.ok, sealing.warn, sealing.detail], [true, true, 'on (1 phone); the latch file is damaged, and the next message replaces it']);
+    });
+
+    it('a directory at the latch path with a phone to seal to fails the row, and says what is there', async () => {
+      const n = node();
+      fs.mkdirSync(path.join(n.dataDir, 'approvals', 'sealing.json'), { recursive: true });
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      boxRecord(n);
+      const { sealing } = await rows(n);
+      assert.equal(sealing.ok, false);
+      assert.match(sealing.detail, /^on, but the latch cannot be written: .*is not a file/);
+    });
+
+    it('a latch this account cannot create fails the row', { skip: !POSIX || UID === 0 }, async () => {
+      const n = node({ linked: false });
+      fs.mkdirSync(path.join(n.dataDir, 'approvals'));
+      fs.chmodSync(path.join(n.dataDir, 'approvals'), 0o555);
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      boxRecord(n);
+      const { sealing } = await rows(n);
+      fs.chmodSync(path.join(n.dataDir, 'approvals'), 0o755);
+      assert.equal(sealing.ok, false);
+      assert.match(sealing.detail, /^on, but the latch cannot be written/);
+    });
+
+    it('latched with an untrusted set: on, and nobody can read it', { skip: !POSIX }, async () => {
+      const n = node();
+      latch(n);
+      fs.chmodSync(path.join(n.configDir, 'approvers'), 0o777);
+      const results = await runDoctor({ dataDir: n.dataDir, platform: 'linux', adminUid: UID });
+      const sealing = results.find((r) => r.check === 'sealing to phones');
+      assert.deepEqual([sealing.ok, sealing.detail], [false, 'on, but no phone can read it: the set is not trusted']);
+    });
+
+    // assertAdminOwned is a no-op on Windows, so only POSIX can make the set untrusted here.
+    it('an untrusted set says so rather than that no phone has a box key', { skip: !POSIX }, async () => {
+      const n = node();
+      put(n, createFakePhone().approverRecord());
+      fs.chmodSync(path.join(n.configDir, 'approvers'), 0o777);
+      const results = await runDoctor({ dataDir: n.dataDir, platform: 'linux', adminUid: UID });
+      assert.equal(results.find((r) => r.check === 'sealing to phones').detail, 'off: the set is not trusted');
+      assert.equal(results.find((r) => r.check === 'phones without a box key').detail, 'none (the set is not trusted)');
+    });
   });
 
   // The row reads front-door.json first (it supersedes approvers.relay in

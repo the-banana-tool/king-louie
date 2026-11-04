@@ -1,0 +1,24 @@
+{
+  "name": "enroll-console-box-key-equal",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:05:11.201Z",
+    "code_id": "dAEMnC18UoZQV-skmzsqzg",
+    "code": "uMl9rw5jwz4VTBOaDPaMMVummWUHRA0cO_MrmT078as",
+    "allow_test_keys": true
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJjb2RlX2lkIjoiZEFFTW5DMThVb1pRVi1za216c3F6ZyIsImNvZGVfbWFjIjoiVlcxTktoeVZwNUtkdEJQc2NKaUJ2ZnM3b3h6MXJ2aFpZUTNlT1h1cDNGOCIsImNyZWF0ZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjExLjIwMVoiLCJkZXZpY2UiOnsiYm94X2tleSI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6ImJSNGVOREd6YXNHT1B5ajFwdm1BOXljUmllT1lLRTJKVnhvVnBqaGZ0SUkiLCJ5IjoiZXBNY3RINktxcC1WUG5tbmIzejh6czhSY2tUekMyeWpic3VvcjJXV25pWSJ9LCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJuYW1lIjoiUGhvbmUgM3ZtdyIsInBsYXRmb3JtIjoiYW5kcm9pZCIsInB1YmxpY19rZXkiOnsiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJrcmN5RzVENkhQeDlQM0dpNW9hUjZPeVU5RDFnSXJjM1VENnBJUmNEcTc0IiwieSI6IjlYcWdQWHNNQVlwbFg1SVpWbi05RlJQMnNONG9IRlJQam5aeWZHLUdwYUkifSwicmVhZF9rZXkiOnsiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJiUjRlTkRHemFzR09QeWoxcHZtQTl5Y1JpZU9ZS0UySlZ4b1ZwamhmdElJIiwieSI6ImVwTWN0SDZLcXAtVlBubW5iM3o4enM4UmNrVHpDMnlqYnN1b3IyV1duaVkifX0sImVucm9sbGVkX2J5IjpudWxsLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODoxNDoxMS4yMDFaIiwibm9uY2UiOiJQbEtKbFlFTmRmdG9wbUZ3bG5HQXMzYzl3dEJ4OGMzYzNDcEVaZ2pvcXZrIiwidHlwZSI6ImtsLmRldmljZS5lbnJvbGwiLCJ2IjoxfQ",
+    "sig": "FES5qRWKduWBeFsMexTzHxAVrEglYYKPwYGagENDGgGbGcHCjy8iUI8vuAhVrueGjqlYhOJ72jwIp8II9qKwWg"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "malformed",
+    "device_id": null,
+    "box_key": null
+  }
+}

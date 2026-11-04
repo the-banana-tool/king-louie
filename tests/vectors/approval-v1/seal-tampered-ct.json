@@ -1,0 +1,51 @@
+{
+  "name": "seal-tampered-ct",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    },
+    "type": "kl.approval.request"
+  },
+  "input": {
+    "v": 1,
+    "type": "kl.approval.request",
+    "request_id": "cfbac8af-3346-461f-b2d2-a49f2676ac72",
+    "node_id": "kl-c2ubd6jjqumalzt5",
+    "node_name": "web-01",
+    "action_hash": "B8QLQC3xza0oW11wLSlDJtYYwiZvGCYS8SnqKDyWSjk",
+    "created_at": "2026-09-23T18:04:11.201Z",
+    "expires_at": "2026-09-23T18:09:11.201Z",
+    "nonce": "W14pmVJGQJ2lXr8yoizeawB7HQ74hsnboeaFkmWOZQU",
+    "node_box": {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw",
+      "y": "qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ"
+    },
+    "sealed": {
+      "v": 1,
+      "epk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "gb3lPRczvX4yCb-RuhJs6B_sAmNHLBVOlDJmMfvVNA0",
+        "y": "MM-tOY1XWFVyrFCfDiMr085JcOO_XqyEye0wGy23Psc"
+      },
+      "iv": "pY-AZPNO20oFawL_",
+      "ct": "2QoOc9bWiP2T3nbNdm5K1AQxnjhEaizFxC_WtjWkcLNuLC8IWJlBcxR9cVEO633D0zQ9yISMrCpQ60NuRO4fHMu1vuZxOrQmJF0laxocq08EnCixmEQpnGgusGSUpTD8GSpfdtqHxRK2sciHf0H2oR_HGnbtnOD4y-rnTwX-sf4tf11Y7B-jTkJNvlJQ1ZCNhRJMiiyI2_kW4EbkX92mlsXCNq0Ipzh3OwMZvtlYLTqanbyayOvCVhBzu0FFEuKvi1EI3_ztIBTdSOogKd7pWpTTYJP9x9hrtLNEV_4_NxdhNOb-qbAKhjaJEYZ6gTKf8JipBDPnjWPqXWiy82dyQWutv3sDWsH0MUZIFrwvu-FNeMyT67fS99D4jA1W2C_Z6RlmTAjLu_lxjrtLopzaXKa_eADdawXjxFfAzMUNjhA9t20nRgl3y9vaIVP9pwgPsIi7spwGbksfa9rORXDZDzJCPHtjqDEzySjzHTByIyW9ZPU8UMslQdrSm1hF07ZF428CayWCwAGbBsN51gB5E9U2pr2RJbMoxWo_Hr9_KeFFFXSX7MrBlz5RG20nIR_sGUVPQiPdUD0lNBFnB0aVQeod5MPYIJDncnWkFGz86jzRQruezNx1NfodNzhEfVz45wIB-n1vfwog_j4rLqjtNPv1YGJ6QtPMApZzauX5smojI39ULbS6jI71Xl0Z3Omq",
+      "keys": {
+        "d-3vmwrihhdbnit4oi": "hArbnMQpw9pTjYolmiWMaHGTLOv5nidpcxNtiYbxo7AJrYzlNvTPd_IALoYsRBsK",
+        "d-6xdlbxglhnvfa3lw": "EM0yU0LPOlXuTQla40zum6Y7ecjGmghrLPPZMOxkaniYVvZFBpTrjZVLDpLHoCxP"
+      }
+    }
+  },
+  "expect": {
+    "reason": "open_failed",
+    "message": null
+  }
+}

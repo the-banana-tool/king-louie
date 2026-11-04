@@ -23,7 +23,7 @@ const APPROVER_CONTROLS = {
 };
 const CACHE_MS = 1000;
 // What a phone may relay for staging (spec §4.6, android-slim §8.7).
-const STAGED_TYPES = ['kl.device.enroll', 'kl.device.revoke', 'kl.device.read_key'];
+const STAGED_TYPES = ['kl.device.enroll', 'kl.device.revoke', 'kl.device.read_key', 'kl.device.box_key'];
 // A staged message's own signed created_at may not be this far ahead of the
 // node's clock. Without this, a revoke dated far in the future would never
 // age out of MAX_STAGED_AGE_MS (age = now - created_at is negative), making
@@ -60,6 +60,17 @@ function checkApproverRecord(record, fileName = null) {
     if (!Object.hasOwn(record, 'read_key')) return 'read_key_at without read_key';
     if (!(typeof record.read_key_at === 'string' && TIMESTAMP_RE.test(record.read_key_at))) return 'bad read_key_at';
   }
+  // The box key (sealed phones, R-SP-10), by the same rules, and no other
+  // key's point: one key agrees keys, and the others sign.
+  if (Object.hasOwn(record, 'box_key')) {
+    if (!isDeviceJwk(record.box_key)) return 'box_key must be a P-256 JWK with exactly kty, crv, x, y';
+    if (samePoint(record.box_key, record.public_key)) return 'box_key must differ from public_key';
+    if (Object.hasOwn(record, 'read_key') && samePoint(record.box_key, record.read_key)) return 'box_key must differ from read_key';
+  }
+  if (Object.hasOwn(record, 'box_key_at')) {
+    if (!Object.hasOwn(record, 'box_key')) return 'box_key_at without box_key';
+    if (!(typeof record.box_key_at === 'string' && TIMESTAMP_RE.test(record.box_key_at))) return 'bad box_key_at';
+  }
   return null;
 }
 
@@ -75,15 +86,40 @@ function readKeySetAt(record) {
 // names, once its signer has been checked (android-slim §8.7). One rule
 // order for staging (ApproverStore#stage) and for `device apply`
 // (ApproverAdmin): null when the key may be set, else 'same_point' (it is
-// the device key), 'test_key' (a published key, unless allowed), 'applied'
-// (the record already holds it) or 'stale' (not newer than the record's).
+// the device key or the box key), 'test_key' (a published key, unless
+// allowed), 'applied' (the record already holds it) or 'stale' (not newer
+// than the record's).
 function judgeReadKey(record, message, { allowTestKeys = false } = {}) {
   if (samePoint(message.read_key, record.public_key)) return 'same_point';
+  if (Object.hasOwn(record, 'box_key') && samePoint(message.read_key, record.box_key)) return 'same_point';
   if (!allowTestKeys && hasTestKey({ public_key: null, read_key: message.read_key })) return 'test_key';
   if (Object.hasOwn(record, 'read_key') && samePoint(message.read_key, record.read_key)) return 'applied';
   if (Date.parse(message.created_at) <= readKeySetAt(record)) return 'stale';
   return null;
 }
+
+// As readKeySetAt, for the box key.
+function boxKeySetAt(record) {
+  if (!record || !Object.hasOwn(record, 'box_key')) return -Infinity;
+  return Date.parse(record.box_key_at || record.enrolled_at);
+}
+
+// judgeReadKey's rule order for a well-formed kl.device.box_key statement
+// (sealed phones, R-SP-10); 'same_point' is the device key or the read key.
+function judgeBoxKey(record, message, { allowTestKeys = false } = {}) {
+  if (samePoint(message.box_key, record.public_key)) return 'same_point';
+  if (Object.hasOwn(record, 'read_key') && samePoint(message.box_key, record.read_key)) return 'same_point';
+  if (!allowTestKeys && hasTestKey({ public_key: null, box_key: message.box_key })) return 'test_key';
+  if (Object.hasOwn(record, 'box_key') && samePoint(message.box_key, record.box_key)) return 'applied';
+  if (Date.parse(message.created_at) <= boxKeySetAt(record)) return 'stale';
+  return null;
+}
+
+// What differs between the two statements a device makes of its own keys.
+const KEY_STATEMENTS = Object.freeze({
+  'kl.device.read_key': Object.freeze({ judge: judgeReadKey, pending: 'read-key-pending-apply' }),
+  'kl.device.box_key': Object.freeze({ judge: judgeBoxKey, pending: 'box-key-pending-apply' })
+});
 
 // null when the approver dir may be trusted, else the problem. A missing dir
 // is an empty set, not a problem. Sync so `doctor` can use it too.
@@ -532,9 +568,9 @@ class ApproverStore {
     // Validated before it is used as a file name.
     if (typeof message.nonce !== 'string' || !NONCE_RE.test(message.nonce)) return rejected('malformed');
     if (this._isKnownNonce(message.nonce)) {
-      // A re-post of a read-key statement `device apply` has already written
+      // A re-post of a key statement `device apply` has already written
       // answers `applied`, so the phone can tell it from one still staged.
-      if (type === 'kl.device.read_key' && this._readKeyApplied(envelope, message)) return { state: 'applied' };
+      if (Object.hasOwn(KEY_STATEMENTS, type) && this._keyStatementApplied(envelope, message)) return { state: 'applied' };
       return { state: 'duplicate' };
     }
     const shape = validateMessage(type, message);
@@ -565,7 +601,7 @@ class ApproverStore {
       return { state: 'staged' };
     }
 
-    if (type === 'kl.device.read_key') return this._stageReadKey(envelope, message);
+    if (Object.hasOwn(KEY_STATEMENTS, type)) return this._stageKeyStatement(envelope, message);
 
     const fault = this._checkRevoke(envelope, message);
     if (fault) return rejected(fault);
@@ -582,31 +618,33 @@ class ApproverStore {
     return { state: 'revoked-pending-apply' };
   }
 
-  // A device key's statement of its read key (android-slim spec §8.7),
-  // checked like a relayed revoke: the signer is the device itself, an
-  // active approver whose device key (never the read key) verifies it. It is
-  // only staged: `device apply` writes it into the record.
-  _stageReadKey(envelope, message) {
+  // A device key's statement of its read key (android-slim spec §8.7) or box
+  // key (sealed phones, R-SP-10), checked like a relayed revoke: the signer is
+  // the device itself, an active approver whose device key (never the read
+  // key) verifies it. It is only staged: `device apply` writes it into the
+  // record.
+  _stageKeyStatement(envelope, message) {
+    const { judge, pending } = KEY_STATEMENTS[message.type];
     const rejected = (reason) => ({ state: 'rejected', reason });
     if (envelope.alg !== 'ES256' || envelope.kid !== message.device_id) return rejected('malformed');
     if (!this.isActive(message.device_id)) return rejected('signer_not_active');
     const record = this.get(message.device_id);
     if (!verifyEs256(envelope, record.public_key)) return rejected('bad_signature');
-    const judged = judgeReadKey(record, message, { allowTestKeys: this.allowTestKeys });
+    const judged = judge(record, message, { allowTestKeys: this.allowTestKeys });
     if (judged === 'applied') return { state: 'applied' };
     if (judged === 'same_point') return rejected('malformed');
     if (judged) return rejected(judged);
     if (!this._writeStagedSafe(message.nonce, envelope)) return rejected('staging_write_failed');
-    return { state: 'read-key-pending-apply' };
+    return { state: pending };
   }
 
   // True when a well-formed statement, signed by its device's key, names the
-  // read key that device's record already holds.
-  _readKeyApplied(envelope, message) {
-    if (validateMessage('kl.device.read_key', message)) return false;
+  // key that device's record already holds.
+  _keyStatementApplied(envelope, message) {
+    if (validateMessage(message.type, message)) return false;
     if (envelope.alg !== 'ES256' || envelope.kid !== message.device_id || !this.isActive(message.device_id)) return false;
     const record = this.get(message.device_id);
-    return verifyEs256(envelope, record.public_key) && judgeReadKey(record, message, { allowTestKeys: this.allowTestKeys }) === 'applied';
+    return verifyEs256(envelope, record.public_key) && KEY_STATEMENTS[message.type].judge(record, message, { allowTestKeys: this.allowTestKeys }) === 'applied';
   }
 
   _writeStaged(nonce, envelope) {
@@ -629,5 +667,5 @@ class ApproverStore {
 }
 
 module.exports = {
-  ApproverStore, checkApproverRecord, judgeReadKey, checkApproverDir, checkWindowsOwners, readWindowsOwners, writeFileAtomic, APPROVER_CONTROLS, FUTURE_SKEW_MS
+  ApproverStore, checkApproverRecord, judgeReadKey, judgeBoxKey, checkApproverDir, checkWindowsOwners, readWindowsOwners, writeFileAtomic, APPROVER_CONTROLS, FUTURE_SKEW_MS
 };

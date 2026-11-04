@@ -1,0 +1,43 @@
+{
+  "name": "listing-with-sealed-status",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": null,
+  "given": {
+    "node": {
+      "id": "kl-c2ubd6jjqumalzt5",
+      "name": "web-01",
+      "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+    },
+    "nonce": "ne87l7_3txjCvVqM1HxCFI8mkkRga-_iilIOPljnkSM",
+    "device_id": "d-3vmwrihhdbnit4oi",
+    "statuses": [
+      {
+        "alg": "Ed25519",
+        "kid": "kl-c2ubd6jjqumalzt5",
+        "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJMN3FjWWpURkRIeXU4VTgxVWt1S2dBIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MjQ6MTEuMjAxWiIsImdyYW50ZWRfYnkiOnsiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwibmFtZSI6Ik93bmVyIHBob25lIn0sImtpbmQiOiJ0YXNrIiwibGVhc2VfaWQiOiI2ZDA0YjNjMi1lZWRjLTRlMWMtODZlYy00ZWJkMWE4Njk1N2EiLCJsb2NrZWQiOmZhbHNlLCJub2RlX2lkIjoia2wtYzJ1YmQ2ampxdW1hbHp0NSIsInJlYXNvbiI6bnVsbCwic2VhbGVkIjp7ImN0IjoieFo2Ri1MYUZhQS1fWGJlMTNSMkFsRUltMHFjMU9LNjdVcnc4OVc0ZFVvdC1OSVZzRlowdmRMZXBVZWF4SzdQYU9MX0hfdnpEdDZjS3NpbUhWYlBqV3lQeFpFZzFjeGt0cVYxeGxnSnlob3JTcHJPQ1Q5YUYyNkZtOE1CUEdJM0xQTi1nYnJzTC1BVjBoN0lXcVF3NlU4ekUtX2dKeGFyUE5vbFdTTjJzQnRKamJ3XzRqa0NST3pkZTZDQnFScTg5UnI3MTdSam8tVmJZX0IyU2VvOURhaF9TX3R1bnRYZndBZUFSTEUzOWZ3WEVuTUU1WXpQVld6d0JrX3BOUi1GaFZuSWVxcy1UNHZlendTYkxkZ3dkdElqMTBTN05sSzhoc1MtUHN2dWVtX195azlpYlFmY1hTLUpsOFgxVXpBcmNQR0ZDODN1RHU2Wk9FTTlBUl9nM1g2eHNROEltS2lsbUdTNERGNEp0a004IiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4Ijoid2VmTWw4aWhZZ2xTUU1UWHFPMnpYcDZ5Zng0NjZHNlZ4RDIzN2RjRXhHYyIsInkiOiJfRk5JcG5wbHFvVEIwM01iZE1DUXJFWUhVTGl6blhlanZvSHNTWVVZU1JVIn0sIml2IjoiT1FnaUNjRGZ0b21PV1NtUCIsImtleXMiOnsiZC0zdm13cmloaGRibml0NG9pIjoiRmE1eWFwOVRzbnhnNTNLd2hfUkt6YW9GTUFRMmdXc2ZTMDl0UjVEX01CLVFwUmt1aUNReUU4dTdRSW9DYkRFRSIsImQtNnhkbGJ4Z2xobnZmYTNsdyI6Imx0bTZhUkxQNnRkcld2WEI3V2l5Y1l6OTNDM2ZCcXBXWXo0MWduNEJTdDFzbWtrMTREZzZCbmhGUkdiWFo2RS0iLCJrbC1jMnViZDZqanF1bWFsenQ1IjoiZUdJN0Y3N1R2X3NHSndSZkJ5d282blFYNnc3anh6cXY1NFVaN29Pd0JSZnhiTmZhbFRyY2IyRlNpdWpQbVdwayJ9LCJ2IjoxfSwic2VxIjo2LCJzdGF0ZSI6ImFjdGl2ZSIsInR5cGUiOiJrbC5sZWFzZS5zdGF0dXMiLCJ1bmF0dGVuZGVkIjp0cnVlLCJ2IjoxfQ",
+        "sig": "pLnpK8QiWZjrVJEMvz_5k1YtdZ7XrpOtygrUll_2QCveYl5brzTNxK78vncGNu-RYjowCHPm9AqtuQ5JYFEfAA"
+      }
+    ]
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-c2ubd6jjqumalzt5",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImxlYXNlcyI6W3sibGVhc2VfaWQiOiI2ZDA0YjNjMi1lZWRjLTRlMWMtODZlYy00ZWJkMWE4Njk1N2EiLCJzZXEiOjZ9XSwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub25jZSI6Im5lODdsN18zdHhqQ3ZWcU0xSHhDRkk4bWtrUmdhLV9paWxJT1Bsam5rU00iLCJ0b19kZXZpY2UiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJ0eXBlIjoia2wubGVhc2UubGlzdGluZyIsInYiOjF9",
+    "sig": "sEuZ1o9AYp6EbObxt5oY2imxqxYyotHVV4y-8jYRjb7uQDq04AeE2SN_dlxUm5obY4nZgDt_LHJ5O16ibcMcCQ"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "leases": [
+      {
+        "lease_id": "6d04b3c2-eedc-4e1c-86ec-4ebd1a86957a",
+        "seq": 6,
+        "state": "active"
+      }
+    ]
+  }
+}

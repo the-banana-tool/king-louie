@@ -31,7 +31,8 @@ function loadVerifiers() {
     const { open, verifyEd25519 } = require('../../approvals/envelope');
     const { validateMessage } = require('../../approvals/messages');
     const { deriveNodeId } = require('../../mesh/node-identity');
-    return { verifyDeviceEnvelope, open, verifyEd25519, validateMessage, deriveNodeId };
+    const { openSealed } = require('../../approvals/seal');
+    return { verifyDeviceEnvelope, open, verifyEd25519, validateMessage, deriveNodeId, openSealed };
   } catch (err) {
     if (err.code === 'MODULE_NOT_FOUND') return null;
     throw err;
@@ -76,7 +77,9 @@ function spkiHex(key) {
 
 // The node-signed kl.approval.request: a well-formed message for this
 // request and this exact action, signed by this node's key. → message | null
-function verifiedRequest(sealed, v, { nodeId, keyHex, requestId, hash }) {
+// A sealed request (R-SP-2) names a salted hash: the node opens its own request
+// with its box key for the salt. With no box it proves nothing.
+function verifiedRequest(sealed, v, { nodeId, keyHex, requestId, hashFor, nodeBox }) {
   let opened;
   try {
     opened = v.open(sealed);
@@ -87,8 +90,21 @@ function verifiedRequest(sealed, v, { nodeId, keyHex, requestId, hash }) {
   if (v.validateMessage('kl.approval.request', m)) return null;
   if (sealed.alg !== 'Ed25519' || sealed.kid !== nodeId || m.node_id !== nodeId) return null;
   if (!v.verifyEd25519(sealed, keyHex)) return null;
-  if (m.request_id !== requestId || m.action_hash !== hash) return null;
-  return m;
+  if (m.request_id !== requestId) return null;
+  let salt = null;
+  if (m.sealed !== undefined) {
+    if (!nodeBox) return null;
+    try {
+      ({ salt } = v.openSealed({ type: 'kl.approval.request', message: m, recipientId: nodeId, agree: nodeBox.agree }).content);
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return m.action_hash === hashFor(salt) ? m : null;
+  } catch {
+    return null;
+  }
 }
 
 // The phone-signed kl.approval.response, through F3's device-envelope check
@@ -118,11 +134,11 @@ function responseApproves(sealed, v, { approverStore, nodeId, request }) {
 // The unsigned `data` fields are only used to find entries; the decision is
 // read from the signed envelopes. The outcome is F3's final decision (ruling
 // M13): outcomes for the request must exist and all be 'approved'.
-function auditProvesGrant(entries, { requestId, hash, approverStore, nodeId, keyHex, v }) {
+function auditProvesGrant(entries, { requestId, hashFor, approverStore, nodeId, keyHex, v, nodeBox }) {
   let request = null;
   for (const e of entries) {
     if (e && e.kind === 'approval.request') {
-      request = verifiedRequest(e.data?.envelope, v, { nodeId, keyHex, requestId, hash });
+      request = verifiedRequest(e.data?.envelope, v, { nodeId, keyHex, requestId, hashFor, nodeBox });
       if (request) break;
     }
   }
@@ -162,18 +178,29 @@ function auditTrustReady({ approverStore, nodeId, nodePublicKey }, v) {
 // `nodePublicKey` (this node's Ed25519 SPKI, Buffer or hex); without them it
 // fails closed.
 function verifySignedGrant(env, {
-  caseId, outcomes = [], auditLedger = null, auditScanEntries = 5000, helpers = null, approverStore = null, nodeId = null, nodePublicKey = null
+  caseId, outcomes = [], auditLedger = null, auditScanEntries = 5000, helpers = null, approverStore = null, nodeId = null, nodePublicKey = null, nodeBox = null
 } = {}) {
   if (!envelopeIntact(env)) return { ok: false, error: TAMPERED };
   let hash;
+  let hashFor;
   try {
     const h = helpers || approvalHelpers();
-    hash = h.actionHash(signedAction(env, caseId, h));
+    const action = signedAction(env, caseId, h);
+    hash = h.actionHash(action);
+    hashFor = (salt) => (salt === null ? hash : h.actionHash(action, { salt }));
   } catch {
     return { ok: false, error: NOT_FOUND };
   }
   if (typeof hash !== 'string' || !hash) return { ok: false, error: NOT_FOUND };
-  if ((outcomes || []).some((o) => o && o.decision === 'approve' && o.action_hash === hash)) return { ok: true, via: 'memory' };
+  const outcomeApproves = (o) => {
+    if (!o || o.decision !== 'approve') return false;
+    try {
+      return o.action_hash === hashFor(o.salt || null);
+    } catch {
+      return false;
+    }
+  };
+  if ((outcomes || []).some(outcomeApproves)) return { ok: true, via: 'memory' };
   const requestId = env.grantedBy?.evidence?.request_id;
   const v = auditLedger && requestId ? loadVerifiers() : null;
   const keyHex = v ? auditTrustReady({ approverStore, nodeId, nodePublicKey }, v) : null;
@@ -181,7 +208,7 @@ function verifySignedGrant(env, {
     try {
       const verified = auditLedger.verify();
       const entries = verified && verified.ok === true ? auditLedger.tail(auditScanEntries) : null;
-      if (Array.isArray(entries) && auditProvesGrant(entries, { requestId, hash, approverStore, nodeId, keyHex, v })) {
+      if (Array.isArray(entries) && auditProvesGrant(entries, { requestId, hashFor, approverStore, nodeId, keyHex, v, nodeBox })) {
         return { ok: true, via: 'audit' };
       }
     } catch {

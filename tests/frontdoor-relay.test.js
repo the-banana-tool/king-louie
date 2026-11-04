@@ -15,7 +15,7 @@ const { MeshPairing } = require('../src/mesh/mesh-pairing');
 const { NodeIdentity, deriveNodeId } = require('../src/mesh/node-identity');
 const { startRelay } = require('../src/frontdoor/relay');
 const { assertPrivateMeshHost } = require('../src/frontdoor/net');
-const { startApprovals } = require('../src/approvals/service-wiring');
+const { startApprovals, startMcpApprovals } = require('../src/approvals/service-wiring');
 const { FileCourier } = require('../src/approvals/courier');
 const { ApproverAdmin } = require('../src/approvals/approver-admin');
 const { verifyConsoleEnrollment } = require('../src/approvals/verify-device');
@@ -27,6 +27,8 @@ const https = require('https');
 const net = require('net');
 const { createLinkRpc } = require('../src/approvals/link-rpc');
 const { buildRequest, toolAction } = require('../src/approvals/messages');
+const { generateBoxKey, createBox } = require('../src/approvals/node-box-key');
+const { isSealedShape } = require('../src/approvals/seal');
 const { relaySpkiPin } = require('../src/frontdoor/tls');
 const { createPhoneServer, PHONE_LISTENER } = require('../src/frontdoor/relay');
 const { addSink } = require('../src/logging');
@@ -71,7 +73,7 @@ async function phoneCall(phone, method, p, body) {
 
 // A node: its own data and admin config dirs, paired with the relay, running
 // startApprovals, with a service.pid naming this process so couriers work.
-async function startNode(name, approverRecords = []) {
+async function startNode(name, approverRecords = [], { box = false } = {}) {
   const baseDir = tempDir(`kl-relay-node-${name}-`);
   const dataDir = path.join(baseDir, 'data');
   const configDir = path.join(baseDir, 'config');
@@ -82,6 +84,10 @@ async function startNode(name, approverRecords = []) {
   fs.writeFileSync(path.join(dataDir, 'service.pid'), String(process.pid));
 
   const identity = new NodeIdentity({ nodeName: name });
+  if (box) {
+    const { jwk, d } = generateBoxKey();
+    identity.box = createBox(jwk, d);
+  }
   const { code } = relay.nodeHub.addCode(name);
   const meshPort = relay.address().mesh.port;
   const pairing = new MeshPairing(identity, new MeshTransport({ identity, listen: false, useTls: false }), { timeoutMs: 5000 });
@@ -95,7 +101,7 @@ async function startNode(name, approverRecords = []) {
   });
   cleanups.push(() => approvals.stop());
   await until(() => approvals.relayClient.isConnected(), `${name} to link`);
-  return { name, identity, dataDir, configDir, approvals };
+  return { name, identity, dataDir, configDir, approvals, store, ports: { store, cipher: createAesGcmCipher(crypto.randomBytes(32)) } };
 }
 
 before(async () => {
@@ -110,6 +116,45 @@ before(async () => {
     extensions: [(r) => r.mailbox.registerType('kl.test.', { ttlMs: 60000 })]
   });
   cleanups.push(() => relay.stop());
+});
+
+// The wiring itself: a real node with a box-key approver sends sealed, in the
+// service and in the `mcp` process alike.
+describe('startApprovals seals once an approver holds a box key', () => {
+  const owner = createFakePhone({ name: 'Box phone', boxKey: true });
+  const action = toolAction('Bash', { command: 'hidden-parameter' }, '/srv/site');
+  let node;
+  before(async () => { node = await startNode('sealing-01', [owner.approverRecord({ boxKey: true })], { box: true }); });
+
+  it('the service: what reaches the relay has the sealed shape and opens for the phone', async () => {
+    const ask = node.approvals.phoneApprover.requestAction(action, { origin: { client: 'agent' }, currentAction: () => action });
+    const held = await until(() => relay.approvals.list([node.identity.nodeId])[0], 'the request at the relay');
+    const { message } = open(held.envelope);
+    assert.equal(isSealedShape('kl.approval.request', message), true);
+    assert.equal(Object.hasOwn(message, 'action'), false);
+    assert.equal(Buffer.from(held.envelope.payload, 'base64url').toString().includes('hidden-parameter'), false);
+    assert.deepEqual(owner.open(held.envelope, 'kl.approval.request').content.action, action);
+    assert.ok(Object.hasOwn(message.sealed.keys, node.identity.nodeId));
+    node.approvals.phoneApprover.stop();
+    await ask;
+  });
+
+  it('the mcp process: its approver seals too', async () => {
+    const mcp = await startMcpApprovals({
+      dataDir: node.dataDir, configDir: node.configDir, nodeConfig: { name: node.name, approvers: { requestTtlS: 300 }, policy: {} },
+      ports: node.ports, identity: node.identity, approverStoreOptions: storeOptions
+    });
+    cleanups.push(() => mcp.stop());
+    const sent = [];
+    mcp.courier.submit = async (envelope) => { sent.push(envelope); };
+    mcp.courier.canDeliver = () => ({ ok: true });
+    mcp.courier.isConnected = () => true;
+    const ask = mcp.approver.requestAction(action, { origin: { client: 'stdio-mcp' }, currentAction: () => action });
+    await until(() => sent.length === 1, 'the request at the courier');
+    assert.equal(isSealedShape('kl.approval.request', open(sent[0]).message), true);
+    mcp.approver.stop();
+    await ask;
+  });
 });
 
 describe('relay end to end', () => {
@@ -356,6 +401,30 @@ describe('relay trust rules', () => {
     const { envelope: second } = buildRequest({ identity: a.identity, action: toolAction('Bash', { command: 'id' }, '/srv'), origin: { client: 'agent' }, ttlMs: 60000 });
     await a.call('approval.submit', { envelope: second });
     assert.equal((await call(phone, 'POST', `/v1/approvals/${open(second).message.request_id}/response`, phone.respond(envelope, 'approve'))).status, 400);
+  });
+
+  it('approval.submit takes a sealed request: the phone gets the envelope as signed, and nothing in clear holds the action', async () => {
+    const nodeBox = generateBoxKey().jwk;
+    const sealPolicy = {
+      sealing: () => true,
+      canSeal: () => true,
+      recipients: () => ({ [phone.deviceId]: generateBoxKey().jwk, [a.identity.nodeId]: nodeBox }),
+      senderId: a.identity.nodeId,
+      nodeBox
+    };
+    const { envelope, message } = buildRequest({ identity: a.identity, action: toolAction('Bash', { command: 'hidden-parameter' }, '/srv/hidden-cwd'), origin: { client: 'agent', session: 'hidden-session' }, ttlMs: 60000, sealPolicy });
+    assert.deepEqual(await a.call('approval.submit', { envelope }), { ok: true });
+    const got = await call(phone, 'GET', `/v1/approvals/${message.request_id}`);
+    assert.equal(got.status, 200);
+    assert.deepEqual(got.body.envelope, envelope);
+    const list = await call(phone, 'GET', '/v1/approvals?wait=0');
+    assert.ok(list.body.some((e) => e.envelope.payload === envelope.payload));
+    const seen = open(got.body.envelope).message;
+    for (const key of ['action', 'origin', 'salt']) assert.equal(Object.hasOwn(seen, key), false, key);
+    const clearText = JSON.stringify({ seen: { ...seen, sealed: null }, view: { ...got.body, envelope: null } });
+    for (const hidden of ['hidden-parameter', 'hidden-cwd', 'hidden-session', 'Bash']) assert.equal(clearText.includes(hidden), false, hidden);
+    const res = await call(phone, 'POST', `/v1/approvals/${message.request_id}/response`, phone.respond(envelope, 'approve'));
+    assert.equal(res.status, 202);
   });
 
   it('refuses node envelopes not signed by the node on the link, or naming another node', async () => {
@@ -879,6 +948,60 @@ describe('relay: the read key', () => {
     assert.equal(res.status, 200);
     const byNode = Object.fromEntries(res.body.nodes.map((n) => [n.node_id, n.state]));
     assert.deepEqual(byNode, { [applied.identity.nodeId]: 'applied', [odd.identity.nodeId]: 'offline' });
+  });
+
+  it('POST /v1/devices/box-key: forwarded to every active node, each state reported, nothing stored', async () => {
+    const boxed = await linkNode('bk-new', { 'device.box_key': (params) => { received.push(params.envelope); return { state: 'box-key-pending-apply' }; } });
+    const dup = await linkNode('bk-dup', { 'device.box_key': () => ({ state: 'duplicate' }) });
+    const odd = await linkNode('bk-odd', { 'device.box_key': () => ({ state: 'set-somehow' }) });
+    const phone = createFakePhone({ name: 'Boxed phone' });
+    active(phone, quiet, boxed, dup, odd);
+    r.devices.setReadKey(phone.deviceId, phone.readJwk, new Date().toISOString());
+    const before = JSON.stringify(r.devices.get(phone.deviceId));
+    const statement = phone.boxKeyStatement();
+    const sent = received.length;
+    const res = await call(phone, 'POST', '/v1/devices/box-key', statement, { key: 'read' });
+    assert.equal(res.status, 200);
+    const byNode = Object.fromEntries(res.body.nodes.map((n) => [n.node_id, n.state]));
+    assert.deepEqual(byNode, {
+      [quiet.identity.nodeId]: 'offline',
+      [boxed.identity.nodeId]: 'box-key-pending-apply',
+      [dup.identity.nodeId]: 'duplicate',
+      [odd.identity.nodeId]: 'offline'
+    });
+    assert.equal(received.length, sent + 1);
+    assert.deepEqual(received.at(-1), statement, 'the node gets the signed statement unchanged');
+    assert.equal(JSON.stringify(r.devices.get(phone.deviceId)), before, 'the relay stores nothing');
+    const boxX = JSON.parse(Buffer.from(statement.payload, 'base64url').toString('utf8')).box_key.x;
+    assert.ok(boxX, 'the statement carries the key looked for below');
+    assert.equal(JSON.stringify(r.devices.get(phone.deviceId)).includes(boxX), false);
+    const list = await call(phone, 'GET', '/v1/devices', undefined, { key: 'read' });
+    assert.equal(JSON.stringify(list.body).includes(boxX), false, 'GET /v1/devices echoes no box key');
+  });
+
+  it("box-key refuses a read-key-signed statement, another device's, an expired or future one, a wrong type, and an inactive device", async () => {
+    const phone = createFakePhone({ name: 'Box checked' });
+    const stranger = createFakePhone({ name: 'Box stranger' });
+    active(phone, modern);
+    active(stranger, modern);
+    const sent = received.length;
+    const wrongSigner = await call(phone, 'POST', '/v1/devices/box-key', phone.boxKeyStatement({ signWith: 'read' }));
+    assert.deepEqual([wrongSigner.status, wrongSigner.body.error], [400, 'bad_box_key']);
+    const notCaller = await call(stranger, 'POST', '/v1/devices/box-key', phone.boxKeyStatement());
+    assert.deepEqual([notCaller.status, notCaller.body.error], [400, 'bad_box_key']);
+    const t = Date.now();
+    const expired = await call(phone, 'POST', '/v1/devices/box-key', phone.boxKeyStatement({ now: t - 8 * DAY_MS, ttlMs: DAY_MS }));
+    assert.deepEqual([expired.status, expired.body.error], [400, 'expired']);
+    const future = await call(phone, 'POST', '/v1/devices/box-key', phone.boxKeyStatement({ now: t + 10 * 60000 }));
+    assert.deepEqual([future.status, future.body.error], [400, 'from_the_future']);
+    assert.equal((await call(phone, 'POST', '/v1/devices/box-key', phone.readKeyStatement())).body.error, 'malformed');
+
+    const idle = createFakePhone({ name: 'Box nowhere' });
+    active(idle, modern);
+    r.devices.setNodeState(idle.deviceId, modern.identity.nodeId, 'revoked');
+    const inactive = await call(idle, 'POST', '/v1/devices/box-key', idle.boxKeyStatement());
+    assert.deepEqual([inactive.status, inactive.body.error], [403, 'forbidden']);
+    assert.equal(received.length, sent, 'nothing refused reached a node');
   });
 
   it('a read-signed request reaches a read route and is refused on a device route', async () => {

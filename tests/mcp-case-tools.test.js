@@ -351,7 +351,12 @@ describe('MCP case tools through the running service (courier, R24)', () => {
       assert.strictEqual((await c.call('answer_question', { case: meta.id, question_id: q.approval.id, text: 'yes', quote: 'yes, go ahead' })).error.error, 'not_answerable_here');
       for (let i = 0; i < 100 && !audit.some((e) => e.kind === 'cases.answer_question'); i += 1) await new Promise((r) => setTimeout(r, 10));
       const entry = audit.find((e) => e.kind === 'cases.answer_question');
-      assert.deepStrictEqual(entry && entry.data, { channel: 'mcp-stdio', caseId: meta.id, questionId: q.free.id, optionId: null, factId: r.fact_id });
+      assert.deepStrictEqual(entry && entry.data, { channel: 'mcp-stdio', caseId: meta.id, questionId: q.free.id, factId: r.fact_id });
+      // Answered by option, the entry is the same: the option is the owner's answer, and the ledger is mirrored.
+      const picked = await c.call('answer_question', { case: meta.id, question_id: q.color.id, option_id: 'a', quote: 'Lead with the lake view' });
+      for (let i = 0; i < 100 && audit.filter((e) => e.kind === 'cases.answer_question').length < 2; i += 1) await new Promise((r) => setTimeout(r, 10));
+      const byOption = audit.filter((e) => e.kind === 'cases.answer_question')[1];
+      assert.deepStrictEqual(byOption && byOption.data, { channel: 'mcp-stdio', caseId: meta.id, questionId: q.color.id, factId: picked.fact_id });
     } finally {
       c.close();
       courier.stop();

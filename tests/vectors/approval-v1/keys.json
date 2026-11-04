@@ -1,10 +1,14 @@
 {
-  "note": "Fixed test keys for the approval-v1 vectors. Never use them for anything real: nodes refuse these device keys (and the read keys A_read and B_read, which have no device id of their own: read_key_of names the device they belong to) unless built with allowTestKeys (src/approvals/test-keys.js).",
+  "note": "Fixed test keys for the approval-v1 vectors. Never use them for anything real: nodes refuse these device keys (and the read keys A_read and B_read, which have no device id of their own: read_key_of names the device they belong to; and the box keys A_box and B_box, by box_key_of) unless built with allowTestKeys (src/approvals/test-keys.js).",
   "nodes": {
     "web-01": {
       "seed": "00f47b1c993fe0506bf6e606dca8c01afaaafc14cf44ee38c70bf6fb2b166727",
       "spki": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423",
-      "id": "kl-c2ubd6jjqumalzt5"
+      "id": "kl-c2ubd6jjqumalzt5",
+      "box": {
+        "d": "G4xu6oJW0Cytp2E9o732vG-h6xdVFltHuGbnFLBr8_8",
+        "jwk": { "kty": "EC", "crv": "P-256", "x": "tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw", "y": "qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ" }
+      }
     },
     "gpu-box": {
       "seed": "25987fdeb838cd84203da80857dd70a62221c673e4ae8c7cea7b4190a2dd5aca",
@@ -44,6 +48,18 @@
       "jwk": { "kty": "EC", "crv": "P-256", "x": "cVt3bucyCwSWInd6zTjQgp27Jl5Bsy_wLUnYZMzSBQY", "y": "jt2NwAHES1iQ9RYN8GvJNzrNVL4W2FwJQ5oH5CssLiU" },
       "read_key_of": "B",
       "fingerprint": "r-245m efke vdmy 5lkl"
+    },
+    "A_box": {
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ",
+      "jwk": { "kty": "EC", "crv": "P-256", "x": "AUcENPOiBeZMUCUoLPAf4iXiRVQGO2XcbpR_GbvA47Y", "y": "3wSU8i6hc3-PXZztNVJm2LpENtj87rbex4qhJa3VQ-4" },
+      "box_key_of": "A",
+      "fingerprint": "b-sv5o q23r zc2v e5ib"
+    },
+    "B_box": {
+      "d": "9m8MHBE-HrDhe67-nZm6agY13KjUy9Nkmev9J1aRw20",
+      "jwk": { "kty": "EC", "crv": "P-256", "x": "h6PCItS4cVIGuDrKEcllyTPlzqJD3V4yStB8RYEEhlc", "y": "Mb8Qva8gF3CiDXhJpmWn5R0JV1QbHmocdj4DV-pbqKA" },
+      "box_key_of": "B",
+      "fingerprint": "b-jmye d6hw ml3m s5br"
     }
   }
 }

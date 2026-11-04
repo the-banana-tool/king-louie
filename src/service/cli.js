@@ -27,7 +27,7 @@ const HELP = `Usage:
   king-louie-service install --personal [--data-dir DIR] [--browser PATH] [--provider P] [--model M] [--dry-run] [--yes]
   king-louie-service uninstall --personal [--data-dir DIR] [--dry-run] [--yes]
   king-louie-service enroll-device [--data-dir DIR]              (admin: pair a phone approver)
-  king-louie-service device list|revoke <device-id>|apply [--yes] [--data-dir DIR]
+  king-louie-service device list|revoke <device-id>|apply|unseal [--yes] [--data-dir DIR]
   king-louie-service relay run|code <node-name>|nodes|remove-node <node-name>|qr [--data-dir DIR]
   king-louie-service relay push-test [--device <device-id>] [--data-dir DIR]   (admin: send a test push)
   king-louie-service frontdoor enroll-device|code <node-name> [--confirm]|nodes|remove-node <node-name>|rotate-tls-key [--data-dir DIR]
@@ -83,7 +83,7 @@ const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'r
 // it for). The scoping is checked in main(), before any command runs. A
 // one-word entry is a command with no subcommand; install and uninstall take
 // it only with --personal (checked in main()).
-const YES_COMMANDS = [['desktop', 'pair'], ['device', 'apply'], ['identity', 'record'], ['session', 'install'], ['session', 'uninstall'], ['install'], ['uninstall'], ['import']];
+const YES_COMMANDS = [['desktop', 'pair'], ['device', 'apply'], ['device', 'unseal'], ['identity', 'record'], ['session', 'install'], ['session', 'uninstall'], ['install'], ['uninstall'], ['import']];
 const YES_SHOWN = { install: 'install --personal', uninstall: 'uninstall --personal' };
 const listed = (names) => names.map((n) => `"${n}"`).join(', ').replace(/, ([^,]*)$/, ' and $1');
 const YES_COMMANDS_TEXT = `${listed(YES_COMMANDS.filter((e) => e.length === 2).map(([c, s]) => `${c} ${s}`))}, and for ${listed(YES_COMMANDS.filter((e) => e.length === 1).map(([c]) => YES_SHOWN[c] || c))}`;

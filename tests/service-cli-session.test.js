@@ -1270,7 +1270,7 @@ describe('the CLI', () => {
     for (const argv of [['session', '--yes'], ['session', 'status', '--yes'], ['session', 'probe', '--yes'], ['session', '_write-autostart', '/x', '--yes'], ['session', '_remove-autostart', '/x', '--yes']]) {
       const t4 = io();
       assert.equal(await main(argv, t4.io), 2, argv.join(' '));
-      assert.match(t4.err.join(''), /"--yes" is only valid for "desktop pair", "device apply", "identity record", "session install" and "session uninstall"/);
+      assert.match(t4.err.join(''), /"--yes" is only valid for "desktop pair", "device apply", "device unseal", "identity record", "session install" and "session uninstall"/);
     }
     const help = io();
     await main(['help'], help.io);

@@ -142,8 +142,12 @@ class InviteFlow(private val scope: CoroutineScope, private val onProblem: (Stri
         val readJwk = device["read_key"]?.takeIf { it !is JsonNull }?.let { rk ->
             Messages.jwk(rk["x"].str() ?: return null, rk["y"].str() ?: return null)
         }
+        // And with its box key (R-SP-10), under the same mac.
+        val boxJwk = device["box_key"]?.takeIf { it !is JsonNull }?.let { bk ->
+            Messages.jwk(bk["x"].str() ?: return null, bk["y"].str() ?: return null)
+        }
         val rebuilt = try {
-            Messages.device(id, name, platform, x, y, readJwk)
+            Messages.device(id, name, platform, x, y, readJwk, boxJwk)
         } catch (e: ProtocolException) {
             return null
         }

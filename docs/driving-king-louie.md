@@ -518,7 +518,8 @@ relay is down your Stop cannot reach the node, and the minutes you approved
 are the bound. A take ends when its time runs out, when any of your phones
 stops it, when the phone that approved it is revoked, when the session
 closes (`cancel_job`, the idle close, a failed turn), when the screen locks,
-when the service stops, or after **30 minutes** with no word from you once a
+when the service stops, when the node seals and no phone can read it any more
+(`no_sealed_recipient`), or after **30 minutes** with no word from you once a
 turn has ended. Two endings mean the video is not all there:
 
 - `helper_lost`: the session helper has been gone 30 s (you signed out, it

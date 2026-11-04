@@ -66,6 +66,10 @@ final class DeviceKey {
         }
         let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
         try keychainWrite(key.dataRepresentation)
+        // After the write, whose delete() takes any box key with it. An enrollment
+        // carries it (R-SP-10). One that cannot be made leaves the phone with none: it
+        // reads nothing sealed, and Settings says so.
+        do { _ = try BoxKey.create() } catch { BoxKey.delete() }
         // canEvaluatePolicy fills evaluatedPolicyDomainState without a prompt.
         let context = LAContext()
         var laError: NSError?
@@ -82,6 +86,7 @@ final class DeviceKey {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account]
         SecItemDelete(query as CFDictionary)
         UserDefaults.standard.removeObject(forKey: domainStateKey)
+        BoxKey.delete()
     }
 
     /// A fresh biometric prompt, then one signature (raw r||s).

@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { canonicalize, sha256b64url } = require('../platform/jcs');
 const { seal, open, nodeSigner, deriveDeviceId, deviceIdFromJwk, fingerprintGroups, isDeviceJwk, samePoint, fromB64url, toB64url, EnvelopeError } = require('./envelope');
+const { boxKeyFingerprint, sealContent, splitMessage, isSealedShape, newSalt, saltedHash, SealError } = require('./seal');
 
 class MessageError extends Error {
   constructor(reason, detail = '') {
@@ -25,6 +26,13 @@ const DEVICE_ID_RE = /^d-[a-z2-7]{16}$/;
 const NODE_ID_RE = /^kl-[a-z2-7]{16}$/;
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_ACTION_BYTES = 262144;
+// A sealed request's signed payload. The audit entry holds the envelope, and a
+// mirror page is at most 262144 bytes plus 1024 of slack (src/frontdoor/audit/
+// mirror.js); an entry over that breaks the node's mirror for good
+// (`oversize_entry`). Sealing grows an action by a third and the envelope by a
+// third again, so a sealed action has about 140 KiB, not MAX_ACTION_BYTES. The
+// 5 KiB left over is the rest of the entry and of the page.
+const SEALED_PAYLOAD_MAX = 258048;
 const SUMMARY_MAX = 300;
 const NODE_NAME_MAX = 64;
 const ORIGIN_STRING_MAX = 200;
@@ -34,6 +42,7 @@ const TTL_MAX_MS = 300000;
 const ENROLL_MAX_MS = 10 * 60 * 1000;
 const REVOKE_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const READ_KEY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+const BOX_KEY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const PLATFORMS = ['ios', 'android', 'demo'];
 const STATUS_STATES = ['approved', 'denied', 'expired', 'withdrawn', 'refused'];
 
@@ -136,7 +145,15 @@ function envelopeAction({ executorId, caseId, envelopeHash, summary }) {
   };
 }
 
-function actionHash(action) {
+// `salt` is a sealed request's (R-SP-2); with none, the clear rule.
+function actionHash(action, { salt = null } = {}) {
+  if (salt !== null) {
+    try {
+      return saltedHash(salt, action);
+    } catch (err) {
+      throw new MessageError('non_canonical', err.message);
+    }
+  }
   let text;
   try {
     text = canonicalize(action);
@@ -157,7 +174,43 @@ function normalizeOrigin(origin) {
   return out;
 }
 
-function buildRequest({ identity, action, origin, ttlMs = TTL_MAX_MS, now = Date.now(), requestId = null, nonce = null }) {
+// Whom this request is sealed to, or null for the clear path. R-SP-5: sealing()
+// true never ends in clear. Whatever cannot be answered is a refusal.
+function sealTargets(sealPolicy) {
+  if (!sealPolicy) return null;
+  const refuse = () => new MessageError('no_sealed_recipient', 'sealing is on and no phone can read it');
+  let recipients;
+  try {
+    if (!sealPolicy.sealing()) return null;
+    if (!sealPolicy.canSeal()) throw refuse();
+    recipients = sealPolicy.recipients();
+  } catch {
+    throw refuse();
+  }
+  if (!sealPolicy.nodeBox || !Object.keys(recipients).some((id) => DEVICE_ID_RE.test(id))) throw refuse();
+  return { recipients, senderId: sealPolicy.senderId, nodeBox: sealPolicy.nodeBox };
+}
+
+function buildSealedRequest(full, action, targets, identity) {
+  const salt = newSalt();
+  let message;
+  try {
+    const { clear, content } = splitMessage('kl.approval.request', { ...full, action_hash: saltedHash(salt, action), node_box: targets.nodeBox, salt });
+    // Never an injected ephemeral or random: a reused ephemeral repeats keystream
+    // under the wrap's zero iv (tests/sealed-types.test.js).
+    message = sealContent({ type: 'kl.approval.request', senderId: targets.senderId, clear, content, recipients: targets.recipients });
+  } catch (err) {
+    if (err instanceof SealError) throw new MessageError(err.reason, err.message);
+    throw err;
+  }
+  const envelope = seal(message, nodeSigner(identity));
+  if (envelope.payload.length > SEALED_PAYLOAD_MAX) {
+    throw Object.assign(new MessageError('action_too_large', 'the sealed request is over what an audit page can hold'), { sealed: true });
+  }
+  return { message, envelope, bytes: fromB64url(envelope.payload), salt };
+}
+
+function buildRequest({ identity, action, origin, ttlMs = TTL_MAX_MS, now = Date.now(), requestId = null, nonce = null, sealPolicy = null }) {
   let actionText;
   try {
     actionText = canonicalize(action);
@@ -167,6 +220,7 @@ function buildRequest({ identity, action, origin, ttlMs = TTL_MAX_MS, now = Date
   if (Buffer.byteLength(actionText, 'utf8') > MAX_ACTION_BYTES) {
     throw new MessageError('action_too_large', `the action is over ${MAX_ACTION_BYTES} bytes`);
   }
+  const targets = sealTargets(sealPolicy);
   const message = {
     v: 1,
     type: 'kl.approval.request',
@@ -180,8 +234,9 @@ function buildRequest({ identity, action, origin, ttlMs = TTL_MAX_MS, now = Date
     expires_at: iso(now + clampTtl(ttlMs)),
     nonce: nonce || randomNonce()
   };
+  if (targets) return buildSealedRequest(message, action, targets, identity);
   const envelope = seal(message, nodeSigner(identity));
-  return { message, envelope, bytes: fromB64url(envelope.payload) };
+  return { message, envelope, bytes: fromB64url(envelope.payload), salt: null };
 }
 
 function buildStatus({ identity, requestId, state, deviceId = null, reason = null, now = Date.now() }) {
@@ -285,23 +340,51 @@ function checkOrigin(origin) {
 
 const DEVICE_KEYS = ['device_id', 'name', 'platform', 'public_key'];
 
-// The four keys of today, or exactly those and `read_key` (android-slim spec
-// §8.2): a P-256 JWK on the curve whose point is not `public_key`'s. The
-// device id still derives from `public_key` alone.
+// The four keys of today, or those and `read_key` (android-slim spec §8.2)
+// and `box_key` (sealed phones, R-SP-10): each a P-256 JWK on the curve whose
+// point is no other key's here. The device id still derives from `public_key`
+// alone.
 function isDevice(device) {
   if (!isPlainObject(device)) return false;
   const withReadKey = Object.hasOwn(device, 'read_key');
-  if (!hasExactKeys(device, withReadKey ? [...DEVICE_KEYS, 'read_key'] : DEVICE_KEYS)) return false;
+  const withBoxKey = Object.hasOwn(device, 'box_key');
+  const keys = [...DEVICE_KEYS, ...(withReadKey ? ['read_key'] : []), ...(withBoxKey ? ['box_key'] : [])];
+  if (!hasExactKeys(device, keys)) return false;
   if (!isString(device.name) || device.name.length < 1 || device.name.length > 64) return false;
   if (!PLATFORMS.includes(device.platform) || !isDeviceJwk(device.public_key)) return false;
   if (withReadKey && (!isDeviceJwk(device.read_key) || samePoint(device.read_key, device.public_key))) return false;
+  if (withBoxKey && (!isDeviceJwk(device.box_key) || samePoint(device.box_key, device.public_key))) return false;
+  if (withReadKey && withBoxKey && samePoint(device.box_key, device.read_key)) return false;
   return DEVICE_ID_RE.test(device.device_id) && deviceIdFromJwk(device.public_key) === device.device_id;
 }
 
+// What both shapes of a request hold in clear.
+const requestClearFields = (m) => UUID_V4_RE.test(m.request_id) && NODE_ID_RE.test(m.node_id) && withinLength(m.node_name, NODE_NAME_MAX)
+  && HASH_RE.test(m.action_hash) && isTimestamp(m.created_at) && isTimestamp(m.expires_at) && NONCE_RE.test(m.nonce);
+
+const isClearRequest = (m) => hasExactKeys(m, ['v', 'type', 'request_id', 'node_id', 'node_name', 'action', 'action_hash', 'origin', 'created_at', 'expires_at', 'nonce'])
+  && requestClearFields(m) && checkAction(m.action) && checkOrigin(m.origin);
+
+// A sealed one (R-SP-4): its action and origin are checked by whoever opens it,
+// with validateOpenedRequest.
+const isSealedRequest = (m) => isSealedShape('kl.approval.request', m) && requestClearFields(m) && isDeviceJwk(m.node_box);
+
+// A sealed request after opening (clear part and content together). → null, or
+// the reason a phone refuses it. The hash is held to the content here, before
+// anything is shown (R-SP-2).
+function validateOpenedRequest(m) {
+  try {
+    if (!isPlainObject(m) || m.type !== 'kl.approval.request' || m.v !== 1) return 'malformed';
+    const { node_box: nodeBox, salt, ...clear } = m;
+    if (!isClearRequest(clear) || !isDeviceJwk(nodeBox) || !HASH_RE.test(salt)) return 'malformed';
+    return saltedHash(salt, m.action) === m.action_hash ? null : 'action_hash_mismatch';
+  } catch {
+    return 'malformed';
+  }
+}
+
 const VALIDATORS = {
-  'kl.approval.request': (m) => hasExactKeys(m, ['v', 'type', 'request_id', 'node_id', 'node_name', 'action', 'action_hash', 'origin', 'created_at', 'expires_at', 'nonce'])
-    && UUID_V4_RE.test(m.request_id) && NODE_ID_RE.test(m.node_id) && withinLength(m.node_name, NODE_NAME_MAX) && checkAction(m.action)
-    && HASH_RE.test(m.action_hash) && checkOrigin(m.origin) && isTimestamp(m.created_at) && isTimestamp(m.expires_at) && NONCE_RE.test(m.nonce),
+  'kl.approval.request': (m) => isClearRequest(m) || isSealedRequest(m),
   'kl.approval.response': (m) => hasExactKeys(m, ['v', 'type', 'request_id', 'node_id', 'action_hash', 'nonce', 'decision', 'expires_at', 'device_id', 'signed_at'])
     && UUID_V4_RE.test(m.request_id) && NODE_ID_RE.test(m.node_id) && HASH_RE.test(m.action_hash) && NONCE_RE.test(m.nonce)
     && (m.decision === 'approve' || m.decision === 'deny') && isTimestamp(m.expires_at) && DEVICE_ID_RE.test(m.device_id) && isTimestamp(m.signed_at),
@@ -335,6 +418,15 @@ const VALIDATORS = {
     const span = Date.parse(m.expires_at) - Date.parse(m.created_at);
     return span > 0 && span <= READ_KEY_MAX_MS;
   },
+  // The device key's statement of its box key (sealed phones, R-SP-10), as for
+  // the read key. There is no form of it that takes a box key away.
+  'kl.device.box_key': (m) => {
+    if (!hasExactKeys(m, ['v', 'type', 'device_id', 'box_key', 'created_at', 'expires_at', 'nonce'])) return false;
+    if (!DEVICE_ID_RE.test(m.device_id) || !isDeviceJwk(m.box_key)) return false;
+    if (!isTimestamp(m.created_at) || !isTimestamp(m.expires_at) || !NONCE_RE.test(m.nonce)) return false;
+    const span = Date.parse(m.expires_at) - Date.parse(m.created_at);
+    return span > 0 && span <= BOX_KEY_MAX_MS;
+  },
   'kl.enroll.open': (m) => hasExactKeys(m, ['v', 'type', 'node_id', 'code_id', 'expires_at', 'nonce'])
     && NODE_ID_RE.test(m.node_id) && CODE_ID_RE.test(m.code_id) && isTimestamp(m.expires_at) && NONCE_RE.test(m.nonce),
   'kl.enroll.done': (m) => hasExactKeys(m, ['v', 'type', 'node_id', 'code_id', 'enroll', 'refused', 'nonce'])
@@ -366,7 +458,9 @@ function genericDeviceMessage(m) {
 
 function validateMessage(type, message) {
   try {
-    if (!isPlainObject(message) || message.type !== type || !Number.isInteger(message.v)) return 'malformed';
+    // A caller may pass a message's own type, and an array equals itself and
+    // would coerce to a VALIDATORS key below.
+    if (typeof type !== 'string' || !isPlainObject(message) || message.type !== type || !Number.isInteger(message.v)) return 'malformed';
     if (message.v !== 1) return 'unsupported_version';
     // Object.hasOwn: an unregistered type (including one that collides with
     // an inherited name like 'constructor') is simply unrecognised, never
@@ -404,6 +498,9 @@ module.exports = {
   DEVICE_ID_RE,
   NODE_ID_RE,
   MAX_ACTION_BYTES,
+  SEALED_PAYLOAD_MAX,
+  sealTargets,
+  validateOpenedRequest,
   TTL_MIN_MS,
   TTL_MAX_MS,
   PLATFORMS,
@@ -424,8 +521,10 @@ module.exports = {
   enrollMac,
   inviteMac,
   READ_KEY_MAX_MS,
+  BOX_KEY_MAX_MS,
   phoneAuthString,
   readKeyFingerprint,
+  boxKeyFingerprint,
   isDevice,
   encodeQr,
   decodeQr,

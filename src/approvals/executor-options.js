@@ -7,11 +7,25 @@
 // keep the on-screen dialog and never reach the phone; remote runs in phone
 // mode only ever get the phone.
 const { createLogger } = require('../logging');
-const { canonicalize, sha256b64url } = require('../platform/jcs');
+const { paramsHmac, auditOriginOf, auditError, errorByCode } = require('./audit-fields');
 const originHelpers = require('../core/origin');
 
 const log = createLogger('approvals/executor-options');
 const PHONE_GRACE_MS = 15000;
+const LOGGED_ERROR_MAX = 2000;
+
+// The ledger holds a failure's code alone, so its words are logged here. A tool
+// with an audit form of its parameters (Type, Key) may quote typed text, so it is
+// logged by code too; so is one the registry does not know.
+function logToolFailure(toolName, jobId, result) {
+  // Required here, as in phoneExecutorOptions: only the agent profile loads the tool registry.
+  const { toolRegistry } = require('../tools');
+  const tool = toolRegistry.get(toolName);
+  const words = !tool || typeof tool.auditParameters === 'function'
+    ? errorByCode(result)
+    : String((result && result.error) || 'failed').slice(0, LOGGED_ERROR_MAX);
+  log.warn(`${toolName} failed (job ${jobId || 'none'}): ${words}`);
+}
 
 // Fleet stage 4 §3.8: a delegate session whose client was not granted
 // fleet:unsafe refuses unsafe calls itself; the phone is never asked.
@@ -54,14 +68,6 @@ function refuseUnsafeGate(classifyCall, allowedRoots = null) {
   });
 }
 
-function paramsSha256(params) {
-  try {
-    return sha256b64url(canonicalize(params === undefined || params === null ? {} : params));
-  } catch {
-    return null;
-  }
-}
-
 function runOrigin({ executorOptions, event, local, helpers }) {
   if (executorOptions.origin) return executorOptions.origin;
   const session = executorOptions.chatId || null;
@@ -90,7 +96,9 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
     // The same metadata object goes on to the phone approver, so the refusal
     // it writes there reaches ToolExecutor's mapApprovalResult.
     options.approvalRequester = (toolName, parameters, metadata = {}) => {
-      metadata.origin = origin;
+      // What the phone is shown; the kind and the ids are the ledger's.
+      const { kind, grant_id: grantId, client_id: clientId, ...phoneOrigin } = origin;
+      metadata.origin = phoneOrigin;
       return phoneApprover.requestApproval(toolName, parameters, metadata);
     };
     // The phone's own expiry answers first ('timeout' from the approver).
@@ -109,22 +117,26 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
         .then(() => auditLedger.append({ kind, data }))
         .catch((err) => log.warn(`audit ${kind} failed: ${err?.message ?? String(err)}`));
     };
-    // The hash is of the parameters as called, except for a tool that gives
-    // an audit form of them (Type and Key, R-F5-16): the ledger is served
-    // to the relay's mirror, and a plain hash of a short typed text or of
-    // one key is that text to anyone with a dictionary. Nothing verifies
-    // this hash against a phone signature: what a phone signs for an unsafe
-    // call is the request's action_hash, which is untouched.
+    // The ledger is served to the relay's mirror, so an entry holds the tool,
+    // the tier and the ids (R-SP-7): the origin is its kind, an error its code
+    // (audit-fields.js). The mark is of the parameters as called, except for a
+    // tool that gives an audit form of them (Type and Key, R-F5-16), under a key
+    // only this node holds: a plain hash of a short parameter is that parameter
+    // to anyone with a dictionary. Null where this process holds no box key.
+    // Nothing verifies it against a phone signature: what a phone signs for an
+    // unsafe call is the request's action_hash, which is untouched.
+    const identity = auditLedger.identity || (phoneApprover && phoneApprover.identity) || null;
+    const auditOrigin = auditOriginOf(origin);
     executor.on('tierDecision', ({ toolName, parameters, auditParameters, tier, reason }) => {
       const hashed = auditParameters === undefined ? parameters : auditParameters;
-      append('tier.decision', { tool: toolName, tier, reason, params_sha256: paramsSha256(hashed), origin });
+      append('tier.decision', { tool: toolName, tier, reason, params_hmac: paramsHmac(hashed, identity), job_id: origin.job_id || null, origin: auditOrigin });
     });
     // 'executeStart' fires only after every gate (hooks, rules, node-policy
     // tier, the approval gate, the abort check) has passed, immediately
     // before the tool's execute — unlike 'preExecute', which also fires for
     // calls later denied. exec.start means "the tool is about to run".
     executor.on('executeStart', ({ toolName }) => {
-      append('exec.start', { kind: 'tool', name: toolName, request_id: null, job_id: origin.job_id || null, origin });
+      append('exec.start', { kind: 'tool', name: toolName, request_id: null, job_id: origin.job_id || null, origin: auditOrigin });
     });
     // Demo takes spec §7.2: every take refusal, by the tool's name and the
     // code only; never the parameters (a URL, typed text).
@@ -132,13 +144,14 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
     // the owner's no to one beyond its grant.
     executor.on('approvalDenied', ({ toolName, deniedBy, code }) => {
       if (deniedBy !== 'take' && deniedBy !== 'task') return;
-      append(`${deniedBy}.refused`, { tool: toolName, code: typeof code === 'string' ? code : null, origin });
+      append(`${deniedBy}.refused`, { tool: toolName, code: typeof code === 'string' ? code : null, origin: auditOrigin });
     });
     executor.on('postExecute', ({ toolName, result }) => {
       const ok = Boolean(result) && result.success !== false && result.ok !== false;
+      if (!ok) logToolFailure(toolName, origin.job_id, result);
       append('exec.result', {
-        kind: 'tool', name: toolName, request_id: null, job_id: origin.job_id || null, origin,
-        ok, exit_status: null, error: ok ? null : String((result && result.error) || 'failed')
+        kind: 'tool', name: toolName, request_id: null, job_id: origin.job_id || null, origin: auditOrigin,
+        ok, exit_status: null, error: ok ? null : auditError(result)
       });
     });
   };
@@ -185,4 +198,4 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
   };
 }
 
-module.exports = { approvalSeam, phoneExecutorOptions, paramsSha256, refuseUnsafeClassifier, refuseUnsafeGate, PHONE_GRACE_MS, REFUSE_UNSAFE_MESSAGE };
+module.exports = { approvalSeam, phoneExecutorOptions, refuseUnsafeClassifier, refuseUnsafeGate, PHONE_GRACE_MS, REFUSE_UNSAFE_MESSAGE };

@@ -203,6 +203,30 @@ describe('ApprovalCache', () => {
     assert.equal(cache.get(message.request_id), null);
   });
 
+  it('holds a sealed request and lists it; its entry and its status hold no action', () => {
+    const cache = new ApprovalCache();
+    const node = testNodeIdentity({ box: true });
+    const phone = createFakePhone({ boxKey: true });
+    const sealPolicy = {
+      sealing: () => true,
+      canSeal: () => true,
+      recipients: () => ({ [phone.deviceId]: phone.boxJwk, [node.nodeId]: node.box.jwk }),
+      senderId: node.nodeId,
+      nodeBox: node.box.jwk
+    };
+    const { envelope, message } = m.buildRequest({ identity: node, action: m.toolAction('Bash', { command: 'hidden-parameter' }, null), sealPolicy });
+    const entry = cache.put(node.nodeId, envelope);
+    assert.deepEqual(entry.envelope, envelope);
+    assert.deepEqual(cache.list([node.nodeId]).map((e) => e.request_id), [message.request_id]);
+    const status = m.buildStatus({ identity: node, requestId: message.request_id, state: 'approved' });
+    assert.equal(cache.setStatus(message.request_id, status), true);
+    const held = cache.get(message.request_id);
+    assert.equal(Object.hasOwn(JSON.parse(Buffer.from(held.envelope.payload, 'base64url')), 'action'), false);
+    assert.equal(Buffer.from(held.envelope.payload, 'base64url').toString().includes('hidden-parameter'), false);
+    assert.equal(Buffer.from(held.status.payload, 'base64url').toString().includes('hidden-parameter'), false);
+    assert.equal(phone.open(held.envelope, 'kl.approval.request').content.action.params.command, 'hidden-parameter');
+  });
+
   it('refuses a request whose node id is malformed or whose envelope disagrees with the caller-authenticated node', () => {
     const cache = new ApprovalCache();
     const node = testNodeIdentity();

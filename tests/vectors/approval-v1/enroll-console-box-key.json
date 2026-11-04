@@ -1,0 +1,31 @@
+{
+  "name": "enroll-console-box-key",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {
+    "now": "2026-09-23T18:05:11.201Z",
+    "code_id": "dAEMnC18UoZQV-skmzsqzg",
+    "code": "uMl9rw5jwz4VTBOaDPaMMVummWUHRA0cO_MrmT078as",
+    "allow_test_keys": true
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJjb2RlX2lkIjoiZEFFTW5DMThVb1pRVi1za216c3F6ZyIsImNvZGVfbWFjIjoieDBTbkFIUDRsal95V1hrbXl1VmR4U19oM3Nwb09BeDJIWU02RWZjSm4zYyIsImNyZWF0ZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjExLjIwMVoiLCJkZXZpY2UiOnsiYm94X2tleSI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6IkFVY0VOUE9pQmVaTVVDVW9MUEFmNGlYaVJWUUdPMlhjYnBSX0didkE0N1kiLCJ5IjoiM3dTVThpNmhjMy1QWFp6dE5WSm0yTHBFTnRqODdyYmV4NHFoSmEzVlEtNCJ9LCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJuYW1lIjoiUGhvbmUgM3ZtdyIsInBsYXRmb3JtIjoiYW5kcm9pZCIsInB1YmxpY19rZXkiOnsiY3J2IjoiUC0yNTYiLCJrdHkiOiJFQyIsIngiOiJrcmN5RzVENkhQeDlQM0dpNW9hUjZPeVU5RDFnSXJjM1VENnBJUmNEcTc0IiwieSI6IjlYcWdQWHNNQVlwbFg1SVpWbi05RlJQMnNONG9IRlJQam5aeWZHLUdwYUkifX0sImVucm9sbGVkX2J5IjpudWxsLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODoxNDoxMS4yMDFaIiwibm9uY2UiOiJ0ZXg2d0tCM0J6OE5wWmMwenBXSU50ZHhSZ1VMTlZkM3lPdS1PZEkzdVlrIiwidHlwZSI6ImtsLmRldmljZS5lbnJvbGwiLCJ2IjoxfQ",
+    "sig": "Yqp_vuHcjfaf8VamZWVQAb6oS_1OUKoMwdNMEVApd_5Ib__yO7N9CcMrPuweQtVo61kYNxW2pGRY9WE8JMZdgA"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "device_id": "d-3vmwrihhdbnit4oi",
+    "box_key": {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "AUcENPOiBeZMUCUoLPAf4iXiRVQGO2XcbpR_GbvA47Y",
+      "y": "3wSU8i6hc3-PXZztNVJm2LpENtj87rbex4qhJa3VQ-4"
+    }
+  }
+}

@@ -69,9 +69,10 @@ class ExecutorRegistry {
     this.getRunbookEngine = fn(getRunbookEngine);
     this.getPhoneApprover = fn(getPhoneApprover);
     this.getAuditLedger = fn(getAuditLedger);
-    // → { approverStore, nodeId, nodePublicKey } for verifySignedGrant's audit
-    // path: F3's ADMIN-owned ApproverStore (built from the config dir, never
-    // the data dir) and this node's identity. Missing → that path fails closed.
+    // → { approverStore, nodeId, nodePublicKey, box } for verifySignedGrant's
+    // audit path: F3's ADMIN-owned ApproverStore (built from the config dir,
+    // never the data dir) and this node's identity; `box` opens a sealed request
+    // in the ledger. Missing → that path fails closed.
     this.getApprovalTrust = fn(getApprovalTrust);
     this._usageTracker = usageTracker;
     this.now = typeof now === 'function' ? now : () => new Date();
@@ -641,7 +642,8 @@ class ExecutorRegistry {
     return {
       approverStore: isObject(t?.approverStore) ? t.approverStore : null,
       nodeId: typeof t?.nodeId === 'string' && t.nodeId ? t.nodeId : null,
-      nodePublicKey: t?.nodePublicKey || null
+      nodePublicKey: t?.nodePublicKey || null,
+      box: t?.box || null
     };
   }
 

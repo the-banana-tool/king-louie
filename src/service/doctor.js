@@ -307,6 +307,16 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
   return results;
 }
 
+// The file read as `readNodeIdentity` reads it: only whether the record holds one.
+function identityHoldsBoxKey(dataDir) {
+  try {
+    const record = JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8')).mesh.identity;
+    return Boolean(record.boxKeyJwk && record.encryptedBoxKey);
+  } catch {
+    return false;
+  }
+}
+
 // Fleet stage 3: the approver set must be admin-only, the relay linked when
 // one is configured, and the audit chain intact.
 async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = null }) {
@@ -343,6 +353,50 @@ async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = nul
     const store = new ApproverStore({ dir, stagedDir, platform, serviceProbe: false });
     await store.ready();
     return { ok: true, detail: String(store.activeCount()) };
+  });
+  // Sealed phones, R-SP-5, R-SP-11: active records that hold a box key are who
+  // a node seals to. The same store reading as the row above.
+  const activeRecords = async () => {
+    const { ApproverStore } = require('../approvals/approver-store');
+    const store = new ApproverStore({ dir, stagedDir, platform, serviceProbe: false });
+    await store.ready();
+    return store.list().filter((r) => store.isActive(r.device_id));
+  };
+  await attempt('sealing to phones', async () => {
+    // A node that has sealed sends no content with no phone to seal to (the
+    // latch, R-SP-5): that is a fault, and never the same row as "off".
+    const { readLatch, latchPathProblem, latchWriteProblem } = require('../approvals/seal-policy');
+    const latch = readLatch(dataDir);
+    const { latched } = latch;
+    if (problem) {
+      return latched
+        ? { ok: false, detail: 'on, but no phone can read it: the set is not trusted' }
+        : { ok: true, detail: 'off: the set is not trusted' };
+    }
+    const sealing = (await activeRecords()).filter((r) => r.box_key).length;
+    if (sealing === 0) {
+      return latched
+        ? { ok: false, detail: 'on, but no phone can read it: enroll or apply a box key' }
+        : { ok: true, detail: 'off: no phone has a box key yet' };
+    }
+    // The two things canSeal() needs besides a phone. Each refuses every send, so
+    // neither may read as "on".
+    if (!identityHoldsBoxKey(dataDir)) return { ok: false, detail: 'on, but this node has no box key: restart the service' };
+    const count = `${sealing} ${sealing === 1 ? 'phone' : 'phones'}`;
+    // A file that does not read as a latch is replaced at the next build; a link
+    // or a directory at its path, or an approvals path that is no directory, is not.
+    const inTheWay = latch.state === 'bad' ? latchPathProblem(dataDir) : null;
+    if (inTheWay) return { ok: false, detail: `on, but the latch cannot be written: ${inTheWay} Nothing goes to the phones until it can.` };
+    const unwritable = latch.state === 'good' ? null : latchWriteProblem(dataDir);
+    if (unwritable) return { ok: false, detail: `on, but the latch cannot be written (${unwritable}): nothing goes to the phones until it can` };
+    if (latch.state === 'bad') return { ok: true, warn: true, detail: `on (${count}); the latch file is damaged, and the next message replaces it` };
+    return { ok: true, detail: `on (${count})` };
+  });
+  await attempt('phones without a box key', async () => {
+    if (problem) return { ok: true, detail: 'none (the set is not trusted)' };
+    const { fingerprintGroups } = require('../approvals/envelope');
+    const without = (await activeRecords()).filter((r) => !r.box_key);
+    return { ok: true, detail: without.length ? without.map((r) => fingerprintGroups(r.device_id)).join(', ') : 'none' };
   });
   await attempt('relay paired and linked', () => {
     const { loadNodeConfig } = require('./node-config');

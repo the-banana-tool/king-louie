@@ -1,0 +1,50 @@
+{
+  "name": "seal-not-recipient",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    },
+    "type": "kl.approval.request"
+  },
+  "input": {
+    "v": 1,
+    "type": "kl.approval.request",
+    "request_id": "50d54372-9680-488b-b9fd-9c450a5bab94",
+    "node_id": "kl-c2ubd6jjqumalzt5",
+    "node_name": "web-01",
+    "action_hash": "lGXDzKhODoOmFbstFs24QSyRXiG8_bNbv353vQhQ79s",
+    "created_at": "2026-09-23T18:04:11.201Z",
+    "expires_at": "2026-09-23T18:09:11.201Z",
+    "nonce": "aIGJZ2P7xnOIhyCWA-BiBhWYL1O94eWu-FVhfT2MqJc",
+    "node_box": {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw",
+      "y": "qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ"
+    },
+    "sealed": {
+      "v": 1,
+      "epk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "1LTHtbjAso7GDHvPuzPh22jL3gsI3yDv3njEbTcNwLI",
+        "y": "BGsgNL98SodAzOexXe9xJ_Zz_sTIxC2ZDPefHPoIoRE"
+      },
+      "iv": "mV3f-rJaqlp48Jis",
+      "ct": "OgbkT7wYdMYuigUGv5ECn7TMVshqxN89OZMcRCJiVtJmYPRbGADUbQTFDWSgXfXIeIJkyWMnSigCdoYAKh9sciDOb6l4KT3Mtgwu5S4Jcdyrl9rJ98eEKAiouOBVMzjT7UMFmPTUZLOqUGZOsWVfgmeMBM1Pm6fcMSwqcFH3EG1CYT_UZXYaWrL56zdt-cRhdyC5-Zos1FYbZUnEs-_-RAKDYiKQ2zFMVCvjYHQIY7XaIXJwHY3_D7juKhXVjl0i82xn5IGlBELp64XMisCpWawMpFKejoFKmRLGaTsCUq9emkBkZFAkFxqUuCA1dNrESpjMc3KS3dMa6UzXJUsTtF6fozgfOPUnegq4ddYXymClYcVrUP9o1ZjkFDlBIB-CWOr7eSf4Vb0NhExYr0mhsHgu6b2KJiIbAyGWoe8zQeltyRUuDODJRhAMvxMsqKk5ghHscDeskCNLwiu632E4fqMiV79KVmIo-LIvafPHoT9kkPXk2bo6cmWyFFRBvTumnHYJOkZZoizBFcGtaQ_SUoEkEC0OFIpV_P2Psvn0pHS7YR0zi4YW6CxrW6h6gDWk4nz6tNgGB1B7QU5Huk0hZJTMnvyBm-tz4WmOb_K3dqM6hnlxGfSpUTSsK3jJYIawkoFD8uawI471G87xVFqVwrw5rAbwV0eMqZf-DV8hAA9BkcAOSfmIitB3Ih3bcO8Y",
+      "keys": {
+        "d-6xdlbxglhnvfa3lw": "dzFrHYFZeNoT3LIOk-Uq2XowbhmCzK_mQ7GtdgoxUScx-cLHaMzC4QPiFWgeEHMb"
+      }
+    }
+  },
+  "expect": {
+    "reason": "not_recipient",
+    "message": null
+  }
+}

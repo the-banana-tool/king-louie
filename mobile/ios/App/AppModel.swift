@@ -5,8 +5,10 @@ import SwiftUI
 import UIKit
 
 /// What the app keeps (mobile/PRIVACY.md): the relay pin, node pins, its key
-/// reference (in the Keychain) and the push token. Nothing else, and no
-/// analytics. History is held in memory only (see AppModel.history).
+/// references (in the Keychain) and the push token here; beside this, the nodes it
+/// has verified a sealed message from (SealedSeenStore, `kl.sealed-seen`) and what
+/// nodes were told of its box key (BoxKeyNodes, `kl.box-key.nodes`). Nothing else,
+/// and no analytics. History is held in memory only (see AppModel.history).
 struct StoredState: Codable {
     var mode: AppMode = .welcome
     var relayURL: String?
@@ -30,6 +32,43 @@ struct StoredState: Codable {
     }
 }
 
+/// The nodes this phone has verified a sealed message from, by node id (R-SP-15).
+/// Beside the pins, under its own key: a new key in StoredState would fail the old
+/// decode and lose the pins, and `restore` puts back a StoredState from before a
+/// pairing, which must not take a mark away. Only a sealed message past the signature adds one
+/// (AppModel.noteSeal); Reset clears it, and nothing else takes one away. A one-way
+/// mark, so it is pushed to disk before anything goes on.
+enum SealedSeenStore {
+    static let key = "kl.sealed-seen"
+
+    static func load() -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    }
+
+    static func save(_ nodes: Set<String>) {
+        UserDefaults.standard.set(nodes.sorted(), forKey: key)
+        _ = UserDefaults.standard.synchronize()
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+        _ = UserDefaults.standard.synchronize()
+    }
+}
+
+/// A message a pinned node signed that this phone cannot read or may not answer
+/// (R-SP-6, R-SP-15): its verified clear facts and why. Kept apart from the stores a
+/// decision reads, so none can reach it. `ref` is unique across kinds: the kind's
+/// prefix and its own id.
+struct UnreadableItem: Equatable {
+    let ref: String
+    let nodeId: String
+    let nodeName: String
+    let label: String
+    let reason: String
+    let expiresAt: Date?
+}
+
 struct PendingItem: Identifiable {
     let id: String
     let envelope: Envelope
@@ -41,6 +80,8 @@ struct PendingItem: Identifiable {
     let receivedAt: ContinuousClock.Instant
     let expiresInMs: Int
     var status: String?
+    /// A sealed request: what it opened to, which `message` also is and the response is built from. nil for a clear one.
+    var opened: JSONValue? = nil
 
     /// Counted from receipt on the monotonic clock, never from wall time.
     var timeLeft: Duration {
@@ -97,6 +138,13 @@ final class AppModel: ObservableObject {
     private var grantReceivedAt: ContinuousClock.Instant?
 
     private(set) var key: DeviceKey?
+    /// The box key (R-SP-10), or nil for a phone enrolled before it, one that refused it, or one locked at launch. Deleted with `key`.
+    @Published private var boxKey: BoxKey?
+    /// The nodes this phone has verified a sealed message from (R-SP-15); noteSeal is the only writer but Reset.
+    private var sealedSeen: Set<String> = SealedSeenStore.load()
+    private let sealMemo = SealMemo()
+    /// The last name a sealed status of a take or task opened to, by lease id: what the rows show, since drawing never decrypts.
+    private var leaseNames: [String: String] = [:]
     private var demo: DemoFleet?
     private var client: RelayAPI?
     private var pollTask: Task<Void, Never>?
@@ -127,13 +175,18 @@ final class AppModel: ObservableObject {
         guard mode == .live, !pairing, let client, let key else { return }
         if onlyIfUnlocked, !key.isSessionUnlocked { return }
         do {
-            var items: [QuestionItem] = []
-            for entry in try await client.questions(signWith: onlyIfUnlocked ? Self.sessionOnlySigner(key) : nil) {
+            let listed = try await client.questions(signWith: onlyIfUnlocked ? Self.sessionOnlySigner(key) : nil)
+            await warmSeals(listed)
+            var read: [QuestionItem] = []
+            for entry in listed {
                 guard let item = verifiedQuestion(entry), !answeredTokens.contains(item.token),
-                      !items.contains(where: { $0.token == item.token }) else { continue }
-                items.append(item)
+                      !read.contains(where: { $0.token == item.token }) else { continue }
+                read.append(item)
             }
-            questions = items
+            // A later one of this batch may have just marked the node, so this looks again.
+            let cannot = read.filter { $0.unreadable != nil || heldToSealing($0.nodeId, $0.seal) }
+            questions = read.filter { $0.unreadable == nil && !heldToSealing($0.nodeId, $0.seal) }
+            replaceUnreadable(Self.questionRef, cannot.map { unreadableQuestion($0) })
         } catch is SessionLocked {
             // The session lapsed: stay quiet; the owner can tap to unlock.
         } catch {
@@ -156,10 +209,11 @@ final class AppModel: ObservableObject {
     private func verifiedQuestion(_ entry: JSONValue) -> QuestionItem? {
         guard let json = entry["envelope"], let envelope = try? Envelope(json: json),
               let pin = state.nodes.first(where: { $0.id == envelope.kid }), envelope.verifyEd25519(spkiHex: pin.key),
-              let message = try? envelope.message(), let item = QuestionItem(message: message, nodeName: pin.name),
-              item.nodeId == pin.id else { return nil }
-        // Listed under the node that signed it.
+              let message = try? envelope.message(), message["node_id"]?.stringValue == pin.id else { return nil }
+        // Listed under the node that signed it, before anything is opened.
         if let listed = entry["node_id"]?.stringValue, listed != pin.id { return nil }
+        guard let item = QuestionItem(message: message, nodeName: pin.name, open: opener(), sealedSeen: sealedSeen) else { return nil }
+        noteSeal(pin.id, item.seal)
         return item
     }
 
@@ -169,6 +223,8 @@ final class AppModel: ObservableObject {
     /// is untrusted in a prompt).
     func answer(_ item: QuestionItem, optionId: String?, text: String?) async {
         guard mode == .live, let key, let client, !answering.contains(item.token) else { return }
+        // R-SP-15: looked at again now, since the first sealed open may have come after this was fetched.
+        if heldToSealing(item.nodeId, item.seal) { refuseHeldQuestion(item); return }
         if let text, text.utf16.count > Self.maxAnswerChars {
             banner = "An answer can be at most \(Self.maxAnswerChars) characters. Shorten it and send again."
             return
@@ -176,11 +232,13 @@ final class AppModel: ObservableObject {
         answering.insert(item.token)
         defer { answering.remove(item.token) }
         do {
-            let message = Questions.answer(to: item, optionId: optionId, text: text, deviceId: key.deviceId,
+            let message = try Questions.answer(to: item, optionId: optionId, text: text, deviceId: key.deviceId,
                                            nonce: Messages.randomNonce(), signedAt: Timestamps.string(client.now()))
             let choice = optionId.flatMap { id in item.options.first(where: { $0.id == id })?.label } ?? text ?? ""
             let reason = "Answer \(Self.promptText(item.caseTitle, 40)): \(Self.promptText(item.text, 80)) → \(Self.promptText(choice, 40))"
             let envelope = try await key.signEnvelope(message, reason: reason)
+            // The prompt takes time.
+            if heldToSealing(item.nodeId, item.seal) { refuseHeldQuestion(item); return }
             let result = try await client.answerQuestion(item.token, envelope: envelope)
             // The node's own words (escaped) when it sent any.
             let ack = result?["ack"]?.stringValue.map { Display.escape($0) }
@@ -194,6 +252,12 @@ final class AppModel: ObservableObject {
         } catch {
             fail(error)
         }
+    }
+
+    private func refuseHeldQuestion(_ item: QuestionItem) {
+        questions.removeAll { $0.token == item.token }
+        putUnreadable(unreadableQuestion(item))
+        banner = Self.unreadableLine(Seal.clearAfterSealed, nodeName: item.nodeName)
     }
 
     /// At most `max` Unicode scalars, then escaped (never cut through an escape).
@@ -225,6 +289,7 @@ final class AppModel: ObservableObject {
         let request: LeaseRequest
         let nodeName: String
         var status: LeaseStatus?
+        var seal: SealState = .clear
     }
 
     struct LiveLease: Equatable {
@@ -350,12 +415,14 @@ final class AppModel: ObservableObject {
         guard mode == .live, !pairing, let client, let key else { return }
         if onlyIfUnlocked, !key.isSessionUnlocked { return }
         do {
-            var items: [LeaseRequestItem] = []
+            var read: [LeaseRequestItem] = []
+            var unread: [UnreadableItem] = []
             // R-F5-20: a nonce chosen for this one request. Each node signs its
             // listing over it, so an answer to an earlier request cannot be
             // played again and no entry can be left out unseen.
             let nonce = Messages.randomNonce()
             let entries = try await client.leases(nonce: nonce, signWith: onlyIfUnlocked ? Self.sessionOnlySigner(key) : nil)
+            await warmSeals(entries)
             for entry in entries {
                 // R-F5-18: a lease that is running, or ended lately, comes with no
                 // request: only the status its node signed for this very listing.
@@ -363,24 +430,14 @@ final class AppModel: ObservableObject {
                     noteListedLease(entry, deviceId: key.deviceId)
                     continue
                 }
-                guard let json = entry["envelope"], let envelope = try? Envelope(json: json),
-                      let pin = state.nodes.first(where: { $0.id == envelope.kid }),
-                      let message = Leases.verifiedMessage(envelope, pin: pin), let request = LeaseRequest(message: message),
-                      !decidedLeaseRequests.contains(request.requestId),
-                      let expires = Timestamps.date(request.expiresAt), expires > client.now() else { continue }
-                // Listed under the node that signed it.
-                if let listed = entry["node_id"]?.stringValue, listed != pin.id { continue }
-                // A status counts only when the same node signed it, about this lease.
-                var status: LeaseStatus?
-                if let statusJSON = entry["status"], let statusEnvelope = try? Envelope(json: statusJSON),
-                   let statusMessage = Leases.verifiedMessage(statusEnvelope, pin: pin),
-                   let parsed = LeaseStatus(message: statusMessage), parsed.leaseId == request.leaseId {
-                    status = parsed
-                }
-                if status?.state == "ended" { continue }
-                if !items.contains(where: { $0.id == request.requestId }) { items.append(LeaseRequestItem(request: request, nodeName: pin.name, status: status)) }
+                guard let item = verifiedLeaseRequest(entry, relayNow: client.now(), unread: &unread) else { continue }
+                if !read.contains(where: { $0.id == item.id }) { read.append(item) }
             }
+            // A later one of this batch may have just marked the node, so this looks again.
+            let items = read.filter { !heldToSealing($0.request.nodeId, $0.seal) }
+            let held = read.filter { heldToSealing($0.request.nodeId, $0.seal) }
             leaseRequests = items
+            replaceUnreadable(Self.leaseRef, unread + held.map { unreadableLease($0) })
             // R-F5-20: per pinned node, a listing it signed for this request and
             // this phone, complete, or no answer. This phone cannot tell a node
             // that is off, slow or older from a relay that kept its answer back,
@@ -392,7 +449,8 @@ final class AppModel: ObservableObject {
             for pin in state.nodes {
                 let check = Leases.checkListing(entries, pin: pin, nonce: nonce, deviceId: key.deviceId)
                 guard check.accepted else { checks[pin.id] = .unconfirmed; continue }
-                let listed = Leases.listedStatuses(check, pin: pin)
+                // The counts need nothing opened: what is open already, and the clear part of the rest.
+                let listed = Leases.listedStatuses(check, pin: pin, open: openedOnly())
                 dropMayStartRows(of: pin, named: Set(listed.map { $0.leaseId }), relayNow: client.now())
                 notePendingListed(check, pin: pin, shownAsRequest: Set(items.map { $0.request.leaseId }))
                 checks[pin.id] = .confirmed(at: checkedAt, running: listed.filter { Leases.isLive(state: $0.state) }.count,
@@ -411,11 +469,46 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// One listed request. Shown only when a pinned node signed it (kid, node_id and
+    /// signature all that node's), its lease hash is intact, it has not expired on the
+    /// relay-corrected clock, and no status that node signed about this lease says it
+    /// ended. One signed by such a node that cannot be read or answered goes into
+    /// `unread`, from its clear part, with no decision.
+    private func verifiedLeaseRequest(_ entry: JSONValue, relayNow: Date, unread: inout [UnreadableItem]) -> LeaseRequestItem? {
+        guard let json = entry["envelope"], let envelope = try? Envelope(json: json),
+              let pin = state.nodes.first(where: { $0.id == envelope.kid }),
+              let message = Leases.verifiedMessage(envelope, pin: pin) else { return nil }
+        // Listed under the node that signed it.
+        if let listed = entry["node_id"]?.stringValue, listed != pin.id { return nil }
+        let check = LeaseRequest.check(message, open: opener(), sealedSeen: sealedSeen)
+        noteSeal(pin.id, check.seal)
+        // What is read here is in the clear part of a request of either shape (R-SP-4).
+        guard let requestId = message["request_id"]?.stringValue, let leaseId = message["lease_id"]?.stringValue,
+              !decidedLeaseRequests.contains(requestId),
+              let expires = message["expires_at"]?.stringValue.flatMap({ Timestamps.date($0) }), expires > relayNow else { return nil }
+        // A status counts only when the same node signed it, about this lease.
+        var status: LeaseStatus?
+        if let statusJSON = entry["status"], let statusEnvelope = try? Envelope(json: statusJSON),
+           let parsed = readStatus(statusEnvelope, pin: pin), parsed.leaseId == leaseId {
+            status = parsed
+        }
+        if status?.state == "ended" { return nil }
+        guard let request = check.request else {
+            if let reason = check.reason, Self.unreadableReasons.contains(reason), !unread.contains(where: { $0.ref == Self.leaseRef + requestId }) {
+                unread.append(UnreadableItem(ref: Self.leaseRef + requestId, nodeId: pin.id, nodeName: pin.name, label: Self.leaseLabel(status?.kind), reason: reason, expiresAt: expires))
+            }
+            return nil
+        }
+        return LeaseRequestItem(request: request, nodeName: pin.name, status: status, seal: check.seal)
+    }
+
     /// Grant (a fresh Face ID over exactly these apps and minutes) or deny
     /// (a fresh Face ID too). `signed_at` is the relay-corrected clock.
     func decideLease(_ item: LeaseRequestItem, apps: Set<String>, minutes: Int, grant: Bool) async {
         if mode == .demo { demoDecide(item, grant: grant); return }
         guard mode == .live, let key, let client, !decidingLease.contains(item.id) else { return }
+        // R-SP-15: looked at again now, since the first sealed open may have come after this was fetched.
+        if heldToSealing(item.request.nodeId, item.seal) { refuseHeldLease(item); return }
         decidingLease.insert(item.id)
         defer { decidingLease.remove(item.id) }
         do {
@@ -427,11 +520,13 @@ final class AppModel: ObservableObject {
                 let what = item.request.isTask ? "this task: \(Self.promptText(item.request.name ?? "", 40))" : "computer use of \(names)"
                 let spend = item.request.isTask ? ", up to $\(item.request.usd)" : ""
                 envelope = try await key.signEnvelope(message, reason: "Allow \(what) on \(Self.promptText(item.nodeName, 30)) for \(minutes) min\(spend)")
-                // Signed: from here on the lease may start, whatever the relay answers.
-                signedLeaseGrants[item.request.leaseId] = Timestamps.date(item.request.expiresAt) ?? Date.distantFuture
             } else {
                 envelope = try await key.signEnvelope(Leases.deny(item.request, deviceId: key.deviceId, signedAt: signedAt), reason: "\(item.request.isTask ? "Deny this task" : "Deny computer use") on \(Self.promptText(item.nodeName, 30))")
             }
+            // The prompt takes time.
+            if heldToSealing(item.request.nodeId, item.seal) { refuseHeldLease(item); return }
+            // Signed: from here on the lease may start, whatever the relay answers.
+            if grant { signedLeaseGrants[item.request.leaseId] = Timestamps.date(item.request.expiresAt) ?? Date.distantFuture }
             let result = try await client.leaseDecision("grant", leaseId: item.request.leaseId, envelope: envelope)
             let state = result?["state"]?.stringValue
             if state == "rejected" {
@@ -445,6 +540,7 @@ final class AppModel: ObservableObject {
             }
             decidedLeaseRequests.insert(item.id)
             leaseRequests.removeAll { $0.id == item.id }
+            await warmReply(result)
             if grant, item.request.isTask {
                 // A task has no live view: its banner row comes from the status its node signed for this answer.
                 noteListedLease(.object(["node_id": .string(item.request.nodeId), "status": result?["status"] ?? .null]), deviceId: key.deviceId)
@@ -461,6 +557,12 @@ final class AppModel: ObservableObject {
         } catch {
             fail(error)
         }
+    }
+
+    private func refuseHeldLease(_ item: LeaseRequestItem) {
+        leaseRequests.removeAll { $0.id == item.id }
+        putUnreadable(unreadableLease(item))
+        banner = Self.unreadableLine(Seal.clearAfterSealed, nodeName: item.nodeName)
     }
 
     /// The status a node's answer may carry: the node signed it for that
@@ -495,6 +597,8 @@ final class AppModel: ObservableObject {
     func setLiveViewVisible(_ visible: Bool) {
         guard visible != liveViewVisible else { return }
         liveViewVisible = visible
+        // Plaintext leaves with the screen.
+        if !visible { clearOpened() }
         if visible, mode == .live, let live = liveLease, live.state != "ended" { startLiveLoop() }
     }
 
@@ -547,6 +651,7 @@ final class AppModel: ObservableObject {
                         if self.liveViewVisible {
                             do {
                                 let reply = try await client.leaseDecision("watch", leaseId: leaseId, envelope: envelope, signWith: AppModel.sessionOnlySigner(key))
+                                await self.warmReply(reply)
                                 // The status the node signed for this watch: the token the next one echoes.
                                 self.applyReplyStatus(reply, leaseId: leaseId)
                             } catch is RelayError {
@@ -556,6 +661,7 @@ final class AppModel: ObservableObject {
                     }
                     // (`live` is the lease as this turn began; its mailbox position is what the poll needs.)
                     let entries = try await client.leaseViews(leaseId, afterSeq: live.lastSeq, wait: 20, signWith: AppModel.sessionOnlySigner(key))
+                    await self.warmSeals(entries)
                     // Read again: the kill switch may have changed the lease while this waited.
                     guard var current = self.liveLease, current.leaseId == leaseId else { return }
                     for entry in entries {
@@ -579,7 +685,7 @@ final class AppModel: ObservableObject {
     /// only one whose node seq is newer than the newest already applied, and
     /// a view only when it is addressed to this device.
     private func apply(_ envelope: Envelope, pin: NodePin, deviceId: String, to live: inout LiveLease) {
-        if let message = Leases.verifiedMessage(envelope, pin: pin), let status = LeaseStatus(message: message) {
+        if let status = readStatus(envelope, pin: pin) {
             guard status.leaseId == live.leaseId, Leases.acceptsStatus(status, appliedSeq: live.appliedSeq) else { return }
             live.appliedSeq = status.seq
             if let token = status.contactToken { live.contactToken = token }
@@ -595,8 +701,10 @@ final class AppModel: ObservableObject {
             if status.state == "ended" { live.revoking = false }
             return
         }
-        let check = Leases.verifyView(envelope, pin: pin)
+        let check = Leases.verifyView(envelope, pin: pin, open: opener())
+        dropOpenedView(envelope)
         guard check.accepted, let view = check.view, view.leaseId == live.leaseId else { return }
+        noteSeal(pin.id, view.seal)
         guard Leases.acceptsView(view, appliedSeq: live.appliedSeq, deviceId: deviceId) else { return }
         live.appliedSeq = view.seq
         if let token = view.contactToken { live.contactToken = token }
@@ -613,6 +721,7 @@ final class AppModel: ObservableObject {
         liveTask?.cancel()
         demoLeaseTimer?.cancel()
         liveLease = nil
+        clearOpened()
     }
 
     /// R-F5-18: on opening the app, what is running on the paired nodes (and
@@ -641,7 +750,7 @@ final class AppModel: ObservableObject {
     private func noteListedLease(_ entry: JSONValue, deviceId: String) {
         guard let nodeId = entry["node_id"]?.stringValue, let pin = state.nodes.first(where: { $0.id == nodeId }),
               let json = entry["status"], let signed = try? Envelope(json: json),
-              let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message) else { return }
+              let status = readStatus(signed, pin: pin) else { return }
         if var live = liveLease, live.leaseId == status.leaseId {
             apply(signed, pin: pin, deviceId: deviceId, to: &live)
             liveLease = live
@@ -683,7 +792,7 @@ final class AppModel: ObservableObject {
     private func notePendingListed(_ check: ListingCheck, pin: NodePin, shownAsRequest: Set<String>) {
         guard check.accepted else { return }
         for signed in check.statuses {
-            guard let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message) else { continue }
+            guard let status = readStatus(signed, pin: pin) else { continue }
             let remembered = signedLeaseGrants[status.leaseId] != nil
             guard Leases.listedPendingGetsRow(state: status.state, shownAsRequest: shownAsRequest.contains(status.leaseId), signedGrant: remembered) else { continue }
             // The lease on the live screen has its row; so has one already listed.
@@ -758,10 +867,10 @@ final class AppModel: ObservableObject {
     /// for any other lease (and for one not running yet).
     func unattendedTake(_ lease: RunningLease) -> (name: String, ends: Date)? {
         guard lease.state != "pending", let signed = lease.status, let pin = state.nodes.first(where: { $0.id == lease.nodeId }),
-              let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message),
-              status.leaseId == lease.leaseId, status.kind == "take", status.unattended, let name = status.name,
+              let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message, open: openedOnly()),
+              status.leaseId == lease.leaseId, status.kind == "take", status.unattended,
               let ends = status.expiresAt.flatMap({ Timestamps.date($0) }) else { return nil }
-        return (name: name, ends: ends)
+        return (name: shownName(status), ends: ends)
     }
 
     /// Revised 2026-11-03: a task's name, from the row's status, verified
@@ -769,9 +878,9 @@ final class AppModel: ObservableObject {
     /// live view (no frames), so its row has no way to one.
     func runningTask(_ lease: RunningLease) -> String? {
         guard let signed = lease.status, let pin = state.nodes.first(where: { $0.id == lease.nodeId }),
-              let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message),
+              let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message, open: openedOnly()),
               status.leaseId == lease.leaseId, status.kind == "task" else { return nil }
-        return status.name
+        return shownName(status)
     }
 
     /// Under the row of a pending lease: which of the two this phone knows.
@@ -844,7 +953,8 @@ final class AppModel: ObservableObject {
             let node = Self.promptText(live.nodeName, 30)
             let reason: String
             if Leases.isTaskStatus(signedStatus) {
-                reason = Leases.taskStopName(signedStatus).map { "Stop this task: \(Self.promptText($0, 40)) on \(node)" } ?? "Stop this task on \(node)"
+                // A sealed status's name is not in its clear part: the last one read.
+                reason = (leaseNames[leaseId] ?? Leases.taskStopName(signedStatus)).map { "Stop this task: \(Self.promptText($0, 40)) on \(node)" } ?? "Stop this task on \(node)"
             } else {
                 reason = "Stop computer use on \(node) now"
             }
@@ -859,6 +969,7 @@ final class AppModel: ObservableObject {
                     guard let self, let now = self.liveLease, now.leaseId == leaseId, now.state != "ended", now.revoking else { return }
                     do {
                         let reply = try await client.leaseDecision("revoke", leaseId: leaseId, envelope: envelope)
+                        await self.warmReply(reply)
                         // The node's answer carries the status it signed for it: "ended" on its own word.
                         self.applyReplyStatus(reply, leaseId: leaseId)
                         if reply?["state"]?.stringValue == "rejected" {
@@ -941,8 +1052,400 @@ final class AppModel: ObservableObject {
 
     // MARK: Leases end
 
+    // MARK: The box key: set-up for a phone enrolled before it (R-SP-10)
+
+    /// What a node knows of this phone's box key, for Settings.
+    enum BoxKeyNodeState { case inUse, waitingForApply, notSent }
+
+    /// A `kl.device.box_key` lives at most seven days (R-SP-10).
+    static let boxKeyStatementSeconds: TimeInterval = 7 * 24 * 60 * 60
+    /// The set-up row (R-SP-10).
+    static let boxKeySetupTitle = "Read sealed messages on this phone. Set up once: one unlock."
+    /// Settings, for a phone that refuses the key.
+    static let boxKeyRefusedLine = "This phone cannot hold a box key; sealed nodes will not show here."
+    /// C-19, as on Android: no fallback for a relay from before the box key.
+    static let olderRelay = "This relay is older than this app. Upgrade it, then try again."
+    // What a row says of this phone's own key, in place of a reader's reason.
+    static let boxKeyBrokenReason = "box_key_broken"
+    static let boxKeyRefusedReason = "box_key_refused"
+    /// What a reader's reason makes a row with no decision (R-SP-6, R-SP-15); any other refusal shows nothing.
+    static let unreadableReasons: Set<String> = ["not_recipient", "open_failed", Seal.keyLocked, Seal.clearAfterSealed]
+    // An unreadable row's ref: the kind, then its own id.
+    static let toolRef = "tool:"
+    static let questionRef = "question:"
+    static let leaseRef = "lease-request:"
+    /// A take's or a task's name when no status of it has been read yet (a locked phone, or one not in its `keys`).
+    static let sealedName = "(sealed)"
+    private static let leaseNamesMax = 64
+
+    /// The set-up row: making the key, signing or sending the statement.
+    @Published private(set) var boxKeySetupBusy = false
+    /// Each node's answer to the statement, and the statement kept to re-post it.
+    @Published private var boxKeyNodes = BoxKeyNodes.load()
+    /// The box key has failed on an unlocked phone for a while: rows say so, and Settings can make a new one.
+    @Published private(set) var boxKeyBroken = false
+    /// Requests, questions and lease requests a pinned node signed that this phone cannot read or may not answer (R-SP-6, R-SP-15).
+    @Published private(set) var unreadable: [UnreadableItem] = []
+    /// Telling a locked phone from a key that stopped working. In memory: a restart finds out again.
+    private var boxKeyHealth = BoxKeyHealth()
+    private let healthStart = ContinuousClock.now
+    /// Tool approvals being signed or sent: the first sealed open leaves them to look again themselves.
+    private var decidingApprovals = Set<String>()
+
+    /// This phone would not make a box key; Settings says what that means.
+    var boxKeyRefused: Bool { boxKeyNodes.refused }
+    /// Its box key's: `b-abcd efgh ijkl mnop` (R-SP-10); nil without one.
+    var boxKeyFingerprint: String? { boxKey?.fingerprint }
+    /// Whether the Pending list shows the set-up row. Only with the session unlocked: its
+    /// post signs with the session, so the statement's prompt is then the one unlock.
+    var boxKeySetupNeeded: Bool { mode == .live && key?.isSessionUnlocked == true && !boxKeyNodes.refused && (boxKey == nil || !boxKeyNodes.sent) }
+
+    private func deviceLocked() -> Bool { !UIApplication.shared.isProtectedDataAvailable }
+
+    private func healthNowMs() -> Int64 {
+        let elapsed = ContinuousClock.now - healthStart
+        return elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000
+    }
+
+    private func clearBoxKeyHealth() {
+        boxKeyHealth.reset()
+        boxKeyBroken = false
+    }
+
+    /// Settings' line for one pinned node.
+    func boxKeyState(_ nodeId: String) -> BoxKeyNodeState {
+        guard boxKey != nil, boxKeyNodes.sent else { return .notSent }
+        // No statement was ever needed: the phone enrolled with its box key, so every node holds it.
+        if boxKeyNodes.noneSent { return .inUse }
+        switch boxKeyNodes[nodeId] {
+        case BoxKeyNodes.inUse?: return .inUse
+        case BoxKeyNodes.waiting?: return .waitingForApply
+        default: return .notSent
+        }
+    }
+
+    /// The set-up row's tap: make the box key (or keep one no node was told of), sign
+    /// a `kl.device.box_key` with the device key, a fresh prompt, and post it. A phone
+    /// that will not make the key is left with none, and no more row until Settings'
+    /// Try again; a locked phone says nothing of the key, so it is not marked. Nothing
+    /// is sealed to the key until each node runs `device apply`, and a message's row
+    /// says so.
+    func setUpBoxKey() async {
+        guard !boxKeySetupBusy, mode == .live, !pairing, let key, let client else { return }
+        boxKeySetupBusy = true
+        defer { boxKeySetupBusy = false }
+        do {
+            let box: BoxKey
+            if let held = boxKey {
+                box = held
+            } else {
+                do {
+                    // A load that failed at startup, or a key made for a statement that never went, is not replaced.
+                    box = try BoxKey.load() ?? BoxKey.create()
+                } catch {
+                    BoxKey.delete()
+                    if !deviceLocked() { boxKeyNodes.markRefused(true) }
+                    return
+                }
+            }
+            let envelope = try await signBoxKeyStatement(key, box, client)
+            let reply = try await postBoxKey(client, envelope)
+            // A Reset or a new key may have come while this waited.
+            guard self.key === key else { return }
+            boxKey = box
+            clearOpened()
+            boxKeyNodes.keep(envelope)
+            boxKeyNodes.noteReply(reply, firstPost: true)
+            boxKeyNodes.markSent()
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// Settings' Try again, on a phone marked refused.
+    func retryBoxKey() async {
+        boxKeyNodes.markRefused(false)
+        await setUpBoxKey()
+    }
+
+    /// Settings' Make a new box key, once the key stopped working: the old one goes,
+    /// no node is counted as told, and setUpBoxKey makes a new one and sends its
+    /// statement. Each node seals to it after its `device apply`.
+    func remakeBoxKey() async {
+        guard !boxKeySetupBusy, mode == .live, !pairing, key != nil, client != nil else { return }
+        BoxKey.delete()
+        boxKey = nil
+        clearOpened()
+        clearBoxKeyHealth()
+        boxKeyNodes.forget()
+        await setUpBoxKey()
+    }
+
+    /// Settings' Send again, past the statement's seven days or after a node refused it: a new statement (a fresh prompt).
+    func sendBoxKeyAgain() async {
+        guard let box = boxKey, boxKeyNodes.sent else {
+            await setUpBoxKey()
+            return
+        }
+        guard !boxKeySetupBusy, let key, let client else { return }
+        boxKeySetupBusy = true
+        defer { boxKeySetupBusy = false }
+        do {
+            let envelope = try await signBoxKeyStatement(key, box, client)
+            let reply = try await postBoxKey(client, envelope)
+            guard self.key === key else { return }
+            boxKeyNodes.keep(envelope)
+            boxKeyNodes.noteReply(reply, firstPost: true)
+        } catch {
+            fail(error)
+        }
+    }
+
+    private func signBoxKeyStatement(_ key: DeviceKey, _ box: BoxKey, _ client: RelayAPI) async throws -> Envelope {
+        let now = client.now()
+        let message = try Messages.boxKeyStatement(deviceId: key.deviceId, boxKey: box.jwk, createdAt: Timestamps.string(now),
+                                                   expiresAt: Timestamps.string(now.addingTimeInterval(Self.boxKeyStatementSeconds)), nonce: Messages.randomNonce())
+        return try await key.signEnvelope(message, reason: "Read sealed messages. Adds this phone's box key \(box.fingerprint ?? "").")
+    }
+
+    private func postBoxKey(_ client: RelayAPI, _ envelope: Envelope) async throws -> JSONValue? {
+        do {
+            return try await client.postBoxKey(envelope)
+        } catch let e as RelayError where e.status == 404 {
+            throw ProtocolError.malformed(Self.olderRelay)
+        }
+    }
+
+    /// Once a poll has got through: the kept statement again when a node was offline,
+    /// until it expires. No prompt, and tried again at the next start if it fails.
+    private func repostBoxKeyStatement(_ client: RelayAPI) async {
+        guard boxKeyNodes.anyOffline, let key, let envelope = boxKeyNodes.kept(relayNow: client.now()) else { return }
+        if let reply = try? await client.postBoxKey(envelope, signWith: Self.sessionOnlySigner(key)) {
+            boxKeyNodes.noteReply(reply, firstPost: false)
+        }
+    }
+
+    /// A new device key was made, and DeviceKey.create tried a box key beside it.
+    private func boxKeyMade() {
+        boxKey = BoxKey.load()
+        clearOpened()
+        clearBoxKeyHealth()
+        boxKeyNodes.forget()
+        if boxKey == nil && !deviceLocked() { boxKeyNodes.markRefused(true) }
+    }
+
+    /// An enrollment carrying this box key finished for `enrolled`. Other pinned nodes
+    /// know of it only if they were told before: a key whose statement never went (a
+    /// relay from before the box key answers 404) keeps its set-up row.
+    private func enrolledWithBoxKey(_ enrolled: Set<String>) {
+        guard boxKey != nil else { return }
+        if boxKeyNodes.sent || state.nodes.allSatisfy({ enrolled.contains($0.id) }) { boxKeyNodes.markSent() }
+    }
+
+    // MARK: Reading what is sealed (R-SP-6, R-SP-15)
+
+    /// What opens a sealed message for this phone, or nil without a box key. A reader
+    /// calls it only once the node's signature has held.
+    private func opener() -> Opener? {
+        guard mode == .live, let box = boxKey, let id = key?.deviceId else { return nil }
+        return sealMemo.wrapping(Seal.opener(recipientId: id, agree: { x, y in try box.agree(x: x, y: y) }))
+    }
+
+    /// What drawing and the counts read with: what is open already, never the key.
+    private func openedOnly() -> Opener { sealMemo.openedOnly }
+
+    private func clearOpened() { sealMemo.clear() }
+
+    /// A view is read once and holds a frame: its entry does not wait to age out.
+    private func dropOpenedView(_ envelope: Envelope) {
+        if let message = try? envelope.message() { sealMemo.drop(message) }
+    }
+
+    /// A sealed message a pinned node signed, or nil for anything else.
+    nonisolated private static func verifiedSealed(_ raw: JSONValue, pins: [NodePin]) -> JSONValue? {
+        guard let envelope = try? Envelope(json: raw), let pin = pins.first(where: { $0.id == envelope.kid }),
+              let message = Leases.verifiedMessage(envelope, pin: pin), message["sealed"] != nil else { return nil }
+        return message
+    }
+
+    /// Opens what a fetch brought off the main actor, signature first, so the readers
+    /// find it done, whichever way it went. It marks and decides nothing. What it saw
+    /// of the box key goes to `boxKeyHealth`: only a fresh open says the key works, and
+    /// a failure counts only on an unlocked phone.
+    private func warmSeals(_ entries: [JSONValue]) async {
+        guard let open = opener() else { return }
+        let pins = state.nodes
+        let memo = sealMemo
+        let generation = memo.beginFetch()
+        let seen = await Task.detached(priority: .userInitiated) { () -> (opened: Bool, unavailable: Bool) in
+            var seen = (opened: false, unavailable: false)
+            for entry in entries {
+                for field in ["envelope", "status"] {
+                    guard let raw = entry[field], let message = AppModel.verifiedSealed(raw, pins: pins),
+                          let type = message["type"]?.stringValue, !memo.holds(message) else { continue }
+                    do {
+                        _ = try open(type, message)
+                        seen.opened = true
+                    } catch {
+                        memo.noteFailure(message, error, generation: generation)
+                        if error is SealKeyUnavailable { seen.unavailable = true }
+                    }
+                }
+            }
+            return seen
+        }.value
+        guard memo.isCurrent(generation) else { return }
+        if seen.opened {
+            boxKeyHealth.opened()
+        } else if seen.unavailable {
+            if deviceLocked() { boxKeyHealth.locked() } else { boxKeyHealth.failedUnlocked(nowMs: healthNowMs()) }
+        } else {
+            return
+        }
+        boxKeyBroken = boxKeyHealth.broken
+    }
+
+    /// The status a node's answer may carry, before it is read.
+    private func warmReply(_ reply: JSONValue?) async {
+        if let reply { await warmSeals([reply]) }
+    }
+
+    /// After a reader verified a message from `nodeId`: an opened one marks the node,
+    /// for good, and what it had on screen in clear loses its buttons at once. Nothing
+    /// relayed or unverified gets here.
+    private func noteSeal(_ nodeId: String, _ state: SealState) {
+        let next = Seal.noteSealedSeen(sealedSeen, nodeId: nodeId, state: state)
+        let marked = next != sealedSeen
+        sealedSeen = next
+        if SealedSeenStore.load() != next { SealedSeenStore.save(next) }
+        if marked { demoteClear(nodeId) }
+    }
+
+    /// R-SP-15: a clear message from a node this phone has seen seal offers no decision, however long it has been on screen.
+    private func heldToSealing(_ nodeId: String, _ seal: SealState) -> Bool { seal == .clear && sealedSeen.contains(nodeId) }
+
+    private func approvalHeld(_ item: PendingItem) -> Bool { item.opened == nil && heldToSealing(item.display["node"]?["id"]?.stringValue ?? "", .clear) }
+
+    private func unreadableApproval(_ item: PendingItem) -> UnreadableItem {
+        UnreadableItem(ref: Self.toolRef + item.id, nodeId: item.display["node"]?["id"]?.stringValue ?? "", nodeName: item.message["node_name"]?.stringValue ?? "",
+                       label: "Tool approval", reason: Seal.clearAfterSealed, expiresAt: item.message["expires_at"]?.stringValue.flatMap { Timestamps.date($0) })
+    }
+
+    private func unreadableQuestion(_ item: QuestionItem) -> UnreadableItem {
+        UnreadableItem(ref: Self.questionRef + item.token, nodeId: item.nodeId, nodeName: item.nodeName, label: "Question",
+                       reason: item.unreadable ?? Seal.clearAfterSealed, expiresAt: item.expiresAt.flatMap { Timestamps.date($0) })
+    }
+
+    private func unreadableLease(_ item: LeaseRequestItem) -> UnreadableItem {
+        UnreadableItem(ref: Self.leaseRef + item.request.requestId, nodeId: item.request.nodeId, nodeName: item.nodeName,
+                       label: Self.leaseLabel(item.request.kind), reason: Seal.clearAfterSealed, expiresAt: Timestamps.date(item.request.expiresAt))
+    }
+
+    private func putUnreadable(_ item: UnreadableItem) {
+        if let i = unreadable.firstIndex(where: { $0.ref == item.ref }) { unreadable[i] = item } else { unreadable.append(item) }
+    }
+
+    /// One kind's rows, replaced whole by its fetch.
+    private func replaceUnreadable(_ prefix: String, _ items: [UnreadableItem]) {
+        unreadable.removeAll { $0.ref.hasPrefix(prefix) }
+        unreadable.append(contentsOf: items)
+    }
+
+    /// The clear items of `nodeId` leave the stores a decision reads. One being signed or sent is caught when it looks again.
+    private func demoteClear(_ nodeId: String) {
+        for item in pending.filter({ approvalHeld($0) && $0.status == nil && !decidingApprovals.contains($0.id) && $0.display["node"]?["id"]?.stringValue == nodeId }) { refuseHeld(item) }
+        for item in questions.filter({ $0.nodeId == nodeId && heldToSealing($0.nodeId, $0.seal) && !answering.contains($0.token) }) {
+            questions.removeAll { $0.token == item.token }
+            putUnreadable(unreadableQuestion(item))
+        }
+        for item in leaseRequests.filter({ $0.request.nodeId == nodeId && heldToSealing($0.request.nodeId, $0.seal) && !decidingLease.contains($0.id) }) {
+            leaseRequests.removeAll { $0.id == item.id }
+            putUnreadable(unreadableLease(item))
+        }
+    }
+
+    private func refuseHeld(_ item: PendingItem) {
+        pending.removeAll { $0.id == item.id }
+        putUnreadable(unreadableApproval(item))
+    }
+
+    private func refuseHeldApproval(_ item: PendingItem) {
+        refuseHeld(item)
+        banner = Self.unreadableLine(Seal.clearAfterSealed, nodeName: item.message["node_name"]?.stringValue ?? "")
+    }
+
+    /// Keeps `name`, the newest known for a lease, for what drawing shows.
+    private func noteLeaseName(_ leaseId: String, _ name: String) {
+        if leaseNames[leaseId] == nil, leaseNames.count >= Self.leaseNamesMax, let any = leaseNames.keys.first { leaseNames[any] = nil }
+        leaseNames[leaseId] = name
+    }
+
+    /// A take's or a task's name as its row shows it: its own, the last known, or a word for one never read. Never empty.
+    private func shownName(_ status: LeaseStatus) -> String {
+        status.name ?? leaseNames[status.leaseId] ?? Self.sealedName
+    }
+
+    /// A status off the network, from `pin`: signature first, then opened; the mark and the name are noted here.
+    private func readStatus(_ envelope: Envelope, pin: NodePin) -> LeaseStatus? {
+        guard let status = Leases.verifiedMessage(envelope, pin: pin).flatMap({ LeaseStatus(message: $0, open: opener()) }) else { return nil }
+        noteSeal(pin.id, status.seal)
+        if let name = status.name { noteLeaseName(status.leaseId, name) }
+        return status
+    }
+
+    /// Why a row says what it says now: a reader's reason, or what is since known of this phone's own key.
+    private func rowReason(_ reason: String) -> String {
+        if reason == Seal.keyLocked && boxKeyBroken { return Self.boxKeyBrokenReason }
+        if boxKeyNodes.refused && ["not_recipient", "open_failed"].contains(reason) { return Self.boxKeyRefusedReason }
+        return reason
+    }
+
+    /// The one line of a row that offers no decision (R-SP-6, R-SP-15), for a reason in
+    /// `unreadableReasons`: `not_recipient` and `open_failed` both mean the wrap is not
+    /// for the box key this phone holds.
+    static func unreadableLine(_ reason: String, nodeName: String) -> String {
+        switch reason {
+        case Seal.clearAfterSealed: return clearAfterSealedLine
+        case Seal.keyLocked: return keyLockedLine
+        case Self.boxKeyBrokenReason: return "This phone's box key stopped working. Make a new one in Settings."
+        case Self.boxKeyRefusedReason: return boxKeyRefusedLine
+        default: return "Sealed for this node's other phones. Run device apply on \(Display.escape(nodeName)) for this phone."
+        }
+    }
+
+    private static let clearAfterSealedLine = "This node seals its messages. This one was not sealed, so it may be old."
+    private static let keyLockedLine = "Unlock to read"
+
+    /// A lease's kind in a row's label. The kind of a sealed request nobody read is not known, and is not guessed.
+    static func leaseLabel(_ kind: String?) -> String {
+        switch kind {
+        case "computer_use"?: return "Computer use"
+        case "take"?: return "Take"
+        case "task"?: return "Task"
+        default: return "Request"
+        }
+    }
+
+    /// A row's line as drawn now.
+    func unreadableText(reason: String, nodeName: String) -> String {
+        Self.unreadableLine(rowReason(reason), nodeName: nodeName)
+    }
+
+    /// One kind's rows, soonest first, without what has run out. Each row's time is the relay-corrected clock's.
+    func unreadableRows(_ prefix: String) -> [ApprovalList.Row] {
+        let now = client?.now() ?? Date()
+        let shown = unreadable.filter { $0.ref.hasPrefix(prefix) }.compactMap { u -> ApprovalList.SealedUnreadable? in
+            let left = u.expiresAt.map { Int64($0.timeIntervalSince(now) * 1000) }
+            if let left, left <= 0 { return nil }
+            return ApprovalList.SealedUnreadable(ref: u.ref, nodeId: u.nodeId, nodeName: u.nodeName, label: u.label,
+                                                 line: unreadableText(reason: u.reason, nodeName: u.nodeName), timeLeftMs: left)
+        }
+        return ApprovalList.build(sealedUnreadable: shown)
+    }
+
     init() {
         key = DeviceKey.load()
+        boxKey = BoxKey.load()
         if state.mode == .demo { startDemo() }
         if state.mode == .live { connect() }
     }
@@ -967,6 +1470,9 @@ final class AppModel: ObservableObject {
         switch reason {
         case "action_changed"?: return "the action changed before it ran"
         case "expired"?: return "too late — request expired"
+        case Seal.clearAfterSealed?: return Self.clearAfterSealedLine
+        case Seal.keyLocked?: return Self.keyLockedLine
+        case "sealed_required"?: return "this node takes only a sealed answer here"
         case let r?: return Display.escape(r)
         case nil: return "no reason given"
         }
@@ -1021,6 +1527,9 @@ final class AppModel: ObservableObject {
         stopPolling()
         DeviceKey.delete()
         key = nil
+        boxKey = nil
+        clearOpened()
+        clearBoxKeyHealth()
         client?.invalidate()
         client = nil
         banner = DeviceKey.invalidatedMessage
@@ -1043,7 +1552,7 @@ final class AppModel: ObservableObject {
         closeLiveLease()
         leaseRequests = []
         if let env = try? fleet.leaseRequest(on: 0, apps: ["calculator", "textedit"], minutes: 15),
-           let message = Leases.verifiedMessage(env, pin: fleet.pins[0]), let request = LeaseRequest(message: message) {
+           let message = Leases.verifiedMessage(env, pin: fleet.pins[0]), let request = LeaseRequest(message: message, sealedSeen: []) {
             leaseRequests = [LeaseRequestItem(request: request, nodeName: fleet.pins[0].name, status: nil)]
         }
     }
@@ -1060,6 +1569,7 @@ final class AppModel: ObservableObject {
         showLiveLease = false
         leaseRequests = []
         decidedLeaseRequests = []
+        unreadable = []
         state = StoredState()
         state.save()
     }
@@ -1118,15 +1628,17 @@ final class AppModel: ObservableObject {
             client?.invalidate()
             client = nil
             key = nil
+            boxKey = nil
         }
         let created = try DeviceKey.create()
         key = created
+        boxKeyMade()
         return created
     }
 
     private func deviceObject(for key: DeviceKey) throws -> JSONValue {
         do {
-            return try Messages.device(deviceId: key.deviceId, name: UIDevice.current.name, platform: "ios", x: key.jwkX, y: key.jwkY)
+            return try Messages.device(deviceId: key.deviceId, name: UIDevice.current.name, platform: "ios", x: key.jwkX, y: key.jwkY, boxKey: boxKey?.jwk)
         } catch {
             throw ProtocolError.malformed("This phone's name must be 1–64 characters to enroll it. Rename it in Settings › General › About.")
         }
@@ -1213,6 +1725,9 @@ final class AppModel: ObservableObject {
         switch result {
         case "done":
             state.save()
+            // The enrollment carried the box key (R-SP-10): this node holds it.
+            enrolledWithBoxKey([pin.id])
+            if boxKey != nil { boxKeyNodes.set(pin.id, BoxKeyNodes.inUse) }
             needsTap = false
             banner = "Enrolled. This phone now approves for \(Display.escape(pin.name))."
             startPolling()
@@ -1275,34 +1790,73 @@ final class AppModel: ObservableObject {
 
     /// Shows a request only when the core says so (shape, pin, node
     /// signature); everything displayed comes from its display model.
-    private func receive(_ item: JSONValue, pins: [NodePin]) {
-        guard let envJSON = item["envelope"] else { return }
-        let view = Display.view(envJSON, pinned: pins)
-        guard view.shown, let display = view.display else {
+    @discardableResult
+    private func receive(_ item: JSONValue, pins: [NodePin]) -> Received {
+        guard let envJSON = item["envelope"] else { return .nothing }
+        let view = Display.view(envJSON, pinned: pins, open: opener(), sealedSeen: sealedSeen)
+        if !view.shown || view.display == nil {
             if view.reason == "bad_node_signature", let payload = envJSON["payload"]?.stringValue, !warnedPayloads.contains(payload) {
                 if warnedPayloads.count >= 64 { warnedPayloads.removeAll() }
                 warnedPayloads.insert(payload)
                 banner = "Node key changed — pair again."
             }
-            return
         }
-        guard let env = try? Envelope(json: envJSON), let message = try? env.message(),
-              let requestId = message["request_id"]?.stringValue,
-              let pin = pins.first(where: { $0.id == env.kid }) else { return }
+        guard let env = try? Envelope(json: envJSON), let message = try? env.message() else { return .nothing }
+        // Anything but .clear comes only past the pin and the node's signature, so the kid is that node.
+        if view.seal != .clear { noteSeal(env.kid, view.seal) }
+        guard let requestId = message["request_id"]?.stringValue,
+              let pin = pins.first(where: { $0.id == env.kid }) else { return .nothing }
+        guard view.shown, let display = view.display else {
+            // A row from the verified clear part: its display is nil. One already decided or being sent keeps its row.
+            guard let reason = view.reason, Self.unreadableReasons.contains(reason),
+                  !pending.contains(where: { $0.id == requestId && ($0.status != nil || decidingApprovals.contains(requestId)) }) else { return .nothing }
+            let ref = Self.toolRef + requestId
+            putUnreadable(UnreadableItem(ref: ref, nodeId: pin.id, nodeName: pin.name, label: "Tool approval", reason: reason,
+                                         expiresAt: message["expires_at"]?.stringValue.flatMap { Timestamps.date($0) }))
+            return .unread(ref)
+        }
         let status = verifiedStatus(item["status"], requestId: requestId, pin: pin)
         if let i = pending.firstIndex(where: { $0.id == requestId }) {
             pending[i].status = status ?? pending[i].status
-            return
+            return .pending(requestId)
         }
         let expiresInMs = min(item["expires_in_ms"]?.intValue ?? 0, Self.maxExpiresInMs)
         // Already over when it arrived: nothing to decide.
-        guard expiresInMs > 0 else { return }
+        guard expiresInMs > 0 else { return .nothing }
         var fullText: [String: String] = [:]
-        for entry in Display.build(message, collapse: false)["items"]?.arrayValue ?? [] {
+        for entry in Display.build(view.opened ?? message, collapse: false)["items"]?.arrayValue ?? [] {
             if let path = entry["path"]?.stringValue { fullText[path] = entry["text"]?.stringValue ?? "" }
         }
-        pending.append(PendingItem(id: requestId, envelope: env, message: message, display: display, fullText: fullText,
-                                   receivedAt: .now, expiresInMs: expiresInMs, status: status))
+        pending.append(PendingItem(id: requestId, envelope: env, message: view.opened ?? message, display: display, fullText: fullText,
+                                   receivedAt: .now, expiresInMs: expiresInMs, status: status, opened: view.opened))
+        return .pending(requestId)
+    }
+
+    /// What a received item became: a row that can be decided, a row that cannot, or nothing.
+    private enum Received {
+        case pending(String)
+        case unread(String)
+        case nothing
+    }
+
+    /// One poll's items. A row this batch's first sealed open took the buttons off is
+    /// still listed, and keeps its row. One that can be read now is in `pending`, and its
+    /// old row goes, as does one the relay no longer lists.
+    private func takeApprovals(_ items: [JSONValue]) {
+        var listed = Set<String>()
+        var unread = Set<String>()
+        for item in items {
+            switch receive(item, pins: state.nodes) {
+            case .pending(let id): listed.insert(id)
+            case .unread(let ref): unread.insert(ref)
+            case .nothing: break
+            }
+        }
+        unreadable.removeAll { u in
+            let id = String(u.ref.dropFirst(Self.toolRef.count))
+            return u.ref.hasPrefix(Self.toolRef) && !unread.contains(u.ref) && (!listed.contains(id) || pending.contains(where: { $0.id == id }))
+        }
+        pruneExpired()
     }
 
     /// Drops what is over: undecided requests at zero, and decided ones a
@@ -1311,11 +1865,16 @@ final class AppModel: ObservableObject {
         pending.removeAll { item in
             item.timeLeft == .zero && (item.status == nil || ContinuousClock.now - item.receivedAt > .milliseconds(item.expiresInMs) + .seconds(60))
         }
+        let now = client?.now() ?? Date()
+        unreadable.removeAll { $0.expiresAt.map { $0 <= now } ?? false }
     }
 
     /// From the scene becoming active: polls unless the owner must tap first
     /// or a pairing is under way.
     func resumePolling() {
+        sealMemo.resume()
+        // A box key that could not be read at launch (a locked phone) can be now.
+        if boxKey == nil, mode == .live { boxKey = BoxKey.load() }
         // Alerts are read on every open (spec §3.13), so a chain break is seen even without push.
         if mode == .live, state.frontDoorId != nil, !pairing { Task { await refreshAlerts() } }
         // R-F5-18: and what is running on the paired nodes, once the session is unlocked (no prompt of its own).
@@ -1356,13 +1915,19 @@ final class AppModel: ObservableObject {
                 isPolling = false
             }
         }
+        // R-SP-10: once in each run of the loop, when a poll has unlocked the session.
+        var reposted = false
         while !Task.isCancelled, mode == .live, let client {
             do {
                 let items = try await client.approvals(wait: 25)
                 pollProblem = nil
                 fingerprintToCompare = nil
-                for item in items { receive(item, pins: state.nodes) }
-                pruneExpired()
+                await warmSeals(items)
+                takeApprovals(items)
+                if !reposted {
+                    reposted = true
+                    await repostBoxKeyStatement(client)
+                }
             } catch {
                 if Task.isCancelled { return }
                 if error is LAError {
@@ -1406,6 +1971,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The app left the foreground: the poll stops, and the plaintext goes with it.
+    func didEnterBackground() {
+        stopPolling()
+        clearOpened()
+        sealMemo.pause()
+    }
+
     /// Cancelling drops our connection, but the relay keeps a parked long
     /// poll for up to its 25 s wait. It allows two per device, so one
     /// stop-and-start is fine; a third quick one gets a 429, which the loop
@@ -1426,11 +1998,23 @@ final class AppModel: ObservableObject {
             banner = "Too late — this request has expired."
             return
         }
-        guard let action = item.message["action"], let actionHash = item.message["action_hash"]?.stringValue,
-              actionHash == Digest.sha256B64url(JCS.data(action)) else {
-            banner = "This request's action does not match its signed hash. Nothing was signed."
-            return
+        // R-SP-15: looked at again now. A poll can be 25 s away from the first sealed open.
+        if approvalHeld(item) { refuseHeldApproval(item); return }
+        if let opened = item.opened {
+            // The salted hash (R-SP-2) of what it opened to.
+            guard Messages.validateOpenedRequest(opened) == nil else {
+                banner = "This request's action does not match its signed hash. Nothing was signed."
+                return
+            }
+        } else {
+            guard let action = item.message["action"], let actionHash = item.message["action_hash"]?.stringValue,
+                  actionHash == Digest.sha256B64url(JCS.data(action)) else {
+                banner = "This request's action does not match its signed hash. Nothing was signed."
+                return
+            }
         }
+        decidingApprovals.insert(item.id)
+        defer { decidingApprovals.remove(item.id) }
         do {
             if mode == .demo, let demo {
                 let response = try Messages.response(to: item.message, decision: approve ? "approve" : "deny", deviceId: demo.deviceId, signedAt: Timestamps.string(Date()))
@@ -1442,8 +2026,14 @@ final class AppModel: ObservableObject {
                 banner = "This phone is not paired with a relay."
                 return
             }
-            let response = try Messages.response(to: item.message, decision: approve ? "approve" : "deny", deviceId: key.deviceId,
+            let response: JSONValue
+            if let opened = item.opened {
+                response = try Messages.responseToOpened(opened, decision: approve ? "approve" : "deny", deviceId: key.deviceId,
+                                                         signedAt: Timestamps.string(client.now()))
+            } else {
+                response = try Messages.response(to: item.message, decision: approve ? "approve" : "deny", deviceId: key.deviceId,
                                                  signedAt: Timestamps.string(client.now()))
+            }
             let summary = item.display["summary"]?.stringValue ?? "this action"
             let envelope = try await key.signEnvelope(response, reason: approve ? "Approve: \(summary)" : "Deny: \(summary)")
             // The prompt takes time; never send once the request has run out.
@@ -1452,6 +2042,7 @@ final class AppModel: ObservableObject {
                 banner = "Too late — this request has expired."
                 return
             }
+            if approvalHeld(item) { refuseHeldApproval(item); return }
             guard let reply = try await sendResponse(client, item: item, envelope: envelope) else { return }
             // Only accepted: true is a verdict the node applied. null is never shown as approved.
             switch ResponseOutcome(reply: reply) {
@@ -1460,7 +2051,10 @@ final class AppModel: ObservableObject {
             case .forwarded: setStatus(item.id, "sent to \(item.display["node"]?["name"]?.stringValue ?? "the node")")
             case .notDelivered: setStatus(item.id, "not delivered")
             }
-            if let fresh = try? await client.approval(item.id) { receive(fresh, pins: state.nodes) }
+            if let fresh = try? await client.approval(item.id) {
+                await warmSeals([fresh])
+                receive(fresh, pins: state.nodes)
+            }
         } catch let e as RelayError where e.code == "gone" {
             setStatus(item.id, "expired")
         } catch {
@@ -1473,6 +2067,11 @@ final class AppModel: ObservableObject {
     /// relay asks to wait) and the request still has time left. nil once it ran out.
     private func sendResponse(_ client: RelayAPI, item: PendingItem, envelope: Envelope) async throws -> JSONValue? {
         while true {
+            // R-SP-15: a retry can wait for as long as the request lives.
+            if approvalHeld(item) {
+                refuseHeldApproval(item)
+                return nil
+            }
             do {
                 return try await client.respond(item.id, envelope: envelope) ?? .null
             } catch let e as RelayError where e.code == "node_offline" || e.code == "rate_limited" {
@@ -1609,7 +2208,7 @@ final class AppModel: ObservableObject {
               let id = device["device_id"]?.stringValue, let name = device["name"]?.stringValue,
               let platform = device["platform"]?.stringValue, platform == "ios" || platform == "android",
               let x = device["public_key"]?["x"]?.stringValue, let y = device["public_key"]?["y"]?.stringValue,
-              let rebuilt = try? Messages.device(deviceId: id, name: name, platform: platform, x: x, y: y), rebuilt == device,
+              let rebuilt = try? Messages.device(deviceId: id, name: name, platform: platform, x: x, y: y, boxKey: device["box_key"]), rebuilt == device,
               id != key?.deviceId,
               let expected = try? Messages.inviteMac(secret: secret, device: device), expected == mac else { return nil }
         return device
@@ -1665,6 +2264,8 @@ final class AppModel: ObservableObject {
             throw error
         }
         state.save()
+        // The claim carried the box key, and the other phone's enrollment carries it on (R-SP-10).
+        enrolledWithBoxKey(Set(pins.map { $0.id }))
         fingerprintToCompare = "d-" + Identifiers.fingerprintGroups(key.deviceId)
         needsTap = true
         pollProblem = "When the other phone has added this one, tap “Check for requests”."
@@ -2018,7 +2619,10 @@ final class AppModel: ObservableObject {
         // A request id is a lowercase UUID; anything else is not ours to fetch.
         guard requestId.count == 36, requestId.unicodeScalars.allSatisfy({ "0123456789abcdef-".unicodeScalars.contains($0) }) else { return }
         do {
-            if let item = try await client.approval(requestId) { receive(item, pins: state.nodes) }
+            if let item = try await client.approval(requestId) {
+                await warmSeals([item])
+                receive(item, pins: state.nodes)
+            }
         } catch {
             fail(error)
         }
@@ -2028,6 +2632,15 @@ final class AppModel: ObservableObject {
         stopPolling()
         DeviceKey.delete()
         key = nil
+        boxKey = nil
+        clearOpened()
+        clearBoxKeyHealth()
+        leaseNames = [:]
+        unreadable = []
+        sealedSeen = []
+        SealedSeenStore.clear()
+        BoxKeyNodes.clearStored()
+        boxKeyNodes = BoxKeyNodes()
         client?.invalidate()
         client = nil
         demo = nil

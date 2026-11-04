@@ -9,7 +9,7 @@ const path = require('path');
 const { createLogger } = require('../logging');
 const { JobManager } = require('../runbooks/runbook-engine');
 const { runbookAction, actionHash } = require('../approvals/messages');
-const { canonicalize, sha256b64url } = require('../platform/jcs');
+const { paramsHmac, auditOriginOf, auditError } = require('../approvals/audit-fields');
 
 const log = createLogger('fleet-tools');
 
@@ -18,14 +18,6 @@ const log = createLogger('fleet-tools');
 // src/runbooks/) can list the same tools (Task 27).
 const { MCP_TOOLS, TASK_TOOL_NAMES, WAIT_MS_MAX, ToolError, untrustedOutput } = require('./tool-definitions');
 const { detectCapabilities } = require('./capabilities');
-
-function paramsSha256(params) {
-  try {
-    return sha256b64url(canonicalize(params === undefined || params === null ? {} : params));
-  } catch {
-    return null;
-  }
-}
 
 // Free and total space for each allowed root, or for the filesystem holding
 // the home directory when no roots are configured. A root that cannot be
@@ -46,6 +38,8 @@ function diskState(allowedRoots) {
 
 const STDIO_ORIGIN = Object.freeze({ kind: 'stdio', client: 'stdio-mcp', session: null });
 const ORIGIN_STRING_MAX = 200;
+// What request.inbound says of a name no tool or runbook here has: a caller can name any string.
+const OTHER_NAME = '(other)';
 // Names the phone shows for this node's own local callers. A front-door
 // client declares its client_name itself, so one of these (in any case)
 // would pass a remote call off as a local one; it is shown by client_id
@@ -86,10 +80,15 @@ function approvalOrigin(origin, jobId = null) {
   };
 }
 
-function auditOrigin(origin, jobId = null) {
-  const base = approvalOrigin(origin, jobId);
-  if (origin && origin.kind === 'frontdoor') return { ...base, via: 'frontdoor', grant_id: origin.grant_id || null, client_id: origin.client_id || null };
-  return base;
+// The ledger is served to the relay's mirror, so an entry names the kind of
+// caller and what the front door issued it, never the name it gave itself (R-SP-7).
+// No origin at all is the stdio server's.
+const auditOrigin = (origin) => auditOriginOf(origin || STDIO_ORIGIN);
+
+// The origin of a run this node starts for a caller (a delegate turn, a task's):
+// what the phone is shown, and what the ledger needs of it, carried to its children.
+function executorOrigin(origin, jobId = null) {
+  return { ...approvalOrigin(origin, jobId), ...auditOrigin(origin) };
 }
 
 // A task as a client reads it. The text is a client's words and the answer a
@@ -340,8 +339,7 @@ class FleetToolHandler {
     // (CourierFleetClient), one short get_job at a time, and a front-door or
     // chat caller gets the plain call.
     if (toolName === 'send_to_job') {
-      // A stdio caller can name any string: the audit keeps 200 code points.
-      this.auditInbound('send_to_job', { message: args.message }, origin, typeof args.job_id === 'string' ? cut(args.job_id, 200) : null);
+      this.auditInbound('send_to_job', { message: args.message }, origin, this.knownJobId(args.job_id));
       const job = this.getJobOrThrow(args.job_id, origin);
       if (job.kind !== 'delegate') {
         throw new ToolError('not_accepted', `not_accepted: job "${job.job_id}" is a runbook job and does not accept messages`);
@@ -403,7 +401,7 @@ class FleetToolHandler {
   // so it is logged here and a client hears `internal`.
   async callTask(toolName, args, origin) {
     if (toolName === 'run_task') this.auditInbound(toolName, { task: args.task }, origin, null);
-    if (toolName === 'send_to_task') this.auditInbound(toolName, { message: args.message }, origin, typeof args.task_id === 'string' ? cut(args.task_id, 200) : null);
+    if (toolName === 'send_to_task') this.auditInbound(toolName, { message: args.message }, origin, this.knownTaskId(args.task_id));
     if (toolName === 'run_task' || toolName === 'list_tasks') this.assertThisMachine(args.node);
     if (!this.tasks) throw this.tasksUnavailable();
     try {
@@ -467,13 +465,36 @@ class FleetToolHandler {
   // refusal leaves nothing behind (§9); then the job starts in the
   // background and its id goes back at once (§8.2). An unsafe runbook waits
   // in awaiting_approval for a signed phone approval (fleet stage 3, §3.8).
+  // A caller can send any string for these, and the ledger is mirrored: only what
+  // this node knows is written.
+  knownName(name) {
+    if (typeof name !== 'string') return OTHER_NAME;
+    if (MCP_TOOLS.some((t) => t.name === name)) return name;
+    try {
+      return this.runbookEngine && this.runbookEngine.getRunbook(name) ? name : OTHER_NAME;
+    } catch {
+      return OTHER_NAME;
+    }
+  }
+
+  knownJobId(jobId) {
+    return typeof jobId === 'string' && this.jobManager.getJob(jobId) ? jobId : null;
+  }
+
+  knownTaskId(taskId) {
+    try {
+      return typeof taskId === 'string' && this.tasks && this.tasks.store && this.tasks.store.get(taskId) ? taskId : null;
+    } catch {
+      return null;
+    }
+  }
+
   // The request.inbound record for a tools/call, written before anything
   // can refuse it.
   auditInbound(name, params, origin, jobId) {
-    const inbound = auditOrigin(origin, jobId);
     this.auditBestEffort('request.inbound', {
-      client: inbound.client, method: 'tools/call', name: typeof name === 'string' ? name : null,
-      params_sha256: paramsSha256(params), job_id: jobId, origin: inbound
+      method: 'tools/call', name: this.knownName(name),
+      params_hmac: paramsHmac(params, this.auditLedger && this.auditLedger.identity), job_id: jobId, origin: auditOrigin(origin)
     });
   }
 
@@ -581,7 +602,8 @@ class FleetToolHandler {
 
     if (jobs.isTerminal(jobId)) return; // cancel_job already decided it
     if (outcome.decision === 'deny') {
-      jobs.updateJob(jobId, { status: 'denied', reason: `denied: ${outcome.reason || 'the phone denied it'}` });
+      const why = outcome.detail ? `${outcome.reason}: ${outcome.detail}` : (outcome.reason || 'the phone denied it');
+      jobs.updateJob(jobId, { status: 'denied', reason: `denied: ${why}` });
       return;
     }
     if (outcome.decision === 'expired') {
@@ -593,7 +615,8 @@ class FleetToolHandler {
       return;
     }
     if (outcome.decision !== 'approve') {
-      jobs.updateJob(jobId, { status: 'denied', reason: `denied_by_policy: ${outcome.reason || outcome.decision}` });
+      const why = outcome.sealed ? 'A sealed approval holds about 130 KB of parameters. Shorten the runbook\'s parameters. Nothing ran.' : (outcome.reason || outcome.decision);
+      jobs.updateJob(jobId, { status: 'denied', reason: `denied_by_policy: ${why}` });
       return;
     }
 
@@ -622,7 +645,8 @@ class FleetToolHandler {
     let mismatch = typeof outcome.action_hash !== 'string';
     if (!mismatch) {
       try {
-        liveHash = actionHash(currentAction());
+        // A sealed request's hash is salted (R-SP-2); the outcome carries the salt.
+        liveHash = actionHash(currentAction(), { salt: outcome.salt || null });
       } catch {
         mismatch = true;
       }
@@ -642,7 +666,7 @@ class FleetToolHandler {
     const jobs = this.jobManager;
     const engine = this.runbookEngine;
     const signal = jobs.getSignal(jobId);
-    const runOrigin = auditOrigin(origin, jobId);
+    const runOrigin = auditOrigin(origin);
     // Yield first, so the caller has its job_id before any work starts.
     await Promise.resolve();
     if (jobs.isTerminal(jobId) || signal?.aborted) {
@@ -672,7 +696,9 @@ class FleetToolHandler {
       const logs = Array.isArray(res?.logs) ? res.logs : [];
       const evidence = { checks: Array.isArray(res?.checks) ? res.checks : [] };
       ok = Boolean(res?.success);
-      error = ok ? null : (res?.error || 'runbook failed');
+      error = ok ? null : auditError({ code: res?.error === 'cancelled' ? 'cancelled' : res?.code, error: res?.error || 'runbook failed' });
+      // The ledger holds the code; the words stay here.
+      if (!ok) log.warn(`Job ${jobId} (${name}) failed: ${res?.error || 'runbook failed'}`);
       if (jobs.isTerminal(jobId)) {
         jobs.updateJob(jobId, { logs, evidence });
       } else if (res?.success) {
@@ -686,7 +712,7 @@ class FleetToolHandler {
       const result = err.code === 'rate_limited' && err.retryAfterSeconds !== undefined
         ? `rate_limited: retry after ${err.retryAfterSeconds}s`
         : err.message;
-      error = result;
+      error = auditError({ code: err.code, error: result });
       log.warn(`Job ${jobId} (${name}) failed: ${err.message}`);
       if (!jobs.isTerminal(jobId)) jobs.updateJob(jobId, { status: 'failed', result });
     } finally {
@@ -696,4 +722,4 @@ class FleetToolHandler {
   }
 }
 
-module.exports = { MCP_TOOLS, ToolError, untrustedOutput, diskState, STDIO_ORIGIN, approvalOrigin, auditOrigin, FleetToolHandler };
+module.exports = { MCP_TOOLS, ToolError, untrustedOutput, diskState, STDIO_ORIGIN, approvalOrigin, auditOrigin, executorOrigin, FleetToolHandler };

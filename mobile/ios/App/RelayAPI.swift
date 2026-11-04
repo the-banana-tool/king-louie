@@ -364,6 +364,13 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         try await request("POST", "/v1/devices/revoke", body: envelope.json).1
     }
 
+    /// A device-key-signed `kl.device.box_key` statement (R-SP-10), first send and
+    /// re-send alike: `{ nodes: [{ node_id, state }] }`; a relay from before the box
+    /// key answers 404. `signWith`: a re-send signs only with an unlocked session.
+    func postBoxKey(_ statement: Envelope, signWith: Signer? = nil) async throws -> JSONValue? {
+        try await request("POST", "/v1/devices/box-key", body: statement.json, signWith: signWith).1
+    }
+
     func devices() async throws -> [JSONValue] {
         try await request("GET", "/v1/devices").1?.arrayValue ?? []
     }

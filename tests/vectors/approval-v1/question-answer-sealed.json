@@ -1,0 +1,81 @@
+{
+  "name": "question-answer-sealed",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {
+    "box": {
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "d": "G4xu6oJW0Cytp2E9o732vG-h6xdVFltHuGbnFLBr8_8"
+    },
+    "type": "kl.question.answer",
+    "device": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+        "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+      }
+    },
+    "ask": {
+      "v": 1,
+      "type": "kl.question.ask",
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "token": "7QD4KM",
+      "kind": "question",
+      "urgency": "high",
+      "expires_at": null,
+      "node_box": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw",
+        "y": "qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ"
+      },
+      "case_id": "mfz1k2-0a1b2c3d",
+      "question_id": "q-0012",
+      "case_title": "Lakeside lot",
+      "text": "Accept the 41k offer?",
+      "options": [
+        {
+          "id": "a",
+          "label": "Yes"
+        },
+        {
+          "id": "b",
+          "label": "No"
+        }
+      ]
+    },
+    "answer": {
+      "option_id": "a"
+    },
+    "nonce": "NIBib-f7UndTocqbc3jfYchm6Gnv_s6qgo2pZjFDDZs",
+    "signed_at": "2026-09-23T18:04:11.201Z"
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJub2RlX2lkIjoia2wtYzJ1YmQ2ampxdW1hbHp0NSIsIm5vbmNlIjoiTklCaWItZjdVbmRUb2NxYmMzamZZY2htNkdudl9zNnFnbzJwWmpGRERacyIsInNlYWxlZCI6eyJjdCI6Ik9PMXZUa2JveXNzMGFnR25yOEo2bjE2cnRrWGcwV0daOEF5UjFNRWJLWW4tMmNwWTdtcG5ydkU1ajF4UTFhUU50OW5OMWZ6Qk5zZU9LN3pydzhHNk00QVhVQVcyTGdkYTFxQlRpMGpaRU9keEFpSFNob0owZUxMdlB4bjd6dkE1c3lJRmZ0SEJYWkJXa2VzRXpYV0JnMzV6eVpIVzZoMjdfYTVpZGdZNk5xSHBkanUwWjM3Qi1meGQ5dkoydkhNODVsNjd4YXA3ZDFvRzMwWjlMWUdzSExwM3RKZ3dWTWcyRnVrd0Y0Q25YdENrWTBpdXR1dkMzTzhYRU5KSGhpVWJCdVNPdjhBeGVsZU9Za3hYSG9rZUhGcTlSRGJqQllhY1ZwWWpVUXFrV01PT3RIejI4b3dpWkdRY2RhV1ZCNG5Fa0VtUUx3b2E5QzRlMXBHTms1Q19Kc2EzV1BTVUQyTWJtREpFbzQzc2hpTSIsImVwayI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6InFhUTd5NkYyM0o2ZnBSUXJuMlNveC10MFZjendQcEJiNHZoNWYtbzJQRjQiLCJ5IjoiVWdobmJEOUJiN1FYdTRNS1NmSlRRcE04VlVyNXhHaUNxaFpMc0w1VUozayJ9LCJpdiI6ImNrWHFDMTV2aEZuRllWOGIiLCJrZXlzIjp7ImtsLWMydWJkNmpqcXVtYWx6dDUiOiJ4LTVVak1zeTFrcmNSYkI5WHVvckJiNE1sNFZtbGR0cU9qZDlMN0VYV2pOT0hiQkpsSFVkWTVfZjRVdEJhOEpRIn0sInYiOjF9LCJzaWduZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjExLjIwMVoiLCJ0b2tlbiI6IjdRRDRLTSIsInR5cGUiOiJrbC5xdWVzdGlvbi5hbnN3ZXIiLCJ2IjoxfQ",
+    "sig": "S__ducDfENewkZwQUkzuQ1RKOO2aE7asy1EVzu-XM9g25gwlLENbiMEvrBCfnkfat9aMWIk81vHJ_N2MXxCgvg"
+  },
+  "expect": {
+    "reason": null,
+    "message": {
+      "v": 1,
+      "type": "kl.question.answer",
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "token": "7QD4KM",
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "nonce": "NIBib-f7UndTocqbc3jfYchm6Gnv_s6qgo2pZjFDDZs",
+      "signed_at": "2026-09-23T18:04:11.201Z",
+      "case_id": "mfz1k2-0a1b2c3d",
+      "question_id": "q-0012",
+      "answer": {
+        "option_id": "a"
+      }
+    }
+  }
+}

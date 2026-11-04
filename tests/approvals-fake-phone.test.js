@@ -5,7 +5,8 @@ const crypto = require('crypto');
 const { createFakePhone, testNodeIdentity, KEYS } = require('./helpers/fake-phone');
 const { verifyEs256, verifyEd25519, open, deviceIdFromJwk, seal } = require('../src/approvals/envelope');
 const m = require('../src/approvals/messages');
-const { TEST_DEVICE_KEYS, TEST_NODE_KEYS, isTestDeviceKey, isTestNodeKey } = require('../src/approvals/test-keys');
+const { boxKeyFingerprint } = require('../src/approvals/seal');
+const { TEST_DEVICE_KEYS, TEST_NODE_KEYS, TEST_NODE_BOX_KEYS, isTestDeviceKey, isTestNodeKey, isTestNodeBoxKey, hasTestKey } = require('../src/approvals/test-keys');
 
 describe('test keys', () => {
   it('test-keys.js lists exactly the public halves of keys.json', () => {
@@ -20,6 +21,11 @@ describe('test keys', () => {
         assert.equal(k.name, `${fixed.read_key_of}_read`);
         assert.equal(KEYS.devices[fixed.read_key_of].id, k.device_id);
         assert.equal(m.readKeyFingerprint(fixed.jwk), fixed.fingerprint);
+      } else if (k.box_key) {
+        // A box key (R-SP-1), likewise: no id of its own.
+        assert.equal(k.name, `${fixed.box_key_of}_box`);
+        assert.equal(KEYS.devices[fixed.box_key_of].id, k.device_id);
+        assert.equal(boxKeyFingerprint(fixed.jwk), fixed.fingerprint);
       } else {
         assert.equal(deviceIdFromJwk(fixed.jwk), k.device_id);
         assert.equal(fixed.id, k.device_id);
@@ -27,6 +33,13 @@ describe('test keys', () => {
     }
     assert.equal(isTestDeviceKey(KEYS.devices.A_read.jwk), true);
     assert.equal(isTestDeviceKey(KEYS.devices.B_read.jwk), true);
+    assert.equal(isTestDeviceKey(KEYS.devices.A_box.jwk), true);
+    assert.equal(isTestDeviceKey(KEYS.devices.B_box.jwk), true);
+    assert.equal(hasTestKey({ public_key: createFakePhone().jwk, box_key: KEYS.devices.A_box.jwk }), true);
+    assert.equal(hasTestKey({ public_key: createFakePhone().jwk, box_key: createFakePhone().jwk }), false);
+    assert.deepEqual([...TEST_NODE_BOX_KEYS], [KEYS.nodes['web-01'].box.jwk]);
+    assert.equal(isTestNodeBoxKey(KEYS.nodes['web-01'].box.jwk), true);
+    assert.equal(isTestNodeBoxKey(createFakePhone().jwk), false);
     assert.deepEqual(Object.values(KEYS.nodes).map((n) => n.spki), [...TEST_NODE_KEYS]);
     assert.equal(isTestDeviceKey(KEYS.devices.B.jwk), true);
     assert.equal(isTestDeviceKey(createFakePhone().jwk), false);

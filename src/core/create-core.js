@@ -3521,7 +3521,10 @@ function createCore(deps = {}) {
         getBridges: () => ({ telegram: telegramBridge, discord: discordBridge }),
         getWebhookServer: () => webhookServer,
         approvals: deps.approvals || null,
-        getExecutorRegistry: () => executorRegistry
+        getExecutorRegistry: () => executorRegistry,
+        warnOwner: deps.uiToastChannel && typeof deps.uiToastChannel.send === 'function'
+          ? (body) => deps.uiToastChannel.send({ title: 'King Louie', body })
+          : null
       });
       await contactHost.start();
     } catch (err) {

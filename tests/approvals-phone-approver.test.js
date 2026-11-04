@@ -7,7 +7,12 @@ const os = require('os');
 const path = require('path');
 const { PhoneApprover } = require('../src/approvals/phone-approver');
 const { open, verifyEd25519 } = require('../src/approvals/envelope');
-const { toolAction, actionHash } = require('../src/approvals/messages');
+const { toolAction, actionHash, buildRequest, validateMessage, MAX_ACTION_BYTES } = require('../src/approvals/messages');
+const { openSealed, isSealedShape, saltedHash } = require('../src/approvals/seal');
+const { createSealPolicy, writeLatch } = require('../src/approvals/seal-policy');
+const { AuditLedger } = require('../src/audit/audit-ledger');
+const { canonicalize } = require('../src/platform/jcs');
+const { addSink } = require('../src/logging');
 const { ApproverStore } = require('../src/approvals/approver-store');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
@@ -478,5 +483,734 @@ describe('PhoneApprover availability', () => {
     store.activeCount = () => { throw new Error('store boom'); };
     assert.equal(withBadStore.isAvailable(), false);
     assert.match(withBadStore.unavailableReason(), /store boom/);
+  });
+});
+
+// Sealed phones (R-SP-1, R-SP-2, R-SP-5, R-SP-7): the real policy over a real
+// store and a temp data dir. A phone's action is what it opens with its box key.
+describe('PhoneApprover with a seal policy', () => {
+  const dirs = [];
+  after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
+  const PARAM = 'deploy --target hidden-parameter';
+  const liveAction = () => toolAction('Bash', { command: PARAM }, '/srv/site');
+  const ORIGIN = { client: 'gateway', session: 's-hidden-session', job_id: 'job-hidden-id' };
+  const REQUEST_TYPE = 'kl.approval.request';
+
+  async function sealedSetup({ holders = 1, plain = 0, nodeBox = true, link = fakeLink(), withPolicy = true } = {}) {
+    const identity = testNodeIdentity({ box: nodeBox });
+    const boxed = Array.from({ length: holders }, (_, i) => createFakePhone({ name: `Box phone ${i + 1}`, boxKey: true }));
+    const others = Array.from({ length: plain }, (_, i) => createFakePhone({ name: `Plain phone ${i + 1}` }));
+    const store = await approverStoreWith([...boxed.map((p) => p.approverRecord({ boxKey: true })), ...others.map((p) => p.approverRecord())]);
+    stores.push(store);
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-seal-approver-'));
+    dirs.push(dataDir);
+    const sealPolicy = withPolicy ? createSealPolicy({ approverStore: store, identity, dataDir }) : null;
+    const ledger = fakeLedger();
+    const timers = manualTimers();
+    const approver = new PhoneApprover({ identity, approverStore: store, link, auditLedger: ledger, sealPolicy, setTimer: timers.setTimer, clearTimer: timers.clearTimer });
+    return { identity, boxed, others, store, dataDir, sealPolicy, ledger, link, approver };
+  }
+  const ask = (approver, signal = null) => approver.requestAction(liveAction(), { origin: ORIGIN, signal, currentAction: liveAction });
+
+  it("with no box key anywhere the request is the clear shape and bytes match today's builder", async () => {
+    const { identity, sealPolicy, approver, link, others } = await sealedSetup({ holders: 0, plain: 2 });
+    const fixed = { identity, action: liveAction(), origin: ORIGIN, now: 1790000000000, requestId: '11111111-1111-4111-8111-111111111111', nonce: 'n'.repeat(43) };
+    const today = buildRequest(fixed);
+    const withPolicy = buildRequest({ ...fixed, sealPolicy });
+    assert.deepEqual(withPolicy.bytes, today.bytes);
+    assert.deepEqual(withPolicy.envelope, today.envelope);
+    assert.equal(withPolicy.salt, null);
+    const pending = ask(approver);
+    const request = await waitForSubmit(link);
+    const { message } = open(request);
+    assert.deepEqual(message.action, liveAction());
+    assert.equal(message.action_hash, actionHash(liveAction()));
+    assert.equal(Object.hasOwn(message, 'sealed'), false);
+    assert.equal(approver.pending()[0].summary, liveAction().summary);
+    await approver.handleResponse(others[0].respond(request, 'approve'));
+    assert.deepEqual(Object.keys(await pending).sort(), ['action_hash', 'decision', 'device_id', 'reason', 'request_id'], 'a clear outcome has no salt key');
+    approver.stop();
+  });
+
+  it('a policy absent is the clear path', async () => {
+    const { approver, link } = await sealedSetup({ holders: 1, withPolicy: false });
+    const pending = ask(approver);
+    const { message } = open(await waitForSubmit(link));
+    assert.deepEqual(message.action, liveAction());
+    approver.stop();
+    await pending;
+  });
+
+  it('with one phone holding a box key the request is sealed, it and the node are in keys, and only the box holder opens the action', async () => {
+    const { approver, link, boxed, others, identity } = await sealedSetup({ holders: 1, plain: 1 });
+    const pending = ask(approver);
+    const request = await waitForSubmit(link);
+    assert.equal(verifyEd25519(request, identity.publicKey.toString('hex')), true);
+    const { message } = open(request);
+    assert.equal(validateMessage(REQUEST_TYPE, message), null);
+    assert.equal(isSealedShape(REQUEST_TYPE, message), true);
+    for (const key of ['action', 'origin', 'salt']) assert.equal(Object.hasOwn(message, key), false, key);
+    assert.deepEqual(Object.keys(message.sealed.keys).sort(), [boxed[0].deviceId, identity.nodeId].sort());
+    assert.deepEqual(message.node_box, identity.box.jwk);
+    const opened = boxed[0].open(request, REQUEST_TYPE);
+    assert.deepEqual(opened.content.action, liveAction());
+    assert.deepEqual(opened.content.origin, { client: 'gateway', session: 's-hidden-session', job_id: 'job-hidden-id' });
+    assert.throws(() => openSealed({ type: REQUEST_TYPE, message, recipientId: others[0].deviceId, agree: identity.box.agree }), (e) => e.reason === 'not_recipient');
+    assert.deepEqual(openSealed({ type: REQUEST_TYPE, message, recipientId: identity.nodeId, agree: identity.box.agree }).content.action, liveAction(), 'the node reads its own audit entries');
+    approver.stop();
+    await pending;
+  });
+
+  it('every phone holding a box key is in keys', async () => {
+    const { approver, link, boxed, identity } = await sealedSetup({ holders: 2 });
+    const pending = ask(approver);
+    const request = await waitForSubmit(link);
+    assert.deepEqual(Object.keys(open(request).message.sealed.keys).sort(), [boxed[0].deviceId, boxed[1].deviceId, identity.nodeId].sort());
+    for (const phone of boxed) assert.deepEqual(phone.open(request, REQUEST_TYPE).content.action, liveAction());
+    approver.stop();
+    await pending;
+  });
+
+  it("a sealed request's action_hash is the salted hash and a response over it is accepted", async () => {
+    const { approver, link, boxed } = await sealedSetup();
+    const pending = ask(approver);
+    const request = await waitForSubmit(link);
+    const { message, content } = boxed[0].open(request, REQUEST_TYPE);
+    assert.equal(message.action_hash, saltedHash(content.salt, liveAction()));
+    assert.notEqual(message.action_hash, actionHash(liveAction()));
+    assert.equal(actionHash(liveAction(), { salt: content.salt }), message.action_hash);
+    assert.deepEqual(await approver.handleResponse(boxed[0].respond(request, 'approve')), { accepted: true, reason: null });
+    const outcome = await pending;
+    assert.equal(outcome.decision, 'approve');
+    assert.equal(outcome.action_hash, message.action_hash);
+    assert.equal(outcome.salt, content.salt, 'a caller that re-checks the action needs the salt');
+    approver.stop();
+  });
+
+  it('two requests for one action have different hashes', async () => {
+    const { approver, link } = await sealedSetup();
+    const one = ask(approver);
+    const two = ask(approver);
+    await waitForSubmit(link, 2);
+    assert.notEqual(open(link.submitted[0]).message.action_hash, open(link.submitted[1]).message.action_hash);
+    approver.stop();
+    await Promise.all([one, two]);
+  });
+
+  it('a response over the unsalted hash is action_hash_mismatch', async () => {
+    const { approver, link, boxed } = await sealedSetup();
+    const pending = ask(approver);
+    const request = await waitForSubmit(link);
+    const forged = boxed[0].respond(request, 'approve', { overrides: { action_hash: actionHash(liveAction()) } });
+    assert.deepEqual(await approver.handleResponse(forged), { accepted: false, reason: 'action_hash_mismatch' });
+    approver.stop();
+    await pending;
+  });
+
+  it('a changed parameter under sealing is action_changed on the salted re-check', async () => {
+    const { approver, link, boxed } = await sealedSetup();
+    let command = PARAM;
+    const pending = approver.requestAction(liveAction(), { origin: ORIGIN, currentAction: () => toolAction('Bash', { command }, '/srv/site') });
+    const request = await waitForSubmit(link);
+    command = 'deploy --force';
+    assert.deepEqual(await approver.handleResponse(boxed[0].respond(request, 'approve')), { accepted: false, reason: 'action_changed' });
+    const outcome = await pending;
+    assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'action_changed']);
+    approver.stop();
+  });
+
+  it('a parameter that changes during the response audit is action_changed on the second pass', async () => {
+    const ledger = gatedLedger('approval.response');
+    const { store, boxed, identity, dataDir, link } = await sealedSetup();
+    const timers = manualTimers();
+    const approver = new PhoneApprover({ identity, approverStore: store, link, auditLedger: ledger, sealPolicy: createSealPolicy({ approverStore: store, identity, dataDir }), setTimer: timers.setTimer, clearTimer: timers.clearTimer });
+    let command = PARAM;
+    const pending = approver.requestAction(liveAction(), { origin: ORIGIN, currentAction: () => toolAction('Bash', { command }, '/srv/site') });
+    const request = await waitForSubmit(link);
+    const handling = approver.handleResponse(boxed[0].respond(request, 'approve'));
+    await tick();
+    command = 'deploy --force';
+    ledger.release();
+    assert.deepEqual(await handling, { accepted: false, reason: 'action_changed' });
+    assert.equal((await pending).reason, 'action_changed');
+    approver.stop();
+  });
+
+  it("a box key applied while a clear request is pending leaves that request's check unsalted and seals the next", async () => {
+    const { approver, link, others, store } = await sealedSetup({ holders: 0, plain: 1 });
+    const first = ask(approver);
+    const clearRequest = await waitForSubmit(link);
+    assert.equal(open(clearRequest).message.action_hash, actionHash(liveAction()));
+
+    const boxPhone = createFakePhone({ name: 'New box phone', boxKey: true });
+    fs.writeFileSync(path.join(store.dir, `${boxPhone.deviceId}.json`), JSON.stringify(boxPhone.approverRecord({ boxKey: true })), { mode: 0o644 });
+    await store.ready();
+
+    const second = ask(approver);
+    const sealedRequest = await waitForSubmit(link, 2);
+    assert.equal(isSealedShape(REQUEST_TYPE, open(sealedRequest).message), true);
+    assert.deepEqual(await approver.handleResponse(others[0].respond(clearRequest, 'approve')), { accepted: true, reason: null });
+    assert.equal((await first).decision, 'approve');
+    assert.deepEqual(await approver.handleResponse(boxPhone.respond(sealedRequest, 'approve')), { accepted: true, reason: null });
+    assert.equal((await second).decision, 'approve');
+    approver.stop();
+  });
+
+  it('a device revoked after the request is refused revoked_device even though its wrap is in keys', async () => {
+    const { approver, link, boxed, store } = await sealedSetup({ holders: 2 });
+    const pending = ask(approver);
+    const request = await waitForSubmit(link);
+    const [owner, thief] = boxed;
+    assert.equal(store.stage(owner.revoke(thief.deviceId)).state, 'revoked-pending-apply');
+    assert.ok(Object.hasOwn(open(request).message.sealed.keys, thief.deviceId), 'the wrap is still there');
+    assert.deepEqual(await approver.handleResponse(thief.respond(request, 'approve')), { accepted: false, reason: 'revoked_device' });
+    assert.equal((await approver.handleResponse(owner.respond(request, 'deny'))).accepted, true);
+    assert.equal((await pending).decision, 'deny');
+    approver.stop();
+  });
+
+  it('a device revoked before the request has no wrap', async () => {
+    const { approver, link, boxed, store, identity } = await sealedSetup({ holders: 2 });
+    const [owner, thief] = boxed;
+    assert.equal(store.stage(owner.revoke(thief.deviceId)).state, 'revoked-pending-apply');
+    const pending = ask(approver);
+    const request = await waitForSubmit(link);
+    assert.deepEqual(Object.keys(open(request).message.sealed.keys).sort(), [owner.deviceId, identity.nodeId].sort());
+    approver.stop();
+    await pending;
+  });
+
+  it("a relay moving one request's sealed blob onto another's clear part opens nowhere and earns no response", async () => {
+    const { approver, link, boxed, identity } = await sealedSetup();
+    const pendingA = ask(approver);
+    const pendingB = ask(approver);
+    await waitForSubmit(link, 2);
+    const [a, b] = link.submitted;
+    const moved = { ...open(b).message, sealed: open(a).message.sealed };
+    assert.throws(() => openSealed({ type: REQUEST_TYPE, message: moved, recipientId: identity.nodeId, agree: identity.box.agree }), (e) => e.reason === 'open_failed');
+    // A phone that could not open it has nothing to hash; a response naming
+    // A's hash on B's request is refused.
+    const crossed = boxed[0].respond(b, 'approve', { overrides: { action_hash: open(a).message.action_hash } });
+    assert.deepEqual(await approver.handleResponse(crossed), { accepted: false, reason: 'action_hash_mismatch' });
+    approver.stop();
+    await Promise.all([pendingA, pendingB]);
+  });
+
+  it('the approval.request audit entry holds the sealed envelope and no action key', async () => {
+    const { approver, link, boxed, ledger } = await sealedSetup();
+    const pending = ask(approver);
+    const request = await waitForSubmit(link);
+    await approver.handleResponse(boxed[0].respond(request, 'deny'));
+    await pending;
+    await tick();
+    const entry = ledger.entries.find((e) => e.kind === 'approval.request');
+    assert.deepEqual(entry.data.envelope, request);
+    assert.equal(Object.hasOwn(entry.data, 'action'), false);
+    assert.equal(Object.hasOwn(open(entry.data.envelope).message, 'action'), false);
+    approver.stop();
+  });
+
+  it('nothing the relay or the mirror sees holds a parameter, the summary or the origin', async () => {
+    const lines = [];
+    const removeSink = addSink((record) => { lines.push(record.line); });
+    const { approver, link, boxed, ledger } = await sealedSetup();
+    const pending = ask(approver);
+    const request = await waitForSubmit(link);
+    // Read only by the loopback bridge to the node's own paired window.
+    assert.deepEqual(approver.pending().map((p) => p.summary), [liveAction().summary]);
+    await approver.handleResponse(boxed[0].respond(request, 'approve'));
+    await pending;
+    await tick();
+    removeSink();
+    const decode = (v) => {
+      if (Array.isArray(v)) return v.map(decode);
+      if (v && typeof v === 'object') {
+        const out = {};
+        for (const [k, inner] of Object.entries(v)) out[k] = decode(inner);
+        if (typeof v.payload === 'string') out.decoded = Buffer.from(v.payload, 'base64url').toString('utf8');
+        return out;
+      }
+      return v;
+    };
+    const seen = JSON.stringify(decode({ submitted: link.submitted, statuses: link.statuses, ledger: ledger.entries, lines }));
+    for (const hidden of [PARAM, 'hidden-parameter', 's-hidden-session', 'job-hidden-id', 'Bash(']) assert.equal(seen.includes(hidden), false, hidden);
+    approver.stop();
+  });
+
+  describe('a relay that refuses a sealed request', () => {
+    const refusingLink = (code) => {
+      const link = fakeLink();
+      link.submit = async (env) => { link.submitted.push(env); throw Object.assign(new Error('expected kl.approval.request'), { code }); };
+      return link;
+    };
+    const logged = async (run) => {
+      const lines = [];
+      const removeSink = addSink((record) => { lines.push(record.line); });
+      try {
+        await run();
+        await tick();
+        await tick();
+      } finally {
+        removeSink();
+      }
+      return lines;
+    };
+
+    for (const code of ['malformed', 'bad_request']) {
+      it(`${code} warns once, naming the relay's version and the upgrade order`, async () => {
+        const { approver, link } = await sealedSetup({ link: refusingLink(code) });
+        const asks = [];
+        const lines = await logged(async () => {
+          asks.push(ask(approver), ask(approver));
+          await waitForSubmit(link, 2);
+        });
+        const warned = lines.filter((l) => /relay before node/.test(l));
+        assert.equal(warned.length, 1, lines.join('\n'));
+        assert.match(warned[0], /older than this node/);
+        assert.equal(lines.some((l) => /will resubmit on reconnect/.test(l)), false);
+        approver.stop();
+        await Promise.all(asks);
+      });
+
+      it(`${code} finishes the request at once: relay_too_old, sent once, audited, and the tool is told`, async () => {
+        const { approver, link, ledger } = await sealedSetup({ link: refusingLink(code) });
+        const outcome = await ask(approver);
+        assert.deepEqual([outcome.decision, outcome.reason], ['unavailable', 'relay_too_old']);
+        assert.equal(link.submitted.length, 1);
+        assert.deepEqual(approver.pending(), []);
+        link.connect();
+        await tick();
+        assert.equal(link.submitted.length, 1, 'a reconnect sends nothing: it is over');
+        assert.ok(ledger.entries.some((e) => e.kind === 'approval.outcome' && e.data.reason === 'relay_too_old'));
+        const metadata = {};
+        assert.equal(await approver.requestApproval('Bash', { command: PARAM }, metadata), 'unavailable');
+        assert.match(metadata.refusal.error, /^Phone approval unavailable \(relay_too_old\): the relay or front door is older than this node/);
+        assert.match(metadata.refusal.error, /Nothing ran\.$/);
+        approver.stop();
+      });
+    }
+
+    it('another failure of a sealed request is the ordinary retry', async () => {
+      const { approver, link } = await sealedSetup({ link: refusingLink('link_down') });
+      let pending;
+      const lines = await logged(async () => {
+        pending = ask(approver);
+        await waitForSubmit(link);
+      });
+      assert.ok(lines.some((l) => /will resubmit on reconnect/.test(l)));
+      assert.equal(lines.some((l) => /relay before node/.test(l)), false);
+      approver.stop();
+      await pending;
+    });
+
+    it('a clear request refused malformed is the ordinary retry', async () => {
+      const { approver, link } = await sealedSetup({ holders: 0, plain: 1, link: refusingLink('malformed') });
+      let pending;
+      const lines = await logged(async () => {
+        pending = ask(approver);
+        await waitForSubmit(link);
+      });
+      assert.ok(lines.some((l) => /will resubmit on reconnect/.test(l)));
+      assert.equal(lines.some((l) => /relay before node/.test(l)), false);
+      approver.stop();
+      await pending;
+    });
+  });
+
+  it('a clear request still audits its job id', async () => {
+    const { approver, link, ledger } = await sealedSetup({ holders: 0, plain: 1 });
+    const pending = ask(approver);
+    await waitForSubmit(link);
+    assert.equal(ledger.entries.find((e) => e.kind === 'approval.request').data.job_id, 'job-hidden-id');
+    approver.stop();
+    await pending;
+  });
+
+  describe('latched with nobody to seal to', () => {
+    it('a request is denied no_sealed_recipient, nothing is sent and nothing clear is audited', async () => {
+      const { approver, link, dataDir, ledger, sealPolicy } = await sealedSetup({ holders: 0, plain: 1 });
+      writeLatch(dataDir);
+      assert.deepEqual([sealPolicy.sealing(), sealPolicy.canSeal()], [true, false]);
+      const outcome = await ask(approver);
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'no_sealed_recipient']);
+      await tick();
+      assert.deepEqual(link.submitted, []);
+      assert.deepEqual(approver.pending(), []);
+      assert.equal(JSON.stringify(ledger.entries).includes('hidden-parameter'), false);
+      assert.equal(ledger.entries.some((e) => e.kind === 'approval.request'), false);
+      assert.deepEqual(ledger.entries.map((e) => [e.kind, e.data.state, e.data.reason]), [['approval.outcome', 'refused', 'no_sealed_recipient']]);
+      approver.stop();
+    });
+
+    it("the tool call fails with the reason, and is not counted as the owner's no", async () => {
+      const { approver, dataDir } = await sealedSetup({ holders: 0, plain: 1 });
+      writeLatch(dataDir);
+      const metadata = {};
+      assert.equal(await approver.requestApproval('Bash', { command: PARAM }, metadata), 'unavailable');
+      assert.match(metadata.refusal.error, /no_sealed_recipient/);
+      approver.stop();
+    });
+
+    it('the node holding no box key of its own never sends clear', async () => {
+      const { approver, link } = await sealedSetup({ holders: 1, nodeBox: false });
+      const outcome = await ask(approver);
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'no_sealed_recipient']);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('an untrusted store never sends clear', async () => {
+      const { approver, link, store, dataDir } = await sealedSetup();
+      writeLatch(dataDir);
+      store.list = () => [];
+      const outcome = await ask(approver);
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'no_sealed_recipient']);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('with no phone holding a box key the denial says to enroll one', async () => {
+      const { approver, dataDir } = await sealedSetup({ holders: 0, plain: 1 });
+      writeLatch(dataDir);
+      const metadata = {};
+      await approver.requestApproval('Bash', { command: PARAM }, metadata);
+      assert.match(metadata.refusal.error, /Enroll a phone or apply its box key/);
+      assert.deepEqual(approver.sealRefusal().reason, 'no_sealed_recipient');
+      approver.stop();
+    });
+
+    // The real policy over a store that is not trusted, whatever its phones hold.
+    it('an untrusted approver set is named as the cause, not a missing phone', async () => {
+      const { identity, store, dataDir, link } = await sealedSetup();
+      writeLatch(dataDir);
+      const untrusted = { list: () => [], isActive: () => false, untrusted: true, problem: 'the approver dir is writable by the service' };
+      const sealPolicy = createSealPolicy({ approverStore: untrusted, identity, dataDir });
+      const approver = new PhoneApprover({ identity, approverStore: store, link, auditLedger: fakeLedger(), sealPolicy, setTimer: () => null, clearTimer: () => {} });
+      const metadata = {};
+      assert.equal(await approver.requestApproval('Bash', { command: PARAM }, metadata), 'unavailable');
+      assert.match(metadata.refusal.error, /no_sealed_recipient/);
+      assert.match(metadata.refusal.error, /the approver dir is writable by the service/);
+      assert.doesNotMatch(metadata.refusal.error, /Enroll/);
+      const outcome = await approver.requestAction(liveAction(), { currentAction: liveAction });
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'no_sealed_recipient']);
+      approver.stop();
+    });
+
+    it('a latch that cannot be written is named as the cause while phones hold box keys', async () => {
+      const { identity, store, dataDir, link } = await sealedSetup();
+      const sealPolicy = createSealPolicy({ approverStore: store, identity, dataDir, writeLatchFile: () => { throw Object.assign(new Error('read-only'), { code: 'EROFS' }); } });
+      const approver = new PhoneApprover({ identity, approverStore: store, link, auditLedger: fakeLedger(), sealPolicy, setTimer: () => null, clearTimer: () => {} });
+      const metadata = {};
+      assert.equal(await approver.requestApproval('Bash', { command: PARAM }, metadata), 'unavailable');
+      assert.match(metadata.refusal.error, /no_sealed_recipient/);
+      assert.match(metadata.refusal.error, /sealing\.json cannot be written/);
+      assert.doesNotMatch(metadata.refusal.error, /Enroll/);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('a node with no box key of its own is named as the cause', async () => {
+      const { approver } = await sealedSetup({ holders: 1, nodeBox: false });
+      const metadata = {};
+      await approver.requestApproval('Bash', { command: PARAM }, metadata);
+      assert.match(metadata.refusal.error, /no box key of its own/);
+      assert.doesNotMatch(metadata.refusal.error, /Enroll/);
+      approver.stop();
+    });
+
+    it('sealRefusal is null while it can seal, and on the clear path', async () => {
+      const sealing = await sealedSetup();
+      assert.equal(sealing.approver.sealRefusal(), null);
+      sealing.approver.stop();
+      const clear = await sealedSetup({ holders: 0, plain: 1 });
+      assert.equal(clear.approver.sealRefusal(), null);
+      clear.approver.stop();
+      const none = await sealedSetup({ withPolicy: false });
+      assert.equal(none.approver.sealRefusal(), null);
+      none.approver.stop();
+    });
+
+    it('a policy that throws is refused, never clear', async () => {
+      const { identity } = await sealedSetup({ holders: 0, plain: 1 });
+      const boom = () => { throw new Error('store boom'); };
+      for (const sealPolicy of [{ sealing: boom }, { sealing: () => true, canSeal: boom }, { sealing: () => true, canSeal: () => true, recipients: boom }]) {
+        assert.throws(() => buildRequest({ identity, action: liveAction(), sealPolicy }), (e) => e.reason === 'no_sealed_recipient');
+      }
+    });
+
+    it('recipients that hold only the node are refused', async () => {
+      const { identity } = await sealedSetup({ holders: 0, plain: 1 });
+      const sealPolicy = { sealing: () => true, canSeal: () => true, recipients: () => ({ [identity.nodeId]: identity.box.jwk }), senderId: identity.nodeId, nodeBox: identity.box.jwk };
+      assert.throws(() => buildRequest({ identity, action: liveAction(), sealPolicy }), (e) => e.reason === 'no_sealed_recipient');
+    });
+  });
+
+  describe('a clear request resent after the latch', () => {
+    // Holds a clear request with the link down, then gives a phone a box key.
+    async function heldClear(options = {}) {
+      const link = fakeLink({ connected: false });
+      const setup = await sealedSetup({ holders: 0, plain: 1, link, ...options });
+      const pending = setup.approver.requestAction(liveAction(), { origin: ORIGIN, signal: options.signal || null, currentAction: options.currentAction || liveAction });
+      for (let i = 0; i < 20 && setup.approver.pending().length === 0; i += 1) await tick();
+      assert.equal(setup.approver.pending().length, 1);
+      assert.deepEqual(link.submitted, []);
+      return { ...setup, link, pending };
+    }
+    async function giveBoxKey(store) {
+      const phone = createFakePhone({ name: 'New box phone', boxKey: true });
+      fs.writeFileSync(path.join(store.dir, `${phone.deviceId}.json`), JSON.stringify(phone.approverRecord({ boxKey: true })), { mode: 0o644 });
+      await store.ready();
+      return phone;
+    }
+
+    it('goes out as a new sealed request, audited first, and the phone that opens it decides', async () => {
+      const { approver, link, store, ledger, pending, identity } = await heldClear();
+      const heldId = approver.pendingRequests.list()[0].request.request_id;
+      const phone = await giveBoxKey(store);
+      link.connect();
+      const envelope = await waitForSubmit(link);
+      assert.equal(link.submitted.length, 1);
+      const { message } = open(envelope);
+      assert.equal(isSealedShape(REQUEST_TYPE, message), true);
+      assert.notEqual(message.request_id, heldId);
+      assert.ok(ledger.entries.some((e) => e.kind === 'approval.request' && e.data.envelope === envelope), 'audited before it went');
+      assert.ok(ledger.entries.some((e) => e.kind === 'approval.outcome' && e.data.request_id === heldId && e.data.state === 'withdrawn'));
+      assert.deepEqual(approver.pending().map((p) => p.request_id), [message.request_id]);
+      const opened = openSealed({ type: REQUEST_TYPE, message, recipientId: identity.nodeId, agree: identity.box.agree });
+      assert.deepEqual(opened.content.action, liveAction());
+      assert.deepEqual(await approver.handleResponse(phone.respond(envelope, 'approve')), { accepted: true, reason: null });
+      assert.equal((await pending).decision, 'approve');
+      approver.stop();
+    });
+
+    it('is rebuilt from the kept currentAction, so what goes is the action now', async () => {
+      let command = 'deploy --target before';
+      const currentAction = () => toolAction('Bash', { command }, '/srv/site');
+      const { approver, link, store, identity, pending } = await heldClear({ currentAction });
+      await giveBoxKey(store);
+      command = 'deploy --target after';
+      link.connect();
+      const { message } = open(await waitForSubmit(link));
+      assert.deepEqual(openSealed({ type: REQUEST_TYPE, message, recipientId: identity.nodeId, agree: identity.box.agree }).content.action, currentAction());
+      approver.stop();
+      await pending;
+    });
+
+    it('with the latch set and no phone to seal to it ends no_sealed_recipient, sending nothing', async () => {
+      const { approver, link, dataDir, pending, others, store } = await heldClear();
+      writeLatch(dataDir);
+      assert.ok(others.length === 1 && store);
+      const sealPolicy = approver.sealPolicy;
+      sealPolicy.sealing = () => true;
+      sealPolicy.canSeal = () => false;
+      link.connect();
+      const outcome = await pending;
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'no_sealed_recipient']);
+      assert.deepEqual(link.submitted, []);
+      assert.deepEqual(approver.pending(), []);
+      approver.stop();
+    });
+
+    it('a policy that throws is never read as clear', async () => {
+      const { approver, link, pending } = await heldClear();
+      approver.sealPolicy.sealing = () => { throw new Error('store boom'); };
+      link.connect();
+      const outcome = await pending;
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'no_sealed_recipient']);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('a currentAction that throws ends it action_changed, sending nothing', async () => {
+      let boom = false;
+      const currentAction = () => { if (boom) throw new Error('gone'); return liveAction(); };
+      const { approver, link, store, pending } = await heldClear({ currentAction });
+      await giveBoxKey(store);
+      boom = true;
+      link.connect();
+      const outcome = await pending;
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'action_changed']);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('an action too large to seal ends with the words for that', async () => {
+      const big = toolAction('Write', { content: 'x'.repeat(200 * 1024) }, null);
+      const { approver, link, store, pending } = await heldClear({ currentAction: () => big });
+      await giveBoxKey(store);
+      link.connect();
+      const outcome = await pending;
+      assert.deepEqual([outcome.decision, outcome.reason, outcome.sealed], ['error', 'action_too_large', true]);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('a clear request on a node that does not seal is resent as it was, and a sealed one too', async () => {
+      const clear = await heldClear();
+      const held = clear.approver.pendingRequests.list()[0].envelope;
+      clear.link.connect();
+      assert.equal(await waitForSubmit(clear.link), held);
+      clear.approver.stop();
+      await clear.pending;
+
+      const link = fakeLink();
+      const { approver } = await sealedSetup({ link });
+      const pending = ask(approver);
+      const first = await waitForSubmit(link);
+      link.connect();
+      assert.equal(await waitForSubmit(link, 2), first, 'a sealed request is the same bytes again');
+      approver.stop();
+      await pending;
+    });
+
+    it('a stop while the new request is being audited sends nothing', async () => {
+      const { approver, link, store, ledger, pending } = await heldClear();
+      await giveBoxKey(store);
+      const append = ledger.append;
+      let release;
+      ledger.append = async (entry) => {
+        if (entry.kind === 'approval.request') await new Promise((resolve) => { release = resolve; });
+        return append(entry);
+      };
+      link.connect();
+      for (let i = 0; i < 50 && !release; i += 1) await tick();
+      approver.stop();
+      release();
+      const outcome = await pending;
+      assert.equal(outcome.decision, 'unavailable');
+      assert.deepEqual(link.submitted, []);
+    });
+
+    it('an abort while it waits on the link, then a reconnect, sends nothing', async () => {
+      const controller = new AbortController();
+      const { approver, link, store, pending } = await heldClear({ signal: controller.signal });
+      await giveBoxKey(store);
+      controller.abort();
+      assert.equal((await pending).decision, 'withdrawn');
+      link.connect();
+      await tick();
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('an abort after the rebuild withdraws the new request', async () => {
+      const controller = new AbortController();
+      const { approver, link, store, pending } = await heldClear({ signal: controller.signal });
+      await giveBoxKey(store);
+      link.connect();
+      await waitForSubmit(link);
+      controller.abort();
+      assert.equal((await pending).decision, 'withdrawn');
+      assert.deepEqual(approver.pending(), []);
+      approver.stop();
+    });
+
+    it('a decision being audited is not rebuilt under it', async () => {
+      const link = fakeLink();
+      const { approver, others, store, ledger } = await sealedSetup({ holders: 0, plain: 1, link });
+      const pending = ask(approver);
+      const clearRequest = await waitForSubmit(link);
+      await giveBoxKey(store);
+      const append = ledger.append;
+      let release;
+      ledger.append = async (entry) => {
+        if (entry.kind === 'approval.response') await new Promise((resolve) => { release = resolve; });
+        return append(entry);
+      };
+      const answer = approver.handleResponse(others[0].respond(clearRequest, 'approve'));
+      for (let i = 0; i < 50 && !release; i += 1) await tick();
+      link.connect();
+      await tick();
+      assert.equal(link.submitted.length, 1);
+      release();
+      assert.deepEqual(await answer, { accepted: true, reason: null });
+      assert.equal((await pending).decision, 'approve');
+      approver.stop();
+    });
+  });
+
+  describe('sizes', () => {
+    const sized = (bytes) => {
+      const bare = { kind: 'tool', name: 'Write', params: { content: '' }, cwd: null, summary: 'Write' };
+      return { ...bare, params: { content: 'x'.repeat(bytes - canonicalize(bare).length) } };
+    };
+    // What the front door's mirror takes, and the mesh's link frame.
+    const MIRROR_PAGE = 262144;
+    const FRAME = 1024 * 1024;
+
+    async function policyFor(phones) {
+      const identity = testNodeIdentity({ box: true });
+      const boxed = Array.from({ length: phones }, () => createFakePhone({ boxKey: true }));
+      const store = await approverStoreWith(boxed.map((p) => p.approverRecord({ boxKey: true })));
+      stores.push(store);
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-seal-approver-'));
+      dirs.push(dataDir);
+      return { identity, dataDir, sealPolicy: createSealPolicy({ approverStore: store, identity, dataDir }) };
+    }
+
+    it('a full-size action in clear still builds; sealed it is refused action_too_large', async () => {
+      const { identity, sealPolicy } = await policyFor(1);
+      const full = sized(MAX_ACTION_BYTES);
+      assert.equal(buildRequest({ identity, action: full }).salt, null);
+      assert.throws(() => buildRequest({ identity, action: full, sealPolicy }), (e) => e.reason === 'action_too_large');
+    });
+
+    it('the approver answers a sealed oversize action with the existing error, sending nothing', async () => {
+      const { approver, link } = await sealedSetup();
+      const full = sized(MAX_ACTION_BYTES);
+      const outcome = await approver.requestAction(full, { currentAction: () => full });
+      assert.deepEqual([outcome.decision, outcome.reason], ['error', 'action_too_large']);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('the model reads plain words for a sealed oversize call, and the old words stay for a clear one', async () => {
+      const big = { content: 'x'.repeat(MAX_ACTION_BYTES - 1024) };
+      const sealed = await sealedSetup();
+      const metadata = {};
+      assert.equal(await sealed.approver.requestApproval('Write', big, metadata), 'unavailable');
+      assert.equal(metadata.refusal.error, 'A sealed approval holds about 130 KB of parameters. Write it in smaller pieces. Nothing ran.');
+      sealed.approver.stop();
+      const huge = { content: 'x'.repeat(MAX_ACTION_BYTES) };
+      const clear = await sealedSetup({ holders: 0, plain: 1 });
+      const clearMeta = {};
+      assert.equal(await clear.approver.requestApproval('Write', huge, clearMeta), 'unavailable');
+      assert.match(clearMeta.refusal.error, /^Action cannot be shown on the phone \(action_too_large\)/);
+      clear.approver.stop();
+    });
+
+    it('the largest action that seals, to eight phones and with the longest origin, fits a mirror page and a link frame', async () => {
+      const { identity, sealPolicy, dataDir } = await policyFor(8);
+      const longest = String.fromCodePoint(0x20ac).repeat(200);
+      const origin = { client: longest, session: longest, job_id: longest };
+      const fits = (bytes) => {
+        try {
+          return buildRequest({ identity, action: sized(bytes), origin, sealPolicy });
+        } catch (err) {
+          if (err.reason === 'action_too_large') return null;
+          throw err;
+        }
+      };
+      let low = 1024;
+      let high = MAX_ACTION_BYTES;
+      while (high - low > 1) {
+        const mid = Math.floor((low + high) / 2);
+        if (fits(mid)) low = mid;
+        else high = mid;
+      }
+      assert.ok(low > 128 * 1024, `the room left for an action, ${low} bytes, is too small`);
+      const built = fits(low);
+      assert.equal(validateMessage(REQUEST_TYPE, built.message), null);
+      assert.equal((Buffer.from(built.message.sealed.ct, 'base64url').length - 16) % 256, 0, 'padded to a whole block, inside the limit');
+
+      const ledger = new AuditLedger({ dir: path.join(dataDir, 'audit'), identity, nodeId: identity.nodeId, writer: 'service' });
+      // The largest a clear job id could be in an entry; a sealed entry holds none.
+      await ledger.append({ kind: 'approval.request', data: { job_id: longest, envelope: built.envelope } });
+      const slice = ledger.slice({ limit: 200, after: null, max_bytes: MIRROR_PAGE });
+      assert.equal(open(slice).message.entries.length, 1);
+      assert.ok(slice.payload.length <= Math.ceil(((MIRROR_PAGE + 1024) * 4) / 3), `the audit page is ${slice.payload.length} characters`);
+      assert.ok(Buffer.byteLength(JSON.stringify({ method: 'audit.slice', params: { envelope: slice } })) < FRAME);
+      assert.ok(Buffer.byteLength(JSON.stringify({ method: 'approval.submit', params: { envelope: built.envelope } })) < FRAME);
+    });
   });
 });

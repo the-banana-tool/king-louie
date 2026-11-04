@@ -9,7 +9,7 @@ const path = require('path');
 const { createLogger } = require('../logging');
 const { isPathUnderRoots, realResolve } = require('../platform/path-roots');
 const { EvidenceLedger } = require('../verification/evidence-ledger');
-const { ToolError, approvalOrigin } = require('./fleet-tools');
+const { ToolError, executorOrigin } = require('./fleet-tools');
 const { covers } = require('./scope-rules');
 const { MCP_TOOLS } = require('./tool-definitions');
 const { CASE_MCP_TOOLS } = require('../cases/mcp-tool-definitions');
@@ -394,7 +394,7 @@ class DelegateSessions {
         // T11-sessions; the re-threaded requester carries it to sub-agents.
         allowedToolNames: delegateToolNames(this.toolRegistry, { refuseUnsafe }),
         executorOptions: {
-          origin: approvalOrigin(origin, jobId),
+          origin: executorOrigin(origin, jobId),
           chatId: `delegate:${jobId}`,
           refuseUnsafe,
           // T11-roots: with no node policy, the refuseUnsafe classifier

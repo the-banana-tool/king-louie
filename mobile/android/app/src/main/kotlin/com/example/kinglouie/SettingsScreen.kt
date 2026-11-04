@@ -84,7 +84,7 @@ fun SettingsScreen(model: AppModel, back: () -> Unit, openScanner: () -> Unit) {
         AlertDialog(
             onDismissRequest = { resetAsked = false },
             title = { Text("Reset this phone?") },
-            text = { Text("This deletes both of this phone's keys and every pin. To approve again, pair it again. The nodes still list it as an approver until their administrators revoke it.") },
+            text = { Text("This deletes this phone's keys and every pin. To approve again, pair it again. The nodes still list it as an approver until their administrators revoke it.") },
             confirmButton = { TextButton({ resetAsked = false; model.reset(); openScanner() }) { Text("Reset", color = KlTokens.error) } },
             dismissButton = { TextButton({ resetAsked = false }) { Text("Cancel") } }
         )
@@ -123,6 +123,14 @@ fun SettingsScreen(model: AppModel, back: () -> Unit, openScanner: () -> Unit) {
                         AppModel.ReadKeyNodeState.NOT_SENT -> {
                             Text("Read key: not sent yet", color = statusColors.warning)
                             if (live) TextButton({ model.sendReadKeyAgain() }, enabled = !model.readKeySetupBusy) { Text("Send again") }
+                        }
+                    }
+                    if (!model.boxKeyRefused) when (n.boxKey) {
+                        AppModel.BoxKeyNodeState.IN_USE -> Secondary("Box key: in use")
+                        AppModel.BoxKeyNodeState.WAITING_FOR_APPLY -> Text("Box key: waiting for `device apply` on the node", color = statusColors.warning)
+                        AppModel.BoxKeyNodeState.NOT_SENT -> {
+                            Text("Box key: not sent yet", color = statusColors.warning)
+                            if (live && !model.readKeySetupNeeded) TextButton({ model.sendBoxKeyAgain() }, enabled = !model.boxKeySetupBusy) { Text("Send again") }
                         }
                     }
                     Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -171,6 +179,16 @@ fun SettingsScreen(model: AppModel, back: () -> Unit, openScanner: () -> Unit) {
                     Text("This phone", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(model.deviceFingerprint ?: "No key yet", style = MonoStyle)
                     Text(model.readKeyFingerprint?.let { "Read key $it" } ?: "No read key yet", style = MonoStyle, color = KlTokens.textSecondary)
+                    if (model.boxKeyRefused) {
+                        Text(AppModel.BOX_KEY_REFUSED_LINE, color = statusColors.warning)
+                        if (live) TextButton({ model.retryBoxKey() }, enabled = !model.boxKeySetupBusy) { Text("Try again") }
+                    } else {
+                        Text(model.boxKeyFingerprint?.let { "Box key $it" } ?: "No box key yet", style = MonoStyle, color = KlTokens.textSecondary)
+                        if (model.boxKeyBroken) {
+                            Text(unreadableLine(AppModel.BOX_KEY_BROKEN, ""), color = statusColors.warning)
+                            if (live) TextButton({ model.remakeBoxKey() }, enabled = !model.boxKeySetupBusy) { Text("Make a new box key") }
+                        }
+                    }
                 }
             }
             val others = model.devices.filter { it["device_id"].str() != model.deviceId }
@@ -225,7 +243,7 @@ fun SettingsScreen(model: AppModel, back: () -> Unit, openScanner: () -> Unit) {
                 OutlinedButton({ resetAsked = true }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(KlTokens.radiusMd), colors = denyColors(), border = denyBorder(true)) {
                     Text("Reset this phone")
                 }
-                Secondary("No analytics. The relay sees every action you are asked to approve, and when this app is open. See PRIVACY.md.", Modifier.padding(top = 8.dp))
+                Secondary("No analytics. The relay cannot read what a sealed node sends. It still sees when this app is open, your yes or no, and everything from a node that does not seal yet. See PRIVACY.md.", Modifier.padding(top = 8.dp))
             }
         }
     }

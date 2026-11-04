@@ -12,20 +12,75 @@ public enum Messages {
         return Base64URL.encode(Data(bytes))
     }
 
-    /// The `device` object of an enrollment. `name` is 1–64 UTF-16 units.
-    public static func device(deviceId: String, name: String, platform: String, x: String, y: String) throws -> JSONValue {
-        let device: JSONValue = .object([
+    /// A P-256 public key as a JWK.
+    public static func jwk(x: String, y: String) -> JSONValue {
+        .object(["kty": .string("EC"), "crv": .string("P-256"), "x": .string(x), "y": .string(y)])
+    }
+
+    /// The `device` object of an enrollment. `name` is 1–64 UTF-16 units. With
+    /// `boxKey` (sealed phones, R-SP-10) it has a fifth member, `box_key`: a P-256
+    /// JWK on the curve whose point is not the device key's. The device id still
+    /// derives from the device key (`x`, `y`) alone.
+    public static func device(deviceId: String, name: String, platform: String, x: String, y: String, boxKey: JSONValue? = nil) throws -> JSONValue {
+        var fields: [String: JSONValue] = [
             "device_id": .string(deviceId),
             "name": .string(name),
             "platform": .string(platform),
-            "public_key": .object(["kty": .string("EC"), "crv": .string("P-256"), "x": .string(x), "y": .string(y)])
-        ])
-        guard Rules.isDevice(device) else { throw ProtocolError.malformed("not a valid device (name is 1–64 UTF-16 units)") }
+            "public_key": jwk(x: x, y: y)
+        ]
+        if let boxKey { fields["box_key"] = boxKey }
+        let device: JSONValue = .object(fields)
+        guard Rules.isDevice(device) else { throw ProtocolError.malformed("not a valid device (name is 1–64 UTF-16 units; a box key is a P-256 key other than the device key)") }
         return device
     }
 
-    /// kl.approval.response for a node-signed request message.
+    /// kl.device.box_key (R-SP-10): the device key's statement of its box key, for
+    /// a phone enrolled before it. `expiresAt` is after `createdAt` by at most 7 days.
+    public static func boxKeyStatement(deviceId: String, boxKey: JSONValue, createdAt: String, expiresAt: String, nonce: String) throws -> JSONValue {
+        try checked("kl.device.box_key", .object([
+            "v": .number("1"),
+            "type": .string("kl.device.box_key"),
+            "device_id": .string(deviceId),
+            "box_key": boxKey,
+            "created_at": .string(createdAt),
+            "expires_at": .string(expiresAt),
+            "nonce": .string(nonce)
+        ]))
+    }
+
+    /// What people compare for a box key (R-SP-10): `b-` and the device id's rule,
+    /// in groups of four. `boxKeyFingerprint` in src/approvals/seal.js.
+    public static func boxKeyFingerprint(x: String, y: String) throws -> String {
+        // Checks the coordinates and the curve.
+        _ = try Identifiers.deviceId(x: x, y: y)
+        let xb = try Base64URL.decode(x)
+        let yb = try Base64URL.decode(y)
+        let id = Identifiers.deviceId(raw: Data([0x04]) + xb + yb, prefix: "b-")
+        return "b-" + Identifiers.fingerprintGroups(id)
+    }
+
+    public static func boxKeyFingerprint(_ key: JSONValue) throws -> String {
+        guard Rules.isDeviceJwk(key), let x = key["x"]?.stringValue, let y = key["y"]?.stringValue else {
+            throw ProtocolError.malformed("not a P-256 JWK")
+        }
+        return try boxKeyFingerprint(x: x, y: y)
+    }
+
+    /// kl.approval.response for a node-signed clear request message. A message
+    /// holding `sealed` is refused: a phone answers only what it opened and checked.
     public static func response(to request: JSONValue, decision: String, deviceId: String, signedAt: String) throws -> JSONValue {
+        guard request["sealed"] == nil else { throw ProtocolError.malformed("a sealed request is answered from its opened message") }
+        return try buildResponse(request, decision: decision, deviceId: deviceId, signedAt: signedAt)
+    }
+
+    /// kl.approval.response for a sealed request, from what it opened to
+    /// (`PhoneView.opened`), which must pass `validateOpenedRequest`. It signs the salted hash as received (R-SP-2).
+    public static func responseToOpened(_ opened: JSONValue, decision: String, deviceId: String, signedAt: String) throws -> JSONValue {
+        if let problem = validateOpenedRequest(opened) { throw ProtocolError.malformed("not an opened request: \(problem)") }
+        return try buildResponse(opened, decision: decision, deviceId: deviceId, signedAt: signedAt)
+    }
+
+    private static func buildResponse(_ request: JSONValue, decision: String, deviceId: String, signedAt: String) throws -> JSONValue {
         guard let requestId = request["request_id"]?.stringValue, let nodeId = request["node_id"]?.stringValue,
               let actionHash = request["action_hash"]?.stringValue, let nonce = request["nonce"]?.stringValue,
               let expiresAt = request["expires_at"]?.stringValue else {
@@ -127,6 +182,21 @@ public enum Messages {
         return rule(m) ? nil : "malformed"
     }
 
+    /// A sealed kl.approval.request after opening (clear part and content
+    /// together): nil, or the reason a phone refuses it (`malformed`,
+    /// `action_hash_mismatch`). The hash is held to the content here, before
+    /// anything is shown (R-SP-2). `validateOpenedRequest` in src/approvals/messages.js.
+    public static func validateOpenedRequest(_ message: JSONValue) -> String? {
+        guard var m = message.objectValue, let type = m["type"]?.stringValue, ExactText.same(type, "kl.approval.request"),
+              m["v"] == JSONValue.number("1") else { return "malformed" }
+        let salt = m.removeValue(forKey: "salt")
+        let nodeBox = m.removeValue(forKey: "node_box")
+        guard Rules.isClearRequest(m), Rules.isDeviceJwk(nodeBox), Rules.isHash(salt),
+              let saltText = salt?.stringValue, let action = m["action"], let hash = m["action_hash"]?.stringValue,
+              let recomputed = try? Seal.saltedHash(salt: saltText, value: action) else { return "malformed" }
+        return ExactText.same(recomputed, hash) ? nil : "action_hash_mismatch"
+    }
+
     private static func checked(_ type: String, _ message: JSONValue) throws -> JSONValue {
         if let reason = validate(type, message) { throw ProtocolError.malformed("not a valid \(type): \(reason)") }
         return message
@@ -174,6 +244,7 @@ enum Rules {
         "kl.approval.status": status,
         "kl.device.enroll": enroll,
         "kl.device.revoke": revoke,
+        "kl.device.box_key": boxKey,
         "kl.audit.slice": auditSlice
     ]
 
@@ -185,6 +256,7 @@ enum Rules {
     static let statusStates = ["approved", "denied", "expired", "withdrawn", "refused"]
     static let enrollMaxMs: Int64 = 10 * 60 * 1000
     static let revokeMaxMs: Int64 = 7 * 24 * 60 * 60 * 1000
+    static let boxKeyMaxMs: Int64 = 7 * 24 * 60 * 60 * 1000
     static let platforms = ["ios", "android", "demo"]
 
     // MARK: shapes
@@ -270,8 +342,20 @@ enum Rules {
         return (try? Identifiers.deviceId(x: x, y: y)) != nil
     }
 
+    /// Whether two P-256 JWKs name one point. A coordinate is canonical base64url, so the text decides.
+    static func samePoint(_ a: JSONValue?, _ b: JSONValue?) -> Bool {
+        guard let ax = a?["x"]?.stringValue, let ay = a?["y"]?.stringValue,
+              let bx = b?["x"]?.stringValue, let by = b?["y"]?.stringValue else { return false }
+        return ExactText.same(ax, bx) && ExactText.same(ay, by)
+    }
+
+    /// The four keys of today, or exactly those and `box_key` (R-SP-10): a P-256 JWK whose point is not `public_key`'s.
     static func isDevice(_ v: JSONValue?) -> Bool {
-        guard let d = v?.objectValue, hasExactKeys(d, ["device_id", "name", "platform", "public_key"]),
+        guard let d = v?.objectValue else { return false }
+        let withBoxKey = d["box_key"] != nil
+        let deviceKeys = ["device_id", "name", "platform", "public_key"]
+        if withBoxKey && (!isDeviceJwk(d["box_key"]) || samePoint(d["box_key"], d["public_key"])) { return false }
+        guard hasExactKeys(d, withBoxKey ? deviceKeys + ["box_key"] : deviceKeys),
               let name = d["name"]?.stringValue, (1...64).contains(name.utf16.count),
               isOneOf(d["platform"], platforms), isDeviceJwk(d["public_key"]), isDeviceId(d["device_id"]),
               let jwk = d["public_key"], let id = d["device_id"]?.stringValue,
@@ -311,10 +395,21 @@ enum Rules {
         return hasExactKeys(o, keys) && o.values.allSatisfy { $0.isNull || withinLength($0, originStringMax) }
     }
 
-    static func request(_ m: Fields) -> Bool {
+    /// What both shapes of a request hold in clear.
+    static func requestClearFields(_ m: Fields) -> Bool {
+        isUuidV4(m["request_id"]) && isNodeId(m["node_id"]) && withinLength(m["node_name"], nodeNameMax)
+            && isHash(m["action_hash"]) && isTimestamp(m["created_at"]) && isTimestamp(m["expires_at"]) && isNonce(m["nonce"])
+    }
+
+    static func isClearRequest(_ m: Fields) -> Bool {
         hasExactKeys(m, ["v", "type", "request_id", "node_id", "node_name", "action", "action_hash", "origin", "created_at", "expires_at", "nonce"])
-            && isUuidV4(m["request_id"]) && isNodeId(m["node_id"]) && withinLength(m["node_name"], nodeNameMax) && action(m["action"])
-            && isHash(m["action_hash"]) && origin(m["origin"]) && isTimestamp(m["created_at"]) && isTimestamp(m["expires_at"]) && isNonce(m["nonce"])
+            && requestClearFields(m) && action(m["action"]) && origin(m["origin"])
+    }
+
+    /// A sealed one (R-SP-4): whoever opens it checks its action and origin (`Messages.validateOpenedRequest`).
+    static func request(_ m: Fields) -> Bool {
+        isClearRequest(m)
+            || (Seal.isSealedShape(type: "kl.approval.request", message: .object(m)) && requestClearFields(m) && isDeviceJwk(m["node_box"]))
     }
 
     static func response(_ m: Fields) -> Bool {
@@ -348,6 +443,14 @@ enum Rules {
               isDeviceId(m["device_id"]), isDeviceId(m["revoked_by"]), withinLength(m["reason"], revokeReasonMax),
               isTimestamp(m["created_at"]), isTimestamp(m["expires_at"]), isNonce(m["nonce"]) else { return false }
         return spanWithin(m, revokeMaxMs)
+    }
+
+    /// kl.device.box_key, the device key's statement of its box key.
+    static func boxKey(_ m: Fields) -> Bool {
+        guard hasExactKeys(m, ["v", "type", "device_id", "box_key", "created_at", "expires_at", "nonce"]),
+              isDeviceId(m["device_id"]), isDeviceJwk(m["box_key"]),
+              isTimestamp(m["created_at"]), isTimestamp(m["expires_at"]), isNonce(m["nonce"]) else { return false }
+        return spanWithin(m, boxKeyMaxMs)
     }
 
     static func auditSlice(_ m: Fields) -> Bool {

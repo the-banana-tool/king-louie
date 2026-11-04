@@ -1,0 +1,74 @@
+{
+  "name": "box-key-stale",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:05:11.201Z",
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null,
+        "box_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "h6PCItS4cVIGuDrKEcllyTPlzqJD3V4yStB8RYEEhlc",
+          "y": "Mb8Qva8gF3CiDXhJpmWn5R0JV1QbHmocdj4DV-pbqKA"
+        },
+        "box_key_at": "2026-09-23T18:04:11.201Z"
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "overlay": [],
+    "allow_test_keys": true
+  },
+  "input": [
+    {
+      "alg": "ES256",
+      "kid": "d-3vmwrihhdbnit4oi",
+      "payload": "eyJib3hfa2V5Ijp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiQVVjRU5QT2lCZVpNVUNVb0xQQWY0aVhpUlZRR08yWGNicFJfR2J2QTQ3WSIsInkiOiIzd1NVOGk2aGMzLVBYWnp0TlZKbTJMcEVOdGo4N3JiZXg0cWhKYTNWUS00In0sImNyZWF0ZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjAzOjExLjIwMVoiLCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0zMFQxODowMzoxMS4yMDFaIiwibm9uY2UiOiJzaUVHRWR0OFk2Wkt2d2NFLVFtVlNoX1BRVXRPREU2SThCTjJyMWQ3SUljIiwidHlwZSI6ImtsLmRldmljZS5ib3hfa2V5IiwidiI6MX0",
+      "sig": "l6vIxZc2Mc-JiwLeZJTqqP1eSOn1UcrxL8Td7bQLO9XbmRI3EYd7NHAxQbto6EmDuniuSLogMRhmoFo80bbKNw"
+    }
+  ],
+  "expect": {
+    "results": [
+      {
+        "state": "rejected",
+        "reason": "stale"
+      }
+    ],
+    "active": [
+      "d-3vmwrihhdbnit4oi",
+      "d-6xdlbxglhnvfa3lw"
+    ]
+  }
+}

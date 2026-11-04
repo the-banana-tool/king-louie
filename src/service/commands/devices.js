@@ -7,13 +7,14 @@ const { adminConfigDir } = require('../../platform/paths');
 const { buildServicePorts } = require('../ports');
 const { loadNodeConfig } = require('../node-config');
 const { restoreDataDirOwnership } = require('../ownership');
-const { readLine, printable, runningServicePid, renderQr } = require('./io');
+const { readLine, printable, shown, runningServicePid, renderQr } = require('./io');
 const { isRoot, dataDirOwner } = require('../drop-privileges');
 
 const ENROLL_TTL_MS = 10 * 60 * 1000;
 const DEVICE_HELP = `Usage: king-louie-service device list [--data-dir DIR]
        king-louie-service device revoke <device-id> [--data-dir DIR]
        king-louie-service device apply [--yes] [--data-dir DIR]
+       king-louie-service device unseal [--yes] [--data-dir DIR]
 `;
 
 function layout(dataDir, configDir, deps) {
@@ -50,7 +51,7 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
   const { getOrGenerateNodeIdentity } = require('../../mesh/node-identity');
   const { verifyConsoleEnrollment } = require('../../approvals/verify-device');
   const { buildEnrollOpen, buildEnrollDone, encodeQr } = require('../../approvals/messages');
-  const { fingerprintGroups } = require('../../approvals/envelope');
+  const { fingerprintGroups, samePoint } = require('../../approvals/envelope');
   const now = deps.now || Date.now;
   const { admin } = layout(dataDir, configDir, deps);
 
@@ -178,9 +179,25 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
       return 1;
     }
     const { device } = check.message;
+    // Writing this claim would drop a box key and its date, and sealing with
+    // it (R-SP-10). A phone really reset has a new device id, so nothing
+    // legitimate needs this.
+    const heldBox = heldBoxKey(admin, device.device_id);
+    if (heldBox && !device.box_key) {
+      await finish(null, true);
+      io.stderr.write(`${device.device_id} is enrolled here with box key ${boxKeyText(heldBox)}, and this enrollment has none. Nothing was enrolled. To replace this phone, run "device revoke ${device.device_id}", Reset the phone, and enroll it again.\n`);
+      return 1;
+    }
+    const replacing = heldBox && !samePoint(heldBox, device.box_key) ? `, replacing box key ${boxKeyText(heldBox)}` : '';
+    // A node that seals sends this phone nothing it can read. An enrollment is still
+    // the administrator's call, for a phone that will stop leases and no more.
+    const { readLatch } = require('../../approvals/seal-policy');
+    if (readLatch(dataDir).latched && !device.box_key) {
+      io.stdout.write('This node seals what it sends and this phone has no box key: this phone will see nothing from this node.\n');
+    }
     // The name and platform come from the phone: printed without control or
     // bidi characters so they cannot rewrite what the administrator reads.
-    io.stdout.write(`Device "${printable(device.name)}" (${printable(device.platform)}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)}${withReadKey(device)} — does the phone show the same? [y/N] `);
+    io.stdout.write(`Device "${printable(device.name)}" (${printable(device.platform)}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)}${withReadKey(device)}${withBoxKey(device)}${replacing} — does the phone show the same? [y/N] `);
     const answer = await readLine(io.stdin, { signal: expired.signal });
     if (answer === null) {
       await finish(null, true);
@@ -209,6 +226,7 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
         platform: device.platform,
         public_key: device.public_key,
         ...(device.read_key ? { read_key: device.read_key, read_key_at: check.message.created_at } : {}),
+        ...(device.box_key ? { box_key: device.box_key, box_key_at: check.message.created_at } : {}),
         enrolled_at: new Date(now()).toISOString(),
         enrolled_by: 'console',
         revoked_at: null,
@@ -285,6 +303,22 @@ function withReadKey(holder) {
   return ` with a read key ${readKeyText(holder.read_key)}`;
 }
 
+// The box key of this device's active record, else null. A file no store
+// would trust, or a revoked record, holds nothing for this purpose.
+function heldBoxKey(admin, deviceId) {
+  const { checkApproverRecord } = require('../../approvals/approver-store');
+  const record = admin.read(deviceId);
+  if (!record || checkApproverRecord(record, `${deviceId}.json`) !== null) return null;
+  return record.revoked_at === null && record.box_key ? record.box_key : null;
+}
+
+// " with a box key b-abcd efgh ijkl mnop" for one that holds one (sealed
+// phones, R-SP-10), else "".
+function withBoxKey(holder) {
+  if (!holder || !holder.box_key) return '';
+  return ` with a box key ${boxKeyText(holder.box_key)}`;
+}
+
 function describeState(store, record) {
   if (record.revoked_at) return `revoked ${record.revoked_at} by ${record.revoked_by}`;
   if (record.platform === 'demo') return 'demo (never accepted)';
@@ -308,7 +342,17 @@ function readKeyText(jwk) {
   }
 }
 
-// `recordsById` maps a device id to its approver record, for read-key statements.
+// As readKeyText, for a box key.
+function boxKeyText(jwk) {
+  const { boxKeyFingerprint } = require('../../approvals/messages');
+  try {
+    return boxKeyFingerprint(jwk);
+  } catch {
+    return '(malformed box key)';
+  }
+}
+
+// `recordsById` maps a device id to its approver record, for key statements.
 function describeStagedItem(item, now, recordsById = null) {
   if (item.type === 'unsafe' || item.type === 'unreadable') {
     return `${item.type}  ${item.file}  (${item.reason || item.error || 'unknown problem'})`;
@@ -317,17 +361,22 @@ function describeStagedItem(item, now, recordsById = null) {
   // never the data dir's received_at, which the service itself writes and so
   // does not get to use to set policy or displayed trust).
   const age = describeAge(item.message && item.message.created_at, now);
-  if (item.type === 'kl.device.read_key') {
-    // The device's own statement of its read key (android-slim spec §8.7):
-    // the device as this node knows it, and the new key's fingerprint.
+  if (item.type === 'kl.device.read_key' || item.type === 'kl.device.box_key') {
+    // The device's own statement of its read key (android-slim spec §8.7) or
+    // box key (sealed phones, R-SP-10): the device as this node knows it, and
+    // the new key's fingerprint.
     const record = recordsById && recordsById.get(item.deviceId);
     const name = record ? `"${printable(record.name)}"` : '(not an approver here)';
-    return `read key  ${item.deviceId}  ${name}  ${readKeyText(item.message.read_key)}  signed by the device itself  (${age})`;
+    const [word, text] = item.type === 'kl.device.read_key'
+      ? ['read key', readKeyText(item.message.read_key)]
+      : ['box key', boxKeyText(item.message.box_key)];
+    return `${word}  ${shown(item.deviceId)}  ${name}  ${text}  signed by the device itself  (${age})`;
   }
-  if (item.type === 'kl.device.revoke') return `revoke  ${item.deviceId}  signed by ${item.signer}  (${age})`;
+  if (item.type === 'kl.device.revoke') return `revoke  ${shown(item.deviceId)}  signed by ${shown(item.signer)}  (${age})`;
   const device = item.message && item.message.device;
   const readKey = device && device.read_key ? `  with a read key ${readKeyText(device.read_key)}` : '';
-  return `enroll  ${item.deviceId}${readKey}  signed by ${item.signer}  (${age})`;
+  const boxKey = device && device.box_key ? `  with a box key ${boxKeyText(device.box_key)}` : '';
+  return `enroll  ${shown(item.deviceId)}${readKey}${boxKey}  signed by ${shown(item.signer)}  (${age})`;
 }
 
 // "N min ago" from a signed timestamp; a phone clock ahead of this one reads
@@ -339,10 +388,126 @@ function describeAge(createdAt, now) {
   return `${Math.round((now - at) / 60000)} min ago`;
 }
 
+// R-SP-5, the one way back from the latch: a node that has sealed goes back to
+// clear only here, at the console. Refused while a record not revoked by an
+// administrator holds a box key. That is stricter than the policy's set, which
+// also leaves out a device whose relayed revoke waits on the overlay: such a
+// revoke is `device apply`'s to make final, first. `device apply` and `device
+// revoke` do not yet make the personal node's checks made here; that is a
+// follow-up.
+async function runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, storeOptions, admin }) {
+  const { ApproverStore } = require('../../approvals/approver-store');
+  const { readLatch, clearLatch, latchPathProblem, latchFile } = require('../../approvals/seal-policy');
+  const { getOrGenerateNodeIdentity } = require('../../mesh/node-identity');
+  // Off a terminal nobody can be asked, so only --yes goes on. Checked before
+  // anything is resolved or read.
+  const isTTY = deps.isTTY || (() => Boolean(io.stdin && io.stdin.isTTY));
+  if (!flags.yes && !isTTY()) {
+    io.stderr.write('Refusing to stop sealing without confirmation on a non-interactive terminal; pass --yes.\n');
+    return 2;
+  }
+  // A personal node's owner runs this as himself, as `desktop pair` does.
+  let hosting = 'service';
+  try {
+    ({ hosting } = loadNodeConfig({ dataDir, adminConfigDir: configDir, ...storeOptions }));
+  } catch {
+    hosting = 'service';
+  }
+  if (hosting === 'personal') {
+    const platform = deps.platform || process.platform;
+    const isAdmin = deps.isAdmin || (() => require('./admin-check').isAdmin({ platform }));
+    if (await isAdmin()) {
+      io.stderr.write('device unseal on a personal node runs as you, not elevated: open a normal prompt. Nothing changed.\n');
+      return 1;
+    }
+    const owner = require('../personal-host').checkPersonalOwner({ dataDir, configDir, platform, ...(deps.personalOwner || {}) });
+    if (!owner.ok) {
+      io.stderr.write(`${shown(owner.problem, 500)}. Nothing changed.\n`);
+      return 1;
+    }
+  }
+  try {
+    admin.assertWritable();
+  } catch (err) {
+    io.stderr.write(`${err.message}\n`);
+    return 1;
+  }
+  // Why not, right now; asked again after the question, which can wait a while.
+  const blocked = async () => {
+    // serviceProbe false: an administrator can always write there, so a probe from
+    // here proves nothing. hosting 'personal' is the store's one way to keep the
+    // Windows owner check without the probe, which this answer rests on, so it
+    // applies to a fleet node here too.
+    const store = new ApproverStore({ dir, stagedDir, ...storeOptions, serviceProbe: false, hosting: 'personal' });
+    const ready = await store.ready();
+    if (!ready.ok) return `The approver set cannot be trusted, so what holds a box key cannot be told: ${ready.problem}\n`;
+    const holders = store.list().filter((r) => r.box_key && store.isAdminApplied(r.device_id));
+    if (holders.length === 0) return null;
+    return `${holders.map((r) => shown(r.device_id)).join(', ')} still ${holders.length === 1 ? 'holds' : 'hold'} a box key. Revoke with "device revoke <device-id>"; a revoke sent from a phone waits for "device apply".\n`;
+  };
+  let why = await blocked();
+  if (why) {
+    io.stderr.write(`${why}Nothing changed.\n`);
+    return 1;
+  }
+  const problem = latchPathProblem(dataDir);
+  if (problem) {
+    io.stderr.write(`${problem} Nothing changed.\n`);
+    return 1;
+  }
+  if (!readLatch(dataDir).latched) {
+    io.stdout.write('This node is not latched: it has never sealed to a phone. Nothing to do.\n');
+    return 0;
+  }
+  const nodeCfg = loadNodeConfig({ dataDir, adminConfigDir: configDir, ...storeOptions });
+  io.stdout.write(`Node "${shown(nodeCfg.name, 64)}" has sealed what it sends to phones, and refuses to send anything now that no phone can read it.\n`);
+  io.stdout.write('  this clears the latch: until a phone next has a box key, what it sends goes in clear, and the relay can read it\n');
+  io.stdout.write('  it takes effect at the next build of a message; a running service with a phone holding a box key latches again\n');
+  io.stdout.write('  the audit ledger records this\n');
+  if (!flags.yes) {
+    io.stdout.write('Send in clear again? [y/N] ');
+    if (!/^y(es)?$/i.test(String(await readLine(io.stdin)).trim())) {
+      io.stderr.write('Nothing changed.\n');
+      return 1;
+    }
+  }
+  why = await blocked();
+  if (why) {
+    io.stderr.write(`${why}Nothing changed.\n`);
+    return 1;
+  }
+  // The question can wait a while, and the service account can write this directory.
+  const problemNow = latchPathProblem(dataDir);
+  if (problemNow) {
+    io.stderr.write(`${problemNow} Nothing changed.\n`);
+    return 1;
+  }
+  const written = [];
+  try {
+    const ports = buildServicePorts({ dataDir, onPathWritten: (p) => written.push(p) });
+    const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeCfg.name);
+    // Before the removal: a downgrade must never go unrecorded, and an entry for
+    // one that then failed is the smaller wrong, which the error below explains.
+    await auditLedger(dataDir, identity, written).append({ kind: 'device.unsealed', data: { by: 'console', envelope: null } });
+    try {
+      clearLatch(dataDir);
+    } catch (err) {
+      io.stderr.write(`Could not remove ${latchFile(dataDir)} (${err.code || err.message}), so the node stays latched. The audit ledger says device.unsealed all the same. Remove it by hand and run this again.\n`);
+      return 1;
+    }
+    io.stdout.write(`The latch is cleared. From the next build, ${shown(nodeCfg.name, 64)} sends in clear until a phone next has a box key; a running service with a phone holding one latches again.\n`);
+    return 0;
+  } finally {
+    restoreDataDirOwnership(dataDir, written, io.ownership);
+  }
+}
+
 async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfigDir({ dataDir }), io, deps = {} }) {
   const { ApproverStore } = require('../../approvals/approver-store');
   const { fingerprintGroups } = require('../../approvals/envelope');
   const { dir, stagedDir, storeOptions, admin } = layout(dataDir, configDir, deps);
+
+  if (sub === 'unseal') return runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, storeOptions, admin });
 
   if (sub === 'list') {
     // serviceProbe: false — this store is built by the admin CLI, which on
@@ -355,7 +520,7 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
     const records = store.list();
     if (records.length === 0) io.stdout.write('No approver devices on this node.\n');
     for (const r of records) {
-      io.stdout.write(`${fingerprintGroups(r.device_id)}  ${r.device_id}  ${printable(r.name)} (${printable(r.platform)})${r.read_key ? `  read key ${readKeyText(r.read_key)}` : ''}  ${describeState(store, r)}  enrolled by ${r.enrolled_by}\n`);
+      io.stdout.write(`${fingerprintGroups(r.device_id)}  ${r.device_id}  ${printable(r.name)} (${printable(r.platform)})${r.read_key ? `  read key ${readKeyText(r.read_key)}` : ''}${r.box_key ? `  box key ${boxKeyText(r.box_key)}` : ''}  ${describeState(store, r)}  enrolled by ${r.enrolled_by}\n`);
     }
     try {
       const staged = admin.listStaged();
@@ -408,7 +573,7 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
           const nowMs = (deps.now || Date.now)();
           const recordsById = new Map();
           for (const i of items) {
-            if (i.type !== 'kl.device.read_key') continue;
+            if (i.type !== 'kl.device.read_key' && i.type !== 'kl.device.box_key') continue;
             const record = admin.read(i.deviceId);
             if (record) recordsById.set(i.deviceId, record);
           }
@@ -434,10 +599,11 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
       // the various `rejected: …` reasons, including unsafe/unreadable
       // entries — all just displayed, since only enrolled/revoked write audit.
       // Unsafe and unreadable entries have no device id: name the file.
-      io.stdout.write(`${r.deviceId || r.file}: ${r.result}\n`);
+      io.stdout.write(`${r.deviceId ? shown(r.deviceId) : r.file}: ${r.result}\n`);
       if (r.result === 'enrolled') await ledger.append({ kind: 'device.enrolled', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'revoked') await ledger.append({ kind: 'device.revoked', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'read key set') await ledger.append({ kind: 'device.read_key_set', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
+      if (r.result === 'box key set') await ledger.append({ kind: 'device.box_key_set', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
     }
     return 0;
   } finally {

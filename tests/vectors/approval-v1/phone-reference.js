@@ -6,8 +6,9 @@
 // the phone vectors; the iOS and Android apps implement the same rules and
 // must produce the same `display`.
 const crypto = require('crypto');
-const { open, verifyEd25519, EnvelopeError } = require('../../../src/approvals/envelope');
-const { validateMessage } = require('../../../src/approvals/messages');
+const { open, verifyEd25519, fromB64url, EnvelopeError } = require('../../../src/approvals/envelope');
+const { validateMessage, validateOpenedRequest } = require('../../../src/approvals/messages');
+const { openSealed, SealError } = require('../../../src/approvals/seal');
 const { canonicalize } = require('../../../src/platform/jcs');
 
 const COMMAND_KEYS = new Set(['command', 'script', 'argv']);
@@ -180,8 +181,30 @@ function hasEquivalentKeys(value) {
   return false;
 }
 
-// pinned: [{ id, key }] from pairing and invite QR codes only.
-function phoneView(envelope, pinned) {
+// What a phone does with a sealed request once its signature holds: open it with
+// its box key, then hold the hash to the content (R-SP-1, R-SP-2). → { message } or
+// { reason }. A wrap that is not there or does not open keeps its own reason, which
+// the apps show as "Sealed for this node's other phones".
+function openRequest(message, box) {
+  if (!box) return { reason: 'not_recipient' };
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.setPrivateKey(fromB64url(box.d));
+  const agree = (jwk) => ecdh.computeSecret(Buffer.concat([Buffer.from([0x04]), fromB64url(jwk.x), fromB64url(jwk.y)]));
+  let opened;
+  try {
+    opened = openSealed({ type: 'kl.approval.request', message, recipientId: box.device_id, agree });
+  } catch (err) {
+    if (!(err instanceof SealError)) throw err;
+    return { reason: err.reason === 'content_malformed' ? 'malformed' : err.reason };
+  }
+  if (hasEquivalentKeys(opened.message)) return { reason: 'malformed' };
+  const reason = validateOpenedRequest(opened.message);
+  return reason ? { reason } : { message: opened.message };
+}
+
+// pinned: [{ id, key }] from pairing and invite QR codes only. box: this phone's
+// { device_id, d }, for a sealed request.
+function phoneView(envelope, { pinned, box = null }) {
   const hide = (reason) => ({ shown: false, reason, display: null });
   let message;
   try {
@@ -198,6 +221,11 @@ function phoneView(envelope, pinned) {
   const pin = pinned.find((n) => n.id === message.node_id);
   if (!pin || envelope.kid !== message.node_id) return hide('unpinned_node');
   if (!verifyEd25519(envelope, pin.key)) return hide('bad_node_signature');
+  if (message.sealed !== undefined) {
+    const opened = openRequest(message, box);
+    if (opened.reason) return hide(opened.reason);
+    return { shown: true, reason: null, display: buildDisplay(opened.message) };
+  }
   return { shown: true, reason: null, display: buildDisplay(message) };
 }
 

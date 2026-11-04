@@ -44,7 +44,7 @@ function createContactHost({
   getSettings, setSettings = null, contactConfig = null, isService = false, caseRuntime, channelRegistry = null, vault = null,
   dataDir, features = {}, getBridges = () => ({}), getWebhookServer = () => null, approvals = null,
   clock = () => new Date(), tickMs = Number(process.env.KING_LOUIE_CONTACT_TICK_MS) || 30000, getGate = defaultGetGate,
-  fetchImpl = globalThis.fetch, extraAdapters = {}, getExecutorRegistry = () => null, log = createLogger('contact/host')
+  fetchImpl = globalThis.fetch, extraAdapters = {}, getExecutorRegistry = () => null, warnOwner = null, log = createLogger('contact/host')
 } = {}) {
   const host = caseRuntime.host || {};
   const settings = () => {
@@ -148,7 +148,7 @@ function createContactHost({
     getTimeZone: () => presence.timeZone()
   });
   const ladder = new LadderEngine({
-    state, casesRoot: caseRuntime.root, runtime: caseRuntime, router, presence, getPolicy: () => settings().contactPolicy, clock, tickMs, dataDir
+    state, casesRoot: caseRuntime.root, runtime: caseRuntime, router, presence, getPolicy: () => settings().contactPolicy, clock, tickMs, dataDir, warnOwner
   });
 
   function wire(id, adapter) {
@@ -363,6 +363,7 @@ function createContactHost({
       const mobile = new MobileAppChannel({
         link: approvals.relayClient,
         approverStore: approvals.approverStore,
+        sealPolicy: approvals.sealPolicy,
         identity: approvals.identity,
         nonces: new NonceCache({}),
         getRouter: () => router,

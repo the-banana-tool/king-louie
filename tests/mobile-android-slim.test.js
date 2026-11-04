@@ -69,6 +69,7 @@ const SPEC_ROUTE_AUTH = [
   ['POST', '/v1/devices/enroll', 'read'],
   ['POST', '/v1/devices/revoke', 'read'],
   ['POST', '/v1/devices/read-key', 'read'],
+  ['POST', '/v1/devices/box-key', 'read'],
   ['GET', '/v1/grants/pending', 'device'],
   ['POST', '/v1/alerts/{id}/ack', 'device'],
   ['POST', '/v1/pairing-codes', 'device'],
@@ -212,7 +213,11 @@ describe('Android: the Scanner and Settings (android-slim §6.1, §6.4)', () => 
     assert.ok(count(s, 'AlertDialog(') >= 2, 'Remove and Reset each ask first');
     assert.ok(s.includes('It shows the same — add it'));
     for (const gone of ['The new phone has scanned it', 'notices when it has']) assert.ok(!s.includes(gone), gone);
-    assert.ok(s.includes('No analytics. The relay sees every action you are asked to approve, and when this app is open. See PRIVACY.md.'));
+    assert.ok(s.includes('No analytics. The relay cannot read what a sealed node sends. It still sees when this app is open, your yes or no, and everything from a node that does not seal yet. See PRIVACY.md.'));
+    assert.ok(!s.includes('The relay sees every action'), 'untrue of a sealing node');
+    const ios = fs.readFileSync(path.join(__dirname, '..', 'mobile', 'ios', 'App', 'Views.swift'), 'utf8');
+    assert.ok(ios.includes('No analytics. The relay cannot read what a sealed node sends. It still sees when this app is open, your yes or no, and everything from a node that does not seal yet. See PRIVACY.md.'), 'iOS says the same');
+    assert.ok(!ios.includes('The relay sees every action'), 'untrue of a sealing node');
     for (const w of ['read key in use', 'waiting for `device apply` on the node', 'not sent yet']) assert.ok(s.includes(w), w);
   });
 });
@@ -239,9 +244,9 @@ describe('Android: the read key and the routes (android-slim §8.4, §12.1)', ()
     // No screen touches either key.
     for (const file of appFiles()) {
       const base = path.basename(file);
-      if (['AppModel.kt', 'ReadKey.kt', 'DeviceKey.kt', 'RelayApi.kt'].includes(base)) continue;
+      if (['AppModel.kt', 'ReadKey.kt', 'DeviceKey.kt', 'BoxKey.kt', 'RelayApi.kt'].includes(base)) continue;
       const src = read(file);
-      for (const w of [/\bReadKey\b/, /\bDeviceKey\b/, /\breadSigner\b/, /\bsignRead\(/]) assert.doesNotMatch(src, w, base);
+      for (const w of [/\bReadKey\b/, /\bDeviceKey\b/, /\bBoxKey\b/, /\breadSigner\b/, /\bsignRead\(/]) assert.doesNotMatch(src, w, base);
     }
   });
 });

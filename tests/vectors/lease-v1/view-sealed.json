@@ -1,0 +1,55 @@
+{
+  "name": "view-sealed",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": null,
+  "given": {
+    "node": {
+      "id": "kl-c2ubd6jjqumalzt5",
+      "name": "web-01",
+      "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+    },
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    }
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-c2ubd6jjqumalzt5",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiJ6eTJzelVHVXpyQVhHRDJyOTJaYUZRIiwibGVhc2VfaWQiOiI4OTQ4ZDJhOS0wNDAzLTQ3YjEtYjI4Ny02OGU0MTU5Njg0M2MiLCJsb2NrZWQiOmZhbHNlLCJub2RlX2lkIjoia2wtYzJ1YmQ2ampxdW1hbHp0NSIsInJlbWFpbmluZ19zIjo1MTIsInNlYWxlZCI6eyJjdCI6InkzeHhWdTNGQS1iVUJnRGtpMTZMUXpfejNNa19FM1JzWU5obEtNejhVMWhNaEMtZW1XcjYwUGVXTEppbkxONVlvT1M5S3hxdEtSdDRaaWtEWV9GRk5IYi1SeTdtel9VOFY1eTM5N2xtTlp4ZzRtbmV2SFhRZTNaaXBEUXItOVdWNTIyQUhFbnN4NERKcFNkMXNrdDhiWC1BQ2RVT3VKWGhEN181QUZMRVhCY3I4d1h3c24yaGtiMVRoSkltWkk1cHItOUpKdGJmR1N5TUx6OXFVc3lVMU5XM2pxRTNiZWs3ajY1UFpVTGdMZmZpWVBRWlBMZkhpa1F5S0RLV19CNzRZQU8wZktUV01KTkJBZU9haGxVLWY5bnRTV2M1N3VqM0x3V1A0RHdLc18yZmZ6SVpSdEkxa2wwS3l2amZJZmtEZHJoU3dxc2RMdXU1c2hqSmJadktQcXhIUl81RUdIcGlDWWFyT0xaUXJOQjZ1S2N3NjY1eExkWHd4d1g5N0d2NUUxWjdlSWJ5VWZTYkl6MVB0amY5RlZoR0dqbVdPX3N3NXh0QXh6bHp5NEowbmRQcE5OZjdkSVJEb2V4OWtjbzZ1amZMeGlJTllkLVZncXN1c21OV3BtS0tEZlpjMlpNc1NOQ2huTlRBSEs0RnpqcHVNeFdlWS1jNlctQk9FUHBSaVpLWEs1U1dMcUtUX2tNTklsWHFaTndGUXltcm8xdjJ5SGdjVXRxNzRWb2ZMUmE2LWVIRXgzRmhiZ0htMjZvT2c5eHpsZ3NqcWw4Mjl1UmpDaXJ4VUcxVHVsUE5UcU5fN1hiUUxiZXNsdkRYTXFCcHN0cTJFQ0s4Nl9MM2NqVDN6TEYxWWlmcl95bkw5TFQtT0pIeFM2OWJRU2FQUkNNSlNsSTdoUnB5WnhJSUpPaUk0OXZuRERvcXN0WTNxUmNUIiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiZVNwV2hfbnp6RG5yZmhORlVicERSVHFKTHl2NU1pQnRoRFVoQ1lULWZOQSIsInkiOiJXUnp1Z3d0VjltZmVSa2FMR0RyOXJzWUQxTWVlRGRCaUNHWm04WG9GOTBrIn0sIml2IjoiOWRiWnVaVmU2RHZ1QjBJMiIsImtleXMiOnsiZC0zdm13cmloaGRibml0NG9pIjoiNUJLTFVVN3p6c2dDNmNsbDlZTFhsX1R6UEs0RHZhNS1MTGVDcGxVbEFqb2NHTW9TeDlzQWZkM1RLdkZobm0tRCIsImQtNnhkbGJ4Z2xobnZmYTNsdyI6IlVOQVYtM09BNUFIZUJiZm1uUENSV0FVaG5Wb0VEYkVuSW9LaHBSNW1mc2VSRGpfWngyY3RXXzBsZG9kTTZjbUoiLCJrbC1jMnViZDZqanF1bWFsenQ1IjoiTkIxMVFLMlhqRm9mYi1EejdjWEVvYnlSeXlVd3lOdnRlbzdfSmR2M0hUSUEtYVNGcnA4azlIRzVDX09sc283RCJ9LCJ2IjoxfSwic2VxIjo4LCJzdGF0ZSI6ImFjdGl2ZSIsInRvX2RldmljZSI6ImQtM3Ztd3JpaGhkYm5pdDRvaSIsInR5cGUiOiJrbC5sZWFzZS52aWV3IiwidiI6MX0",
+    "sig": "SgPkzVzWknEFbQ9zRbRjCyvJvBfjCutQv7QIOJKCba6H9zqNWIsgt3A3w2fLpWkbNxlUKiJL7WFhk90XNNXKAQ"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "status": {
+      "lease_id": "8948d2a9-0403-47b1-b287-68e41596843c",
+      "to_device": "d-3vmwrihhdbnit4oi",
+      "foreground": {
+        "app_id": "calculator",
+        "matches": true
+      },
+      "frame": {
+        "mime": "image/jpeg",
+        "width": 960,
+        "height": 640,
+        "sha256": "E4ipb8pVvcUeIUqPDGGgjC8KUIdYY2XgsJY5AeGIzTk",
+        "data": "rnrltU3CWCVByzOtPUZo8ZZCwz5sFizoSFj54DyUyiU="
+      },
+      "frame_dropped": false,
+      "actions": [
+        {
+          "at": "2026-09-23T18:04:11.201Z",
+          "result": "ok",
+          "seq": 41,
+          "summary": "Typed 6 characters",
+          "tool": "Type"
+        }
+      ]
+    }
+  }
+}

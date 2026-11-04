@@ -2,7 +2,9 @@
 //
 // The whole path with real processes and real TLS: `relay run`, a node's
 // `run --profile runbook` paired with it, a console-enrolled fake phone, and
-// an unsafe runbook asked for through `mcp` and approved on the phone.
+// an unsafe runbook asked for through `mcp` and approved on the phone. Then
+// sealed: a second phone, enrolled with a box key, opens and approves the same
+// runbook, which the relay only ever saw as ciphertext.
 //
 // The admin config dirs must be root-owned on POSIX, which a test cannot
 // arrange, so this runs on Windows or as root. Everything lives under one
@@ -23,6 +25,8 @@ const { runPair } = require('../src/service/commands/pair');
 const { runEnrollDevice } = require('../src/service/commands/devices');
 const { decodeQr } = require('../src/approvals/messages');
 const { open, verifyEd25519 } = require('../src/approvals/envelope');
+const { isSealedShape } = require('../src/approvals/seal');
+const { readLatch, latchFile } = require('../src/approvals/seal-policy');
 const { createFakePhone } = require('./helpers/fake-phone');
 
 const BIN = path.join(__dirname, '..', 'bin', 'king-louie-service.js');
@@ -141,7 +145,7 @@ function phoneHttps(baseUrl, spkiPin, phone) {
 }
 
 describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned admin config dirs on POSIX', timeout: 600000 }, () => {
-  it('an unsafe runbook asked for through mcp runs after a phone approves it', async () => {
+  it('an unsafe runbook asked for through mcp runs after a phone approves it, in clear and then sealed', async () => {
     const children = [];
     let unlock = null;
     let mcp = null;
@@ -247,9 +251,7 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       enrollIo.stdin.write('y\n');
       assert.equal(await enrolling, 0, enrollIo.text.err);
       await until(async () => (await anonymous('GET', `/v1/enroll/${qr.code_id}`)).body.state === 'done', 'enrollment done');
-      if (POSIX_ROOT) {
-        // enroll-device ran as root, yet nothing it left in approvals/ is
-        // root's: its courier ran as the service account (T13-enroll).
+      const rootOwnedApprovals = () => {
         const rootOwned = [];
         const walk = (p) => {
           const st = fs.lstatSync(p);
@@ -257,7 +259,12 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
           if (st.isDirectory() && !st.isSymbolicLink()) for (const n of fs.readdirSync(p)) walk(path.join(p, n));
         };
         walk(path.join(nodeData, 'approvals'));
-        assert.deepEqual(rootOwned, []);
+        return rootOwned;
+      };
+      if (POSIX_ROOT) {
+        // enroll-device ran as root, yet nothing it left in approvals/ is
+        // root's: its courier ran as the service account (T13-enroll).
+        assert.deepEqual(rootOwnedApprovals(), []);
       }
 
       // ── The unsafe runbook through mcp ──────────────────────────────────
@@ -325,6 +332,78 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
         return ['awaiting_approval', 'queued', 'running'].includes(lastSeen.status) ? null : lastSeen;
       }, () => `the job to finish (last seen ${JSON.stringify(lastSeen)})`, 120000);
       assert.equal(finalJob.status, 'succeeded', JSON.stringify(finalJob));
+      assert.equal(fs.readFileSync(path.join(root, 'marker.txt'), 'utf8'), 'ran');
+
+      // ── Sealed: a phone with a box key, enrolled by the administrator ───
+      assert.deepEqual(readLatch(nodeData), { state: 'none', latched: false }, 'nothing has been sealed yet');
+      fs.rmSync(path.join(root, 'marker.txt'));
+      const serviceSaid = (pattern) => ((service.output() + service.errors()).match(pattern) || []).length;
+      const trustedAgain = () => serviceSaid(/is protected again; its approvers count/g);
+      const refusedSet = () => serviceSaid(/approver set treated as empty/g);
+      const trustedBefore = trustedAgain();
+      const refusedBefore = refusedSet();
+      if (unlock) {
+        const lift = unlock;
+        unlock = null;
+        lift();
+      }
+      const boxPhone = createFakePhone({ name: 'Box phone', platform: 'ios', boxKey: true });
+      const boxIo = streamIo();
+      const boxEnrolling = runEnrollDevice({ dataDir: nodeData, io: boxIo, deps: { renderQr: async () => '[QR]' } });
+      const boxQrText = await until(() => /Or paste this into the app: (kl1:\S+)/.exec(boxIo.text.out), () => `the second pairing QR (${boxIo.text.err})`);
+      const boxQr = decodeQr(boxQrText[1]);
+      const boxClaim = await anonymous('POST', `/v1/enroll/${boxQr.code_id}`, boxPhone.enroll({ device: boxPhone.device({ boxKey: true }), codeId: boxQr.code_id, code: boxQr.code }));
+      assert.equal(boxClaim.status, 202, JSON.stringify(boxClaim.body));
+      await until(() => /does the phone show the same\? \[y\/N\]/.test(boxIo.text.out), 'the second confirmation prompt');
+      assert.match(boxIo.text.out, /with a box key b-/);
+      assert.doesNotMatch(boxIo.text.out, /will see nothing/);
+      boxIo.stdin.write('y\n');
+      assert.equal(await boxEnrolling, 0, boxIo.text.err);
+      assert.ok(JSON.parse(fs.readFileSync(path.join(nodeConfig, 'approvers', `${boxPhone.deviceId}.json`), 'utf8')).box_key, 'the root path keeps the box key');
+      unlock = lockApproversDir(path.join(nodeConfig, 'approvers'));
+      if (process.platform === 'win32') {
+        // One full device poll (5 s). Its poll may have fallen in the moments the
+        // dir was unlocked, and then it says so, and says so again once locked.
+        await sleep(6000);
+        if (refusedSet() > refusedBefore) {
+          await until(() => trustedAgain() > trustedBefore, () => `the service to trust the locked approver set again (${service.errors()})`, 60000);
+        }
+      }
+      await sleep(1100);
+
+      const sealedJob = await runRunbook();
+      assert.equal(sealedJob.status, 'awaiting_approval', JSON.stringify(sealedJob));
+      const boxApi = phoneHttps(boxQr.relay, boxQr.relay_spki, boxPhone);
+      const sealedPending = await until(async () => {
+        const res = await boxApi('GET', '/v1/approvals?wait=5');
+        // The relay still lists the clear request, decided, until it expires.
+        return res.status === 200 ? res.body.find((entry) => open(entry.envelope).message.request_id !== request.request_id) || null : null;
+      }, 'the sealed request on the phone');
+      assert.equal(verifyEd25519(sealedPending.envelope, boxQr.node.key), true);
+      const sealedRequest = open(sealedPending.envelope).message;
+      assert.equal(isSealedShape('kl.approval.request', sealedRequest), true, 'what the relay carries is the sealed shape');
+      for (const key of ['action', 'origin', 'salt']) assert.equal(Object.hasOwn(sealedRequest, key), false, key);
+      assert.equal(JSON.stringify(sealedRequest).includes('site.touch'), false, 'the runbook is not in what the relay reads');
+      assert.deepEqual(Object.keys(sealedRequest.sealed.keys).sort(), [boxPhone.deviceId, boxQr.node.id].sort(), 'the phone with no box key has no wrap');
+      assert.equal((Buffer.from(sealedRequest.sealed.ct, 'base64url').length - 16) % 256, 0, 'padded');
+
+      const opened = boxPhone.open(sealedPending.envelope, 'kl.approval.request');
+      assert.equal(opened.content.action.kind, 'runbook');
+      assert.equal(opened.content.origin.job_id, sealedJob.job_id);
+      // Written once before the first seal, by the service, as the service account.
+      assert.equal(readLatch(nodeData).state, 'good');
+      if (POSIX_ROOT) {
+        assert.equal(fs.lstatSync(latchFile(nodeData)).uid, SERVICE_UID);
+        assert.deepEqual(rootOwnedApprovals(), []);
+      }
+      const sealedAnswer = await boxApi('POST', `/v1/approvals/${sealedRequest.request_id}/response`, boxPhone.respond(sealedPending.envelope, 'approve'));
+      assert.equal(sealedAnswer.status, 202);
+      assert.deepEqual(sealedAnswer.body, { delivered: true, accepted: true, reason: null });
+      const sealedFinal = await until(async () => {
+        lastSeen = await tool('get_job', { job_id: sealedJob.job_id });
+        return ['awaiting_approval', 'queued', 'running'].includes(lastSeen.status) ? null : lastSeen;
+      }, () => `the sealed job to finish (last seen ${JSON.stringify(lastSeen)})`, 120000);
+      assert.equal(sealedFinal.status, 'succeeded', JSON.stringify(sealedFinal));
       assert.equal(fs.readFileSync(path.join(root, 'marker.txt'), 'utf8'), 'ran');
     } finally {
       // mcp stops cleanly when its stdin ends; stopChildren kills whatever is

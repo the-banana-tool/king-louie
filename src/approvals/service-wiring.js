@@ -8,6 +8,7 @@ const { adminConfigDir } = require('../platform/paths');
 const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');
 const { AuditLedger } = require('../audit/audit-ledger');
 const { ApproverStore } = require('./approver-store');
+const { createSealPolicy } = require('./seal-policy');
 const { PhoneApprover } = require('./phone-approver');
 const { RelayClient } = require('./relay-client');
 const { readPin } = require('../fleet/front-door-pin');
@@ -45,7 +46,7 @@ function envelopeSha(envelope) {
   }
 }
 
-// device.rejected fires on every malformed or forged device.enroll/revoke/read_key the
+// device.rejected fires on every malformed or forged device.enroll/revoke/read_key/box_key the
 // relay forwards, so a peer hammering the link with garbage envelopes must
 // not be able to grow the audit ledger without bound. At most REJECT_CAP are
 // audited individually per rolling REJECT_WINDOW_MS; once a window's cap is
@@ -93,7 +94,7 @@ function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, cour
       const result = await phoneApprover.handleResponse(params.envelope);
       return { delivered: true, ...result };
     }
-    if (method === 'device.enroll' || method === 'device.revoke' || method === 'device.read_key') {
+    if (method === 'device.enroll' || method === 'device.revoke' || method === 'device.read_key' || method === 'device.box_key') {
       // The audited type/device_id come from what the envelope actually
       // says (open()'s message.type, null when the envelope is malformed),
       // never from the rpc method the relay happened to call it through.
@@ -108,11 +109,13 @@ function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, cour
         deviceId = null;
       }
       // A read-key statement (android-slim spec §8.7) comes only as
-      // device.read_key, and device.read_key carries nothing else. (Enroll and
+      // device.read_key, a box-key statement (sealed phones, R-SP-10) only as
+      // device.box_key, and neither method carries anything else. (Enroll and
       // revoke may still cross each other's method, as before.)
-      const readKeyMismatch = (method === 'device.read_key') !== (type === 'kl.device.read_key');
-      const result = readKeyMismatch ? { state: 'rejected', reason: 'malformed' } : approverStore.stage(params.envelope);
-      // Nothing new happened for a duplicate or an `applied` read key: no audit entry.
+      const keyMismatch = (method === 'device.read_key') !== (type === 'kl.device.read_key')
+        || (method === 'device.box_key') !== (type === 'kl.device.box_key');
+      const result = keyMismatch ? { state: 'rejected', reason: 'malformed' } : approverStore.stage(params.envelope);
+      // Nothing new happened for a duplicate or an `applied` key: no audit entry.
       if (result.state !== 'duplicate' && result.state !== 'applied') {
         const kind = result.state === 'rejected' ? 'device.rejected' : 'device.staged';
         if (kind !== 'device.rejected' || admitRejectedAudit()) {
@@ -157,7 +160,7 @@ function trackDeviceStates({ approverStore, relayClient, intervalMs = 5000 }) {
 async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir }), nodeConfig, ports, profile = 'agent',
   serviceConfig = {}, identity = null, useTls = true, allowTestKeys = false, transportFactory, reconnectDelays,
   approverStoreOptions = {} } = {}) {
-  const nodeIdentity = identity || getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeConfig.name);
+  const nodeIdentity = identity || getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeConfig.name, { fillBox: true });
   const retentionDays = (serviceConfig.audit && serviceConfig.audit.retentionDays) || 365;
   const auditLedger = new AuditLedger({ dir: path.join(dataDir, 'audit'), identity: nodeIdentity, nodeId: nodeIdentity.nodeId, writer: 'service', retentionDays });
   const pruned = auditLedger.prune();
@@ -171,6 +174,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
   // actually exists yet; `stop` (below) and the catch's teardown share this
   // one function so a failed start and a normal stop leave the same result.
   let approverStore = null;
+  let sealPolicy = null;
   let phoneApprover = null;
   let relayClient = null;
   let courierPump = null;
@@ -210,6 +214,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
       serviceProbe: true
     });
     await approverStore.ready();
+    sealPolicy = createSealPolicy({ approverStore, identity: nodeIdentity, dataDir });
 
     const approvers = nodeConfig.approvers || { relay: null, requestTtlS: 300 };
     // Fleet stage 4 (E7, §3.9): <configDir>/front-door.json, read with the
@@ -249,6 +254,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
       approverStore,
       link,
       auditLedger,
+      sealPolicy,
       ttlMs: (approvers.requestTtlS || 300) * 1000
     });
 
@@ -272,6 +278,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
     auditLedger,
     relayClient,
     approverStore,
+    sealPolicy,
     identity: nodeIdentity,
     courierPump,
     stop: teardown
@@ -283,7 +290,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
 // its audit entries say writer 'mcp'. With the service stopped every unsafe
 // runbook is refused at once with that reason.
 async function startMcpApprovals({ dataDir, configDir = adminConfigDir({ dataDir }), nodeConfig, ports, identity = null,
-  approverStoreOptions = {}, pollMs } = {}) {
+  approverStoreOptions = {}, pollMs, onPathWritten = null } = {}) {
   const { FileCourier } = require('./courier');
   const nodeIdentity = identity || getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeConfig.name);
   const auditLedger = new AuditLedger({ dir: path.join(dataDir, 'audit'), identity: nodeIdentity, nodeId: nodeIdentity.nodeId, writer: 'mcp' });
@@ -294,6 +301,9 @@ async function startMcpApprovals({ dataDir, configDir = adminConfigDir({ dataDir
     serviceProbe: true
   });
   await approverStore.ready();
+  // It can write the latch (a device holds a box key and no service is running),
+  // perhaps as root: onPathWritten hands what it creates back at once.
+  const sealPolicy = createSealPolicy({ approverStore, identity: nodeIdentity, dataDir, onPathWritten });
   const courier = new FileCourier({ dataDir, identity: nodeIdentity, ...(pollMs ? { pollMs } : {}) }).start();
   const approvers = nodeConfig.approvers || { requestTtlS: 300 };
   const approver = new PhoneApprover({
@@ -302,6 +312,7 @@ async function startMcpApprovals({ dataDir, configDir = adminConfigDir({ dataDir
     approverStore,
     link: courier,
     auditLedger,
+    sealPolicy,
     ttlMs: (approvers.requestTtlS || 300) * 1000
   });
   courier.onMessage(async (method, params) => {
@@ -310,6 +321,7 @@ async function startMcpApprovals({ dataDir, configDir = adminConfigDir({ dataDir
   });
   return {
     approver,
+    sealPolicy,
     auditLedger,
     courier,
     identity: nodeIdentity,

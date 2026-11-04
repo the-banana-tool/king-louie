@@ -42,19 +42,48 @@ data class LeaseRequest(
     companion object {
         const val TYPE = "kl.lease.request"
 
+        /** [check]'s request: null unless it can be answered. */
+        fun from(message: JsonElement, open: Opener? = null, sealedSeen: Set<String>): LeaseRequest? = check(message, open, sealedSeen).request
+
         /**
-         * null unless [message] is a complete kl.lease.request whose lease_hash is the hash of its lease,
-         * and whose lease has exactly the keys of its kind ([Leases.isLease]).
+         * A complete kl.lease.request whose lease_hash is the hash of its lease
+         * (the salted one when it came sealed, R-SP-2), and whose lease has
+         * exactly the keys of its kind ([Leases.isLease]); else the reason:
+         * `malformed`, `lease_hash_mismatch`, `not_recipient`, `open_failed`,
+         * `key_locked`, `clear_after_sealed`. [message] has passed the node's signature: only
+         * then may [open] read it.
          */
-        fun from(message: JsonElement): LeaseRequest? {
-            if (message["type"].str() != TYPE || message["v"].int() != 1) return null
+        fun check(message: JsonElement, open: Opener? = null, sealedSeen: Set<String>): LeaseRequestCheck {
+            fun refused(reason: String, seal: SealState = SealState.CLEAR) = LeaseRequestCheck(null, reason, seal)
+            val received = message.obj() ?: return refused("malformed")
+            if (received["type"].str() != TYPE || received["v"].int() != 1) return refused("malformed")
+            if (Seal.clearRefused(TYPE, received, sealedSeen)) return refused(Seal.CLEAR_AFTER_SEALED)
+            if (received.containsKey("sealed") && !Leases.isSealedRequest(received)) return refused("malformed")
+            val read = Seal.read(TYPE, received, open) ?: return refused("malformed", SealState.UNREAD)
+            if (!read.opened) return refused(read.reason ?: "malformed", read.state)
+            val opened = read.state == SealState.OPENED
+            if (opened) Leases.openedRequestProblem(read.message)?.let { return refused(it, read.state) }
+            val request = parsed(read.message, opened) ?: return refused(if (!opened && hashDiffers(read.message)) "lease_hash_mismatch" else "malformed")
+            return LeaseRequestCheck(request, null, read.state)
+        }
+
+        /** Whether a clear request's lease is well formed but not the one it hashed. */
+        private fun hashDiffers(m: JsonObject): Boolean {
+            val lease = m["lease"].obj() ?: return false
+            return Leases.isLease(lease) && m["lease_hash"].str() != null && Digest.sha256B64url(Jcs.bytes(lease)) != m["lease_hash"].str()
+        }
+
+        /** [saltedHashHeld]: a sealed request's hash, which [Leases.openedRequestProblem] has held to the lease with its salt. */
+        private fun parsed(message: JsonObject, saltedHashHeld: Boolean): LeaseRequest? {
             val lease = message["lease"].obj() ?: return null
             val leaseHash = message["lease_hash"].str() ?: return null
             if (!Leases.isLease(lease)) return null
             val kind = lease["kind"].str() ?: return null
             val take = kind == "take"
             val task = kind == "task"
-            if (Digest.sha256B64url(Jcs.bytes(lease)) != leaseHash) return null
+            if (!saltedHashHeld) {
+                if (Digest.sha256B64url(Jcs.bytes(lease)) != leaseHash) return null
+            }
             val maxMinutes = lease["max_minutes"].int() ?: return null
             // A task has no apps; every other kind has at least one.
             val apps = if (task) emptyList() else (lease["apps"].arr() ?: return null).map { a ->
@@ -84,6 +113,9 @@ data class LeaseRequest(
     }
 }
 
+/** One read of a kl.lease.request: the request when it can be answered, else why not. */
+data class LeaseRequestCheck(val request: LeaseRequest?, val reason: String?, val seal: SealState = SealState.CLEAR)
+
 data class LeaseStatus(
     val leaseId: String, val nodeId: String, val seq: Int, val state: String, val locked: Boolean, val reason: String?, val expiresAt: String?,
     /** The token this status carries for the phone's next watch to echo (owner ruling R-F5-15); null when the message holds none. */
@@ -103,24 +135,44 @@ data class LeaseStatus(
      */
     val kind: String = "computer_use",
     val unattended: Boolean = false,
-    val name: String? = null
+    val name: String? = null,
+    /** UNREAD: sealed and not read, so [name] is null whatever the kind; every other field is the clear part's (R-SP-9). */
+    val seal: SealState = SealState.CLEAR
 ) {
     companion object {
         const val TYPE = "kl.lease.status"
 
-        fun from(m: JsonElement): LeaseStatus? {
-            if (m["type"].str() != TYPE) return null
+        /**
+         * [received] has passed the node's signature: only then may [open] read it.
+         * A status sealed in the right shape is never dropped for what is inside:
+         * content that opens to nothing good, a bad name, a locked phone or a wrap
+         * that does not open leave the clear part, so the phone can never say no
+         * session is running while one is.
+         */
+        fun from(received: JsonElement, open: Opener? = null): LeaseStatus? {
+            val message = received.obj() ?: return null
+            if (message["type"].str() != TYPE) return null
+            if (message.containsKey("sealed") && !Seal.isSealedShape(TYPE, message)) return null
+            val read = Seal.read(TYPE, message, open)
+            val m = read?.message ?: JsonObject(message - "sealed")
             val kind = m["kind"].str()?.takeIf { it in Leases.LEASE_KINDS } ?: return null
             val unattended = m["unattended"].bool() ?: return null
             if (kind == "computer_use" && unattended) return null
-            val name = m["name"] ?: return null
-            if (if (kind == "computer_use") name !is JsonNull else !Leases.isTakeName(name)) return null
-            return LeaseStatus(
+            fun status(shownName: String?, state: SealState): LeaseStatus? = LeaseStatus(
                 m["lease_id"].str() ?: return null, m["node_id"].str() ?: return null, m["seq"].int() ?: return null,
                 m["state"].str() ?: return null, m["locked"].bool() ?: return null, m["reason"].str(), m["expires_at"].str(),
                 m["contact_token"].str(), m["granted_by"]["device_id"].str(), m["granted_by"]["name"].str(),
-                kind, unattended, name.str()
+                kind, unattended, shownName, state
             )
+            // Everything but the name (R-SP-9).
+            if (read == null || !read.opened) return status(null, SealState.UNREAD)
+            fun checkedName(): JsonElement? {
+                val name = m["name"] ?: return null
+                if (if (kind == "computer_use") name !is JsonNull else !Leases.isTakeName(name)) return null
+                return name
+            }
+            val shown = checkedName() ?: return if (read.state == SealState.OPENED) status(null, SealState.UNREAD) else null
+            return status(shown.str(), read.state)
         }
     }
 }
@@ -131,7 +183,9 @@ class LeaseView(
     val leaseId: String, val nodeId: String, val seq: Int, val toDevice: String, val state: String, val locked: Boolean, val remainingS: Int,
     val foregroundAppId: String?, val foregroundMatches: Boolean, val frame: ByteArray?, val frameDropped: Boolean, val actions: List<LeaseAction>,
     /** The token this view carries for the phone's next watch to echo (R-F5-15). */
-    val contactToken: String? = null
+    val contactToken: String? = null,
+    /** UNREAD: sealed and not this phone's to open, so no frame, foreground or actions: the clear part alone. */
+    val seal: SealState = SealState.CLEAR
 )
 
 data class ViewCheck(val accepted: Boolean, val reason: String?, val view: LeaseView?)
@@ -393,6 +447,49 @@ object Leases {
         val id = a["id"].str() ?: return false
         return isAppId(id) && Rules.withinLength(a["name"], 64) && Rules.withinLength(a["path"], 1024) &&
             isStringList(a["processes"], 16) { codePoints(it) <= 1024 }
+    }
+
+    /** The most a sealed request's window may be (REQUEST_TTL_MS). */
+    private const val REQUEST_TTL_MS = 5L * 60 * 1000
+    private val SEALED_REQUEST_KEYS = listOf("v", "type", "request_id", "lease_id", "node_id", "node_name", "lease", "lease_hash", "origin", "created_at", "expires_at", "nonce")
+
+    /** What a kl.lease.request holds in clear (requestClearFields). */
+    private fun requestClearFields(m: JsonObject): Boolean {
+        if (!Rules.isUuidV4(m["request_id"]) || !Rules.isUuidV4(m["lease_id"]) || !Rules.isNodeId(m["node_id"]) || !Rules.withinLength(m["node_name"], 64)) return false
+        if (!Rules.isHash(m["lease_hash"]) || !Rules.isNonce(m["nonce"])) return false
+        val created = m["created_at"].str()?.let { Timestamps.epochMillis(it) } ?: return false
+        val expires = m["expires_at"].str()?.let { Timestamps.epochMillis(it) } ?: return false
+        return expires > created && expires - created <= REQUEST_TTL_MS
+    }
+
+    /** The sealed shape of a request (VALIDATORS['kl.lease.request']). */
+    internal fun isSealedRequest(m: JsonObject): Boolean =
+        Seal.isSealedShape(LeaseRequest.TYPE, m) && requestClearFields(m) && Rules.isDeviceJwk(m["node_box"])
+
+    /** checkOrigin. */
+    private fun isOrigin(v: JsonElement?): Boolean {
+        val o = v.obj() ?: return false
+        return Rules.hasExactKeys(o, listOf("client", "session", "job_id")) && o["client"].str() != null &&
+            o.values.all { it is JsonNull || Rules.withinLength(it, 200) }
+    }
+
+    /**
+     * A sealed request after opening (clear part and content together): null, or
+     * `malformed`, or `lease_hash_mismatch` before anything is shown (R-SP-2).
+     * validateOpenedLeaseRequest in src/gui/lease-protocol.js.
+     */
+    internal fun openedRequestProblem(m: JsonObject): String? {
+        val clear = JsonObject(m - "node_box" - "salt")
+        val salt = m["salt"]
+        val lease = m["lease"]
+        if (!Rules.hasExactKeys(clear, SEALED_REQUEST_KEYS) || !requestClearFields(clear) || !isLease(lease) || !isOrigin(m["origin"])) return "malformed"
+        if (lease["resumes"] !is JsonNull && lease["resumes"].str() != m["lease_id"].str()) return "malformed"
+        if (!Rules.isDeviceJwk(m["node_box"]) || !Rules.isHash(salt)) return "malformed"
+        return try {
+            if (Seal.saltedHash(salt.str()!!, lease!!) == m["lease_hash"].str()) null else "lease_hash_mismatch"
+        } catch (e: SealException) {
+            "malformed"
+        }
     }
 
     /** The fields only a take has (checkTakeFields). */
@@ -663,9 +760,9 @@ object Leases {
         return "Checked ${Display.escape(nodeName)} at $time: $sessions$requests"
     }
 
-    /** The statuses an accepted listing names, read. None for a listing that was not accepted: such a listing says nothing. */
-    fun listedStatuses(check: ListingCheck, pin: NodePin): List<LeaseStatus> =
-        if (!check.accepted) emptyList() else check.statuses.mapNotNull { envelope -> verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it) } }
+    /** The statuses an accepted listing names, read. None for a listing that was not accepted: such a listing says nothing. [open] reads their names; nothing else needs it (R-SP-9). */
+    fun listedStatuses(check: ListingCheck, pin: NodePin, open: Opener? = null): List<LeaseStatus> =
+        if (!check.accepted) emptyList() else check.statuses.mapNotNull { envelope -> verifiedMessage(envelope, pin)?.let { LeaseStatus.from(it, open) } }
 
     /** A node-signed message whose signature, kid and node_id are all the pinned node's; null otherwise. */
     fun verifiedMessage(envelope: Envelope, pin: NodePin): JsonObject? {
@@ -678,7 +775,24 @@ object Leases {
         return m.takeIf { it["node_id"].str() == pin.id }
     }
 
-    fun verifyView(envelope: Envelope, pin: NodePin): ViewCheck {
+    /** A sealed view after opening holds what a clear one holds (VALIDATORS['kl.lease.view']); its frame is checked by [verifyView] itself. */
+    private fun isOpenedView(m: JsonObject): Boolean {
+        if (!Rules.hasExactKeys(m, listOf("v", "type", "node_id", "lease_id", "seq", "at", "to_device", "state", "locked", "remaining_s", "foreground", "frame", "frame_dropped", "actions", "contact_token"))) return false
+        val foreground = m["foreground"].obj() ?: return false
+        if (!Rules.hasExactKeys(foreground, listOf("app_id", "matches")) || foreground["matches"].bool() == null) return false
+        if (foreground["app_id"] !is JsonNull && foreground["app_id"].str()?.let { isAppId(it) } != true) return false
+        if (m["frame_dropped"].bool() == null) return false
+        val actions = m["actions"].arr() ?: return false
+        return actions.size <= 50 && actions.all { a -> a.obj()?.let { Rules.hasExactKeys(it, listOf("seq", "at", "tool", "summary", "result")) } == true }
+    }
+
+    /**
+     * The checks of `verifyLeaseView`: the size, the pinned node's signature, the
+     * node, and only then [open] on a sealed one. Not this phone's to open, or a locked phone: accepted,
+     * the clear part alone (no frame, no actions), `seal` UNREAD, and `reason` says why:
+     * a locked phone and a non-recipient need different words, so `accepted` decides, not a null `reason`.
+     */
+    fun verifyView(envelope: Envelope, pin: NodePin, open: Opener? = null): ViewCheck {
         val bytes = try {
             envelope.payloadBytes()
         } catch (e: ProtocolException) {
@@ -687,13 +801,16 @@ object Leases {
         if (bytes.size > VIEW_MAX_BYTES) return ViewCheck(false, "too_large", null)
         if (envelope.alg != "Ed25519" || envelope.kid != pin.id) return ViewCheck(false, "malformed", null)
         if (!envelope.verifyEd25519(pin.key)) return ViewCheck(false, "bad_signature", null)
-        val m = try {
+        val received = try {
             envelope.message()
         } catch (e: ProtocolException) {
             return ViewCheck(false, "malformed", null)
         }
-        if (m["type"].str() != "kl.lease.view") return ViewCheck(false, "malformed", null)
-        if (m["node_id"].str() != pin.id) return ViewCheck(false, "wrong_node", null)
+        if (received["type"].str() != "kl.lease.view") return ViewCheck(false, "malformed", null)
+        if (received["node_id"].str() != pin.id) return ViewCheck(false, "wrong_node", null)
+        val read = Seal.read("kl.lease.view", received, open) ?: return ViewCheck(false, "malformed", null)
+        val m = read.message
+        if (read.state == SealState.OPENED && !isOpenedView(m)) return ViewCheck(false, "malformed", null)
         var frame: ByteArray? = null
         val f: JsonElement? = m["frame"]
         if (f != null && f !is JsonNull) {
@@ -718,8 +835,8 @@ object Leases {
             m["to_device"].str() ?: return ViewCheck(false, "malformed", null),
             m["state"].str() ?: return ViewCheck(false, "malformed", null), m["locked"].bool() ?: false, m["remaining_s"].int() ?: 0,
             m["foreground"]["app_id"].str(), m["foreground"]["matches"].bool() ?: false, frame, m["frame_dropped"].bool() ?: false, actions,
-            m["contact_token"].str()
+            m["contact_token"].str(), read.state
         )
-        return ViewCheck(true, null, view)
+        return ViewCheck(true, read.reason, view)
     }
 }

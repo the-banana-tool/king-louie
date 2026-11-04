@@ -1,0 +1,43 @@
+{
+  "name": "status-sealed",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "check": null,
+  "given": {
+    "node": {
+      "id": "kl-c2ubd6jjqumalzt5",
+      "name": "web-01",
+      "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+    },
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    }
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-c2ubd6jjqumalzt5",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsImNvbnRhY3RfdG9rZW4iOiI1OXkxMlowbHFOWnNtX3RLcEQzZHhRIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MjQ6MTEuMjAxWiIsImdyYW50ZWRfYnkiOnsiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwibmFtZSI6Ik93bmVyIHBob25lIn0sImtpbmQiOiJ0YXNrIiwibGVhc2VfaWQiOiJiNTVlNDExNi1iMWU3LTRkZGItYmJhMi1hZTQzOTg3MGFkOWQiLCJsb2NrZWQiOmZhbHNlLCJub2RlX2lkIjoia2wtYzJ1YmQ2ampxdW1hbHp0NSIsInJlYXNvbiI6bnVsbCwic2VhbGVkIjp7ImN0IjoiZ0JONEtIWk5JWW9Wd3FFZE9YMDZmMHltZllkZmM1Mmp0T0p5Y1NYSWtRVGJkQ3g0Nlgwa2xqU1pEUnJNbEhXV1lQZU12NkJxdDlxOHA2Tk1FRG0zbWtPV1hCQXlNazNUVVJxWVRJdkFsWDdWejhaRElSNkZ5RDd3V0dQcnE2Mm1POUVpbThBb2U1ZFUweDJFVERDaTh4c0hYSUV6cVhCcXNqaTQ3cDhOSm5aWmJhdGVRZGRYUWwyaTVVdC1qNk5kempaZERNbFRuNFo4aUFjNzVIbHlLaTJCb2hhYzNZMkVrcHlZYzVSMDl5OFJmZi12dnVIdS1iNHp4aUtNME1BeWNlWTdzNy1VRVNHLU56Y3ZrSEtOcS1jUURHSlRmeWZaRHRRbUtNNmlOcC03OURhZW1IWUZPNmp6elVFZjZOQ1ZTS2dUcjBBTFF1N0JtekNfbTdjNWhfYkJpX0owcmJwV2s3aUNiQnEyQTU4IiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiQTRwNld4eTU5MEZscTkzUFVYdUw4cnRuUjR0WWlSbkFBdDZKZW1TX2hRayIsInkiOiJ4aUNWU1pnQlEtbllPdUs3QXp3OGNRNkY2NUstSW5KbFlRUzJkM1VPWHBNIn0sIml2IjoiVFRSVVNGVU5Fc1RyTkp5VSIsImtleXMiOnsiZC0zdm13cmloaGRibml0NG9pIjoiVXBoazJzU3B2ZngxRW05R2doNlhDRDgtTkJSS1JNTFI2TF9qb2plTi1waXpEUXlDQUphc09jMXVQb1B0eWxqYiIsImQtNnhkbGJ4Z2xobnZmYTNsdyI6Ijl4VHFJLUxLSUFqRmRfVEVxWmpha0dLRjFwZU5oTWJrM2VucVhJaDBQWUdweVM4Y19fU2E4Rklyem1EVUZicjYiLCJrbC1jMnViZDZqanF1bWFsenQ1IjoielV2OFBKVUsxQ0pZYkZBMXhidFZGZHVva3NLQ2hRbVJHOXFlYjVQSHd5aFc3MkU4Z0NxNzgwRWVzNmVGb2V1RyJ9LCJ2IjoxfSwic2VxIjo1LCJzdGF0ZSI6ImFjdGl2ZSIsInR5cGUiOiJrbC5sZWFzZS5zdGF0dXMiLCJ1bmF0dGVuZGVkIjp0cnVlLCJ2IjoxfQ",
+    "sig": "DhvBNmxRq_CIVmgJ9IWe-VtFkzPn1Wr9x9lsH7qINO3Tlws38HM_YTUstKu2knpAwYG6IRSgCbz8SHfowPOyCQ"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "status": {
+      "lease_id": "b55e4116-b1e7-4ddb-bba2-ae439870ad9d",
+      "seq": 5,
+      "state": "active",
+      "contact_token": "59y12Z0lqNZsm_tKpD3dxQ",
+      "granted_by": {
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Owner phone"
+      },
+      "kind": "task",
+      "unattended": true,
+      "name": "Find a dentist"
+    }
+  }
+}
