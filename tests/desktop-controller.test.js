@@ -2010,6 +2010,25 @@ describe('desktop controller: the one-time move', () => {
     controller.dispose();
   });
 
+  it('Settings Import asks the source for digests of what its target takes', async () => {
+    for (const [hosting, expected] of [['personal', ['models', 'voice']], ['service', ['voice']]]) {
+      const client = new FakeNodeClient();
+      client.service = { ...client.service, hosting };
+      const call = client.call.bind(client);
+      let inventory = null;
+      client.call = async (method, params) => {
+        if (method === 'import.plan') inventory = params.inventory;
+        return call(method, params);
+      };
+      const { controller, userDataDir } = moveController({ client });
+      fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify({ settings: { voice: {}, models: {} } }));
+      const out = await controller.importPlan();
+      assert.strictEqual(out.ok, true, JSON.stringify(out));
+      assert.deepStrictEqual(Object.keys(inventory.settingDigests).sort(), expected, hosting);
+      controller.dispose();
+    }
+  });
+
   it('chats out of order on the node still mark the move, and the line stays on screen', async () => {
     const client = new FakeNodeClient();
     const invoke = client.invoke.bind(client);
