@@ -1321,11 +1321,17 @@ move it into the node, once.
 
 1. Before anything moves, the app makes a backup beside its profile, in
    `%APPDATA%\king-louie.backup-<time>`, and checks every file against the original.
-   Electron's caches are left out. Nothing removes the backup or the old profile.
+   Electron's caches are left out, and so are the caches inside its browser profiles. If
+   the disk is too full it says so, with the numbers, before writing anything. Nothing
+   removes the backup or the old profile.
 2. It shows the plan: what is new, updated, copied, already on the node or needing
-   attention, and a **Stays on this computer** list (browser profiles, local servers,
-   the hosted reranker's key, skills, workflows, webhooks, voice files, and the rest).
-   A case with uncommitted changes moves as it stands, with a note.
+   attention, and a **Stays on this computer** list: browser profiles, local servers, the
+   hosted reranker's key, skills, workflows and webhooks (set them up again in Settings on
+   the node), case memory, contact state, external agents (a case that uses one says it
+   needs setting up on the node), voice files, and the rest. They stay in the old profile
+   and the backup. A case with uncommitted changes moves as it stands, with a note. A chat
+   holding one message too large to send (over about 63 MB) is named with its size: it
+   moves with a line in that message's place, and the whole message stays here.
 3. **Move everything** is the one press. It carries settings, your profile, permission
    rules and always-approve entries, allowed directories, chats, memory, cron jobs
    (disabled), cases, provider keys, search and image keys, the vault and the Anthropic
@@ -1333,8 +1339,16 @@ move it into the node, once.
    hooks and MCP servers. A private chat stays private.
 4. The app asks the node for what it just sent, and only a verified result marks the
    profile as moved. A difference shows what is missing, nothing is marked, and pressing
-   again plans again: what landed is already present. The node then restarts once, for
-   the channels, hooks and MCP servers.
+   again plans again: what landed is already present.
+5. When channels, hooks or MCP servers moved, they start when the node next starts. The
+   app asks: **Restart King Louie Node now** or **Later**. A restart ends a turn, take or
+   task in progress, so nothing restarts without that press.
+
+A case on the node that differs from the app's copy holds the mark back, and the screen
+gives the ways out, those that keep both first: **Not now**, then **Moved elsewhere** on the
+app's copy when the node's is the one you work in; or close the app, rename the case's
+folder in the profile's `cases` folder and plan again, and it lands as a second case. Only
+if nothing in the node's copy matters, remove that folder from the node.
 
 The move refuses, with nothing moved, when the old profile cannot be read, when a custom
 cases folder is missing or holds cases (they are outside the profile and would not move:
@@ -1452,8 +1466,11 @@ registered it says so, removes nothing and exits 0.
   are refused while no phone is enrolled.
 - The backup directory stays until you delete it, with the history in the clear, as the
   profile holds it. Nothing removes it or the old profile.
-- A node older than the app shows a row in Settings > Local service and the banner, with
-  **Restart King Louie Node** to update it; never automatic. The installer stops a node
+- A node older than the app shows a row in Settings > Local service and the banner. A node
+  that runs the app's binary gets **Restart King Louie Node to update it**, never automatic.
+  A node installed from a checkout runs from that folder, so a restart changes nothing:
+  update the folder, then restart it. A logon task whose program is gone (a checkout
+  removed, the app moved) is said on screen, and **Install…** registers it again. The installer stops a node
   running the app's binary, so a turn in progress is lost: quit the app before updating.
   Uninstalling the app removes the logon task and keeps the data dir.
 - `npm run start:standalone` from a checkout can poll the same bot as the node.

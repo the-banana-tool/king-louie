@@ -97,7 +97,8 @@ The service runs in your own login session, as you, from the logon task
 `KingLouie Node`; the owner account is the trust boundary. On first run the
 desktop window installs the node, pairs with it, starts it and moves the old
 profile into it, each on one press (install guide, "Attaching the desktop
-app"). The terminal install below stays, and is the one a machine with no
+app"). A restart the move needs is the owner's press too, so a take or task
+you are driving does not end because of the move. The terminal install below stays, and is the one a machine with no
 window uses. The install guide (`docs/install-guide.md`, section 13) has every
 step; in short, from a normal, unelevated prompt:
 

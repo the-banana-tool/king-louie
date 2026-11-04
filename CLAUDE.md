@@ -1005,7 +1005,10 @@ work while attached appends it to `PROXIED_DOMAINS`).
     only path that carries secrets. `backupProfile`
     (`src/migration/profile-backup.js`) makes
     `<parent of userData>\king-louie.backup-<timestamp>`, skipping `EXCLUDED_DIRS`
-    (twelve) at the top level, snapshotting `history.sqlite`, refusing a link or an
+    at the top level and `BROWSER_CACHE_DIRS` under `browser-profiles/*` and
+    `browser-profiles/*/*` (a browser profile's logins stay in), refusing up front when
+    `statfs` says the files will not fit, with the numbers, snapshotting
+    `history.sqlite`, refusing a link or an
     existing `dest`, hashing every file into `backup.json`; a failure
     (`BACKUP_FAILED`) leaves the half-made directory named. `verifyMigration`
     (`src/migration/migration-verify.js`) asks the node; whatever cannot be shown to be
@@ -1024,13 +1027,47 @@ work while attached appends it to `PROXIED_DOMAINS`).
     takes a case the node has since worked on as present while its source still equals
     what landed and its repository passes `git fsck`
     (`recordedLandingHolds`, `src/migration/desktop-import.js`).
-  - `restartDue` in the marker: the carried channels, hooks and MCP servers need a node
-    restart. It is cleared as the restart goes; an app death before that leaves it for
-    the next launch to do once (`startAttached`).
+  - `restartDue` in the marker, only when the report says `needsRestart` (channels, hooks
+    or MCP servers landed). Nothing restarts by itself, at the move or a later launch: a
+    restart ends a turn, a take or a task. `RESTART_DUE_ACTIONS`, **Restart King Louie
+    Node now** and **Later**, are on the setup's steps after the move and in the attached
+    banner; the press (`nodeRestart`) or Later (`desktop:restartLater`) clears it.
+  - A chat too big for one entry (a personal node's plan says `chatParts: true`):
+    `chatEntries` sends runs of messages under `maxBytes`, in order, a message bigger than
+    that alone in its own batch; `collectChatPart` holds them in memory under the plan and
+    `writeChat` lands the whole chat on the last part, in one transaction with its private
+    mark, so a cut-off lands nothing and the next plan offers it again. A message past
+    `MAX_CHAT_PART_BYTES` (`LIMITS.frameBytes` less 1 MiB): the inventory says
+    `tooLargeBytes`, the plan says `needs-attention` with the chat and the size, and adds
+    it to **Stays on this computer**. The item is `partial`: the chat lands with
+    `TOO_LARGE_TEXT` in that message's place (order, `seq` and the count stay), is
+    `incomplete` in the manifest, and does not block the mark. A fleet plan has neither.
+  - A case on the node that differs (`caseOnNodeDiffers`, `landedIncomplete`) names the
+    ways that keep both first. **Moved elsewhere** in the old standalone mode plans
+    `MOVED_OUT_NOTE`, ahead of the incomplete check. A folder renamed on the desktop lands
+    as a second case: two cases cannot share an id (`CaseStore#get` finds the first), so
+    the plan gives it a new one (`caseExpected.secondId`), `finish` rewrites its `case.yaml`
+    in staging (`slug` the new folder), and its chats follow (`caseIdRemap`).
+  - The read of every message runs in a child (`readHistoryApart`,
+    `src/migration/old-profile-read.js`), one marked line per chat; a child that dies is
+    an attention row the move refuses on, never fewer chats. Decrypting stays in the main
+    process, and needs no chat.
+  - `detectOldProfile` is also `found` for `apiTokens`, the Anthropic sign-in, search and
+    image keys, a vault key in `config.json`, or a carried setting that is not its default
+    (`settingsWouldMove`; `keysOrSettings` on the answer).
   - Under personal the importer also carries `settings.models` (minus `localServers`),
     `settings.channels` with their tokens, `settings.hooks` and `settings.mcpServers`.
     The CLI `import --from` on a personal node keeps the fleet's exclusions and carries
     no secret: only the window's move carries those.
+- **What the task runs** (spec §6.8). `queryTask` reads the program and entry out of the
+  task's PowerShell arguments (`parseTaskXml`, read and never run) and `stat`s them: `gone`
+  on ENOENT alone (a path inside the asar is ENOTDIR to plain Node), `runs` `app` or
+  `folder`. `/Run` succeeds for a program that is gone, so `runNodeTask` refuses
+  `NODE_TASK_PROGRAM_GONE` first, every screen says so and offers Install, and `runInstall`
+  accepts a registered task only then (the CLI's `/Create /F`). The version row's press is
+  there only for `runs: 'app'`. `uninstall --personal` with no `--data-dir` stops the node
+  where the task says it runs. The phone step gives a checkout's script, `node "<entry>"`,
+  or `node bin\king-louie-service.js`.
 - **The personal proxied list is for the same-account loopback bridge only.** Under
   `hosting: personal`, `classifyChannel(channel, { hosting })` adds
   `PERSONAL_PROXIED_DOMAINS` and `settings:mcp`, `unavailableTabsFor` is `['mesh']`, and
@@ -1044,8 +1081,18 @@ work while attached appends it to `PROXIED_DOMAINS`).
   tools are refused while no phone is enrolled. On-screen task approvals and `RunTask`
   from the window wait for stage 3. A recorded landing trusts the node's working tree, so
   a file removed there reads as the node's own work. A same-size edit to a landed file
-  isn't caught. `start:standalone` can poll the same bot as the node. `execSync` in the
-  skill handlers stalls the node during `skill:install` and `skill:checkUpdates`. Private
+  isn't caught. `start:standalone` can poll the same bot as the node. `skill:install` and
+  `skill:checkUpdates` no longer block (`execFile`, `git fetch` only on the pane's press;
+  `skill:install` refuses a relative path over the bridge), but `skill:update` still runs
+  `execSync` on its press. What does not move: skills, workflows and webhooks (each said
+  on the plan, `PERSONAL_EXCLUDED`), `ops-memory.jsonl`, `contact/` and `executors/` (named
+  in `STAYS_BEHIND_FIXED`; a case whose agent is in `executors/` gets its own line). They
+  stay in the old profile and the backup. Skills and workflows do not go through the
+  case-file path: a skill clone is a nested `.git` the importer refuses and whose
+  `.git/config` it drops, a skill installed from a folder is a junction the reader
+  refuses, and both stores load only at the node's start. A secret that will not decrypt
+  is reported `skipped` and blocks the mark on every try. Sizing messages for the plan
+  stringifies each one in the main process. Private
   chats answer `PRIVATE_NO_LOCAL_MODEL` until a local server is in the admin block. No
   real install, migration or packaged run has been done.
 - **Pairing:** start from Settings > Local service, then run the command it shows
