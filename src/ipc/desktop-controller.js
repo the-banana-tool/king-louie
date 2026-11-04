@@ -63,7 +63,7 @@ const INSTALL_CLI_TIMEOUT_MS = 120000;
 const NOT_PERSONAL_TEXT = 'No King Louie Node on this computer is paired with this desktop.';
 // §6.5: named beside what the node's plan lists, since the engine walks none of them.
 const STAYS_BEHIND_FIXED = Object.freeze([
-  'Browser profiles: log in again in the node\'s browser.',
+  'Browser profiles: cookies and sessions stay here, so sites may ask you to sign in again in the node\'s browser. Saved logins in the vault move.',
   'Local servers: add them to the node\'s service.json.',
   'The typesafe.ai key: enter it again on the node.',
   'Case memory (ops-memory.jsonl): what King Louie noted about how your cases run. The node starts its own.',

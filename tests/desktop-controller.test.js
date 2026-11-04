@@ -2000,6 +2000,16 @@ describe('desktop controller: the one-time move', () => {
     controller.dispose();
   });
 
+  it('the stays-behind list says cookies and sessions stay while saved logins move', async () => {
+    const { controller } = moveController();
+    const { staysBehind } = await controller.migrationPlan();
+    const line = staysBehind.find((l) => l.startsWith('Browser profiles'));
+    assert.match(line, /cookies and sessions/);
+    assert.match(line, /[Ss]aved logins/);
+    assert.match(line, /move/);
+    controller.dispose();
+  });
+
   it('chats out of order on the node still mark the move, and the line stays on screen', async () => {
     const client = new FakeNodeClient();
     const invoke = client.invoke.bind(client);
