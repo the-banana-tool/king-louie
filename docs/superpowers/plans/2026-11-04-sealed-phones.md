@@ -225,7 +225,7 @@ it('the relay cache accepts a sealed request and lists it; its view carries no a
 
 **Interfaces:**
 - Consumes: `sealContent`, `openSealed`, `createSealPolicy`. Opening is not authentication: anyone can seal to the public box key, so `handleAnswer` verifies the envelope and binds its signer to `device_id` before it opens.
-- Produces: `MobileAppChannel({ …, sealPolicy })`; the ask's clear part carries `node_box`; an answer whose `sealed` does not open is refused `open_failed` before `unknown_question`, and an answer with a clear `answer` key on a sealing node is still accepted (an older phone answering an older clear ask; the node never refuses a well-formed clear answer).
+- Produces: `MobileAppChannel({ …, sealPolicy })`; the ask's clear part carries `node_box`; an answer whose `sealed` does not open is refused `open_failed` before `unknown_question`, and a clear answer is accepted only when a clear mobile delivery of that token really left; otherwise it is refused `sealed_required` (a relay replaying an old ask must not draw a clear answer that counts). Tasks 8 to 11 word that code; Task 12 lists it in the protocol doc.
 
 - [ ] **Step 1: Write the failing tests** in `tests/contact-mobile.test.js`: a sealing node's ask has no `text`, `case_title` or `options` in clear; the fake phone opens it; a sealed answer is accepted and `ownerProven`; a sealed answer with its `token` changed in clear is refused (AAD); the relay route forwards a sealed answer unchanged.
 - [ ] **Step 2: Run** `node --test tests/contact-mobile.test.js`; expected: FAIL.
