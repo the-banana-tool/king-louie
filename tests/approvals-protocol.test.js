@@ -13,7 +13,7 @@ const { canonicalize } = require('../src/platform/jcs');
 const { open, deviceIdFromJwk, deriveDeviceId, fingerprintGroups, fromB64url, verifyEs256, verifyEd25519 } = require('../src/approvals/envelope');
 const { phoneAuthString, validateMessage } = require('../src/approvals/messages');
 const { verifyConsoleEnrollment } = require('../src/approvals/verify-device');
-const { openSealed, saltedHash, SealError } = require('../src/approvals/seal');
+const { openSealed, saltedHash, isSealedShape, SealError } = require('../src/approvals/seal');
 const { PhoneApprover } = require('../src/approvals/phone-approver');
 const { verifyAuditSlice } = require('../src/audit/audit-ledger');
 require('../src/channels/mobile-app-channel'); // registers the kl.question.* validators
@@ -38,7 +38,7 @@ const READ_KEY = [
 ];
 const READ_KEY_ANDROID = ['phone-api-auth-read', 'enroll-console-read-key', 'read-key-valid'];
 // The seal (sealed phones, R-SP-1, R-SP-2): the node's and both phones'.
-const SEAL = ['seal-open', 'seal-not-recipient', 'seal-tampered-ct', 'seal-tampered-clear', 'seal-hash-mismatch', 'seal-content-not-jcs', 'seal-content-clear-key'];
+const SEAL = ['seal-open', 'seal-not-recipient', 'seal-tampered-ct', 'seal-tampered-clear', 'seal-hash-mismatch', 'seal-content-not-jcs', 'seal-content-clear-key', 'seal-pad-not-spaces'];
 // The box key (sealed phones, R-SP-10): the node's, and both phones' where a phone builds it.
 const BOX_KEY = ['enroll-console-box-key', 'enroll-console-box-key-equal', 'enroll-signed-box-key', 'box-key-valid', 'box-key-wrong-signer', 'box-key-stale'];
 // Sealed tool approvals (R-SP-2, R-SP-5): the node's, and both phones' where a phone reads the request.
@@ -128,8 +128,8 @@ describe('approval-v1 vectors', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
   });
 
-  it('68 vectors; the read-key ones name node and android only, android where the phone builds or signs; the sealed ones both phones where a phone builds or opens', () => {
-    assert.equal(EXPECTED.length, 68);
+  it('69 vectors; the read-key ones name node and android only, android where the phone builds or signs; the sealed ones both phones where a phone builds or opens', () => {
+    assert.equal(EXPECTED.length, 69);
     for (const name of [...SEAL, ...BOX_KEY, ...SEALED_APPROVAL, ...SEALED_QUESTION]) {
       assert.deepEqual(byName.get(name).consumers, SEALED_PHONES.includes(name) ? ['node', 'ios', 'android'] : ['node'], name);
     }
@@ -197,6 +197,36 @@ describe('approval-v1 vectors', () => {
       assert.deepEqual(runSealVector(v), v.expect);
     });
   }
+
+  it('every message a sealer built holds a whole number of 256-byte blocks; only the hand-sealed ones may not', () => {
+    const HAND_SEALED = ['seal-content-not-jcs', 'seal-content-clear-key', 'seal-pad-not-spaces'];
+    let checked = 0;
+    for (const v of byName.values()) {
+      if (HAND_SEALED.includes(v.name)) continue;
+      const walk = (node) => {
+        if (node === null || typeof node !== 'object') return;
+        if (typeof node.payload === 'string') {
+          let inner = null;
+          try { inner = open(node).message; } catch { inner = null; }
+          if (inner) walk(inner);
+        }
+        if (node.sealed && typeof node.sealed.ct === 'string') {
+          assert.equal((fromB64url(node.sealed.ct).length - 16) % 256, 0, v.name);
+          checked += 1;
+        }
+        for (const value of Object.values(node)) walk(value);
+      };
+      walk(v.input);
+      walk(v.given);
+    }
+    assert.ok(checked >= 10, `${checked} sealed messages found`);
+  });
+
+  it('seal-pad-not-spaces: the opened bytes are JCS and hold a pad that is not only spaces', () => {
+    const v = byName.get('seal-pad-not-spaces');
+    assert.deepEqual(v.expect, { reason: 'content_malformed', message: null });
+    assert.equal(isSealedShape(v.given.type, v.input), true);
+  });
 
   it('phone-api-auth-read: the KL-PHONE-READ-V1 string, signed by the read key and not by the device key', () => {
     const v = byName.get('phone-api-auth-read');

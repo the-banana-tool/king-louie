@@ -1225,7 +1225,9 @@ the e2e test), the owner check cannot tell them apart.
     (`getOrGenerateNodeIdentity(..., { fillBox: true })`, a test walks the callers), so a CLI or a
     standalone `mcp` has `box: null`.
   - The seal: `src/approvals/seal.js` (`sealContent`, `openSealed`; `SEAL_SPLIT` is the one table of what
-    is content). One content key wrapped per recipient; AAD is the clear part. A sealed request's hash is
+    is content). One content key wrapped per recipient; AAD is the clear part. Every sender pads: `pad`,
+    only spaces, makes the JCS bytes of the content a multiple of 256; an opener takes any number of
+    spaces and strips it, and anything else there is `content_malformed`. It is in no table and no hash. A sealed request's hash is
     salted (`saltedHash`), and the pending entry keeps the salt, so a clear request pending when sealing
     turns on keeps its unsalted rule. Never pass `ephemeral` or `random` outside vectors
     (`tests/sealed-types.test.js`, which also fails for a content type with no entry). A new node→phone
@@ -1263,7 +1265,7 @@ the e2e test), the owner check cannot tell them apart.
 - Tests: `tests/approvals-*.test.js`, `tests/frontdoor-*.test.js`, `tests/audit-ledger.test.js`,
   `tests/service-cli-devices.test.js`, `tests/service-cli-relay.test.js`. Vectors live in
   `tests/vectors/approval-v1/`; after changing a message, run `node tests/vectors/approval-v1/generate.js`
-  and commit the files (`--check` must say `68 vectors match`). `tests/approvals-e2e.test.js` spawns real
+  and commit the files (`--check` must say `69 vectors match`). `tests/approvals-e2e.test.js` spawns real
   processes and runs on Windows or as root; on Windows it denies itself write access to a temp
   `approvers/` dir with `icacls` (as an installer's ACL would) and lifts the deny before cleanup.
 - Mobile apps (`mobile/`, built from `docs/protocol/approval-v1.md`): protocol-core tests are

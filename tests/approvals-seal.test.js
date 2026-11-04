@@ -129,7 +129,9 @@ describe('sealContent and openSealed', () => {
     const iv = fromB64url(sealed.iv);
     assert.equal(iv.length, 12);
     const plaintext = ungcm(cek, iv, fromB64url(sealed.ct), Buffer.from(canonicalize(clear), 'utf8'));
-    assert.equal(plaintext.toString('utf8'), canonicalize(parts.content), 'the plaintext is the JCS bytes of the content');
+    const text = plaintext.toString('utf8');
+    assert.equal(text, canonicalize({ ...parts.content, pad: JSON.parse(text).pad }), 'the plaintext is the JCS bytes of the content, with its pad');
+    assert.equal(plaintext.length % 256, 0, 'a whole number of 256-byte blocks');
   });
 
   it('opens what a sealer written from the ruling alone built', () => {
@@ -282,6 +284,97 @@ describe('sealContent and openSealed', () => {
     const once = () => sealContent({ type: 'kl.approval.request', senderId: NODE_ID, clear, content, recipients: { [a.id]: a.jwk }, ephemeral: { jwk: eph.jwk, agree: eph.agree }, random });
     assert.deepEqual(once(), once());
     assert.deepEqual(once().sealed.epk, eph.jwk);
+  });
+});
+
+describe('the pad', () => {
+  const answerClear = (phone) => ({ v: 1, type: 'kl.question.answer', node_id: NODE_ID, token: 'ABC123', device_id: phone.id, nonce: 'n'.repeat(43), signed_at: '2026-09-23T18:04:11.201Z' });
+  const ctLength = (message) => fromB64url(message.sealed.ct).length;
+  const sealHand = (clear, plaintext, a) => handSeal({ type: 'kl.approval.request', sender: NODE_ID, clear, plaintext: Buffer.from(plaintext, 'utf8'), recipient: a });
+
+  it('two answers of different lengths give ciphertexts of one length', () => {
+    const phone = newBox();
+    const sealAnswer = (id) => sealContent({
+      type: 'kl.question.answer', senderId: phone.id, clear: answerClear(phone),
+      content: { case_id: 'c-1', question_id: 'q-0012', answer: { option_id: id } }, recipients: { [NODE_ID]: NODE_BOX.jwk }
+    });
+    assert.equal(ctLength(sealAnswer('approve')), ctLength(sealAnswer('refuse')));
+    assert.equal(ctLength(sealAnswer('approve')), 256 + 16);
+  });
+
+  it('lands on a multiple of 256 at every length, multi-byte text included', () => {
+    const a = newBox();
+    const parts = approvalParts();
+    const sizes = new Set();
+    for (let n = 0; n < 300; n += 7) {
+      for (const unit of ['x', 'é', '€', '😀', '"', '\n']) {
+        const content = { ...parts.content, action: { ...parts.content.action, summary: unit.repeat(n) } };
+        const message = sealContent({ type: 'kl.approval.request', senderId: NODE_ID, clear: parts.clear, content, recipients: { [a.id]: a.jwk } });
+        const body = ctLength(message) - 16;
+        assert.equal(body % 256, 0, `${n} ${JSON.stringify(unit)}`);
+        sizes.add(body);
+        assert.deepEqual(openAs(a, message).content, content);
+      }
+    }
+    assert.ok(sizes.size > 3);
+  });
+
+  it('an exact fit takes an empty pad, and one byte more takes the next block', () => {
+    const a = newBox();
+    const parts = approvalParts();
+    const plaintextOf = (content) => {
+      const { sealed, ...clear } = sealContent({ type: 'kl.approval.request', senderId: NODE_ID, clear: parts.clear, content, recipients: { [a.id]: a.jwk } });
+      const cek = ungcm(kekFor(a.agree(sealed.epk), 'kl.approval.request', NODE_ID, a.id), Buffer.alloc(12), fromB64url(sealed.keys[a.id]));
+      return ungcm(cek, fromB64url(sealed.iv), fromB64url(sealed.ct), Buffer.from(canonicalize(clear), 'utf8')).toString('utf8');
+    };
+    const withSummary = (n) => ({ ...parts.content, action: { ...parts.content.action, summary: 'x'.repeat(n) } });
+    const bare = (n) => Buffer.byteLength(canonicalize({ ...withSummary(n), pad: '' }), 'utf8');
+    const fit = 256 * 4 - bare(0);
+    assert.equal(bare(fit) % 256, 0);
+    assert.equal(JSON.parse(plaintextOf(withSummary(fit))).pad, '');
+    const over = plaintextOf(withSummary(fit + 1));
+    assert.equal(JSON.parse(over).pad, ' '.repeat(255));
+    assert.equal(Buffer.byteLength(over, 'utf8'), 256 * 5);
+  });
+
+  it('an opener takes a pad of any number of spaces, strips it from both results, and takes none at all', () => {
+    const a = newBox();
+    const { clear, content } = approvalParts();
+    for (const pad of [null, '', ' ', ' '.repeat(255), ' '.repeat(1000)]) {
+      const opened = openAs(a, sealHand(clear, canonicalize(pad === null ? content : { ...content, pad }), a));
+      assert.deepEqual(opened.content, content);
+      assert.deepEqual(opened.message, { ...clear, ...content });
+      assert.equal(Object.hasOwn(opened.content, 'pad'), false);
+      assert.equal(Object.hasOwn(opened.message, 'pad'), false);
+    }
+  });
+
+  it('a pad that is not only spaces is content_malformed, and so is any other extra key', () => {
+    const a = newBox();
+    const { clear, content } = approvalParts();
+    for (const pad of ['x', ' x ', '\t', '\n', ' ', '　', 1, 0, null, true, [' '], { a: ' ' }]) {
+      assert.equal(reasonOf(() => openAs(a, sealHand(clear, canonicalize({ ...content, pad }), a))), 'content_malformed', JSON.stringify(pad));
+    }
+    for (const key of ['padding', 'Pad', 'PAD', 'pad ', 'node_id', 'extra']) {
+      assert.equal(reasonOf(() => openAs(a, sealHand(clear, canonicalize({ ...content, pad: '', [key]: ' ' }), a))), 'content_malformed', key);
+    }
+    // A pad out of its JCS place, and two pads, one of them not spaces.
+    assert.equal(reasonOf(() => openAs(a, sealHand(clear, `${canonicalize(content).slice(0, -1)},"pad":" "}`, a))), 'content_malformed');
+    assert.equal(reasonOf(() => openAs(a, sealHand(clear, `{"pad":"x",${canonicalize({ ...content, pad: ' ' }).slice(1)}`, a))), 'content_malformed');
+  });
+
+  it('a sender cannot pass its own pad, and the table does not list one', () => {
+    const a = newBox();
+    const { clear, content } = approvalParts();
+    assert.equal(reasonOf(() => sealContent({ type: 'kl.approval.request', senderId: NODE_ID, clear, content: { ...content, pad: ' ' }, recipients: { [a.id]: a.jwk } })), 'malformed');
+    for (const keys of Object.values(SEAL_SPLIT)) assert.equal(keys.includes('pad'), false);
+  });
+
+  it('the pad is outside the salted hash', () => {
+    const a = newBox();
+    const { message, parts } = sealTo([a]);
+    assert.equal(saltedHash(parts.content.salt, parts.content.action), message.action_hash);
+    assert.equal(saltedHash(parts.content.salt, openAs(a, message).content.action), message.action_hash);
   });
 });
 

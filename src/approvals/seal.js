@@ -18,6 +18,11 @@
 // The message a validator checks is clear ∪ content. Nothing here reads a
 // clear value but the sender id; whether the fields hold what they should is
 // the validators' work.
+//
+// A sealer adds `pad`, a string of spaces, so that JCS(content) is a whole number
+// of 256-byte blocks: a relay would otherwise read a short answer's option from
+// the length of `ct`. An opener takes a pad of any number of spaces, and strips
+// it. It is in no table and in no hash.
 const crypto = require('crypto');
 const { canonicalize } = require('../platform/jcs');
 const { deriveDeviceId, fingerprintGroups, fromB64url, isDeviceJwk, toB64url } = require('./envelope');
@@ -73,6 +78,9 @@ const IV_BYTES = 12;
 const TAG_BYTES = 16;
 const WRAP_BYTES = KEY_BYTES + TAG_BYTES;
 const ZERO_IV = Buffer.alloc(IV_BYTES);
+const PAD_KEY = 'pad';
+const PAD_BLOCK = 256;
+const ONLY_SPACES_RE = /^ *$/;
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
   && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
@@ -156,6 +164,13 @@ function freshBytes(random, length) {
   return bytes;
 }
 
+// A space is one byte in JCS, so the bytes with an empty pad say how many it takes.
+function paddedContent(content) {
+  const bare = Buffer.byteLength(jcs({ ...content, [PAD_KEY]: '' }, 'malformed', 'content'), 'utf8');
+  const spaces = (PAD_BLOCK - (bare % PAD_BLOCK)) % PAD_BLOCK;
+  return Buffer.from(jcs({ ...content, [PAD_KEY]: ' '.repeat(spaces) }, 'malformed', 'content'), 'utf8');
+}
+
 function sealContent({ type, senderId, clear, content, recipients, ephemeral = null, random = crypto.randomBytes }) {
   if (!isSealedType(type)) throw new SealError('malformed', 'this type is not sealed');
   if (!isPlainObject(clear) || !isPlainObject(content) || !isPlainObject(recipients)) throw new SealError('malformed', 'clear, content and recipients are objects');
@@ -172,7 +187,7 @@ function sealContent({ type, senderId, clear, content, recipients, ephemeral = n
   const eph = ephemeral || newEphemeral();
   const cek = freshBytes(random, KEY_BYTES);
   const iv = freshBytes(random, IV_BYTES);
-  const ct = gcmSeal(cek, iv, Buffer.from(jcs(content, 'malformed', 'content'), 'utf8'), Buffer.from(jcs(clear, 'malformed', 'the clear part'), 'utf8'));
+  const ct = gcmSeal(cek, iv, paddedContent(content), Buffer.from(jcs(clear, 'malformed', 'the clear part'), 'utf8'));
   const keys = {};
   for (const id of ids) {
     const secret = eph.agree(recipients[id]);
@@ -196,13 +211,15 @@ function parseContent(type, plaintext) {
     throw new SealError('content_malformed', 'not JSON');
   }
   if (!isPlainObject(content)) throw new SealError('content_malformed', 'not an object');
-  // The table's keys and no other: a clear key here could overrule what the
-  // relay and the AAD saw.
-  if (!Object.keys(content).every((k) => SEAL_SPLIT[type].includes(k))) throw new SealError('content_malformed', 'holds a key the type does not seal');
+  // The table's keys and the pad, and no other: a clear key here could overrule
+  // what the relay and the AAD saw.
+  if (!Object.keys(content).every((k) => k === PAD_KEY || SEAL_SPLIT[type].includes(k))) throw new SealError('content_malformed', 'holds a key the type does not seal');
+  if (Object.hasOwn(content, PAD_KEY) && !(typeof content[PAD_KEY] === 'string' && ONLY_SPACES_RE.test(content[PAD_KEY]))) throw new SealError('content_malformed', 'a pad is only spaces');
   // The bytes are the JCS of the object, which rules out duplicate keys and
   // parser differentials, as envelope.open does for a payload.
   if (jcs(content, 'content_malformed', 'content') !== text) throw new SealError('content_malformed', 'not canonical');
-  return content;
+  const { [PAD_KEY]: pad, ...fields } = content;
+  return fields;
 }
 
 function openSealed({ type, message, recipientId, agree }) {

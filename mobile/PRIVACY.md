@@ -95,8 +95,10 @@ minutes and cannot open it.
   says "Could not confirm with" that node instead of showing nothing, and for a node
   that did answer it shows when it checked. A node on which computer use is off
   answers as well, with an empty list.
-- **Timing and sizes:** when each message goes and how big it is, so a large action
-  or a busy window can be told from a small one.
+- **Timing and sizes:** when each message goes and how big it is. What is sealed is
+  rounded up to a multiple of 256 bytes, so a short message's length says nothing: an
+  answer of "approve" and one of "refuse" are the same size. A large action or a busy
+  window can still be told from a small one, to within 256 bytes.
 - **When the app is open.** While it is in front, the Android app asks the relay
   for what is waiting all the time (one request held open for up to 25 seconds,
   then the other lists, again and again) and tells the relay it is in front once a

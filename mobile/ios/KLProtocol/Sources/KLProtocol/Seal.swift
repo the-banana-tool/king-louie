@@ -84,6 +84,11 @@ public enum SealState: Equatable {
 ///
 /// The message a validator checks is clear ∪ content; nothing here reads a clear
 /// value but the sender id.
+///
+/// A sealer adds `pad`, a string of spaces, so that JCS(content) is a whole number
+/// of 256-byte blocks: a relay would otherwise read a short answer's option from
+/// the length of `ct`. An opener takes a pad of any number of spaces, and strips
+/// it. It is in no table and in no hash.
 public enum Seal {
     private struct Row {
         let content: [String]
@@ -149,6 +154,8 @@ public enum Seal {
     private static let tagBytes = 16
     private static let wrapBytes = keyBytes + tagBytes
     private static let zeroIv = Data(repeating: 0, count: ivBytes)
+    private static let padKey = "pad"
+    private static let padBlock = 256
 
     /// Which clear key names the sender, the third line of the info. A phone sends only the answer; a node sends the rest.
     private static func senderKey(_ type: String) -> String {
@@ -211,6 +218,15 @@ public enum Seal {
         fields.keys.allSatisfy { key in row.content.contains { ExactText.same($0, key) } }
     }
 
+    /// A space is one byte in JCS, so the bytes with an empty pad say how many it takes.
+    private static func padded(_ fields: [String: JSONValue]) -> Data {
+        var withPad = fields
+        withPad[padKey] = .string("")
+        let bare = JCS.data(.object(withPad)).count
+        withPad[padKey] = .string(String(repeating: " ", count: (padBlock - bare % padBlock) % padBlock))
+        return JCS.data(.object(withPad))
+    }
+
     private static func parseContent(_ row: Row, _ plaintext: Data) throws -> [String: JSONValue] {
         let parsed: JSONValue
         do {
@@ -219,11 +235,16 @@ public enum Seal {
             throw SealError("content_malformed", "not JSON")
         }
         guard let content = parsed.objectValue else { throw SealError("content_malformed", "not an object") }
-        // The table's keys and no other: a clear key here could overrule what the relay and the AAD saw.
-        guard onlyContentKeys(content, row) else { throw SealError("content_malformed", "holds a key the type does not seal") }
+        // The table's keys and the pad, and no other: a clear key here could overrule what the relay and the AAD saw.
+        var fields = content
+        if let pad = fields.first(where: { ExactText.same($0.key, padKey) }) {
+            guard let spaces = pad.value.stringValue, spaces.utf8.allSatisfy({ $0 == 0x20 }) else { throw SealError("content_malformed", "a pad is only spaces") }
+            fields.removeValue(forKey: padKey)
+        }
+        guard onlyContentKeys(fields, row) else { throw SealError("content_malformed", "holds a key the type does not seal") }
         // The bytes are the JCS of the object, as Envelope.open holds a payload to.
         guard JCS.numbersAreCanonical(parsed), JCS.data(parsed) == plaintext else { throw SealError("content_malformed", "not canonical") }
-        return content
+        return fields
     }
 
     /// The whole message (clear ∪ content) of one sealed to `recipientId`.
@@ -317,7 +338,7 @@ public enum Seal {
         let cek = random(keyBytes)
         let iv = random(ivBytes)
         guard cek.count == keyBytes, iv.count == ivBytes else { throw SealError("malformed", "the random source gave the wrong size") }
-        let ct = try gcmSeal(key: SymmetricKey(data: cek), iv: iv, input: JCS.data(content), aad: JCS.data(clear))
+        let ct = try gcmSeal(key: SymmetricKey(data: cek), iv: iv, input: padded(contentFields), aad: JCS.data(clear))
         let secret = try ephemeral.agree(x, y)
         guard secret.count == keyBytes else { throw SealError("malformed", "the key agreement gave the wrong size") }
         let kek = kekFor(secret: secret, type: type, senderId: senderId, recipientId: recipient.id)

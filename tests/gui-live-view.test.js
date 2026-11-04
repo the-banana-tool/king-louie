@@ -308,3 +308,22 @@ describe('a sealing node\'s live view (R-SP-4, R-SP-8)', () => {
     view.broker.captureFrame = real;
   });
 });
+
+describe('the sealed frame cap, with the pad', () => {
+  it('the largest frame, to eight phones and the node, stays inside a view and opens to a whole number of blocks', () => {
+    const identity = testNodeIdentity({ box: true });
+    const phones = Array.from({ length: 8 }, () => createFakePhone({ boxKey: true }));
+    const recipients = Object.fromEntries([...phones.map((p) => [p.deviceId, p.boxJwk]), [identity.nodeId, identity.box.jwk]]);
+    const sealPolicy = { sealing: () => true, canSeal: () => true, recipients: () => recipients, senderId: identity.nodeId, nodeBox: identity.box.jwk };
+    const data = Buffer.alloc(SEALED_FRAME_MAX_BYTES, 0xfb).toString('base64');
+    const frame = { mime: 'image/jpeg', width: 4096, height: 4096, sha256: crypto.createHash('sha256').update(data).digest('base64url'), data };
+    const envelope = buildLeaseView({
+      identity, leaseId: crypto.randomUUID(), seq: 1, toDevice: phones[0].deviceId, state: 'active', locked: false, remainingS: 60,
+      foreground: { app_id: 'a'.repeat(64), matches: true }, frame, frameDropped: false, actions: [], contactToken: 'A'.repeat(22), now: Date.now(), sealPolicy
+    });
+    const bytes = Buffer.from(envelope.payload, 'base64url');
+    assert.ok(bytes.length <= VIEW_MAX_BYTES, `${bytes.length} bytes`);
+    const { message } = open(envelope);
+    assert.equal((Buffer.from(message.sealed.ct, 'base64url').length - 16) % 256, 0);
+  });
+});

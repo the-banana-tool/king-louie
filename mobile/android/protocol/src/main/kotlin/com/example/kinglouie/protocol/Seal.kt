@@ -74,6 +74,11 @@ enum class SealState { CLEAR, OPENED, UNREAD }
  * RFC 5869 makes an empty salt and 32 zero bytes the same HMAC key;
  * SecretKeySpec refuses an empty one. The message a validator checks is clear ∪
  * content; nothing here reads a clear value but the sender id.
+ *
+ * A sealer adds `pad`, a string of spaces, so that JCS(content) is a whole number
+ * of 256-byte blocks: a relay would otherwise read a short answer's option from
+ * the length of `ct`. An opener takes a pad of any number of spaces, and strips
+ * it. It is in no table and in no hash.
  */
 object Seal {
     private class Row(val content: List<String>, val clear: List<String>)
@@ -134,6 +139,8 @@ object Seal {
     private const val IV_BYTES = 12
     private const val TAG_BYTES = 16
     private const val WRAP_BYTES = KEY_BYTES + TAG_BYTES
+    private const val PAD_KEY = "pad"
+    private const val PAD_BLOCK = 256
     private val RECIPIENT_ID = Regex("(d|kl)-[a-z2-7]{16}")
     private val secureRandom = SecureRandom()
 
@@ -190,6 +197,13 @@ object Seal {
         doFinal(input)
     }
 
+    /** A space is one byte in JCS, so the bytes with an empty pad say how many it takes. */
+    private fun padded(content: JsonObject): ByteArray {
+        val bare = jcs(JsonObject(content + (PAD_KEY to jsonString(""))), "malformed", "content").size
+        val spaces = (PAD_BLOCK - bare % PAD_BLOCK) % PAD_BLOCK
+        return jcs(JsonObject(content + (PAD_KEY to jsonString(" ".repeat(spaces)))), "malformed", "content")
+    }
+
     private fun parseContent(type: String, plaintext: ByteArray): JsonObject {
         val content = try {
             JsonText.parse(plaintext)
@@ -197,8 +211,9 @@ object Seal {
             throw SealException("content_malformed", "not JSON")
         }
         if (content !is JsonObject) throw SealException("content_malformed", "not an object")
-        // The table's keys and no other: a clear key here could overrule what the relay and the AAD saw.
-        if (!TABLE.getValue(type).content.containsAll(content.keys)) throw SealException("content_malformed", "holds a key the type does not seal")
+        // The table's keys and the pad, and no other: a clear key here could overrule what the relay and the AAD saw.
+        if (!(TABLE.getValue(type).content + PAD_KEY).containsAll(content.keys)) throw SealException("content_malformed", "holds a key the type does not seal")
+        if (content.containsKey(PAD_KEY) && content[PAD_KEY].str()?.all { it == ' ' } != true) throw SealException("content_malformed", "a pad is only spaces")
         // The bytes are the JCS of the object, as Envelope.open holds a payload to.
         val canonical = try {
             Jcs.numbersAreCanonical(content) && Jcs.bytes(content).contentEquals(plaintext)
@@ -206,7 +221,7 @@ object Seal {
             false
         }
         if (!canonical) throw SealException("content_malformed", "not canonical")
-        return content
+        return JsonObject(content - PAD_KEY)
     }
 
     /**
@@ -276,7 +291,7 @@ object Seal {
         if (!Rules.isDeviceJwk(boxKey)) throw SealException("malformed", "a recipient key is not a P-256 point")
         val cek = random(KEY_BYTES)
         val iv = random(IV_BYTES)
-        val ct = gcm(Cipher.ENCRYPT_MODE, cek, iv, jcs(content, "malformed", "content"), jcs(clear, "malformed", "the clear part"))
+        val ct = gcm(Cipher.ENCRYPT_MODE, cek, iv, padded(content), jcs(clear, "malformed", "the clear part"))
         val secret = ephemeral.agree(boxKey["x"].str()!!, boxKey["y"].str()!!)
         if (secret.size != KEY_BYTES) throw SealException("malformed", "the key agreement gave the wrong size")
         val wrap = gcm(Cipher.ENCRYPT_MODE, kekFor(secret, type, senderId, id), ByteArray(IV_BYTES), cek)

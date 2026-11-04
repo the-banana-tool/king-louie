@@ -62,7 +62,7 @@ class SealVectorTest {
     @Test
     fun everySealVectorAnswersAsTheNodeDoes() {
         val vectors = sealedVectors()
-        assertEquals(7, vectors.size)
+        assertEquals(8, vectors.size)
         for (v in vectors) {
             val name = v["name"].str()!!
             assertTrue(name, v["consumers"].arr()!!.any { it.str() == "android" })
@@ -397,6 +397,63 @@ class SealVectorTest {
         assertNull(QuestionItem.from(malformed("kl.question.ask", vector("question-ask-sealed")["input"]!!), "web-01", open, sealedSeen = emptySet()))
     }
 
+    /** The pad: every sealer's length is a whole number of 256-byte blocks; an opener takes only spaces, and strips them. */
+    @Test
+    fun thePad() {
+        val a = keys()["devices"]["A"]["id"].str()!!
+        val d = keys()["devices"]["A_box"]["d"].str()!!
+        val v = vector("seal-open")
+        val full = v["expect"]["message"].obj()!!
+        val (clear, content) = Seal.split(requestType, full)
+        val sender = full["node_id"].str()!!
+        fun sealedWith(fields: JsonObject) = handSealed(requestType, clear, sender, Jcs.bytes(fields))
+        fun withPad(pad: JsonElement) = JsonObject(content + ("pad" to pad))
+
+        assertEquals(full, Seal.open(requestType, sealedWith(content), a, softwareAgree(d)))
+        for (n in listOf(0, 1, 255, 1000)) {
+            val opened = Seal.open(requestType, sealedWith(withPad(jsonString(" ".repeat(n)))), a, softwareAgree(d))
+            assertEquals(full, opened)
+            assertFalse(opened.containsKey("pad"))
+        }
+        val bad = listOf(jsonString("x"), jsonString(" x "), jsonString("\t"), jsonString("\n"), jsonString("\u00a0"), jsonString("\u3000"), jsonNumber("1"), JsonNull, kotlinx.serialization.json.JsonPrimitive(true), kotlinx.serialization.json.JsonArray(listOf(jsonString(" "))), JsonObject(mapOf("a" to jsonString(" "))))
+        for (pad in bad) assertEquals(pad.toString(), "content_malformed", reasonOf { Seal.open(requestType, sealedWith(withPad(pad)), a, softwareAgree(d)) })
+        // Every other key is refused as it always was, a pad or no pad beside it.
+        for (key in listOf("padding", "Pad", "PAD", "pad ", "node_name", "extra")) {
+            assertEquals(key, "content_malformed", reasonOf { Seal.open(requestType, sealedWith(JsonObject(withPad(jsonString("")) + (key to jsonString(" ")))), a, softwareAgree(d)) })
+        }
+        // Pad bytes outside JCS order are refused too.
+        val outOfOrder = (String(Jcs.bytes(content), Charsets.UTF_8).dropLast(1) + ",\"pad\":\" \"}").toByteArray()
+        assertEquals("content_malformed", reasonOf { Seal.open(requestType, handSealed(requestType, clear, sender, outOfOrder), a, softwareAgree(d)) })
+
+        // A sender cannot pass its own; two answers of different lengths seal to one length.
+        val answer = vector("question-answer-sealed")
+        val answerFull = answer["expect"]["message"].obj()!!
+        val device = answerFull["device_id"].str()!!
+        val node = keys()["nodes"]["web-01"]
+        val nodeTo = node["id"].str()!! to node["box"]["jwk"].obj()!!
+        val (answerClear, answerContent) = Seal.split("kl.question.answer", answerFull)
+        assertEquals("malformed", reasonOf { Seal.seal("kl.question.answer", device, answerClear, JsonObject(answerContent + ("pad" to jsonString(" "))), nodeTo) })
+        fun ctOf(option: String) = B64Url.decode(Seal.seal("kl.question.answer", device, answerClear, JsonObject(answerContent + ("answer" to JsonObject(mapOf("option_id" to jsonString(option))))), nodeTo)["sealed"]["ct"].str()!!).size
+        assertEquals(ctOf("approve"), ctOf("refuse"))
+        assertEquals(256 + TAG, ctOf("approve"))
+        // An exact fit takes an empty pad, and one byte more the next block.
+        var longest = 0
+        for (n in 0 until 520) {
+            val text = "\u20ac".repeat(n % 3) + "x".repeat(n)
+            val sealed = Seal.seal("kl.question.answer", device, answerClear, JsonObject(answerContent + ("answer" to JsonObject(mapOf("text" to jsonString(text))))), nodeTo)
+            val size = B64Url.decode(sealed["sealed"]["ct"].str()!!).size - TAG
+            assertEquals(0, size % 256)
+            longest = maxOf(longest, size)
+        }
+        assertTrue(longest >= 512)
+        // Every sealed vector a sealer built is padded.
+        val ct = Envelope.fromJson(vector("request-sealed-display")["input"]!!).message()["sealed"]["ct"].str()!!
+        assertEquals(0, (B64Url.decode(ct).size - TAG) % 256)
+        assertEquals(0, (B64Url.decode(v["input"]["sealed"]["ct"].str()!!).size - TAG) % 256)
+    }
+
+    private val TAG = 16
+
     /** What the node holds an ask to, sealed: in clear before anything opens, and inside after. */
     @Test
     fun aSealedAskIsHeldToTheNodesRules() {
@@ -686,6 +743,7 @@ class SealVectorTest {
         assertTrue(Seal.isSealedShape("kl.question.answer", built))
         for (key in listOf("case_id", "question_id", "answer")) assertFalse(key, built.containsKey(key))
         assertEquals(setOf(g["box"]["node_id"].str()), built["sealed"]["keys"].obj()!!.keys)
+        assertEquals(0, (B64Url.decode(built["sealed"]["ct"].str()!!).size - 16) % 256)
         val clearOfVector = JsonObject(Envelope.fromJson(v["input"]!!).message() - "sealed")
         assertEquals(clearOfVector, JsonObject(built - "sealed"))
         assertEquals(v["expect"]["message"], Seal.open("kl.question.answer", built, g["box"]["node_id"].str()!!, softwareAgree(g["box"]["d"].str()!!)))

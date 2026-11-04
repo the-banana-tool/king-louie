@@ -868,7 +868,17 @@ fingerprints in its question.
   device id or a node id.
 - A sealed message holds exactly its type's clear keys and `sealed`. The message
   a validator checks is clear ∪ content. The content's bytes must be the JCS of an
-  object holding only its type's content keys, else `content_malformed`.
+  object holding only its type's content keys and `pad`, else `content_malformed`.
+- **The pad.** Before sealing, the sender adds the key `pad` to the content, a string
+  of only spaces, so that the JCS bytes of the content, `pad` included, are an exact
+  multiple of 256: with L the length of those bytes under an empty `pad`, it holds
+  `(256 - L % 256) % 256` spaces. A sender never takes a `pad` from its caller. An
+  opener accepts a `pad` of spaces of any length or none at all; anything else in it
+  is `content_malformed`. It strips it, and returns it in neither the content nor the
+  full message. `pad` is outside the salted hash, the type table and every validator.
+  So `ct` is 16 bytes more than a multiple of 256, and a relay can no longer read a
+  short answer's option from its length. It still reads a long message's size to
+  within 256 bytes, and the number of recipients from `keys`.
 
 A successful open is not authentication. A box key is public, so anyone can seal
 to it: the open proves only that this message was sealed to this recipient and
@@ -979,9 +989,10 @@ accepted.
 A sealed request's signed payload is at most 258048 characters
 (`SEALED_PAYLOAD_MAX`), since an audit entry over the mirror's 256 KiB page breaks
 that node's mirror for good (`oversize_entry`). That is about 130 KB of parameters;
-the whole action measures at most 143917 bytes with 8 phones. Over it the build
+the whole action measures at most 143737 bytes with 8 phones. Over it the build
 refuses `action_too_large`, as the clear shape does past 256 KiB. One content key
-wrapped per recipient keeps an 8-phone message within this: 16 wraps are 768 bytes.
+wrapped per recipient keeps an 8-phone message within this: 16 wraps are 768 bytes. The
+pad comes before the limit is read, so it counts against it.
 
 ### Codes
 
@@ -991,7 +1002,7 @@ wrapped per recipient keeps an 8-phone message within this: 16 wraps are 768 byt
 | `action_too_large` | node, building | over `SEALED_PAYLOAD_MAX` when sealed |
 | `sealed_required` | node, on an answer | a clear answer with no clear ask of that token |
 | `not_recipient`, `open_failed` | phone, node | not sealed to this key, or it would not open |
-| `content_malformed` | `openSealed`, `Seal.open` | opened, and not the JCS of the type's content keys |
+| `content_malformed` | `openSealed`, `Seal.open` | opened, and not the JCS of the type's content keys and a `pad` of spaces |
 | `action_hash_mismatch` | phone, node | the hash does not hold; on a phone, for the salted rule too |
 | `clear_after_sealed` | phone | a clear message from a node this phone has opened a sealed one from |
 | `key_locked` | phone | the box key would not answer, most often because the phone is locked |
@@ -1009,7 +1020,7 @@ their field. See `src/approvals/audit-fields.js`.
 
 ### Vectors
 
-Nineteen more, 68 in all (`generate.js --check` says `68 vectors match`).
+Twenty more, 69 in all (`generate.js --check` says `69 vectors match`).
 `keys.json` adds `A_box` and `B_box`. A vector's `given.box` is the recipient's id
 and key.
 
@@ -1017,7 +1028,7 @@ and key.
 |---|---|---|
 | `seal-open` | node, ios, android | opens to `expect.message` |
 | `seal-not-recipient`, `seal-tampered-ct`, `seal-tampered-clear` | node, ios, android | `not_recipient`, `open_failed` (the ciphertext; a clear part moved under another's seal) |
-| `seal-content-not-jcs`, `seal-content-clear-key` | node, ios, android | `content_malformed` |
+| `seal-content-not-jcs`, `seal-content-clear-key`, `seal-pad-not-spaces` | node, ios, android | `content_malformed` |
 | `seal-hash-mismatch` | node, ios, android | `action_hash_mismatch` |
 | `request-sealed-display` | node, ios, android | the same display as a clear request |
 | `response-approve-sealed` | node | accepted over the salted hash |

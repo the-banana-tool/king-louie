@@ -558,7 +558,9 @@ type seals. A node with no phone holding a box key sends the clear shapes above.
   of its size, and a view stays ≤ 256 KiB (`VIEW_MAX_BYTES`). So while the node seals
   the raw frame is at most `SEALED_FRAME_MAX_BYTES` = 138240 (135 KiB), under the
   configured `max_frame_bytes`. A frame still over it is captured again smaller, then
-  goes as `frame: null, frame_dropped: true`.
+  goes as `frame: null, frame_dropped: true`. The content is padded to a multiple of
+  256 bytes (approval-v1's "The pad"), which the cap leaves room for, and a sealed
+  status's `name` no longer shows in its length.
 - **Listing.** `kl.lease.listing` stays fully clear, and `verifyLeaseListing` opens
   nothing: a relay can neither hide a lease nor read a name.
 - **A clear request held while the link was down** is never sent once the node seals:
@@ -595,7 +597,7 @@ line of approval-v1's revision, with no Allow or Deny. Its label is the status's
 if a status came with it, else `Request`.
 
 Vectors: six more, 86 in all (`node tests/vectors/lease-v1/generate.js --check` says
-`86 vectors match`).
+`86 vectors match`). Every sealed one holds a padded content.
 
 | Vector | Consumers | What |
 |---|---|---|

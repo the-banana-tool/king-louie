@@ -518,6 +518,9 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   // JCS bytes, but the content overrules a key the AAD covers.
   const clearKey = sealParts('content clear key');
   sealVector('seal-content-clear-key', handSealed('content clear key', clearKey.clear, Buffer.from(canonicalize({ ...clearKey.content, node_name: 'other-node' }), 'utf8')), 'content_malformed');
+  // A pad holds only spaces: anything else in it could carry a second message.
+  const notSpaces = sealParts('pad not spaces');
+  sealVector('seal-pad-not-spaces', handSealed('pad not spaces', notSpaces.clear, Buffer.from(canonicalize({ ...notSpaces.content, pad: '  x ' }), 'utf8')), 'content_malformed');
 
   // ── Sealed tool approvals (R-SP-2, R-SP-5): a node-signed sealed request ────
   // To both phones and the node itself, as a node sends one. The response vectors

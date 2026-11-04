@@ -34,6 +34,24 @@ func lockedOpener(_ recipientId: String) -> Opener {
 /// An opener for a wrap that opened to content that is no such content.
 let contentMalformedOpener: Opener = { _, _ in throw SealError("content_malformed") }
 
+/// Sealed by hand, as a sender that does not follow the format: the plaintext is whatever it is given.
+func handSealed(type: String, clear: JSONValue, senderId: String, plaintext: Data, recipient: (id: String, key: JSONValue)) throws -> JSONValue {
+    let eph = freshBox()
+    let secret = try eph.agree(recipient.key["x"]!.stringValue!, recipient.key["y"]!.stringValue!)
+    let info = Data("kl-seal-v1\n\(type)\n\(senderId)\n\(recipient.id)".utf8)
+    let kek = HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: secret), salt: Data(), info: info, outputByteCount: 32)
+    let cekBytes = Data(repeating: 7, count: 32)
+    let iv = Data(repeating: 9, count: 12)
+    let body = try AES.GCM.seal(plaintext, using: SymmetricKey(data: cekBytes), nonce: try AES.GCM.Nonce(data: iv), authenticating: JCS.data(clear))
+    let wrap = try AES.GCM.seal(cekBytes, using: kek, nonce: try AES.GCM.Nonce(data: Data(repeating: 0, count: 12)))
+    var fields = clear.objectValue!
+    fields["sealed"] = JSONValue.object([
+        "v": .number("1"), "epk": eph.jwk, "iv": .string(Base64URL.encode(iv)), "ct": .string(Base64URL.encode(body.ciphertext + body.tag)),
+        "keys": .object([recipient.id: .string(Base64URL.encode(wrap.ciphertext + wrap.tag))])
+    ])
+    return .object(fields)
+}
+
 /// A P-256 key for a node's box, made here.
 func freshBox() -> (jwk: JSONValue, agree: (String, String) throws -> Data) {
     let key = P256.KeyAgreement.PrivateKey()
@@ -112,7 +130,7 @@ final class SealVectorTests: XCTestCase {
 
     func testEverySealVectorAnswersAsTheNodeDoes() throws {
         let files = try FileManager.default.contentsOfDirectory(atPath: Self.dir.path).filter { $0.hasPrefix("seal-") && $0.hasSuffix(".json") }
-        XCTAssertEqual(files.count, 7)
+        XCTAssertEqual(files.count, 8)
         for file in files {
             let v = try JSONParser.parse(try Data(contentsOf: Self.dir.appendingPathComponent(file)))
             XCTAssertTrue((v["consumers"]?.arrayValue ?? []).contains(.string("ios")), file)
@@ -379,7 +397,7 @@ final class SealVectorTests: XCTestCase {
         let k = try keys()
         let web = k["nodes"]!["web-01"]!
         let pin = NodePin(id: web["id"]!.stringValue!, name: "web-01", key: web["spki"]!.stringValue!)
-        for name in ["seal-content-not-jcs", "seal-content-clear-key"] {
+        for name in ["seal-content-not-jcs", "seal-content-clear-key", "seal-pad-not-spaces"] {
             let v = try vector(name)
             XCTAssertEqual(v["expect"]!["reason"]?.stringValue, "content_malformed", name)
             let envelope = try Envelope.seal(v["input"]!, alg: "Ed25519", kid: pin.id, sign: try ed25519Signer(seedHex: web["seed"]!.stringValue!))
@@ -389,6 +407,70 @@ final class SealVectorTests: XCTestCase {
             XCTAssertEqual(view.seal, .unread, name)
             XCTAssertNil(view.display, name)
         }
+    }
+
+    /// The pad: every sealer's length is a whole number of 256-byte blocks; an opener takes only spaces, and strips them.
+    func testThePad() throws {
+        let k = try keys()
+        let a = (id: k["devices"]!["A"]!["id"]!.stringValue!, key: k["devices"]!["A_box"]!["jwk"]!)
+        let agree = try softwareAgree(text: k["devices"]!["A_box"]!["d"]!.stringValue!)
+        let v = try vector("seal-open")
+        let full = v["expect"]!["message"]!
+        let (clear, content) = try Seal.split(type: requestType, full: full)
+        let sender = full["node_id"]!.stringValue!
+        func sealedWith(_ fields: JSONValue) throws -> JSONValue {
+            try handSealed(type: requestType, clear: clear, senderId: sender, plaintext: JCS.data(fields), recipient: a)
+        }
+        func open(_ message: JSONValue) throws -> JSONValue {
+            try Seal.open(type: requestType, message: message, recipientId: a.id, agree: agree)
+        }
+
+        XCTAssertEqual(try open(try sealedWith(content)), full)
+        for n in [0, 1, 255, 1000] {
+            let opened = try open(try sealedWith(withField(content, "pad", .string(String(repeating: " ", count: n)))))
+            XCTAssertEqual(opened, full)
+            XCTAssertNil(opened["pad"])
+        }
+        let bad: [JSONValue] = [.string("x"), .string(" x "), .string("\t"), .string("\n"), .string("\u{a0}"), .string("\u{3000}"), .string(" \u{301}"), .number("1"), .null, .bool(true), .array([.string(" ")]), .object(["a": .string(" ")])]
+        for pad in bad {
+            let message = try sealedWith(withField(content, "pad", pad))
+            XCTAssertEqual(reasonOf { try open(message) }, "content_malformed", "\(pad)")
+        }
+        // Every other key is refused as it always was, a pad or no pad beside it.
+        for key in ["padding", "Pad", "PAD", "pad ", "node_name", "extra"] {
+            let message = try sealedWith(withField(withField(content, "pad", .string("")), key, .string(" ")))
+            XCTAssertEqual(reasonOf { try open(message) }, "content_malformed", key)
+        }
+        // Pad bytes outside JCS order are refused too.
+        var outOfOrder = JCS.data(content)
+        outOfOrder.removeLast()
+        outOfOrder.append(Data(",\"pad\":\" \"}".utf8))
+        let misplaced = try handSealed(type: requestType, clear: clear, senderId: sender, plaintext: outOfOrder, recipient: a)
+        XCTAssertEqual(reasonOf { try open(misplaced) }, "content_malformed")
+
+        // A sender cannot pass its own; two answers of different lengths seal to one length.
+        let answerFull = try vector("question-answer-sealed")["expect"]!["message"]!
+        let device = answerFull["device_id"]!.stringValue!
+        let node = k["nodes"]!["web-01"]!
+        let nodeTo = (id: node["id"]!.stringValue!, key: node["box"]!["jwk"]!)
+        let (answerClear, answerContent) = try Seal.split(type: "kl.question.answer", full: answerFull)
+        XCTAssertEqual(reasonOf { try Seal.seal(type: "kl.question.answer", senderId: device, clear: answerClear, content: withField(answerContent, "pad", .string(" ")), recipient: nodeTo) }, "malformed")
+        func ctOf(_ answer: JSONValue) throws -> Int {
+            let sealed = try Seal.seal(type: "kl.question.answer", senderId: device, clear: answerClear, content: withField(answerContent, "answer", answer), recipient: nodeTo)
+            return try Base64URL.decode(sealed["sealed"]!["ct"]!.stringValue!).count
+        }
+        XCTAssertEqual(try ctOf(.object(["option_id": .string("approve")])), try ctOf(.object(["option_id": .string("refuse")])))
+        XCTAssertEqual(try ctOf(.object(["option_id": .string("approve")])), 256 + 16)
+        var longest = 0
+        for n in 0..<520 {
+            let text = String(repeating: "\u{20ac}", count: n % 3) + String(repeating: "x", count: n)
+            let size = try ctOf(.object(["text": .string(text)])) - 16
+            XCTAssertEqual(size % 256, 0)
+            longest = max(longest, size)
+        }
+        XCTAssertGreaterThanOrEqual(longest, 512)
+        // Every sealed vector a sealer built is padded.
+        XCTAssertEqual((try Base64URL.decode(v["input"]!["sealed"]!["ct"]!.stringValue!).count - 16) % 256, 0)
     }
 
     /// R-SP-2 on the screen: the vector's bytes signed by the pinned node, opened, and its hash does

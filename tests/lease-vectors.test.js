@@ -230,6 +230,7 @@ describe('lease-v1 vectors', () => {
       const { message } = open(byName.get(name).input);
       assert.equal(validateMessage(type, message), null, name);
       assert.ok(message.sealed, name);
+      assert.equal((Buffer.from(message.sealed.ct, 'base64url').length - 16) % 256, 0, `${name} is padded to a whole block`);
       for (const key of hidden) assert.ok(!(key in message), `${name} holds ${key} in clear`);
     }
     // A reader with no way to open a status still takes it, as a listing does.

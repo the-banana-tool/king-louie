@@ -81,7 +81,7 @@ class ProtocolVectorTest {
 
     // Revised 2026-11-04: sealed phones (R-SP-1, R-SP-2, R-SP-4, R-SP-10), run by SealVectorTest.
     private val sealedVectors = setOf(
-        "seal-open", "seal-not-recipient", "seal-tampered-ct", "seal-tampered-clear", "seal-hash-mismatch", "seal-content-not-jcs", "seal-content-clear-key",
+        "seal-open", "seal-not-recipient", "seal-tampered-ct", "seal-tampered-clear", "seal-hash-mismatch", "seal-content-not-jcs", "seal-content-clear-key", "seal-pad-not-spaces",
         "request-sealed-display", "enroll-console-box-key", "box-key-valid", "question-ask-sealed", "question-answer-sealed"
     )
 

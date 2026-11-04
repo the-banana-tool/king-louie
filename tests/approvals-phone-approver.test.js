@@ -1000,6 +1000,7 @@ describe('PhoneApprover with a seal policy', () => {
       assert.ok(low > 128 * 1024, `the room left for an action, ${low} bytes, is too small`);
       const built = fits(low);
       assert.equal(validateMessage(REQUEST_TYPE, built.message), null);
+      assert.equal((Buffer.from(built.message.sealed.ct, 'base64url').length - 16) % 256, 0, 'padded to a whole block, inside the limit');
 
       const ledger = new AuditLedger({ dir: path.join(dataDir, 'audit'), identity, nodeId: identity.nodeId, writer: 'service' });
       // The largest a clear job id could be in an entry; a sealed entry holds none.
