@@ -2073,6 +2073,14 @@ function renderChatList() {
     metaDiv.textContent = `Updated ${formatTimestamp(chat.updatedAt)} • ${formatTokenCount(totals.totalTokens)} tokens • ${formatUsd(totals.costUsd)}`;
 
     details.appendChild(titleDiv);
+    const taskLabel = taskBadge(chat);
+    if (taskLabel) {
+      const badge = document.createElement('div');
+      badge.className = 'chat-item-task-badge';
+      badge.textContent = taskLabel;
+      badge.title = taskLabel;
+      details.appendChild(badge);
+    }
     details.appendChild(previewDiv);
     details.appendChild(metaDiv);
 
@@ -4188,8 +4196,19 @@ async function openNewCaseFromNudge(chatId) {
   select.dispatchEvent(new Event('change'));
 }
 
+// Above the messages: a task's chat says whose it is (§6.7).
+function paintTaskBadge(chat) {
+  const el = document.getElementById('chat-header-task-badge');
+  if (!el) return;
+  const label = taskBadge(chat);
+  el.textContent = label || '';
+  el.title = label || '';
+  el.hidden = !label;
+}
+
 function renderChatMessages() {
   const activeChat = getActiveChat();
+  paintTaskBadge(activeChat);
   dom.chatMessages.innerHTML = '';
   if (dom.chatInfoPopover) dom.chatInfoPopover.hidden = true;
 
@@ -5759,8 +5778,8 @@ async function loadSkillSettingsTabs() {
   if (!dom.settingsNavSelect) return;
 
   try {
-    const result = await window.electron.skill.listWithSettings();
-    const skills = Array.isArray(result) ? result : (result?.data || []);
+    const result = unwrapIpcResult(await window.electron.skill.listWithSettings(), 'Unable to list skills.');
+    const skills = Array.isArray(result) ? result : [];
 
     // Check for updates in the background
     window.electron.skill.checkUpdates().then((updateResult) => {
@@ -5805,6 +5824,9 @@ async function loadSkillSettingsTabs() {
     sortSettingsNavOptions();
   } catch (err) {
     skillSettingsLog.error(`Failed to load skill settings tabs: ${err.message}`);
+    // A refusal is not an empty list.
+    if (dom.skillsList) dom.skillsList.replaceChildren();
+    if (dom.skillsStatus) dom.skillsStatus.textContent = `Error: ${err.message}`;
   }
 }
 
@@ -7535,6 +7557,20 @@ async function loadSettings() {
     loadModelsCatalogStatus().catch(() => {});
   } catch (error) {
     setProviderListFallback(`Unable to load provider settings: ${error.message || 'Unknown error'}`);
+    // The hooks come with the settings; the other panes ask for themselves and say
+    // what they are told, rather than keep their first words.
+    if (dom.hooksStatus) {
+      dom.hooksStatus.textContent = `Error: ${error.message || 'Unable to load hooks.'}`;
+      dom.hooksStatus.classList.add('error');
+    }
+    loadSkillSettingsTabs().catch(() => {});
+    loadMemoryEntries().catch(() => {});
+    loadCronJobs().catch(() => {});
+    loadPermissionRules().catch(() => {});
+    loadWorkflows().catch(() => {});
+    loadSystemApps().catch(() => {});
+    loadWebhookList().catch(() => {});
+    loadChannelAccess().catch(() => {});
   }
 }
 
@@ -13241,12 +13277,27 @@ async function loadWebhookList() {
       const row = document.createElement('div');
       row.className = 'provider-card';
       row.style.marginBottom = '8px';
-      row.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;">
-        <div><strong>${wh.name}</strong><br><code style="font-size:0.8rem;color:var(--text-secondary);">${wh.url || wh.id}</code></div>
-        <div style="display:flex;gap:4px;">
-          <button class="icon-button" data-action="delete-webhook" data-id="${wh.id}" title="Delete"><i class="fas fa-trash"></i></button>
-        </div>
-      </div>`;
+      // The name and the URL are the node's: text, never markup.
+      const line = document.createElement('div');
+      line.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
+      const info = document.createElement('div');
+      const name = document.createElement('strong');
+      name.textContent = wh.name;
+      const url = document.createElement('code');
+      url.style.cssText = 'font-size:0.8rem;color:var(--text-secondary);';
+      url.textContent = wh.url || wh.id;
+      info.append(name, document.createElement('br'), url);
+      const buttons = document.createElement('div');
+      buttons.style.cssText = 'display:flex;gap:4px;';
+      const remove = document.createElement('button');
+      remove.className = 'icon-button';
+      remove.dataset.action = 'delete-webhook';
+      remove.dataset.id = wh.id;
+      remove.title = 'Delete';
+      remove.appendChild(faIcon('fas fa-trash'));
+      buttons.appendChild(remove);
+      line.append(info, buttons);
+      row.appendChild(line);
       dom.webhookList.appendChild(row);
     });
   } catch (err) {
@@ -13280,7 +13331,7 @@ if (dom.webhookList) {
     if (!btn) return;
     const id = btn.dataset.id;
     try {
-      await window.electron.webhook.delete({ id });
+      unwrapIpcResult(await window.electron.webhook.delete({ id }), 'Unable to delete the webhook.');
       loadWebhookList();
     } catch (err) {
       if (dom.webhookListStatus) dom.webhookListStatus.textContent = `Error: ${err.message}`;
@@ -13295,7 +13346,7 @@ if (dom.diagnosticsRunBtn) {
     if (dom.diagnosticsResults) dom.diagnosticsResults.textContent = '';
     try {
       const result = await window.electron.diagnostics.run();
-      if (dom.diagnosticsStatus) dom.diagnosticsStatus.textContent = result?.ok ? 'Complete.' : 'Failed.';
+      if (dom.diagnosticsStatus) dom.diagnosticsStatus.textContent = result?.ok ? 'Complete.' : `Failed: ${result?.error || 'no answer'}`;
       if (dom.diagnosticsResults) dom.diagnosticsResults.textContent = result?.formatted || 'No results.';
     } catch (err) {
       if (dom.diagnosticsStatus) dom.diagnosticsStatus.textContent = `Error: ${err.message}`;
@@ -13842,6 +13893,10 @@ const wizardState = { currentStep: 0, steps: [], data: {} };
 
 async function checkFirstRun() {
   try {
+    // Attached, the first run is the setup view, which draws the wizard's steps itself
+    // (§6.3). The overlay opening here would cover a window with no node.
+    const desktopStatus = await window.electron.desktop?.status?.();
+    if (desktopStatus?.launch?.host === 'attached') return;
     const result = await window.electron.wizard.getStatus();
     if (result?.isFirstRun) {
       startWizard();
@@ -13878,10 +13933,25 @@ function renderWizardStep() {
   }
 
   // Step content
-  let html = `<h3>${step.title}</h3><p style="color:var(--text-secondary);margin-bottom:12px;">${step.description}</p>`;
+  const html = `<h3>${step.title}</h3><p style="color:var(--text-secondary);margin-bottom:12px;">${step.description}</p>${wizardFieldsHtml(step.id)}`;
+  dom.wizardStepContent.innerHTML = html;
+  // By property, not in the markup: what was typed is not HTML.
+  const typedName = document.getElementById('wizard-name');
+  if (typedName) typedName.value = wizardState.data.name || '';
+  const typedRole = document.getElementById('wizard-role');
+  if (typedRole) typedRole.value = wizardState.data.role || '';
 
-  if (step.id === 'provider') {
-    html += `<div class="template-variables-grid">
+  // Button visibility
+  if (dom.wizardBackBtn) dom.wizardBackBtn.hidden = wizardState.currentStep === 0;
+  if (dom.wizardSkipStepBtn) dom.wizardSkipStepBtn.hidden = !step.optional;
+  if (dom.wizardNextBtn) dom.wizardNextBtn.textContent = wizardState.currentStep === wizardState.steps.length - 1 ? 'Finish' : 'Next';
+}
+
+// What a step asks, in the wizard's own ids: fixed markup, wherever it is drawn. It is
+// in one place on screen at a time, since the wizard does not open under a setup.
+function wizardFieldsHtml(stepId) {
+  if (stepId === 'provider') {
+    return `<div class="template-variables-grid">
       <label>Provider</label>
       <select id="wizard-provider" class="provider-input">
         <option value="openai">OpenAI</option>
@@ -13895,41 +13965,45 @@ function renderWizardStep() {
       <label>API Key</label>
       <input type="password" id="wizard-apikey" class="provider-input" placeholder="sk-...">
     </div>`;
-  } else if (step.id === 'profile') {
-    html += `<div class="template-variables-grid">
+  }
+  if (stepId === 'profile') {
+    return `<div class="template-variables-grid">
       <label>Your Name</label>
-      <input type="text" id="wizard-name" class="provider-input" placeholder="Your name" value="${wizardState.data.name || ''}">
+      <input type="text" id="wizard-name" class="provider-input" placeholder="Your name">
       <label>Role</label>
-      <input type="text" id="wizard-role" class="provider-input" placeholder="e.g. Developer, Designer" value="${wizardState.data.role || ''}">
+      <input type="text" id="wizard-role" class="provider-input" placeholder="e.g. Developer, Designer">
     </div>`;
-  } else if (step.id === 'channels') {
-    html += `<div class="template-variables-grid">
+  }
+  if (stepId === 'channels') {
+    return `<div class="template-variables-grid">
       <label>Telegram Bot Token (optional)</label>
       <input type="password" id="wizard-telegram" class="provider-input" placeholder="123456:ABC-...">
     </div>`;
   }
+  return '';
+}
 
-  dom.wizardStepContent.innerHTML = html;
-
-  // Button visibility
-  if (dom.wizardBackBtn) dom.wizardBackBtn.hidden = wizardState.currentStep === 0;
-  if (dom.wizardSkipStepBtn) dom.wizardSkipStepBtn.hidden = !step.optional;
-  if (dom.wizardNextBtn) dom.wizardNextBtn.textContent = wizardState.currentStep === wizardState.steps.length - 1 ? 'Finish' : 'Next';
+function readWizardFields(stepId) {
+  if (stepId === 'provider') {
+    return {
+      provider: document.getElementById('wizard-provider')?.value || '',
+      apiKey: document.getElementById('wizard-apikey')?.value || ''
+    };
+  }
+  if (stepId === 'profile') {
+    return {
+      name: document.getElementById('wizard-name')?.value || '',
+      role: document.getElementById('wizard-role')?.value || ''
+    };
+  }
+  if (stepId === 'channels') return { telegramToken: document.getElementById('wizard-telegram')?.value || '' };
+  return {};
 }
 
 function collectWizardStepData() {
   const step = wizardState.steps[wizardState.currentStep];
   if (!step) return;
-
-  if (step.id === 'provider') {
-    wizardState.data.provider = document.getElementById('wizard-provider')?.value || '';
-    wizardState.data.apiKey = document.getElementById('wizard-apikey')?.value || '';
-  } else if (step.id === 'profile') {
-    wizardState.data.name = document.getElementById('wizard-name')?.value || '';
-    wizardState.data.role = document.getElementById('wizard-role')?.value || '';
-  } else if (step.id === 'channels') {
-    wizardState.data.telegramToken = document.getElementById('wizard-telegram')?.value || '';
-  }
+  Object.assign(wizardState.data, readWizardFields(step.id));
 }
 
 async function closeWizard() {
@@ -14136,6 +14210,8 @@ function showCommandPalette() {
 document.addEventListener('keydown', (e) => {
   const isMod = e.ctrlKey || e.metaKey;
 
+  // The setup view is all there is: nothing behind it to reach (§6.2).
+  if (document.body.classList.contains('setup-active')) return;
   // Ctrl+K — command palette
   if (isMod && e.key === 'k') { e.preventDefault(); showCommandPalette(); return; }
   // Ctrl+N — new chat
@@ -14277,6 +14353,7 @@ checkFirstRun();
 
 // ── Settings > Local service (fleet stage 7) ──────────────────────────────
 const serviceLog = createLogger('desktop-service');
+const setupLog = createLogger('desktop-setup');
 const servicePaneState = {
   detachArmed: false, detachArmToken: null, detachArmedAt: null, busy: false, error: null,
   pendingNodeId: null, lastView: null, lastModel: null, lastStatus: null
@@ -14611,6 +14688,242 @@ function renderAttachedBanner(status) {
   }
 }
 
+// -- setup view: start
+// The window with no node (attach stage 2 spec §6.2, §6.3). describeSetup, in the
+// controller, says what to draw; this draws it, every string with textContent, and
+// holds no rule of its own. The answer says nothing to draw once the setup is over.
+const setupView = { active: false, answer: null, status: null, generation: 0, pressing: false, pressError: null, pressScreen: null, formStep: null, stepWords: null };
+
+const SETUP_TITLES = {
+  install: 'Install King Louie Node',
+  pair: 'Connect this app to King Louie Node',
+  start: 'Start King Louie Node',
+  migrate: 'Move your earlier King Louie'
+};
+
+function setupHasSomethingToDraw(answer) {
+  return answer.step !== 'done' || answer.lines.length > 0 || answer.actions.length > 0;
+}
+
+function enterSetupView() {
+  if (setupView.active) return;
+  setupView.active = true;
+  document.body.classList.add('setup-active');
+  document.getElementById('setup-view').hidden = false;
+}
+
+function leaveSetupView() {
+  if (!setupView.active) return;
+  setupView.active = false;
+  setupView.answer = null;
+  setupView.formStep = null;
+  setupView.pressError = null;
+  document.body.classList.remove('setup-active');
+  document.getElementById('setup-view').hidden = true;
+  document.getElementById('setup-form').replaceChildren();
+  // Whatever loaded behind the view loaded with no node.
+  loadChats().catch((err) => setupLog.warn('loading chats after the setup failed', { error: err && err.message }));
+  loadSettings();
+}
+
+// The wizard's list gives the form and phone steps their words (§6.3).
+async function setupStepWords() {
+  if (setupView.stepWords) return setupView.stepWords;
+  const result = await window.electron.wizard.getSteps().catch(() => null);
+  const steps = result && Array.isArray(result.steps) ? result.steps : [];
+  if (steps.length) setupView.stepWords = steps;
+  return steps;
+}
+
+function setupTitleOf(step, steps) {
+  const wanted = step === 'done' ? 'finish' : step;
+  const found = steps.find((s) => s.id === wanted);
+  return (found && found.title) || SETUP_TITLES[step] || 'King Louie';
+}
+
+function setupParagraphs(el, lines) {
+  el.replaceChildren(...lines.map((line) => {
+    const p = document.createElement('p');
+    p.textContent = line;
+    return p;
+  }));
+}
+
+function setupSayError(el, message) {
+  el.textContent = message || '';
+  el.hidden = !message;
+}
+
+function setupActionButton(action, primary, onPress) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = `setup-action-${action.id}`;
+  btn.className = primary ? 'btn btn-primary' : 'btn';
+  btn.textContent = action.label;
+  btn.disabled = setupView.pressing || Boolean(action.disabled);
+  btn.addEventListener('click', onPress);
+  return btn;
+}
+
+// Built once per step: a repaint must not take what the owner is typing.
+function drawSetupForm(answer) {
+  const form = document.getElementById('setup-form');
+  if (answer.form && setupView.formStep !== answer.form) {
+    form.replaceChildren(document.createRange().createContextualFragment(wizardFieldsHtml(answer.form)));
+    setupView.formStep = answer.form;
+    setupView.pressError = null;
+  } else if (!answer.form && !['provider', 'profile'].includes(answer.step)) {
+    form.replaceChildren();
+    setupView.formStep = null;
+  }
+  form.hidden = !answer.form;
+}
+
+function drawSetupView(answer, steps) {
+  const view = document.getElementById('setup-view');
+  // A refused press was about the screen it was made on: once that has moved on, so has it.
+  const screen = JSON.stringify([answer.step, answer.lines, answer.pre, answer.actions]);
+  if (setupView.pressError && setupView.pressScreen && setupView.pressScreen !== screen) setupView.pressError = null;
+  setupView.pressScreen = setupView.pressError ? screen : null;
+  view.dataset.step = answer.step;
+  document.getElementById('setup-title').textContent = setupTitleOf(answer.step, steps);
+  setupSayError(document.getElementById('setup-error'), answer.error ? answer.error.message : '');
+  setupParagraphs(document.getElementById('setup-lines'), answer.lines);
+  const pre = document.getElementById('setup-pre');
+  pre.textContent = answer.pre || '';
+  pre.hidden = !answer.pre;
+  drawSetupForm(answer);
+  // A refusal the answer already says is not said twice.
+  setupSayError(document.getElementById('setup-press-error'), answer.error ? '' : setupView.pressError);
+  const presses = [];
+  if (answer.form) presses.push(setupActionButton({ id: 'formSave', label: 'Save and continue' }, true, () => { saveSetupForm(answer.form); }));
+  answer.actions.forEach((action, i) => {
+    // Not now is never what the screen offers first, whatever else there is.
+    const primary = !answer.form && i === 0 && action.id !== 'setupLater';
+    presses.push(setupActionButton(action, primary, () => { pressSetupAction(action.id); }));
+  });
+  document.getElementById('setup-actions').replaceChildren(...presses);
+}
+
+function setSetupPressesDisabled(disabled) {
+  document.querySelectorAll('#setup-actions button').forEach((btn) => { btn.disabled = disabled; });
+}
+
+async function runSetupPress(work) {
+  if (setupView.pressing) return;
+  setupView.pressing = true;
+  setupView.pressError = null;
+  setSetupPressesDisabled(true);
+  try {
+    const result = await work();
+    if (result && result.ok === false) setupView.pressError = result.error || result.message || result.code || 'That did not work.';
+  } catch (err) {
+    setupView.pressError = (err && err.message) || 'That did not work.';
+  }
+  setupView.pressing = false;
+  try {
+    await refreshServiceStatus();
+  } finally {
+    // A refresh that could not read the status draws nothing, so nothing else turns them on.
+    if (setupView.active && !setupView.pressing) setSetupPressesDisabled(false);
+  }
+}
+
+function pressSetupAction(id) {
+  const desktop = window.electron.desktop;
+  const presses = {
+    // Opens over the view, and is the only way there (§6.2).
+    openServiceSettings: () => {
+      openSettingsDrawer();
+      switchSettingsTab('service');
+    },
+    retry: () => desktop.retry(),
+    attach: () => desktop.attach(),
+    nodeStart: () => desktop.nodeStart({ restart: false }),
+    nodeRestart: () => desktop.nodeRestart(),
+    nodeInstallPreview: () => desktop.nodeInstallPreview(),
+    nodeInstall: () => desktop.nodeInstall({ confirmed: true }),
+    pairStart: () => desktop.pairStart(),
+    // The node the owner was shown, not whatever a later poll found.
+    pairConfirm: () => desktop.pairConfirm(setupView.status?.pendingPair?.service?.nodeId || null),
+    pairCancel: () => desktop.pairCancel(),
+    pairRestartConfirm: () => desktop.pairRestartConfirm({ confirmed: true }),
+    migrationPlan: () => desktop.migrationPlan(),
+    migrationApply: () => desktop.migrationApply({ confirmed: true }),
+    setupLater: () => desktop.setupLater(),
+    setupFinish: () => desktop.setupFinish(),
+    skip: () => desktop.setupFinish({ skip: setupView.answer.step })
+  };
+  const press = Object.hasOwn(presses, id) ? presses[id] : null;
+  if (!press) {
+    setupLog.warn('a setup action with no press', { action: id });
+    return;
+  }
+  runSetupPress(press);
+}
+
+// The form's saves go to the node over the proxied channels; the next step comes
+// from what the node then says, not from here.
+function saveSetupForm(step) {
+  const fields = readWizardFields(step);
+  const settings = window.electron.settings;
+  runSetupPress(async () => {
+    if (step === 'provider') {
+      if (!fields.apiKey.trim()) return { ok: false, error: 'Enter your key, or skip the rest of setup.' };
+      const saved = await settings.saveProvider({ provider: fields.provider, token: fields.apiKey });
+      if (saved && saved.ok !== false) {
+        const input = document.getElementById('wizard-apikey');
+        if (input) input.value = '';
+      }
+      return saved;
+    }
+    if (!fields.name.trim()) return { ok: false, error: 'Enter your name, or skip the rest of setup.' };
+    return settings.saveUserProfile({ profile: { name: fields.name.trim(), role: fields.role.trim() } });
+  });
+}
+
+async function refreshSetupView(status) {
+  if (!status.launch || status.launch.host !== 'attached') {
+    leaveSetupView();
+    return;
+  }
+  const generation = ++setupView.generation;
+  // Known at once from the status, and the step can wait on a slow read of the old
+  // profile: no chat with no node meanwhile.
+  if (status.setup && status.setup.step && status.setup.step !== 'done') enterSetupView();
+  let answer;
+  try {
+    answer = await window.electron.desktop.setupStep();
+  } catch (err) {
+    answer = { ok: false, error: err && err.message };
+  }
+  if (generation !== setupView.generation) return;
+  if (!answer || answer.ok === false) {
+    // Past the setup, a failed read of it is no reason to take the chat away.
+    if (!setupView.active && status.setup && status.setup.step === 'done') return;
+    enterSetupView();
+    answer = {
+      step: status.setup?.step || 'install',
+      lines: [],
+      actions: [{ id: 'retry', label: 'Check again' }],
+      pre: null,
+      form: null,
+      error: { message: (answer && answer.error) || 'This app could not read where the setup has got to.' }
+    };
+  } else if (!setupHasSomethingToDraw(answer)) {
+    leaveSetupView();
+    return;
+  } else {
+    enterSetupView();
+  }
+  setupView.answer = answer;
+  setupView.status = status;
+  const steps = await setupStepWords();
+  if (generation !== setupView.generation) return;
+  drawSetupView(answer, steps);
+}
+// -- setup view: end
+
 async function refreshServiceStatus() {
   const status = await window.electron.desktop.status().catch((err) => {
     serviceLog.warn('fetching desktop status failed', { error: err && err.message });
@@ -14619,8 +14932,13 @@ async function refreshServiceStatus() {
   if (!status || status.ok === false) return;
   markUnavailableTabs(status.unavailableTabs || []);
   renderAttachedBanner(status);
+  await refreshSetupView(status);
   const conn = status.connection ? status.connection.status : null;
-  if (conn === 'connected' && serviceLastConnection && serviceLastConnection !== 'connected') loadChats();
+  if (conn === 'connected' && serviceLastConnection && serviceLastConnection !== 'connected') {
+    loadChats();
+    // What the panes said with the node down is over; a form open in the drawer is left alone.
+    if (document.getElementById('settings-drawer')?.hidden) loadSettings();
+  }
   serviceLastConnection = conn;
   if (dom.settingsNavSelect && dom.settingsNavSelect.value === 'service') {
     renderServiceSection().catch((err) => serviceLog.warn('rendering the local service pane failed', { error: err && err.message }));

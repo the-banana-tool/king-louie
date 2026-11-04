@@ -36,6 +36,13 @@ try {
   paneModel = null;
 }
 
+let setupFlow = null;
+try {
+  setupFlow = require('./src/desktop-bridge/setup-flow');
+} catch {
+  setupFlow = null;
+}
+
 let domPurify = null;
 try {
   const createDOMPurify = require('dompurify');
@@ -1411,6 +1418,7 @@ contextBridge.exposeInMainWorld(
       decideDetachClick: (args) => (paneModel ? paneModel.decideDetachClick(args) : { confirm: false, arm: true }),
       paneShapeChanged: (prevModel, nextModel) => (paneModel ? paneModel.paneShapeChanged(prevModel, nextModel) : true),
       describeBanner: (status) => (paneModel ? paneModel.describeAttachedBanner(status) : null),
+      describeSetup: (status) => (setupFlow ? setupFlow.describeSetup(status) : null),
       describeInstallPreview: (result) => (paneModel ? paneModel.describeInstallPreview(result) : null),
       describeInstallResult: (result) => (paneModel ? paneModel.describeInstallResult(result) : null)
     },

@@ -589,7 +589,8 @@ function createDesktopController({
     if (failed && !facts.setupError) {
       facts.setupError = {
         code: failed.code,
-        error: `King Louie Node did not restart after the move (${failed.message || failed.code}). Bots and MCP servers that moved start the next time it starts.`
+        error: `King Louie Node did not restart after the move (${failed.message || failed.code}). Bots and MCP servers that moved start the next time it starts.`,
+        offerRestart: true
       };
     }
     return { ok: true, ...describeSetup(facts) };

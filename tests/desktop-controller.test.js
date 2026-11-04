@@ -3102,6 +3102,20 @@ describe('desktop controller: the setup walk', () => {
     assert.strictEqual((src.match(/\$\{shown\(customCasesRoot, 400\)\}/g) || []).length, 3);
   });
 
+  it('a restart that fails after the move offers its press on the step that follows', async () => {
+    const client = nodeClient();
+    const made = attachedWalk({ client });
+    await made.controller.setupStep();
+    await made.controller.migrationPlan();
+    made.runner.runTask = async () => ({ ok: false, error: 'the task would not run' });
+    await made.controller.migrationApply({ confirmed: true });
+    await made.controller.startIdle();
+    const answer = await made.controller.setupStep();
+    assert.ok(answer.actions.some((a) => a.id === 'nodeRestart' || a.id === 'nodeStart'), JSON.stringify(answer));
+    assert.ok(answer.error, 'and says why');
+    made.controller.dispose();
+  });
+
   it('a move whose restart was lost to an app death restarts once at the next launch', async () => {
     const client = nodeClient();
     const made = attachedWalk({ client });

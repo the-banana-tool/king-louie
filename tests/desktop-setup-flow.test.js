@@ -221,7 +221,7 @@ describe('describeSetup: every answer has the one shape', () => {
   it('keys, and an array of lines and actions, whatever comes in', () => {
     for (const s of [undefined, null, {}, base(), base({ node: { fresh: true } }), attachedUp(), attachedUp({ setup: { completedAt: 'x' } })]) {
       const m = describeSetup(s);
-      assert.deepStrictEqual(Object.keys(m).sort(), ['actions', 'canPostpone', 'error', 'lines', 'pre', 'step']);
+      assert.deepStrictEqual(Object.keys(m).sort(), ['actions', 'canPostpone', 'error', 'form', 'lines', 'pre', 'step']);
       assert.ok(Array.isArray(m.lines));
       assert.ok(Array.isArray(m.actions));
       assert.ok(SETUP_STEPS.includes(m.step));
@@ -816,5 +816,41 @@ describe('every state has a next action or says there is none', () => {
       // Provider and profile: the wizard's form on screen is the next action.
       if (!['provider', 'profile'].includes(m.step)) assert.ok(m.actions.length, `no press on ${m.step}: ${JSON.stringify(s)}`);
     }
+  });
+});
+
+describe('describeSetup: what the window draws at the form steps', () => {
+  const noKey = { service: { hosting: 'personal', providersConfigured: false } };
+
+  it('provider and profile name their form, and a way past it', () => {
+    const p = describeSetup(attachedUp(noKey));
+    assert.strictEqual(p.step, 'provider');
+    assert.strictEqual(p.form, 'provider');
+    assert.deepStrictEqual(ids(p), ['setupFinish']);
+    const q = describeSetup(attachedUp({ userProfileDefault: true }));
+    assert.strictEqual(q.form, 'profile');
+    assert.deepStrictEqual(ids(q), ['setupFinish']);
+  });
+
+  it('no form while a progress line is up, or on any other step', () => {
+    assert.strictEqual(describeSetup(attachedUp({ ...noKey, setupProgress: 'Restarting…' })).form, null);
+    assert.strictEqual(describeSetup(attachedUp()).form, null);
+    assert.strictEqual(describeSetup({}).form, null);
+  });
+
+  it('a restart that failed after the move has a press, once', () => {
+    const failed = { code: 'NODE_START_FAILED', error: 'King Louie Node did not restart after the move (no).', offerRestart: true };
+    const m = describeSetup(attachedUp({ userProfileDefault: true, migration: { at: 'x', backupDir: 'C:\\b' }, setupError: failed }));
+    assert.strictEqual(m.step, 'profile');
+    assert.match(m.error.message, /did not restart/);
+    assert.strictEqual(ids(m)[0], 'nodeRestart');
+    const down = describeSetup(attachedUp({ connection: { status: 'disconnected' }, setupError: failed, node: { personal: true, task: 'registered', running: true } }));
+    assert.strictEqual(down.step, 'start');
+    assert.strictEqual(ids(down).filter((id) => id === 'nodeRestart' || id === 'nodeStart').length, 1);
+  });
+
+  it('another refusal brings no such press', () => {
+    const m = describeSetup(attachedUp({ userProfileDefault: true, setupError: { code: 'X', error: 'no' } }));
+    assert.deepStrictEqual(ids(m), ['setupFinish']);
   });
 });

@@ -29,6 +29,9 @@ const LATER = { id: 'setupLater', label: 'Not now: use the old standalone mode t
 const LATER_NOTICE = 'Standalone mode is going away. While it runs, cron jobs and the channels (Telegram, Discord and the like) are off.';
 const CHECK_AGAIN = { id: 'retry', label: 'Check again' };
 const SERVICE_SETTINGS = { id: 'openServiceSettings', label: 'Local service settings' };
+// The form's own press is the window's. This one is the way on without a key or a name.
+const PAST_THE_FORM = { id: 'setupFinish', label: 'Skip the rest of setup' };
+const RESTART_NODE = { id: 'nodeRestart', label: 'Restart King Louie Node' };
 
 // A task that keeps the window from going on, and what the owner can do about it.
 const TASK_HELP = {
@@ -494,9 +497,9 @@ function bodyFor(step, s, f) {
     case 'start': return startStep(s);
     case 'migrate': return migrateStep(s, f);
     case 'provider':
-      return { lines: ['King Louie needs a key from an AI provider before it can answer. Choose a provider and enter your key; it is kept by King Louie Node on this computer.'], actions: [] };
+      return { lines: ['King Louie needs a key from an AI provider before it can answer. Choose a provider and enter your key; it is kept by King Louie Node on this computer.'], actions: [PAST_THE_FORM], form: 'provider' };
     case 'profile':
-      return { lines: ['Tell King Louie your name and what you do.'], actions: [] };
+      return { lines: ['Tell King Louie your name and what you do.'], actions: [PAST_THE_FORM], form: 'profile' };
     case 'phone': return phoneStep(s, f);
     default:
       return { lines: ['King Louie Node is ready.'], actions: [{ id: 'setupFinish', label: 'Open King Louie' }] };
@@ -513,7 +516,7 @@ function describeSetup(status) {
   const s = status || {};
   const f = setupFacts(s);
   const step = nextSetupStep(f);
-  const answer = (parts) => ({ step, lines: [], actions: [], pre: null, error: null, canPostpone: false, ...parts });
+  const answer = (parts) => ({ step, lines: [], actions: [], pre: null, error: null, canPostpone: false, form: null, ...parts });
   if (nothingToDraw(step, f)) return answer({});
   if (f.elevated) return answer({ error: { code: 'PAIR_ELEVATED', message: ELEVATED_LINE }, actions: [{ id: 'retry', label: 'Check again' }] });
   if (s.setupProgress) return answer({ lines: [long(s.setupProgress)] });
@@ -522,6 +525,9 @@ function describeSetup(status) {
   const lines = [...list(body.lines)];
   if (['provider', 'profile', 'phone', 'done'].includes(step)) lines.push(...movedLines(s, f));
   const actions = [...list(body.actions)];
+  // A restart that failed after the move: the move stands, and what moved is not up
+  // until the node starts, so the screen that says so has the press.
+  if (s.setupError && s.setupError.offerRestart && !actions.some((a) => a.id === 'nodeRestart' || a.id === 'nodeStart')) actions.unshift({ ...RESTART_NODE });
   const old = f.oldProfile;
   const canPostpone = Boolean(old && old.found && !old.schemaProblem && !f.migration && !body.noLater && step !== 'done');
   if (canPostpone) {
@@ -532,6 +538,7 @@ function describeSetup(status) {
     lines,
     actions,
     pre: body.pre || null,
+    form: body.form || null,
     error: body.error || (s.setupError ? refusalOf(s.setupError) : null),
     canPostpone
   });
