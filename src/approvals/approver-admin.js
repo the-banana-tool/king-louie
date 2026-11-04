@@ -59,9 +59,13 @@ const KEY_STATEMENTS = Object.freeze({
   'kl.device.box_key': Object.freeze({ judge: judgeBoxKey, field: 'box_key', at: 'box_key_at', done: 'box key set' })
 });
 
+// A staged file's type is whatever the service account wrote: Object.hasOwn
+// alone would coerce ['kl.device.box_key'] into a match.
+const isKeyStatement = (type) => typeof type === 'string' && Object.hasOwn(KEY_STATEMENTS, type);
+
 function stagedParties(message) {
   if (message.type === 'kl.device.revoke') return { deviceId: message.device_id, signer: message.revoked_by };
-  if (Object.hasOwn(KEY_STATEMENTS, message.type)) return { deviceId: message.device_id, signer: message.device_id };
+  if (isKeyStatement(message.type)) return { deviceId: message.device_id, signer: message.device_id };
   return { deviceId: message.device && message.device.device_id, signer: message.enrolled_by };
 }
 
@@ -251,7 +255,7 @@ class ApproverAdmin {
     const newestOf = (type) => items.filter((i) => i.type === type)
       .sort((x, y) => Date.parse(y.message.created_at) - Date.parse(x.message.created_at));
     const keyStatements = [...newestOf('kl.device.read_key'), ...newestOf('kl.device.box_key')];
-    const rest = items.filter((i) => i.type !== 'kl.device.revoke' && !Object.hasOwn(KEY_STATEMENTS, i.type) && i.type !== 'unsafe');
+    const rest = items.filter((i) => i.type !== 'kl.device.revoke' && !isKeyStatement(i.type) && i.type !== 'unsafe');
     const unsafe = items.filter((i) => i.type === 'unsafe');
 
     // Pass 1: judge every revoke against the pre-batch snapshot only, and

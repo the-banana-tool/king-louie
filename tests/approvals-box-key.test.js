@@ -267,6 +267,17 @@ describe('device.box_key', () => {
     assert.equal(admin(l).read(b.deviceId).box_key, undefined);
   });
 
+  it('a planted type that only coerces to a key statement gets a result and leaves staged/', async () => {
+    const { a, l } = await fleet();
+    const message = { ...statementMessage(a, boxJwk()), type: ['kl.device.box_key'] };
+    const readKey = { v: 1, type: ['kl.device.read_key'], device_id: a.deviceId, read_key: boxJwk(), created_at: iso(NOW), expires_at: iso(NOW + 60000), nonce: randomNonce() };
+    plant(l, seal(message, a.signer), message.nonce);
+    plant(l, seal(readKey, a.signer), readKey.nonce);
+    assert.deepEqual(await applyAll(l), ['rejected: malformed', 'rejected: malformed']);
+    assert.deepEqual(fs.readdirSync(l.stagedDir).filter((n) => n.endsWith('.json')), []);
+    assert.equal(admin(l).read(a.deviceId).box_key, undefined);
+  });
+
   it('apply re-checks the signer against the admin set', async () => {
     const { s, a, l } = await fleet();
     s.stage(statement(a, boxJwk()));

@@ -382,7 +382,9 @@ function genericDeviceMessage(m) {
 
 function validateMessage(type, message) {
   try {
-    if (!isPlainObject(message) || message.type !== type || !Number.isInteger(message.v)) return 'malformed';
+    // A caller may pass a message's own type, and an array equals itself and
+    // would coerce to a VALIDATORS key below.
+    if (typeof type !== 'string' || !isPlainObject(message) || message.type !== type || !Number.isInteger(message.v)) return 'malformed';
     if (message.v !== 1) return 'unsupported_version';
     // Object.hasOwn: an unregistered type (including one that collides with
     // an inherited name like 'constructor') is simply unrecognised, never

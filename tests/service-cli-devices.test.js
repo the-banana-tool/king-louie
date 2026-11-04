@@ -439,6 +439,105 @@ describe('the box key in the device commands', () => {
     assert.equal(await running, 1);
   });
 
+  // A console enrollment over a record that holds a box key. Runs to the
+  // prompt or to its refusal, with the claim built from `device(phone)`.
+  async function reEnroll(record, device, phone) {
+    const n = node();
+    const file = path.join(n.configDir, 'approvers', `${phone.deviceId}.json`);
+    fs.writeFileSync(file, JSON.stringify(record), { mode: 0o644 });
+    const { pump, calls } = servicePump(n);
+    const io = streamIo();
+    const running = runEnrollDevice({ ...n, io, deps });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    const envelope = phone.enroll({ device, codeId: qr.code_id, code: qr.code });
+    pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope });
+    return { n, file, calls, io, running, envelope };
+  }
+
+  it('enroll-device refuses a claim with no box key for an active record that holds one, before asking', async () => {
+    const phone = createFakePhone({ name: 'Pixel 9' });
+    const held = boxJwk();
+    const record = { ...phone.approverRecord(), box_key: held, box_key_at: iso(Date.now() - 60000) };
+    const { n, file, calls, io, running } = await reEnroll(record, phone.device({ readKey: true }), phone);
+    const before = fs.readFileSync(file, 'utf8');
+    // Answered up front: a build that wrongly asks must not wait out the code.
+    io.stdin.write('n\n');
+    assert.equal(await running, 1);
+    assert.doesNotMatch(io.text.out, /does the phone show the same/);
+    assert.ok(io.text.err.includes(`device revoke ${phone.deviceId}`), io.text.err);
+    assert.match(io.text.err, /Reset the phone/);
+    assert.match(io.text.err, /Nothing was enrolled/);
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    assert.deepEqual(JSON.parse(before).box_key, held);
+    await waitFor(() => calls.some(([m]) => m === 'enroll.done'), 'enroll.done');
+    const [, params] = calls.find(([m]) => m === 'enroll.done');
+    assert.equal(open(params.envelope).message.refused, true);
+    const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: null });
+    assert.deepEqual(ledger.tail(5).filter((e) => e.kind === 'device.enrolled'), []);
+  });
+
+  it('enroll-device shows both fingerprints when a claim replaces a box key, and writes the new one after y', async () => {
+    const phone = createFakePhone({ name: 'Pixel 9' });
+    const held = boxJwk();
+    const next = boxJwk();
+    const record = { ...phone.approverRecord(), box_key: held, box_key_at: iso(Date.now() - 60000) };
+    const { file, calls, io, running, envelope } = await reEnroll(record, { ...phone.device(), box_key: next }, phone);
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    io.stdin.write('y\n');
+    assert.equal(await running, 0);
+    assert.ok(io.text.out.includes(` with a box key ${boxKeyFingerprint(next)}, replacing box key ${boxKeyFingerprint(held)} — does the phone show the same? [y/N]`), io.text.out);
+    await waitFor(() => calls.some(([m]) => m === 'enroll.done'), 'enroll.done');
+    const written = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(written.box_key, next);
+    assert.equal(written.box_key_at, open(envelope).message.created_at);
+  });
+
+  it('enroll-device with the box key the record already holds asks with no replacing line', async () => {
+    const phone = createFakePhone();
+    const held = boxJwk();
+    const record = { ...phone.approverRecord(), box_key: held };
+    const { io, running } = await reEnroll(record, { ...phone.device(), box_key: { ...held } }, phone);
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    io.stdin.write('n\n');
+    assert.equal(await running, 1);
+    assert.ok(io.text.out.includes(` with a box key ${boxKeyFingerprint(held)} — does the phone`), io.text.out);
+    assert.doesNotMatch(io.text.out, /replacing/);
+  });
+
+  it('a record no store would trust does not block a re-enrollment', async () => {
+    const phone = createFakePhone();
+    // Its box key is the device key: checkApproverRecord refuses this file.
+    const record = { ...phone.approverRecord(), box_key: { ...phone.jwk } };
+    const { io, running } = await reEnroll(record, phone.device(), phone);
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    io.stdin.write('n\n');
+    assert.equal(await running, 1);
+    assert.doesNotMatch(io.text.out, /replacing/);
+  });
+
+  it('device apply passes a staged file\'s device_id through shown, in the list and in the result', async () => {
+    const a = createFakePhone({ name: 'Owner phone' });
+    const { n } = stagedNode([a.approverRecord()]);
+    const forged = `d-forged\n${a.deviceId}: box key set`;
+    const now = Date.now();
+    const stagedDir = path.join(n.dataDir, 'approvals', 'staged');
+    fs.mkdirSync(stagedDir, { recursive: true });
+    const plant = (message) => fs.writeFileSync(path.join(stagedDir, `${message.nonce}.json`), JSON.stringify({ received_at: iso(now), envelope: a.sign(message) }));
+    const window = { created_at: iso(now), expires_at: iso(now + 60000) };
+    plant({ v: 1, type: 'kl.device.box_key', device_id: forged, box_key: boxJwk(), ...window, nonce: randomNonce() });
+    plant({ v: 1, type: 'kl.device.read_key', device_id: forged, read_key: boxJwk(), ...window, nonce: randomNonce() });
+    plant({ v: 1, type: 'kl.device.revoke', device_id: forged, revoked_by: forged, reason: 'lost', ...window, nonce: randomNonce() });
+    plant({ v: 1, type: 'kl.device.enroll', device: { device_id: forged }, enrolled_by: forged, ...window, nonce: randomNonce() });
+    const io = streamIo();
+    assert.equal(await runDevice({ sub: 'apply', flags: { yes: true }, ...n, io, deps }), 0);
+    assert.ok(!io.text.out.includes(forged), io.text.out);
+    assert.doesNotMatch(io.text.out, new RegExp(`^${a.deviceId}: box key set`, 'm'));
+    assert.match(io.text.out, /hidden or control characters removed/);
+    assert.match(io.text.out, /: rejected: malformed/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(n.configDir, 'approvers', `${a.deviceId}.json`), 'utf8')).box_key, undefined);
+  });
+
   it('device apply shows a staged box-key statement with its fingerprint, asks, writes it after y, audits it, and device list shows it', async () => {
     const a = createFakePhone({ name: 'Owner phone' });
     const { n, store } = stagedNode([a.approverRecord()]);
@@ -754,7 +853,7 @@ describe('doctor', () => {
       const n = node();
       put(n, createFakePhone().approverRecord());
       fs.chmodSync(path.join(n.configDir, 'approvers'), 0o777);
-      const results = await runDoctor({ dataDir: n.dataDir, platform: 'linux' });
+      const results = await runDoctor({ dataDir: n.dataDir, platform: 'linux', adminUid: UID });
       assert.equal(results.find((r) => r.check === 'sealing to phones').detail, 'off: the set is not trusted');
       assert.equal(results.find((r) => r.check === 'phones without a box key').detail, 'none (the set is not trusted)');
     });

@@ -7,7 +7,7 @@ const { adminConfigDir } = require('../../platform/paths');
 const { buildServicePorts } = require('../ports');
 const { loadNodeConfig } = require('../node-config');
 const { restoreDataDirOwnership } = require('../ownership');
-const { readLine, printable, runningServicePid, renderQr } = require('./io');
+const { readLine, printable, shown, runningServicePid, renderQr } = require('./io');
 const { isRoot, dataDirOwner } = require('../drop-privileges');
 
 const ENROLL_TTL_MS = 10 * 60 * 1000;
@@ -50,7 +50,7 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
   const { getOrGenerateNodeIdentity } = require('../../mesh/node-identity');
   const { verifyConsoleEnrollment } = require('../../approvals/verify-device');
   const { buildEnrollOpen, buildEnrollDone, encodeQr } = require('../../approvals/messages');
-  const { fingerprintGroups } = require('../../approvals/envelope');
+  const { fingerprintGroups, samePoint } = require('../../approvals/envelope');
   const now = deps.now || Date.now;
   const { admin } = layout(dataDir, configDir, deps);
 
@@ -178,9 +178,19 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
       return 1;
     }
     const { device } = check.message;
+    // Writing this claim would drop a box key and its date, and sealing with
+    // it (R-SP-10). A phone really reset has a new device id, so nothing
+    // legitimate needs this.
+    const heldBox = heldBoxKey(admin, device.device_id);
+    if (heldBox && !device.box_key) {
+      await finish(null, true);
+      io.stderr.write(`${device.device_id} is enrolled here with box key ${boxKeyText(heldBox)}, and this enrollment has none. Nothing was enrolled. To replace this phone, run "device revoke ${device.device_id}", Reset the phone, and enroll it again.\n`);
+      return 1;
+    }
+    const replacing = heldBox && !samePoint(heldBox, device.box_key) ? `, replacing box key ${boxKeyText(heldBox)}` : '';
     // The name and platform come from the phone: printed without control or
     // bidi characters so they cannot rewrite what the administrator reads.
-    io.stdout.write(`Device "${printable(device.name)}" (${printable(device.platform)}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)}${withReadKey(device)}${withBoxKey(device)} — does the phone show the same? [y/N] `);
+    io.stdout.write(`Device "${printable(device.name)}" (${printable(device.platform)}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)}${withReadKey(device)}${withBoxKey(device)}${replacing} — does the phone show the same? [y/N] `);
     const answer = await readLine(io.stdin, { signal: expired.signal });
     if (answer === null) {
       await finish(null, true);
@@ -286,6 +296,15 @@ function withReadKey(holder) {
   return ` with a read key ${readKeyText(holder.read_key)}`;
 }
 
+// The box key of this device's active record, else null. A file no store
+// would trust, or a revoked record, holds nothing for this purpose.
+function heldBoxKey(admin, deviceId) {
+  const { checkApproverRecord } = require('../../approvals/approver-store');
+  const record = admin.read(deviceId);
+  if (!record || checkApproverRecord(record, `${deviceId}.json`) !== null) return null;
+  return record.revoked_at === null && record.box_key ? record.box_key : null;
+}
+
 // " with a box key b-abcd efgh ijkl mnop" for one that holds one (sealed
 // phones, R-SP-10), else "".
 function withBoxKey(holder) {
@@ -344,13 +363,13 @@ function describeStagedItem(item, now, recordsById = null) {
     const [word, text] = item.type === 'kl.device.read_key'
       ? ['read key', readKeyText(item.message.read_key)]
       : ['box key', boxKeyText(item.message.box_key)];
-    return `${word}  ${item.deviceId}  ${name}  ${text}  signed by the device itself  (${age})`;
+    return `${word}  ${shown(item.deviceId)}  ${name}  ${text}  signed by the device itself  (${age})`;
   }
-  if (item.type === 'kl.device.revoke') return `revoke  ${item.deviceId}  signed by ${item.signer}  (${age})`;
+  if (item.type === 'kl.device.revoke') return `revoke  ${shown(item.deviceId)}  signed by ${shown(item.signer)}  (${age})`;
   const device = item.message && item.message.device;
   const readKey = device && device.read_key ? `  with a read key ${readKeyText(device.read_key)}` : '';
   const boxKey = device && device.box_key ? `  with a box key ${boxKeyText(device.box_key)}` : '';
-  return `enroll  ${item.deviceId}${readKey}${boxKey}  signed by ${item.signer}  (${age})`;
+  return `enroll  ${shown(item.deviceId)}${readKey}${boxKey}  signed by ${shown(item.signer)}  (${age})`;
 }
 
 // "N min ago" from a signed timestamp; a phone clock ahead of this one reads
@@ -457,7 +476,7 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
       // the various `rejected: …` reasons, including unsafe/unreadable
       // entries — all just displayed, since only enrolled/revoked write audit.
       // Unsafe and unreadable entries have no device id: name the file.
-      io.stdout.write(`${r.deviceId || r.file}: ${r.result}\n`);
+      io.stdout.write(`${r.deviceId ? shown(r.deviceId) : r.file}: ${r.result}\n`);
       if (r.result === 'enrolled') await ledger.append({ kind: 'device.enrolled', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'revoked') await ledger.append({ kind: 'device.revoked', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'read key set') await ledger.append({ kind: 'device.read_key_set', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
