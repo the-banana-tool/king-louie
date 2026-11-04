@@ -579,6 +579,13 @@ final class LeaseVectorTests: XCTestCase {
         XCTAssertEqual(try reason(withField(full, "salt", nil)), "malformed")
         XCTAssertEqual(try reason(withField(full, "lease", withField(lease, "kind", .string("screen")))), "malformed")
         XCTAssertEqual(try reason(withField(full, "salt", .string("short"))), "malformed")
+        // resumes names this request's own lease or nothing, whatever the hash says: each is hashed again here, so it holds.
+        func resuming(_ leaseId: String) throws -> JSONValue {
+            let edited = withField(lease, "resumes", .string(leaseId))
+            return withField(withField(full, "lease", edited), "lease_hash", .string(try Seal.saltedHash(salt: full["salt"]!.stringValue!, value: edited)))
+        }
+        XCTAssertEqual(try reason(try resuming("0f8e7c2a-5b1d-4c3e-9a7f-2d6b8e1c4a90")), "malformed")
+        XCTAssertNil(try reason(try resuming(full["lease_id"]!.stringValue!)))
     }
 
     /// The grant is built over the salted hash as received, byte for byte, and its shape does not change.

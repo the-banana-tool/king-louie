@@ -391,6 +391,21 @@ final class SealVectorTests: XCTestCase {
         }
     }
 
+    /// R-SP-2 on the screen: the vector's bytes signed by the pinned node, opened, and its hash does
+    /// not hold. Nothing shows, and nothing is there to answer.
+    func testAHashMismatchOnTheScreen() throws {
+        let web = try keys()["nodes"]!["web-01"]!
+        let pin = NodePin(id: web["id"]!.stringValue!, name: "web-01", key: web["spki"]!.stringValue!)
+        let v = try vector("seal-hash-mismatch")
+        XCTAssertEqual(v["expect"]!["reason"]?.stringValue, "action_hash_mismatch")
+        let envelope = try Envelope.seal(v["input"]!, alg: "Ed25519", kid: pin.id, sign: try ed25519Signer(seedHex: web["seed"]!.stringValue!))
+        let view = Display.view(envelope.json, pinned: [pin], open: try openerOf(v["given"]!["box"]!), sealedSeen: [])
+        XCTAssertFalse(view.shown)
+        XCTAssertEqual(view.reason, "action_hash_mismatch")
+        XCTAssertNil(view.display)
+        XCTAssertNil(view.opened)
+    }
+
     /// A locked key: its own reason, no decision, and nothing marks the node.
     func testALockedKeyOnTheScreen() throws {
         let v = try vector("request-sealed-display")

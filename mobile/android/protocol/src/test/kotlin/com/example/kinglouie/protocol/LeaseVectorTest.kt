@@ -654,8 +654,9 @@ class LeaseVectorTest {
         assertEquals(listOf("Type"), view.actions.map { it.tool })
 
         // Not this phone's to open: the clear part alone, and still a contact token to echo.
-        for (unread in listOf(Leases.verifyView(envelope, pin), Leases.verifyView(envelope, pin, wrongBox(v)))) {
+        for ((reason, unread) in listOf("not_recipient" to Leases.verifyView(envelope, pin), "open_failed" to Leases.verifyView(envelope, pin, wrongBox(v)))) {
             assertTrue(unread.accepted)
+            assertEquals(reason, unread.reason)
             val u = unread.view!!
             assertEquals(SealState.UNREAD, u.seal)
             assertNull(u.frame)
@@ -758,6 +759,7 @@ class LeaseVectorTest {
         val v = vector("view-sealed")
         val check = Leases.verifyView(Envelope.fromJson(v["input"]!!), pin(v), lockedOpener())
         assertTrue(check.accepted)
+        assertEquals("key_locked", check.reason)
         val view = check.view!!
         assertEquals(SealState.UNREAD, view.seal)
         assertNull(view.frame)

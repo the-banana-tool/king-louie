@@ -789,7 +789,8 @@ object Leases {
     /**
      * The checks of `verifyLeaseView`: the size, the pinned node's signature, the
      * node, and only then [open] on a sealed one. Not this phone's to open, or a locked phone: accepted,
-     * the clear part alone (no frame, no actions), `seal` UNREAD.
+     * the clear part alone (no frame, no actions), `seal` UNREAD, and `reason` says why:
+     * a locked phone and a non-recipient need different words, so `accepted` decides, not a null `reason`.
      */
     fun verifyView(envelope: Envelope, pin: NodePin, open: Opener? = null): ViewCheck {
         val bytes = try {
@@ -836,6 +837,6 @@ object Leases {
             m["foreground"]["app_id"].str(), m["foreground"]["matches"].bool() ?: false, frame, m["frame_dropped"].bool() ?: false, actions,
             m["contact_token"].str(), read.state
         )
-        return ViewCheck(true, null, view)
+        return ViewCheck(true, read.reason, view)
     }
 }

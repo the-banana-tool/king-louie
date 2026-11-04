@@ -478,6 +478,20 @@ class SealVectorTest {
         assertEquals("malformed", Messages.validateOpenedRequest(Envelope.fromJson(vector("request-valid")["input"]!!).message()))
     }
 
+    /** R-SP-2 on the screen: the vector's bytes signed by the pinned node, opened, and its hash does not hold. Nothing shows, and nothing is there to answer. */
+    @Test
+    fun aHashMismatchOnTheScreen() {
+        val web = keys()["nodes"]["web-01"]
+        val pin = NodePin(web["id"].str()!!, "web-01", web["spki"].str()!!)
+        val v = vector("seal-hash-mismatch")
+        assertEquals("action_hash_mismatch", v["expect"]["reason"].str())
+        val view = Display.view(signedByWeb(v["input"].obj()!!).json, listOf(pin), openerOf(v["given"]["box"]), sealedSeen = emptySet())
+        assertFalse(view.shown)
+        assertEquals("action_hash_mismatch", view.reason)
+        assertNull(view.display)
+        assertNull(view.opened)
+    }
+
     /** R-SP-15: once a node was seen sealing, its clear request is unreadable and offers no decision. */
     @Test
     fun aClearRequestAfterSealedIsUnreadable() {

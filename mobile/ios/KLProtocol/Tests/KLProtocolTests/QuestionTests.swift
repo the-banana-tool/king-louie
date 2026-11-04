@@ -70,8 +70,8 @@ final class QuestionTests: XCTestCase {
         XCTAssertEqual(item.token, "7QD4KM")
         XCTAssertThrowsError(try Questions.answer(to: item, optionId: "a", text: nil, deviceId: "d-bbbbbbbbbbbbbbbb", nonce: String(repeating: "n", count: 43), signedAt: "2026-09-25T14:00:00Z"))
         // Another node seen sealing is not this one.
-        XCTAssertNil(QuestionItem(message: question, nodeName: "web-01", sealedSeen: ["kl-bbbbbbbbbbbbbbbb"])?.unreadable)
-        XCTAssertNil(QuestionItem(message: question, nodeName: "web-01", sealedSeen: [])?.unreadable)
+        XCTAssertNil(try XCTUnwrap(QuestionItem(message: question, nodeName: "web-01", sealedSeen: ["kl-bbbbbbbbbbbbbbbb"])).unreadable)
+        XCTAssertNil(try XCTUnwrap(QuestionItem(message: question, nodeName: "web-01", sealedSeen: [])).unreadable)
     }
 
     func testBuildsTheAnswerTheNodeVerifies() throws {
