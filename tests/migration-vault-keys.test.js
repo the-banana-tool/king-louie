@@ -303,3 +303,16 @@ describe('the verifier covers the vault', () => {
     assert.ok(cipher);
   });
 });
+
+describe('the source refuses what must not move, whatever a node plans', () => {
+  it('a node that plans a reserved key, or a prototype part, is sent nothing', async () => {
+    const source = readSource(await desktopConfig({ 'contact.relay': 'relay-secret', 'local.box': 'box-secret', github: 'plain-github' }));
+    for (const key of ['contact.relay', 'local.box']) assert.strictEqual(source.getValue('vault', key), null, key);
+    const skipped = [];
+    const items = ['contact.relay', 'local.box', 'a.__proto__.b', 'github'].map((key) => ({ category: 'vault', key, action: 'new', targetKey: key }));
+    const sent = [...planBatches(items, source, { skipped })].flat();
+    assert.deepStrictEqual(sent.map((e) => e.key), ['github']);
+    assert.deepStrictEqual(skipped.map((s) => s.key), ['contact.relay', 'local.box', 'a.__proto__.b']);
+    assert.ok(!JSON.stringify({ sent, skipped }).includes('relay-secret'));
+  });
+});

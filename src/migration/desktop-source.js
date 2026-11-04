@@ -438,7 +438,9 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
       case 'providerToken': return secret(tokens[key]);
       case 'searchKey': return secret(settings.webSearch && settings.webSearch[key] && settings.webSearch[key].apiKey);
       case 'imageKey': return secret(settings.imageGeneration && settings.imageGeneration[key] && settings.imageGeneration[key].apiKey);
-      case 'vault': return secret(vaultEntries.get(key));
+      // Only what may move, whatever a plan asks for: a node's plan is not trusted to
+      // leave a contact credential or a local server's key behind.
+      case 'vault': return isReservedVaultKey(key) || hasPrototypePart(key) ? null : secret(vaultEntries.get(key));
       // Only these names, whatever a plan asks for: the typesafe.ai key and a
       // local server's key sit in the same object and never move.
       case 'channelToken': return CHANNEL_TOKEN_KEYS.includes(key) ? secret(tokens[key]) : null;
