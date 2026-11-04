@@ -354,7 +354,8 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
       assert.strictEqual('adminUid' in seen[1], false, 'production leaves adminUid to the default');
       const { approverStore, identity } = running.approvals;
       assert.ok(approverStore && identity && identity.nodeId && identity.publicKey);
-      assert.deepStrictEqual(seen[0].approvalTrust, { approverStore, nodeId: identity.nodeId, nodePublicKey: identity.publicKey });
+      assert.deepStrictEqual(seen[0].approvalTrust, { approverStore, nodeId: identity.nodeId, nodePublicKey: identity.publicKey, box: identity.box });
+      assert.equal(typeof seen[0].approvalTrust.box.agree, 'function', 'the signed-grant audit path opens a sealed request with it');
       assert.strictEqual(seen[0].approvalTrust.approverStore, approverStore, 'the admin-owned store startApprovals built');
     } finally {
       if (original) require.cache[coreEntry] = original; else delete require.cache[coreEntry];

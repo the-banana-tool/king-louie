@@ -411,9 +411,11 @@ describe('the approval seam writes task.refused', () => {
     await new Promise((r) => setImmediate(r));
     const refused = entries.filter((e) => e.kind === 'task.refused');
     assert.deepEqual(refused.map((e) => e.data), [
-      { tool: 'BrowserPage', code: 'phone_denied', origin },
-      { tool: 'BrowserPage', code: 'task_ended', origin }
+      { tool: 'BrowserPage', code: 'phone_denied', origin: { kind: 'stdio' } },
+      { tool: 'BrowserPage', code: 'task_ended', origin: { kind: 'stdio' } }
     ]);
+    const all = JSON.stringify(refused);
+    for (const leaked of ['#secret', 'stdio-mcp']) assert.ok(!all.includes(leaked), leaked);
   });
 });
 

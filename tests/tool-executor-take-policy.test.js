@@ -244,12 +244,12 @@ describe('the approval seam writes take.refused', () => {
     await new Promise((r) => setImmediate(r));
     const refused = entries.filter((e) => e.kind === 'take.refused');
     assert.deepEqual(refused.map((e) => e.data), [
-      { tool: 'BrowserPage', code: 'take_site_not_allowed', origin },
-      { tool: 'Bash', code: 'take_tool_not_allowed', origin },
-      { tool: GATED, code: 'take_no_mid_take_approval', origin }
+      { tool: 'BrowserPage', code: 'take_site_not_allowed', origin: { kind: 'stdio' } },
+      { tool: 'Bash', code: 'take_tool_not_allowed', origin: { kind: 'stdio' } },
+      { tool: GATED, code: 'take_no_mid_take_approval', origin: { kind: 'stdio' } }
     ]);
     const all = JSON.stringify(refused);
-    for (const leaked of ['off-list', 'secret', 'private']) assert.ok(!all.includes(leaked), leaked);
+    for (const leaked of ['off-list', 'secret', 'private', 'stdio-mcp', 'job-1']) assert.ok(!all.includes(leaked), leaked);
     assert.equal(phoneCalls.length, 0);
   });
 });
