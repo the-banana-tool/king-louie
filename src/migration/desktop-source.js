@@ -15,7 +15,8 @@ const fs = require('fs');
 const path = require('path');
 const { parseCaseYaml } = require('../cases/case-store');
 const { BUILTIN_IDS } = require('../cases/executors/builtins');
-const { EXCLUDED, isReservedVaultKey, hasPrototypePart, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS, MAX_CHAT_PART_BYTES, MAX_CHAT_BYTES } = require('./desktop-import');
+const { mergeSettings } = require('../core/settings');
+const { importedSettingsKeys, settingDigest, userProfileDigest, EXCLUDED, isReservedVaultKey, hasPrototypePart, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS, MAX_CHAT_PART_BYTES, MAX_CHAT_BYTES } = require('./desktop-import');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 // A desktop store file or a case file bigger than this is refused rather
@@ -45,6 +46,18 @@ function withoutTooLarge(chat, maxMessageBytes) {
 // an object under a truncated name. Each entry by its whole key, from the string
 // leaves; a key stored flat reads the same. No part of a key may be a prototype
 // key. What is there and cannot be read is said, never dropped unsaid.
+// Each setting that could move, as the node would hold it. None when it will not merge.
+function settingDigests(settings) {
+  let merged;
+  try {
+    merged = mergeSettings(settings);
+  } catch {
+    return {};
+  }
+  const profiles = arr(settings.models && settings.models.profiles).length > 0;
+  return Object.fromEntries(importedSettingsKeys('personal').filter((key) => settings[key] !== undefined).map((key) => [key, settingDigest(key, merged[key], { profiles })]));
+}
+
 const VAULT_STORE_PREFIX = '__vault_';
 const VAULT_UNREAD_NOTE = 'this stored vault entry is not in a form the move can read; it stays on this computer and in the backup';
 const MAX_VAULT_DEPTH = 64;
@@ -382,7 +395,9 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
       return { id: c.id, updatedAt: c.updatedAt || null, title: String(c.title || ''), ...past };
     }),
     settingsKeys: Object.keys(settings).filter((k) => !['allowedDirectories', 'webSearch', 'imageGeneration'].includes(k)),
+    settingDigests: settingDigests(settings),
     userProfile: Boolean(chatData.userProfile),
+    ...(chatData.userProfile ? { userProfileDigest: userProfileDigest(chatData.userProfile) } : {}),
     permissionRules: arr(toolApprovals.permissionRules).filter((r) => r && r.tool && r.action).map((r) => ({ tool: r.tool, pattern: r.pattern || '*', action: r.action })),
     alwaysApprove: Object.keys(alwaysApprove).filter((k) => alwaysApprove[k] === true),
     providerTokens: Object.keys(tokens).filter((k) => tokens[k] && (!k.startsWith('__') || k === '__elevenlabs_api_key')),

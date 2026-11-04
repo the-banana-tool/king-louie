@@ -91,3 +91,65 @@ describe('settings that stay behind are named', () => {
     for (const key of STAYING) assert.strictEqual(itemOf(plan, 'settings', key).note, 'this setting is managed on the service');
   });
 });
+
+describe('a value already there plans as already there', () => {
+  const defaults = mergeSettings(DEFAULT_SETTINGS);
+
+  it('a setting equal to the node\'s is skip-present, whether the desktop stored it whole or in part', async () => {
+    const { importer } = await nodeService();
+    const source = profile({ settings: { voice: defaults.voice, notifications: {}, templateVariables: defaults.templateVariables, cases: { root: '' } } });
+    const plan = await planOf(importer, source.inventory);
+    for (const key of ['voice', 'notifications', 'templateVariables', 'cases']) assert.strictEqual(itemOf(plan, 'settings', key).action, 'skip-present', key);
+  });
+
+  it('one that differs is new, lands, and is skip-present on the next plan, which writes nothing', async () => {
+    const { core, importer } = await nodeService();
+    const source = profile({ settings: { templateVariables: { name: 'Example Owner' } } });
+    const first = await planOf(importer, source.inventory);
+    assert.strictEqual(itemOf(first, 'settings', 'templateVariables').action, 'new');
+    for (const batch of planBatches(first.items, source)) await importer.apply({ planId: first.planId, batch });
+    const report = await importer.finish({ planId: first.planId });
+    assert.deepStrictEqual(report.failures, []);
+    assert.strictEqual(core.context.getSettings().templateVariables.name, 'Example Owner');
+    const again = await planOf(importer, source.inventory);
+    assert.strictEqual(itemOf(again, 'settings', 'templateVariables').action, 'skip-present');
+    assert.strictEqual(itemOf(again, 'settings', 'templateVariables').note, null);
+    assert.strictEqual([...planBatches(again.items, source)].flat().filter((e) => e.category === 'settings').length, 0);
+    assert.strictEqual((await importer.finish({ planId: again.planId })).failures.length, 0);
+  });
+
+  it('a desktop setting equal to the default, on a node that changed it, is left alone and says so plainly', async () => {
+    const { core, importer } = await nodeService();
+    core.context.setSettings({ ...core.context.getSettings(), templateVariables: { name: 'Set on the node' } });
+    const source = profile({ settings: { templateVariables: {} } });
+    assert.strictEqual(itemOf(await planOf(importer, source.inventory), 'settings', 'templateVariables').action, 'skip-present');
+    assert.strictEqual(core.context.getSettings().templateVariables.name, 'Set on the node');
+  });
+
+  it('a desktop with no model profiles, against the one a node\'s first start made, is already there', async () => {
+    const { importer } = await nodeService();
+    const source = profile({ settings: { models: {} } });
+    assert.strictEqual(itemOf(await planOf(importer, source.inventory), 'settings', 'models').action, 'skip-present');
+  });
+
+  it('the user profile: equal is skip-present, different is new and then skip-present', async () => {
+    const empty = await nodeService();
+    const blank = profile({ settings: {}, userProfile: { name: '', role: '', goals: [], preferences: {}, projectContext: '' } });
+    assert.strictEqual(itemOf(await planOf(empty.importer, blank.inventory), 'userProfile', 'userProfile').action, 'skip-present');
+
+    const { importer } = await nodeService();
+    const filled = profile({ settings: {}, userProfile: { name: 'Example Owner', goals: ['ship'] } });
+    const first = await planOf(importer, filled.inventory);
+    assert.strictEqual(itemOf(first, 'userProfile', 'userProfile').action, 'new');
+    for (const batch of planBatches(first.items, filled)) await importer.apply({ planId: first.planId, batch });
+    await importer.finish({ planId: first.planId });
+    assert.strictEqual(itemOf(await planOf(importer, filled.inventory), 'userProfile', 'userProfile').action, 'skip-present');
+  });
+
+  it('an inventory that sends no digest plans as it did', async () => {
+    const { importer } = await nodeService();
+    const plan = await planOf(importer, { settingsKeys: ['voice'], userProfile: true });
+    assert.strictEqual(itemOf(plan, 'settings', 'voice').action, 'new');
+    assert.strictEqual(itemOf(plan, 'userProfile', 'userProfile').action, 'new');
+  });
+});

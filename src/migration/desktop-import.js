@@ -212,6 +212,19 @@ function settingsWouldMove(settings) {
     return profiles.length > 1 || stable(rest) !== stable(plain);
   });
 }
+// What a value comes to on either side, for telling whether the node already holds
+// the desktop's (a plan carries ids and keys, never settings). Over the merged value,
+// without what never moves. A desktop with no profiles leaves the node its own, so
+// its models are compared without them.
+const digestOf = (value) => crypto.createHash('sha256').update(stable(value)).digest('hex');
+function settingDigest(key, value, { profiles = true } = {}) {
+  if (key === 'cases') return digestOf(withoutRoot(value));
+  if (key !== 'models') return digestOf(value);
+  const { profiles: _p, defaultProfileId: _d, kingLouie: _k, ...rest } = withoutLocalServers(value);
+  return digestOf(profiles ? withoutLocalServers(value) : rest);
+}
+const userProfileDigest = (profile) => digestOf(new UserProfile().normalizeProfile({ ...UserProfile.getDefaultProfile(), ...(profile || {}) }));
+
 function countActions(items) {
   const counts = Object.fromEntries(ACTIONS.map((a) => [a, 0]));
   for (const item of items) counts[item.action] = (counts[item.action] || 0) + 1;
@@ -735,6 +748,9 @@ class DesktopImporter {
     const defaults = mergeSettings(DEFAULT_SETTINGS);
     for (const key of arr(inventory.settingsKeys)) {
       if (!this.settingsKeys.includes(key)) { add('settings', key, 'skip-excluded', this.settingStaysNote(key)); continue; }
+      // What landed, or what was never different: nothing to write.
+      const digests = isPlainObject(inventory.settingDigests) ? inventory.settingDigests : {};
+      if (Object.hasOwn(digests, key) && digests[key] === settingDigest(key, settings[key], { profiles: arr(inventory.modelProfileIds).length > 0 })) { add('settings', key, 'skip-present'); continue; }
       const carried = PERSONAL_SETTINGS_KEYS.includes(key);
       if (this.settingUntouched(key, settings, defaults)) { add('settings', key, 'new', carried ? PERSONAL_NOTES[key] : null); continue; }
       // A skip reads as done, so profiles this node does not hold are said
@@ -746,7 +762,8 @@ class DesktopImporter {
     }
 
     if (inventory.userProfile) {
-      add('userProfile', 'userProfile', stable(this.targets.userProfile.get()) === stable(UserProfile.getDefaultProfile()) ? 'new' : 'skip-present');
+      const same = inventory.userProfileDigest && inventory.userProfileDigest === userProfileDigest(this.targets.userProfile.get());
+      add('userProfile', 'userProfile', !same && stable(this.targets.userProfile.get()) === stable(UserProfile.getDefaultProfile()) ? 'new' : 'skip-present');
     }
 
     const rules = this.context.getPermissionRules();
@@ -1666,6 +1683,8 @@ module.exports = {
   IMPORTED_SETTINGS_KEYS,
   importedSettingsKeys,
   settingsWouldMove,
+  settingDigest,
+  userProfileDigest,
   CHANNEL_TOKEN_KEYS,
   CHANNEL_ALLOWLISTS_KEY,
   ALLOWLIST_CHANNELS,
