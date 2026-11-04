@@ -285,6 +285,7 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     anthropicOAuth: Boolean(oauth),
     channelTokens: CHANNEL_TOKEN_KEYS.filter((k) => tokens[k]),
     channelAllowlists: ALLOWLIST_CHANNELS.filter((c) => channelAllowlist(c)),
+    modelProfileIds: arr(settings.models && settings.models.profiles).filter((p) => p && typeof p.id === 'string' && p.id).map((p) => p.id),
     memory: memoryEntries.map((e) => e.id),
     cron: cronJobs.map((j) => ({ id: j.id, name: String(j.name || '') })),
     cases,

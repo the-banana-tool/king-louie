@@ -65,7 +65,7 @@ const printable = (s) => String(s).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u
 // Spawns the writer and returns { request(method, params) -> Promise, close() }.
 // `identity` ({ uid, gid } or null) comes from writerIdentity(); with one, the
 // child drops to that account and gets a trimmed environment.
-function spawnWriter({ dataDir, identity = null, spawn = require('child_process').spawn, env = process.env, onStderr = () => {} }) {
+function spawnWriter({ dataDir, identity = null, spawn = require('child_process').spawn, env = process.env, onStderr = () => {}, electron = Boolean(process.versions.electron) }) {
   const opts = {
     cwd: dataDir,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -76,6 +76,9 @@ function spawnWriter({ dataDir, identity = null, spawn = require('child_process'
     opts.uid = identity.uid;
     opts.gid = identity.gid;
   }
+  // Under the app's binary the writer runs as Node only with this set; said
+  // here rather than left to whatever this process was started with.
+  if (electron) opts.env.ELECTRON_RUN_AS_NODE = '1';
   const child = spawn(process.execPath, [WRITER_SCRIPT], opts);
   const pending = new Map();
   let nextId = 1;

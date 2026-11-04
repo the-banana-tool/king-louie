@@ -458,6 +458,14 @@ function ensureWorkspace(dataDir) {
 // deps.startProfile (in place of loadProfile(profile).start) and
 // deps.stopRequest (watchStopRequest's options: the interval).
 async function runService({ dataDir: requestedDataDir, profile: profileOverride, signal, stdout = process.stdout, adminUid, deps = {} }) {
+  // A node installed from the desktop runs the app's binary with this set, so
+  // that the binary runs as Node. It has done that job by now. Left here, an
+  // MCP server, a hook or a model's shell would inherit it, and an Electron
+  // program among them would run as plain Node. Every child that needs it (the
+  // PDF and embed workers, Playwright's install) sets it itself;
+  // tests/electron-boundary.test.js holds that. `run` only: a one-shot CLI
+  // command keeps it.
+  delete process.env.ELECTRON_RUN_AS_NODE;
   // Resolved once, here, because this is the only place that moves the
   // process: ensureWorkspace chdirs below, and a relative --data-dir would
   // then be re-resolved against the *new* cwd by everything built afterwards

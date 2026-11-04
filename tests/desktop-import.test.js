@@ -1292,15 +1292,76 @@ describe('DesktopImporter: the personal carry set', () => {
     assert.strictEqual(core.context.getApiTokens().__telegram_bot_token, tokenBefore);
   });
 
-  it('a node the owner already set up keeps its models, and the plan says so', async () => {
-    const { core, importer } = await service({ hosting: 'personal' });
+  const editDefault = (core) => {
     const edited = core.context.getSettings();
     const profile = edited.models.profiles[0];
     core.context.setSettings({ ...edited, models: { ...edited.models, profiles: [{ ...profile, roles: { ...profile.roles, main: [{ provider: 'openai', model: 'owner-picked', effort: null }] } }] } });
+    return profile.id;
+  };
+
+  it('a node with an edited Default and a desktop with two named profiles: attention, nothing overwritten', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    const ownId = editDefault(core);
+    const before = core.context.getSettings().models;
     const fx = carriedFixture();
+    fx.inventory.modelProfileIds = ['p-everyday', 'p-cheap'];
+    const { plan, report } = await runImport(importer, fx);
+    assert.strictEqual(actionOf(plan, 'settings', 'models'), 'needs-attention');
+    assert.match(noteOf(plan, 'settings', 'models'), /your 2 model profiles were not moved/);
+    assert.ok(report.attention.some((a) => a.category === 'settings' && a.key === 'models' && /your 2 model profiles were not moved/.test(a.note)), 'the report carries it');
+    assert.deepStrictEqual(report.failures, [], 'it is attention, not a failure');
+    const after = core.context.getSettings().models;
+    assert.strictEqual(after.defaultProfileId, ownId);
+    assert.deepStrictEqual(after.profiles, before.profiles);
+    const again = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(again, 'settings', 'models'), 'needs-attention', 'a later run still says so');
+  });
+
+  it('says one profile in the singular, counting only what the node lacks', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    const ownId = editDefault(core);
+    const fx = carriedFixture();
+    fx.inventory.modelProfileIds = [ownId, 'p-everyday'];
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'settings', 'models'), 'needs-attention');
+    assert.match(noteOf(plan, 'settings', 'models'), /your 1 model profile was not moved/);
+  });
+
+  it('a node that already holds the desktop\'s profiles is plain skip-present', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    const ownId = editDefault(core);
+    const fx = carriedFixture();
+    fx.inventory.modelProfileIds = [ownId];
     const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
     assert.strictEqual(actionOf(plan, 'settings', 'models'), 'skip-present');
     assert.match(noteOf(plan, 'settings', 'models'), /already set on this node/);
+  });
+
+  it('an inventory with no profile ids (an older desktop) stays skip-present', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    editDefault(core);
+    const fx = carriedFixture();
+    delete fx.inventory.modelProfileIds;
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'settings', 'models'), 'skip-present');
+  });
+
+  it('a fleet node ignores the profile ids', async () => {
+    const { importer } = await service();
+    const fx = carriedFixture();
+    fx.inventory.modelProfileIds = ['p-everyday'];
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'settings', 'models'), 'skip-excluded');
+  });
+
+  it('an allowlist the node already has says the desktop\'s was left behind', async () => {
+    const { core, importer } = await service({ hosting: 'personal' });
+    core.context.getStore().set('channelAllowlists', { telegram: { default: 'deny', users: ['2000'], groups: [] } });
+    const fx = carriedFixture();
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'channelAllowlist', 'telegram'), 'skip-present');
+    assert.match(noteOf(plan, 'channelAllowlist', 'telegram'), /the desktop's list was left behind/);
+    assert.deepStrictEqual(core.context.getAllowlistManager().getPolicy('telegram').users, ['2000']);
   });
 
   it('a desktop with no profiles does not leave the node with none', async () => {

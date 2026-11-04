@@ -102,6 +102,9 @@ const PERSONAL_NOTES = Object.freeze({
   mcpServers: 'each starts with the node, as you, in the node\'s working folder unless it names its own; a relative path or a command only your shell finds may need changing'
 });
 const ALREADY_ON_NODE = 'already set on this node; left as it is';
+const ALLOWLIST_NOTE = 'who may reach this bot';
+const ALLOWLIST_LEFT_BEHIND = 'this node already has a list for this bot; the desktop\'s list was left behind';
+const profilesNotMoved = (n) => `your ${n} model ${n === 1 ? 'profile was' : 'profiles were'} not moved: this node's models were already set up, so they were left as they are; set the ${n === 1 ? 'profile' : 'profiles'} up again under Settings > Models`;
 const RESTART_NOTE = 'MCP servers, channel bots and hook choices that moved take effect when the node next starts.';
 
 class ImportError extends Error {
@@ -494,7 +497,12 @@ class DesktopImporter {
     for (const key of arr(inventory.settingsKeys)) {
       if (!this.settingsKeys.includes(key)) { add('settings', key, 'skip-excluded', EXCLUDED[`settings.${key}`] || 'this setting is managed on the service'); continue; }
       const carried = PERSONAL_SETTINGS_KEYS.includes(key);
-      if (this.settingUntouched(key, settings, defaults)) add('settings', key, 'new', carried ? PERSONAL_NOTES[key] : null);
+      if (this.settingUntouched(key, settings, defaults)) { add('settings', key, 'new', carried ? PERSONAL_NOTES[key] : null); continue; }
+      // A skip reads as done, so profiles this node does not hold are said
+      // outright: the owner would otherwise end the move without them.
+      const held = new Set(arr(settings.models && settings.models.profiles).map((p) => p && p.id));
+      const lacking = key === 'models' ? arr(inventory.modelProfileIds).filter((id) => !held.has(id)) : [];
+      if (lacking.length) add('settings', key, 'needs-attention', profilesNotMoved(lacking.length));
       else add('settings', key, 'skip-present', carried ? ALREADY_ON_NODE : null);
     }
 
@@ -624,7 +632,8 @@ class DesktopImporter {
       for (const channel of arr(inventory.channelAllowlists)) {
         if (!ALLOWLIST_CHANNELS.includes(channel)) continue;
         const held = lists[channel] || {};
-        add('channelAllowlist', channel, arr(held.users).length || arr(held.groups).length ? 'skip-present' : 'new', 'who may reach this bot');
+        if (arr(held.users).length || arr(held.groups).length) add('channelAllowlist', channel, 'skip-present', ALLOWLIST_LEFT_BEHIND);
+        else add('channelAllowlist', channel, 'new', ALLOWLIST_NOTE);
       }
     }
     for (const key of arr(inventory.excluded)) {

@@ -156,6 +156,14 @@ describe('readDesktopSource: what a channel moves with', () => {
     const { inventory } = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
     assert.deepStrictEqual(inventory.channelTokens, []);
     assert.deepStrictEqual(inventory.channelAllowlists, []);
+    assert.deepStrictEqual(inventory.modelProfileIds, []);
+  });
+
+  it('lists the desktop\'s model profiles by id', () => {
+    const root = userData();
+    fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ settings: { models: { profiles: [{ id: 'p-everyday', name: 'Everyday' }, { id: 'p-cheap', name: 'Cheap' }, { name: 'no id' }, null] } } }));
+    const { inventory } = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    assert.deepStrictEqual(inventory.modelProfileIds, ['p-everyday', 'p-cheap']);
   });
 });
 
