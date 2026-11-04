@@ -5,8 +5,12 @@
 const { AsyncLocalStorage } = require('async_hooks');
 
 const storage = new AsyncLocalStorage();
+const chats = new AsyncLocalStorage();
 
 const runFor = (conn, fn) => storage.run(conn, fn);
 const currentConnection = () => storage.getStore() || null;
+// The chat of the send a prompt is raised under.
+const runInChat = (chatId, fn) => chats.run(chatId, fn);
+const currentChatId = () => chats.getStore() || null;
 
-module.exports = { runFor, currentConnection };
+module.exports = { runFor, currentConnection, runInChat, currentChatId };

@@ -2,20 +2,27 @@
 // very handler modules the desktop runs against a virtual ipcMain, serves the
 // allowlisted subset, builds a fresh marked event per call, and binds every
 // prompt it forwards to the connection that saw it. Every other renderer event
-// goes to every window (remote window plan R-RW-7).
+// goes to every window (remote window plan R-RW-7). A remote connection's frames
+// take one more path (R-RW-11, R-RW-12): served, then the class of the channel or
+// method, then the class its payload raises it to; a phone-class call runs only
+// on a signed approval of its exact arguments.
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
 const { registerHandlers: defaultRegisterHandlers } = require('../ipc/register');
 const { listIpcChannels } = require('../ipc/channel-inventory');
 const { createElectronPrompter } = require('../platform/electron-prompter');
-const { markLocalDesktopEvent } = require('../core/origin');
+const { markLocalDesktopEvent, markRemoteWindowEvent } = require('../core/origin');
+const { canonicalize, sha256b64url } = require('../platform/jcs');
+const { WINDOW_TOOL, TTL_MAX_MS } = require('../approvals/messages');
+const { plainLineProblem } = require('../cases/hidden-chars');
 const { llmCommandAction, LLM_CHANNEL_ACTIONS } = require('../core/llm-command');
 const { servedChannels, isRendererEvent, PROMPT_EVENTS } = require('./allowlist');
 const { createDesktopScope } = require('./desktop-scope');
 const { checkPath: defaultCheckPath } = require('./check-path');
 const { MESSAGES } = require('./protocol');
-const { runFor, currentConnection } = require('./run-context');
+const { runFor, currentConnection, runInChat, currentChatId } = require('./run-context');
+const { PRESS_CHANNELS_REMOTE, remotePayloadClass } = require('./remote-classes');
 
 const log = createLogger('desktop-bridge');
 
@@ -32,6 +39,19 @@ const PROMPT_RESPONSES = Object.freeze({
 });
 
 const fail = (code, message) => Object.assign(new Error(message), { code });
+
+// Arguments up to this go on the card whole; past it, their hash and size.
+const WINDOW_ARGS_INLINE_MAX = 65536;
+const WINDOW_SUMMARY_MAX = 120;
+
+const remoteRefusal = (code, error = MESSAGES[code]) => ({ ok: false, code, error });
+
+// The card's one line. A label is the window's own words, so one that is not one
+// plain line is not shown; the channel name comes from the class table.
+function windowSummary(name, label) {
+  const line = `${name} from ${plainLineProblem(label) === null ? label : 'a window (name hidden)'}`;
+  return Array.from(line).slice(0, WINDOW_SUMMARY_MAX).join('');
+}
 
 // Settings > Local service "Approvals and relay" (spec §3.9), read from F3's
 // startApprovals objects; { available: false } when there are none.
@@ -84,6 +104,12 @@ function createBridgeDispatcher({
   const pendingAskUserResolvers = new Map();
   const pendingDirectoryAccessResolvers = new Map();
   const scope = createDesktopScope({ dataDir, context });
+  // request_id -> the arguments an approval covers, as the node hashed them.
+  const pendingArgs = new Map();
+  // deviceId -> [{ chatId, payload }]: questions waiting for that device to come back.
+  const pendingAskUserByDevice = new Map();
+  // requestId -> { chatId, payload }, for every remote question not yet ended.
+  const remoteAsks = new Map();
 
   const anyWindowLive = () => getConnections().some((c) => c.live);
 
@@ -158,9 +184,72 @@ function createBridgeDispatcher({
     return { isDestroyed: () => !conn.live, webContents: { send: (channel, payload) => pushEvent(conn, channel, payload) } };
   };
   const inner = createElectronPrompter({ getWindow: connectionAsWindow, pendingAskUserResolvers, pendingDirectoryAccessResolvers });
+
+  const liveRemote = (deviceId) => getConnections().find((c) => c.live && c.remote && c.deviceId === deviceId) || null;
+  const queueAsk = (deviceId, row) => {
+    const rows = pendingAskUserByDevice.get(deviceId) || [];
+    if (!rows.some((r) => r.payload.requestId === row.payload.requestId)) rows.push(row);
+    pendingAskUserByDevice.set(deviceId, rows);
+  };
+  const forgetAsk = (deviceId, requestId) => {
+    remoteAsks.delete(requestId);
+    const rows = (pendingAskUserByDevice.get(deviceId) || []).filter((r) => r.payload.requestId !== requestId);
+    if (rows.length > 0) pendingAskUserByDevice.set(deviceId, rows);
+    else pendingAskUserByDevice.delete(deviceId);
+  };
+
+  // A remote run's question goes to its device, wherever that is now: typed words are
+  // the owner's, and a question is not a gate (R-RW-7). Its resolver and 5-minute timer
+  // are the prompter's own, so a window that never returns times out as ever (R-RW-8).
+  const askRemote = (conn, args) => {
+    const { deviceId } = conn;
+    const chatId = currentChatId();
+    let requestId = null;
+    const device = {
+      isDestroyed: () => false,
+      webContents: {
+        send: (channel, payload) => {
+          requestId = payload.requestId;
+          const row = { chatId, payload };
+          remoteAsks.set(requestId, row);
+          const live = liveRemote(deviceId);
+          if (live) pushEvent(live, channel, payload);
+          else queueAsk(deviceId, row);
+        }
+      }
+    };
+    const answer = createElectronPrompter({ getWindow: () => device, pendingAskUserResolvers, pendingDirectoryAccessResolvers }).askUser(args);
+    return answer.finally(() => forgetAsk(deviceId, requestId));
+  };
+
+  // What a device missed while it was away. Safe to call again: a row goes out once.
+  function replayPrompts(conn) {
+    if (!conn.remote || !conn.live) return;
+    const rows = pendingAskUserByDevice.get(conn.deviceId);
+    if (!rows) return;
+    pendingAskUserByDevice.delete(conn.deviceId);
+    for (const row of rows) pushEvent(conn, 'agent:askUser', row.payload);
+  }
+
+  const windowOrigin = (conn) => ({ client: 'remote-window', deviceId: conn.deviceId, session: null, job_id: null });
+
+  // A folder for a remote run is the phone's to allow: a remote window never sees the
+  // dialog (R-RW-7). No phone, no folder.
+  async function allowDirectoryOnPhone(conn, { directory, toolName }) {
+    const approver = approvals && approvals.phoneApprover;
+    if (!approver) return false;
+    try {
+      return (await approver.requestApproval('AllowDirectory', { directory, toolName }, { origin: windowOrigin(conn) })) === true;
+    } catch (err) {
+      log.warn(`asking the phone for a folder failed: ${err.message}`);
+      return false;
+    }
+  }
+
   const prompter = {
     askUser(args) {
       const conn = getConnection();
+      if (conn && conn.remote) return askRemote(conn, args);
       if (!conn || !conn.live) return inner.askUser(args);
       const before = new Set(pendingAskUserResolvers.keys());
       const answer = inner.askUser(args);
@@ -170,7 +259,11 @@ function createBridgeDispatcher({
         return { ok: false, error: 'The desktop disconnected.' };
       })]);
     },
-    requestDirectoryAccess: (args) => inner.requestDirectoryAccess(args)
+    requestDirectoryAccess(args) {
+      const conn = getConnection();
+      if (conn && conn.remote) return allowDirectoryOnPhone(conn, args);
+      return inner.requestDirectoryAccess(args);
+    }
   };
 
   // settings:runLlmCommand is proxied, but its channel actions are not
@@ -258,18 +351,76 @@ function createBridgeDispatcher({
   // A run outlives its window's connection for a while, and the others are still
   // watching its chat: the sender is gone only when no window is left. A prompt
   // for a gone connection still goes nowhere (pushEvent).
-  const makeEvent = (conn) => markLocalDesktopEvent(
-    { sender: { send: (channel, payload) => pushEvent(conn, channel, payload), isDestroyed: () => !conn.live && !anyWindowLive() } },
-    { deviceId: conn.deviceId }
-  );
+  const makeEvent = (conn, approved = null) => {
+    const event = { sender: { send: (channel, payload) => pushEvent(conn, channel, payload), isDestroyed: () => !conn.live && !anyWindowLive() } };
+    return conn.remote
+      ? markRemoteWindowEvent(event, { deviceId: conn.deviceId, approved })
+      : markLocalDesktopEvent(event, { deviceId: conn.deviceId });
+  };
+
+  // One signed approval over the exact arguments (R-RW-12). The arguments are read
+  // once, here: the text is hashed or shown, and what runs is parsed from that text,
+  // so nothing that holds the frame or the approver's copy can change what runs.
+  // → { ok: true, request_id } | a refusal.
+  async function gatePhoneClass(conn, name, args) {
+    const approver = approvals && approvals.phoneApprover;
+    if (!approver || typeof approver.requestApproval !== 'function') return remoteRefusal('NO_PHONE');
+    let text;
+    try {
+      text = canonicalize(args);
+    } catch {
+      return remoteRefusal('REMOTE_ARGS_INVALID');
+    }
+    const bytes = Buffer.byteLength(text);
+    const params = bytes <= WINDOW_ARGS_INLINE_MAX
+      ? { channel: name, args: JSON.parse(text) }
+      : { channel: name, args_sha256: sha256b64url(text), bytes };
+    const metadata = { origin: windowOrigin(conn), cardNote: windowSummary(name, conn.label) };
+    let answer;
+    try {
+      answer = await approver.requestApproval(WINDOW_TOOL, params, metadata);
+    } catch (err) {
+      log.warn(`asking the phone about ${name} failed: ${err.message}`);
+      return remoteRefusal('NO_PHONE');
+    }
+    if (answer === 'unavailable') return remoteRefusal('NO_PHONE', (metadata.refusal && metadata.refusal.error) || MESSAGES.NO_PHONE);
+    // Only the exact true approves, and an approval has a request id to carry.
+    if (answer !== true || typeof metadata.request_id !== 'string' || !metadata.request_id) return remoteRefusal('PHONE_DENIED');
+    const ttlMs = Number.isFinite(approver.ttlMs) ? approver.ttlMs : TTL_MAX_MS;
+    pendingArgs.set(metadata.request_id, { name, args: JSON.parse(text), expiresAt: Date.now() + ttlMs });
+    return { ok: true, request_id: metadata.request_id };
+  }
+
+  // What a remote frame may do, after the served check. → { refusal } | { approved, args },
+  // `args` being what the handler gets. A name with no class is refused like a local one.
+  async function remoteGate(conn, name, args) {
+    const cls = remotePayloadClass(name, args, context);
+    if (cls === 'read' || cls === 'ordinary') return { approved: null, args };
+    if (cls !== 'phone') return { refusal: remoteRefusal(PRESS_CHANNELS_REMOTE.includes(name) ? 'REMOTE_PRESS' : 'REMOTE_LOCAL_ONLY') };
+    const gate = await gatePhoneClass(conn, name, args);
+    if (!gate.ok) return { refusal: gate };
+    const entry = pendingArgs.get(gate.request_id);
+    pendingArgs.delete(gate.request_id);
+    return { approved: gate.request_id, args: entry.args };
+  }
 
   async function onInvoke(conn, frame) {
     const { id, channel } = frame;
     if (!Number.isInteger(id)) return;
-    const args = Array.isArray(frame.args) ? frame.args : [];
+    const frameArgs = Array.isArray(frame.args) ? frame.args : [];
     if (typeof channel !== 'string' || !servedHandle.has(channel)) {
       conn.send({ t: 'result', id, error: MESSAGES.CHANNEL_NOT_PROXIED(String(channel)), code: 'CHANNEL_NOT_PROXIED' });
       return;
+    }
+    let approved = null;
+    let args = frameArgs;
+    if (conn.remote) {
+      const gate = await remoteGate(conn, channel, frameArgs);
+      if (gate.refusal) {
+        conn.send({ t: 'result', id, value: gate.refusal });
+        return;
+      }
+      ({ approved, args } = gate);
     }
     // Only chat:sendMessage starts a run bound to this connection. No case:*
     // channel does: a case turn runs inside chat:sendMessage, and
@@ -277,10 +428,10 @@ function createBridgeDispatcher({
     // outlive the desktop.
     // A refused send registers no run, so a drop finds nothing to stop for it.
     const chatId = channel === 'chat:sendMessage' && args[0] && typeof args[0].chatId === 'string' ? args[0].chatId : null;
-    const event = makeEvent(conn);
+    const event = makeEvent(conn, approved);
     if (chatId) conn.runs.set(event, chatId);
     try {
-      const value = await handlers.get(channel)(event, ...args);
+      const value = await runInChat(chatId, () => handlers.get(channel)(event, ...args));
       noteImport(conn, channel, value);
       // Begun for a desktop that left while the handler ran.
       if (!conn.live) dropImport(conn);
@@ -297,6 +448,11 @@ function createBridgeDispatcher({
     const args = Array.isArray(frame.args) ? frame.args : [];
     if (typeof channel !== 'string' || !servedOn.has(channel)) {
       log.warn(`dropped a send on ${channel}: not served over the bridge`);
+      return;
+    }
+    // An on-screen answer is never a remote window's, whoever's prompt it names.
+    if (conn.remote && !['read', 'ordinary'].includes(remotePayloadClass(channel, args, context))) {
+      log.warn(`dropped ${channel} from a remote window`);
       return;
     }
     const binding = PROMPT_RESPONSES[channel];
@@ -353,7 +509,7 @@ function createBridgeDispatcher({
     if (!check.readable || !check.isDirectory) throw fail('PATH_NOT_ACCESSIBLE', MESSAGES.PATH_NOT_ACCESSIBLE(account, target));
   }
 
-  async function callMethod(conn, method, params) {
+  async function callMethod(conn, method, params, approved = null) {
     switch (method) {
       case 'bridge.status':
         return getServiceInfo();
@@ -361,7 +517,7 @@ function createBridgeDispatcher({
         return checkPath(params.path);
       case 'bridge.setWorkingDirectory':
         await readableDirectory(params.path);
-        return handlers.get('chat:setWorkingDirectory')(makeEvent(conn), { chatId: params.chatId, workingDirectory: params.path });
+        return handlers.get('chat:setWorkingDirectory')(makeEvent(conn, approved), { chatId: params.chatId, workingDirectory: params.path });
       case 'bridge.addAllowedDirectory':
         await readableDirectory(params.path);
         return { ok: true, allowedDirectories: scope.addDirectory(params.path) };
@@ -383,9 +539,20 @@ function createBridgeDispatcher({
   async function onCall(conn, frame) {
     const { id, method } = frame;
     if (!Number.isInteger(id)) return;
-    const params = frame.params && typeof frame.params === 'object' ? frame.params : {};
+    const frameParams = frame.params && typeof frame.params === 'object' ? frame.params : {};
+    let approved = null;
+    let params = frameParams;
+    if (conn.remote) {
+      const gate = await remoteGate(conn, method, frameParams);
+      if (gate.refusal) {
+        conn.send({ t: 'result', id, value: gate.refusal });
+        return;
+      }
+      approved = gate.approved;
+      params = gate.args;
+    }
     try {
-      const value = await callMethod(conn, method, params);
+      const value = await callMethod(conn, method, params, approved);
       conn.send({ t: 'result', id, value: value === undefined ? null : value });
     } catch (err) {
       conn.send({ t: 'result', id, error: (err && err.message) || String(err), code: (err && err.code) || 'CALL_FAILED' });
@@ -394,6 +561,8 @@ function createBridgeDispatcher({
 
   async function handleFrame(conn, frame) {
     return runFor(conn, () => {
+      // A device back after a drop: whatever opens the conversation brings its questions.
+      if (conn.remote) replayPrompts(conn);
       if (frame.t === 'invoke') return onInvoke(conn, frame);
       if (frame.t === 'send') return onSend(conn, frame);
       if (frame.t === 'call') return onCall(conn, frame);
@@ -402,13 +571,32 @@ function createBridgeDispatcher({
     });
   }
 
-  // Nothing started from a desktop keeps running unattended (spec §3.3).
+  // A socket that drops on the road stops nothing (R-RW-8): its runs go on, and the
+  // same device's next connection is told about them. It holds no dialog to deny.
+  function onRemoteDisconnect(conn) {
+    for (const requestId of [...conn.prompts.canvas]) failCanvas(requestId);
+    conn.prompts.canvas.clear();
+    for (const requestId of conn.prompts.askUser) {
+      const row = remoteAsks.get(requestId);
+      if (row) queueAsk(conn.deviceId, row);
+    }
+    conn.prompts.askUser.clear();
+    // Its replacement may already be up (one connection per device).
+    const live = liveRemote(conn.deviceId);
+    if (live) replayPrompts(live);
+  }
+
+  // Nothing started from a local desktop keeps running unattended (spec §3.3).
   async function onDisconnect(conn) {
     if (conn.cleaned) return;
     conn.cleaned = true;
     conn.markGone();
     if (importer) importer.expireConnection(conn.id);
     dropImport(conn);
+    if (conn.remote) {
+      onRemoteDisconnect(conn);
+      return;
+    }
     const event = makeEvent(conn);
     const approvalResponse = listeners.get('tool:approvalResponse');
     for (const approvalId of [...conn.prompts.approvals]) {
@@ -459,7 +647,10 @@ function createBridgeDispatcher({
     }
   }
 
-  return { served, providersConfigured, handleFrame, onDisconnect, forwardAmbient, bridgeContext, scope };
+  return {
+    served, providersConfigured, handleFrame, onDisconnect, forwardAmbient, bridgeContext, scope,
+    gatePhoneClass, pendingArgs, replayPrompts, pendingAskUserByDevice
+  };
 }
 
-module.exports = { createBridgeDispatcher, approvalsStatus };
+module.exports = { createBridgeDispatcher, approvalsStatus, WINDOW_ARGS_INLINE_MAX };

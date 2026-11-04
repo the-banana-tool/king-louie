@@ -101,9 +101,60 @@ describe('E2E: an attached window while a reply is held', { timeout: 240000 }, (
     assert.ok((await userRows(ctx)).some((t) => t.includes('hold the reply please')));
   });
 
-  it('a window whose open chat is deleted elsewhere says so and shows one that exists', async () => {
+  it('a send refused while the window did not know the chat was busy gives back the words and the attachments', async () => {
+    const before = await evaluate(ctx, `appState.activeChatId`);
     await click(ctx, '#new-chat-btn');
-    await waitFor(ctx, `getActiveChat()?.title === 'New Chat'`);
+    await waitFor(ctx, `appState.activeChatId !== ${JSON.stringify(before)}`);
+    await fill(ctx, '#user-input', 'hold the reply please');
+    await pressEnter(ctx);
+    await waitFor(ctx, `document.querySelector('.message.streaming')?.textContent.includes('Holding')`, 30000);
+    // As a window sees it when another window's run holds the chat: nothing running here.
+    await evaluate(ctx, `appState.activeResponses.delete(appState.activeChatId); true`);
+    await evaluate(ctx, `
+      appState.pendingImages = [{ name: 'lot.png', mimeType: 'image/png', base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', previewUrl: 'blob:lot' }];
+      appState.pendingDocuments = [{ name: 'deed.txt', mimeType: 'text/plain', base64: 'TGFrZXNpZGUgbG90', textContent: 'Lakeside lot' }];
+      renderPendingImages();
+      true`);
+    await fill(ctx, '#user-input', 'with a picture');
+    await pressEnter(ctx);
+    await waitFor(ctx, `document.getElementById('chat-messages').textContent.includes(${JSON.stringify(REFUSAL)})`);
+    assert.strictEqual(await evaluate(ctx, `document.getElementById('user-input').value`), 'with a picture');
+    assert.deepStrictEqual(await evaluate(ctx, `appState.pendingImages.map((i) => [i.name, i.previewUrl])`), [['lot.png', 'blob:lot']]);
+    assert.deepStrictEqual(await evaluate(ctx, `appState.pendingDocuments.map((d) => d.name)`), ['deed.txt']);
+    assert.strictEqual(await evaluate(ctx, `document.getElementById('image-preview-list').hidden`), false);
+    await evaluate(ctx, `appState.activeResponses.add(appState.activeChatId); clearPendingImages(); document.getElementById('user-input').value = ''; true`);
+    await click(ctx, '#stop-btn');
+    await waitFor(ctx, `document.getElementById('stop-btn').hidden`, 30000);
+  });
+
+  it('a window that comes to a chat part way through a turn shows it running and reads the rows when it ends', async () => {
+    const before = await evaluate(ctx, `appState.activeChatId`);
+    await click(ctx, '#new-chat-btn');
+    await waitFor(ctx, `appState.activeChatId !== ${JSON.stringify(before)}`);
+    const chatId = await evaluate(ctx, `appState.activeChatId`);
+    await fill(ctx, '#user-input', 'hold the reply please');
+    await pressEnter(ctx);
+    await waitFor(ctx, `document.querySelector('.message.streaming')?.textContent.includes('Holding')`, 30000);
+
+    // A fresh renderer on the same node: it missed the turn's start.
+    await ctx.electronApp.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].webContents.reload(); });
+    await pause(1500);
+    await waitFor(ctx, `typeof appState !== 'undefined' && appState.activeResponses.has(${JSON.stringify(chatId)})`, 30000);
+    await evaluate(ctx, `document.getElementById('wizard-skip-btn')?.click(); true`);
+    await evaluate(ctx, `appState.activeChatId === ${JSON.stringify(chatId)} || handleSelectChat(${JSON.stringify(chatId)}); true`);
+    await waitFor(ctx, `appState.activeChatId === ${JSON.stringify(chatId)} && !document.getElementById('stop-btn').hidden`);
+    assert.strictEqual(await evaluate(ctx, `document.getElementById('send-btn').hidden`), true, 'Stop in place of Send');
+    assert.ok(await evaluate(ctx, `[...document.querySelectorAll('#chat-list .chat-item.streaming')].length > 0`));
+
+    await click(ctx, '#stop-btn');
+    await waitFor(ctx, `document.getElementById('stop-btn').hidden && !appState.activeResponses.has(${JSON.stringify(chatId)})`, 30000);
+    await waitFor(ctx, `[...document.querySelectorAll('#chat-messages .message.assistant')].some((el) => el.textContent.includes('Holding'))`, 15000);
+  });
+
+  it('a window whose open chat is deleted elsewhere says so and shows one that exists', async () => {
+    const before = await evaluate(ctx, `appState.activeChatId`);
+    await click(ctx, '#new-chat-btn');
+    await waitFor(ctx, `appState.activeChatId !== ${JSON.stringify(before)}`);
     const doomed = await evaluate(ctx, `appState.activeChatId`);
     await evaluate(ctx, `window.electron.chat.remove(${JSON.stringify(doomed)}).then(() => true)`);
     await fromAnotherWindow(ctx, 'chat:listChanged', { chatId: doomed, what: 'deleted' });

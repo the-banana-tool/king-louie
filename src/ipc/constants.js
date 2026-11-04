@@ -2,6 +2,8 @@ module.exports = {
   APP_QUIT_WINDOW: 'app:quitWindow',
 
   CHAT_LOAD: 'chat:load',
+  CHAT_RUNNING: 'chat:running',
+  CHAT_READ_SCREENSHOT: 'chat:readScreenshot',
   CHAT_GET: 'chat:get',
   CHAT_CREATE: 'chat:create',
   CHAT_SET_ACTIVE: 'chat:setActive',

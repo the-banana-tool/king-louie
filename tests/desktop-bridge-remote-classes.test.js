@@ -18,10 +18,9 @@ const inventory = listIpcChannels();
 const allChannels = [...inventory.handle, ...inventory.on];
 
 // In the table ahead of the code: the tasks that register them come later in
-// this plan (chat:running and chat:readScreenshot, the window's node channels).
+// this plan (the window's node channels).
 // Nothing else may be unknown to the served lists.
 const TABLED_AHEAD = new Set([
-  'chat:running', 'chat:readScreenshot',
   'desktop:nodes', 'desktop:addFrontDoor', 'desktop:listFrontDoorNodes', 'desktop:addRemoteNode',
   'desktop:forgetNode', 'desktop:enrollRemote', 'desktop:remoteStatus', 'desktop:nodeRemoteWindow'
 ]);

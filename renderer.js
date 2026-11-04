@@ -9377,6 +9377,13 @@ function showBusyRefusal(chatId, message, refusal, tempId = null) {
   if (!dom.userInput.value) dom.userInput.value = message;
 }
 
+// A refused send's attachments go back beside whatever was added since.
+function giveBackAttachments(images, documents) {
+  appState.pendingImages = [...images, ...(appState.pendingImages || [])];
+  appState.pendingDocuments = [...documents, ...(appState.pendingDocuments || [])];
+  renderPendingImages();
+}
+
 async function sendMessage() {
   const message = dom.userInput.value.trim();
   const pendingImages = Array.isArray(appState.pendingImages) ? [...appState.pendingImages] : [];
@@ -9833,14 +9840,12 @@ async function sendMessage() {
 
   dom.userInput.value = '';
   dom.userInput.style.height = 'auto';
-  if (busyHere) {
-    // Kept unrevoked: a refusal hands them back.
-    appState.pendingImages = [];
-    appState.pendingDocuments = [];
-    renderPendingImages();
-  } else {
-    clearPendingImages();
-  }
+  // Kept unrevoked until the node answers: a refusal hands them back, and this window
+  // may not know another window's turn holds the chat.
+  appState.pendingImages = [];
+  appState.pendingDocuments = [];
+  if (dom.imageFileInput) dom.imageFileInput.value = '';
+  renderPendingImages();
 
   let refused = false;
   try {
@@ -9877,11 +9882,7 @@ async function sendMessage() {
     if (rawResult?.code === 'CHAT_BUSY') {
       refused = true;
       showBusyRefusal(appState.activeChatId, message, rawResult, tempId);
-      if (busyHere) {
-        appState.pendingImages = pendingImages;
-        appState.pendingDocuments = pendingDocuments;
-        renderPendingImages();
-      }
+      giveBackAttachments(pendingImages, pendingDocuments);
       return;
     }
     const updatedChat = unwrapIpcResult(rawResult, 'Unable to send message.');
@@ -9917,6 +9918,9 @@ async function sendMessage() {
     if (!storedRow && !dom.userInput.value) dom.userInput.value = message;
   } finally {
     if (!refused) {
+      for (const image of pendingImages) {
+        if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
+      }
       setResponseActive(false, appState.activeChatId);
       flushToolGroup();
     }
@@ -10045,6 +10049,8 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
       // reached here, keeps the chat active; this send's own mark does not.
       if (!dom.chatMessages.querySelector('.message.streaming')) setResponseActive(false, chatId);
       showBusyRefusal(chatId, message, rawResult, tempId);
+      // The truncate took the stored row, and its attachments with it.
+      giveBackAttachments(images, documents);
       return;
     }
     const updatedChat = unwrapIpcResult(rawResult, 'Unable to send message.');
@@ -12944,8 +12950,11 @@ window.addEventListener('blur', () => {
 // What another window's turn left this one behind on: its rows are in the store. Read
 // when no reply is active here, since a full load redraws the view (see refreshChatListOnly).
 const watchedRuns = new Set();
+// Chats whose turn began before this window came, so it never saw the turn's start.
+const adoptedRuns = new Set();
 let chatUpdatedDuringReply = false;
 function afterReplyEnded(chatId) {
+  adoptedRuns.delete(chatId);
   const watched = watchedRuns.delete(chatId);
   if (!watched && !chatUpdatedDuringReply) return;
   if (appState.activeResponses.size > 0) {
@@ -12954,6 +12963,37 @@ function afterReplyEnded(chatId) {
   }
   chatUpdatedDuringReply = false;
   loadChats().catch((err) => chatLog.warn(`Chat reload failed: ${err.message}`));
+}
+
+// A window that comes to a chat part way through a turn (remote window plan R-RW-8):
+// it shows the chat as running, Stop in place of Send, and reads the rows when the turn
+// ends. Back from a drop, a reply it was showing may have ended while it was away, and
+// its end was never heard; the load before this has emptied any stream it was drawing.
+async function syncRunningChats({ reconnected = false } = {}) {
+  let answer;
+  try {
+    answer = await window.electron.chat.running();
+  } catch (err) {
+    chatLog.warn(`reading the running chats failed: ${err.message}`);
+    return;
+  }
+  if (answer?.ok !== true || !Array.isArray(answer.chatIds)) return;
+  const running = new Set(answer.chatIds);
+  for (const chatId of running) {
+    if (appState.activeResponses.has(chatId)) {
+      if (reconnected) watchedRuns.add(chatId);
+      continue;
+    }
+    adoptedRuns.add(chatId);
+    watchedRuns.add(chatId);
+    setResponseActive(true, chatId);
+  }
+  for (const chatId of reconnected ? [...appState.activeResponses] : [...adoptedRuns]) {
+    if (running.has(chatId)) continue;
+    watchedRuns.add(chatId);
+    setResponseActive(false, chatId);
+    afterReplyEnded(chatId);
+  }
 }
 
 unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, responseId }) => {
@@ -13312,6 +13352,7 @@ unsubscribeHandlers.push(window.electron.agent.onAskUser(({ requestId, question 
 
 // Listen for chat updates from Telegram bridge or other sources
 unsubscribeHandlers.push(window.electron.chat.onChatUpdated(async () => {
+  if (adoptedRuns.size > 0) await syncRunningChats();
   // A full load empties the view, and a reply streaming here with it: the list now,
   // the rest when the reply ends (afterReplyEnded).
   if (appState.activeResponses.size > 0) {
@@ -14503,7 +14544,7 @@ async function exportAsMarkdown() {
   emptyState.appendChild(card);
 })();
 
-loadChats();
+loadChats().then(() => syncRunningChats()).catch((err) => chatLog.warn(`Chat load failed: ${err.message}`));
 loadSettings();
 renderAgentModeButton();
 renderHistoryToggleButton();
@@ -15173,7 +15214,7 @@ async function refreshServiceStatus() {
   await refreshSetupView(status);
   const conn = status.connection ? status.connection.status : null;
   if (conn === 'connected' && serviceLastConnection && serviceLastConnection !== 'connected') {
-    loadChats();
+    loadChats().then(() => syncRunningChats({ reconnected: true })).catch((err) => chatLog.warn(`Chat load failed: ${err.message}`));
     // What the panes said with the node down is over; a form open in the drawer is left alone.
     if (document.getElementById('settings-drawer')?.hidden) loadSettings();
   }

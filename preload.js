@@ -406,6 +406,7 @@ contextBridge.exposeInMainWorld(
   {
     chat: {
       load: () => ipcRenderer.invoke('chat:load'),
+      running: () => ipcRenderer.invoke('chat:running'),
       get: (chatId) => {
         validateString(chatId, 'chatId');
         return ipcRenderer.invoke('chat:get', { chatId });

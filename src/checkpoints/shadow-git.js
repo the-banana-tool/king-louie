@@ -77,6 +77,13 @@ function projectKey(workdir) {
   return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
 
+// What a checkpoint id is. Anything else could reach git as an option:
+// --output=x would create or truncate a file.
+const COMMIT_ID = /^[0-9a-f]{40}$/;
+function assertCommitId(commit) {
+  if (typeof commit !== 'string' || !COMMIT_ID.test(commit)) throw new Error('Not a checkpoint id.');
+}
+
 class ShadowGit {
   /**
    * @param {object} options
@@ -288,6 +295,7 @@ class ShadowGit {
    * survive the restore.
    */
   async restore(workdir, commit, { key = projectKey(workdir) } = {}) {
+    assertCommitId(commit);
     await this.init();
     const opts = { workdir, key };
 
@@ -322,6 +330,8 @@ class ShadowGit {
 
   /** Files changed between two snapshots (or a snapshot and its parent). */
   async diffNames(commit, base = null) {
+    assertCommitId(commit);
+    if (base !== null) assertCommitId(base);
     const args = base
       ? ['diff', '--name-status', base, commit]
       : ['diff', '--name-status', `${commit}^`, commit];

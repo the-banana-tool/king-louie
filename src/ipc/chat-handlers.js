@@ -22,6 +22,7 @@ const { offerCaseNudge } = require('../cases/case-nudge');
 const { egressPolicy } = require('../models/egress');
 const { createPrivateMark } = require('./private-mark');
 const { localDesktopDeviceId, isRemoteWindowEvent } = require('../core/origin');
+const { readScreenshot } = require('../browser/screenshot-store');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -414,6 +415,21 @@ function registerChatHandlers(ipcMain, context = {}) {
     const dir = result.filePaths[0];
     return { canceled: false, chat: patchChat(chatId, { workingDirectory: dir, updatedAt: new Date().toISOString() }) };
   }));
+
+  // Which chats have a turn under way, for a window that comes to them part way
+  // through one (remote window plan R-RW-8): it missed the turn's start.
+  ipcMain.handle(IPC.CHAT_RUNNING, wrapHandler(IPC.CHAT_RUNNING, async () => ({
+    ok: true,
+    chatIds: historyStatus().available
+      ? listChats({ messages: false }).map((chat) => chat.id).filter((id) => context.isChatRunning(id))
+      : []
+  })));
+
+  // A screenshot's bytes, by name, for a window that cannot open the node's files
+  // (remote window plan R-RW-19).
+  ipcMain.handle(IPC.CHAT_READ_SCREENSHOT, wrapHandler(IPC.CHAT_READ_SCREENSHOT, async (_event, payload) => (
+    readScreenshot(payload && typeof payload === 'object' ? payload.path : null)
+  )));
 
   ipcMain.handle(IPC.CHAT_ADD_MESSAGE, wrapHandler(IPC.CHAT_ADD_MESSAGE, async (event, payload = {}) => {
     const { chatId, sender, text, ...metadata } = payload;

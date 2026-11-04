@@ -813,8 +813,9 @@ describe('a real core behind several windows', () => {
     const execute = { t: 'invoke', id: 1, channel: 'tool:execute', args: [{ toolName: PROBE_TOOL, parameters: {} }] };
 
     const started = Date.now();
+    // No phone on this node: a remote call is refused at the dispatcher, before any tool.
     await server.dispatcher.handleFrame(remote, execute);
-    assert.strictEqual(sent.find((f) => f.id === 1).value.data.deniedBy, 'user');
+    assert.strictEqual(sent.find((f) => f.id === 1).value.code, 'NO_PHONE');
     assert.ok(!sent.some((f) => f.channel === 'tool:approvalRequired'));
     assert.deepStrictEqual(A.events('tool:approvalRequired'), []);
     assert.strictEqual(pending.size, 0);

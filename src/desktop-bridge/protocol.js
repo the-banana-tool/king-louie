@@ -150,7 +150,12 @@ const MESSAGES = Object.freeze({
   PATH_NOT_ACCESSIBLE: (account, target) => `The service runs as ${account || 'its own account'} and cannot read ${target}. Grant that account access or pick another folder.`,
   LOCKED_OUT: 'Too many failed handshakes from this desktop; try again in a minute.',
   BAD_SIGNATURE: "The service rejected this desktop's signature.",
-  MALFORMED: 'The desktop bridge handshake failed.'
+  MALFORMED: 'The desktop bridge handshake failed.',
+  REMOTE_LOCAL_ONLY: 'Not available from a remote window.',
+  REMOTE_PRESS: 'Answer on your phone.',
+  NO_PHONE: 'No phone can approve this on the node. Nothing ran.',
+  PHONE_DENIED: 'Not approved on the phone. Nothing ran.',
+  REMOTE_ARGS_INVALID: 'That request cannot be signed. Nothing ran.'
 });
 
 module.exports = {

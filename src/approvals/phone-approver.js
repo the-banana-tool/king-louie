@@ -401,6 +401,8 @@ class PhoneApprover {
       // request was first signed.
       currentAction: () => toolAction(toolName, parameters, meta.workingDirectory || null, meta.cardNote)
     });
+    // A caller that must name the approval (the bridge's phone gate) reads it here.
+    if (hasMetadata && outcome.request_id) metadata.request_id = outcome.request_id;
     switch (outcome.decision) {
       case 'approve':
         return true;

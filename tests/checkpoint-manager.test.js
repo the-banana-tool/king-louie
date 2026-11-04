@@ -20,6 +20,29 @@ try {
 
 const skip = gitAvailable ? false : 'git is not installed';
 
+describe('ShadowGit checkpoint ids', { skip }, () => {
+  it('only 40 hex reaches git: an option never does, for a local event or a remote one', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-checkpoint-id-'));
+    const workdir = path.join(base, 'project');
+    fs.mkdirSync(workdir);
+    const git = new ShadowGit({ rootDir: path.join(base, 'checkpoints') });
+    const ran = [];
+    const realRun = git._run.bind(git);
+    git._run = (args, opts) => { ran.push(args[0]); return realRun(args, opts); };
+    try {
+      for (const bad of ['--output=written.txt', '--output=x', 'HEAD', 'abc123', 'A'.repeat(40), `${'a'.repeat(40)}\n`, '', null, undefined, 7]) {
+        await assert.rejects(git.restore(workdir, bad), /Not a checkpoint id/, String(bad));
+        await assert.rejects(git.diffNames(bad), /Not a checkpoint id/, String(bad));
+      }
+      await assert.rejects(git.diffNames('a'.repeat(40), '--output=written.txt'), /Not a checkpoint id/);
+      assert.deepStrictEqual(ran, []);
+      assert.deepStrictEqual(fs.readdirSync(workdir), []);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('CheckpointManager', { skip }, () => {
   let root;      // checkpoint store
   let workdir;   // simulated user project

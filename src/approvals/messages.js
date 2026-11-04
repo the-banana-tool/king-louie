@@ -99,18 +99,24 @@ function cloneJson(value) {
   }
 }
 
+// The pseudo-tool of a remote window's channel call (remote window plan R-RW-12).
+// Its card is the host's own line, with no parameters in it: they may be 64 KiB.
+const WINDOW_TOOL = 'Window';
+
 // `note` is host-written and comes first, so a cut never takes it.
 function toolAction(toolName, params, cwd, note = null) {
   // Required here, like runbook-engine in runbookAction, so a module that
   // only verifies envelopes (the front door) never loads src/execution/.
   const { formatToolPattern } = require('../execution/tool-patterns');
   const cloned = cloneJson(params === undefined || params === null ? {} : params);
+  const pattern = () => formatToolPattern(toolName, cloned);
+  const summary = toolName === WINDOW_TOOL && note ? note : (note ? `${note}: ${pattern()}` : pattern());
   return {
     kind: 'tool',
     name: String(toolName),
     params: cloned,
     cwd: cwd === undefined || cwd === null ? null : String(cwd),
-    summary: cutSummary(note ? `${note}: ${formatToolPattern(toolName, cloned)}` : formatToolPattern(toolName, cloned))
+    summary: cutSummary(summary)
   };
 }
 
@@ -510,6 +516,7 @@ module.exports = {
   randomNonce,
   clampTtl,
   cutSummary,
+  WINDOW_TOOL,
   toolAction,
   runbookAction,
   envelopeAction,
