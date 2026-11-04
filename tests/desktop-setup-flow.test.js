@@ -507,7 +507,7 @@ describe('describeSetup: migrate', () => {
     assert.ok(all.includes('Case busy-lot: it has changes not committed'), all);
     assert.match(all, /2 files/);
     assert.ok(all.includes(MARK));
-    assert.match(all, /vault site-login/);
+    assert.match(all, /Vault entry site-login/);
     assert.ok(ids(m).includes('migrationApply'));
   });
 
@@ -607,11 +607,11 @@ describe('describeSetup: migrate', () => {
     }));
     assert.strictEqual(m.error.code, 'MIGRATION_UNVERIFIED');
     const all = m.lines.join('\n');
-    assert.match(all, /chat c-1/);
+    assert.match(all, /Chat c-1/);
     assert.ok(all.includes(MARK));
     assert.match(all, /Restart the node\./);
-    assert.match(all, /case lot: look at it/);
-    assert.match(all, /vault k/);
+    assert.match(all, /Case lot: look at it/);
+    assert.match(all, /Vault entry k/);
     assert.deepStrictEqual(ids(m), ['migrationPlan', 'setupLater']);
     assert.strictEqual(m.actions[0].label, 'Plan the move again');
   });
@@ -656,8 +656,8 @@ describe('describeSetup: after the move, what stayed is on screen up to Done', (
       const all = m.lines.join('\n');
       assert.match(all, /2026-11-04/);
       assert.ok(all.includes(MARKER.backupDir));
-      assert.match(all, /case other-lot: already on the node/);
-      assert.match(all, /vault site-login/);
+      assert.match(all, /Case other-lot: already on the node/);
+      assert.match(all, /Vault entry site-login/);
       assert.ok(all.includes('1 private chat stays private.'));
       assert.ok(all.includes('Browser profiles'));
       assert.ok(all.includes('Cron jobs were imported disabled.'), 'the notes outlast a relaunch');
@@ -890,5 +890,35 @@ describe('describeSetup: what the window draws at the form steps', () => {
   it('another refusal brings no such press', () => {
     const m = describeSetup(attachedUp({ userProfileDefault: true, setupError: { code: 'X', error: 'no' } }));
     assert.deepStrictEqual(ids(m), ['setupFinish']);
+  });
+});
+
+describe('every plan category has the owner\'s words', () => {
+  const { CATEGORY_ORDER } = require('../src/migration/desktop-import');
+  const { categoryWord } = require('../src/desktop-bridge/setup-flow');
+
+  it('each one, both forms, and none is the code', () => {
+    for (const category of CATEGORY_ORDER) {
+      for (const many of [true, false]) {
+        const word = categoryWord(category, many);
+        assert.notStrictEqual(word, category, category);
+        assert.match(word, /^[A-Z][a-z]/, `${category}: ${word}`);
+      }
+    }
+  });
+
+  it('the screen shows them in the counts and in what is left behind', () => {
+    const items = CATEGORY_ORDER.map((category) => ({ category, key: `k-${category}`, action: 'new', note: null, targetKey: null }));
+    const answer = planAnswer({ plan: { ...planAnswer().plan, items }, leftBehind: { needsAttention: [{ category: 'allowedDirectory', key: 'C:\\d', note: 'n' }], secrets: [{ category: 'providerToken', key: 'anthropic', note: 'n' }] } });
+    const shownText = text(describeSetup(attachedUp({ oldProfile: OLD, migrationPlan: answer })));
+    for (const raw of ['providerToken', 'alwaysApprove', 'allowedDirectory', 'userProfile', 'permissionRule', 'channelAllowlist', 'anthropicOAuth']) {
+      assert.ok(!new RegExp(`${raw}:|${raw} `).test(shownText), `${raw} shows raw: ${shownText}`);
+    }
+    assert.match(shownText, /Provider key anthropic/);
+    assert.match(shownText, /Provider keys: 1 new/);
+  });
+
+  it('something that is no category is plain text, never a table lookup', () => {
+    assert.strictEqual(categoryWord('constructor', true), 'constructor');
   });
 });

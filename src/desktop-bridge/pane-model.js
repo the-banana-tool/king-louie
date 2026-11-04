@@ -356,15 +356,43 @@ function describeServiceCommand(status) {
   return { command: p.command, line: `Run this on the service to finish removing this desktop: ${p.command}` };
 }
 
+// Every category a plan can name (CATEGORY_ORDER in desktop-import.js, which this
+// module cannot load: the preload loads it; a test holds the two together), and what
+// the move's other lines file under. Many, then one.
+const CATEGORY_WORDS = {
+  settings: ['Settings', 'Setting'],
+  userProfile: ['Your profile', 'Your profile'],
+  permissionRule: ['Permission rules', 'Permission rule'],
+  alwaysApprove: ['Tools that never ask', 'Tool that never asks'],
+  allowedDirectory: ['Allowed folders', 'Allowed folder'],
+  chat: ['Chats', 'Chat'],
+  memory: ['Memories', 'Memory'],
+  cron: ['Scheduled jobs', 'Scheduled job'],
+  case: ['Cases', 'Case'],
+  providerToken: ['Provider keys', 'Provider key'],
+  searchKey: ['Search keys', 'Search key'],
+  imageKey: ['Image keys', 'Image key'],
+  vault: ['Vault entries', 'Vault entry'],
+  anthropicOAuth: ['Anthropic sign-in', 'Anthropic sign-in'],
+  channelToken: ['Bot tokens', 'Bot token'],
+  channelAllowlist: ['Who may reach each bot', 'Who may reach this bot'],
+  excluded: ['Other things', 'Other'],
+  source: ['Profile files', 'Profile file']
+};
+const categoryWord = (category, many = true) => {
+  const words = typeof category === 'string' && Object.hasOwn(CATEGORY_WORDS, category) ? CATEGORY_WORDS[category] : null;
+  return words ? words[many ? 0 : 1] : plain(category);
+};
+
 function describeImportReport(report = {}) {
   const lines = [];
   const counts = report.counts || {};
   lines.push(Object.entries(counts).filter(([, n]) => n).map(([action, n]) => `${action}: ${n}`).join(', '));
-  for (const f of report.failures || []) lines.push(`Failed: ${f.category} ${f.key} — ${f.error}`);
-  for (const f of report.sendFailures || []) lines.push(`Not sent: ${f.category} ${f.key} — ${f.error}`);
-  for (const s of report.skipped || []) lines.push(`Not read: ${s.category} ${s.key} — ${s.error}`);
-  if ((report.secretsMissing || []).length) lines.push(`Secrets that did not arrive: ${report.secretsMissing.map((s) => `${s.category} ${s.key}`).join(', ')}`);
-  for (const a of report.attention || []) lines.push(`Needs attention: ${a.category} ${a.key} — ${a.note}`);
+  for (const f of report.failures || []) lines.push(`Failed: ${categoryWord(f.category, false)} ${f.key} — ${f.error}`);
+  for (const f of report.sendFailures || []) lines.push(`Not sent: ${categoryWord(f.category, false)} ${f.key} — ${f.error}`);
+  for (const s of report.skipped || []) lines.push(`Not read: ${categoryWord(s.category, false)} ${s.key} — ${s.error}`);
+  if ((report.secretsMissing || []).length) lines.push(`Secrets that did not arrive: ${report.secretsMissing.map((s) => `${categoryWord(s.category, false)} ${s.key}`).join(', ')}`);
+  for (const a of report.attention || []) lines.push(`Needs attention: ${categoryWord(a.category, false)} ${a.key} — ${a.note}`);
   for (const note of report.notes || []) lines.push(note);
   return lines;
 }
@@ -402,6 +430,7 @@ function paneShapeChanged(prevModel, nextModel) {
 }
 
 module.exports = {
+  categoryWord,
   describeServicePane, describeApprovals, describeImportReport, describeServiceCommand,
   describeAttachedBanner, describeInstallPreview, describeInstallResult, describeLocalInferenceBlock,
   decideDetachClick, paneShapeChanged, DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE,

@@ -88,8 +88,8 @@ describe('describeServicePane', () => {
     const lines = describeImportReport({ counts: { new: 3, 'skip-present': 1, failed: 1 }, failures: [{ category: 'vault', key: 'github', error: 'Encryption unavailable in the service.' }], secretsMissing: [{ category: 'vault', key: 'github' }], attention: [], notes: ['1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'], skipped: [] });
     assert.deepStrictEqual(lines, [
       'new: 3, skip-present: 1, failed: 1',
-      'Failed: vault github — Encryption unavailable in the service.',
-      'Secrets that did not arrive: vault github',
+      'Failed: Vault entry github — Encryption unavailable in the service.',
+      'Secrets that did not arrive: Vault entry github',
       '1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'
     ]);
     assert.strictEqual(UNAVAILABLE_TAB_NOTICE, 'Managed by the local service; not available while attached.');

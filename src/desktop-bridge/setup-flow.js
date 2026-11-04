@@ -18,7 +18,7 @@
 // `shown`. A press that cannot help is not offered: a state with no way forward
 // says what the owner can do, and Not now is only ever a press, never a fallback.
 const {
-  plain, describeServicePane, describeImportReport, disconnectedRow, refusalLine,
+  plain, categoryWord, describeServicePane, describeImportReport, disconnectedRow, refusalLine,
   nodeHosting, NODE_LINES, PERSONAL_PAIR_WARNING, RESTART_DUE_LINE, RESTART_DUE_ACTIONS
 } = require('./pane-model');
 
@@ -80,7 +80,6 @@ const ACTION_WORDS = {
   'needs-attention': 'needs attention',
   'needs-desktop': 'not readable here'
 };
-const CATEGORY_WORDS = { chat: 'Chats', case: 'Cases' };
 
 // A code, an action or a task read from a node or a store is data: only a table's
 // own key counts, so `constructor` is a word and not a function.
@@ -310,8 +309,8 @@ function startStep(s) {
 function leftBehindLines(left) {
   const l = left || {};
   return [
-    ...list(l.needsAttention).map((a) => `Needs attention: ${plain(a.category)} ${plain(a.key)}${a.note ? `: ${long(a.note)}` : ''}`),
-    ...list(l.secrets).map((a) => `Not moved, enter it again on the node: ${plain(a.category)} ${plain(a.key)}${a.note ? `: ${long(a.note)}` : ''}`)
+    ...list(l.needsAttention).map((a) => `Needs attention: ${categoryWord(a.category, false)} ${plain(a.key)}${a.note ? `: ${long(a.note)}` : ''}`),
+    ...list(l.secrets).map((a) => `Not moved, enter it again on the node: ${categoryWord(a.category, false)} ${plain(a.key)}${a.note ? `: ${long(a.note)}` : ''}`)
   ];
 }
 
@@ -333,7 +332,7 @@ function categoryLines(items) {
     row[item.action] = (row[item.action] || 0) + 1;
     byCategory.set(item.category, row);
   }
-  return [...byCategory].map(([category, row]) => `${own(CATEGORY_WORDS, category) || plain(category)}: ${countWords(row)}`);
+  return [...byCategory].map(([category, row]) => `${categoryWord(category)}: ${countWords(row)}`);
 }
 
 // What a planned item says that is on screen no other way: each different note
@@ -378,7 +377,7 @@ function customRootRefusal(source, pressWord, profileDir) {
 function moveFailure(answer) {
   const lines = [];
   if (answer.backupDir) lines.push(`The unfinished backup was left at ${long(answer.backupDir)} so you can look at it.`);
-  for (const m of list(answer.verified && answer.verified.missing)) lines.push(`Not verified: ${plain(m.category)} ${plain(m.key)}: ${long(m.why)}`);
+  for (const m of list(answer.verified && answer.verified.missing)) lines.push(`Not verified: ${categoryWord(m.category, false)} ${plain(m.key)}: ${long(m.why)}`);
   if (answer.report) lines.push(...describeImportReport(answer.report).filter(Boolean).map(long));
   if (isCount(answer.refusedFiles) && answer.refusedFiles > 0) lines.push(refusedFilesLine(answer.refusedFiles));
   lines.push(...leftBehindLines(answer.leftBehind));
@@ -409,7 +408,7 @@ function planScreen(answer, profileDir, old) {
   lines.push('Stays on this computer:', ...list(answer.staysBehind).map(long));
   const custom = customRootRefusal(b, 'Check again', profileDir) || customRootRefusal(old, 'Check again', profileDir);
   const held = list(answer.heldCases);
-  for (const h2 of held) lines.push(`Held back: ${plain(h2.category)} ${plain(h2.key)}${h2.note ? `: ${long(h2.note)}` : ''}`);
+  for (const h2 of held) lines.push(`Held back: ${categoryWord(h2.category, false)} ${plain(h2.key)}${h2.note ? `: ${long(h2.note)}` : ''}`);
   if (custom) return { lines, error: custom, actions: [{ id: 'migrationPlan', label: 'Check again' }] };
   if (held.length) {
     return {
@@ -573,4 +572,4 @@ function describeSetup(status) {
   });
 }
 
-module.exports = { SETUP_STEPS, nextSetupStep, describeSetup, setupFacts };
+module.exports = { SETUP_STEPS, nextSetupStep, describeSetup, setupFacts, categoryWord };
