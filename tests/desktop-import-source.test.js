@@ -79,7 +79,8 @@ describe('readDesktopSource', () => {
     assert.deepStrictEqual(inv.permissionRules, [{ tool: 'Bash', pattern: 'git *', action: 'allow' }]);
     assert.deepStrictEqual(inv.memory, ['m-1']);
     assert.deepStrictEqual(inv.cron, [{ id: 'cron_1', name: 'daily' }]);
-    assert.deepStrictEqual(inv.cases, [{ dir: 'lakeside-lot', files: 2, bytes: 24 }]);
+    // This fixture's case.yaml names no id, so its mark cannot be read: private.
+    assert.deepStrictEqual(inv.cases, [{ dir: 'lakeside-lot', files: 2, bytes: 24, head: null, private: true }]);
     assert.strictEqual(inv.secrets, 'needs-desktop');
     assert.ok(inv.excluded.includes('mesh.identity'));
     assert.ok(!JSON.stringify(inv).includes('ENC-'), 'no secret values in the inventory');

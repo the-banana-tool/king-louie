@@ -220,6 +220,13 @@ describe('desktop state: the migration marker and the setup (attach stage 2 §6.
     assert.deepStrictEqual(state.migration, marker());
   });
 
+  it('the marker keeps what was left behind, when told', () => {
+    const state = openState();
+    const leftBehind = { needsAttention: [{ category: 'case', key: 'x', note: 'n' }], secrets: [] };
+    state.setMigration({ ...marker(), leftBehind });
+    assert.deepStrictEqual(state.migration.leftBehind, leftBehind);
+  });
+
   it('setSetup round-trips and needs completedAt', () => {
     const state = openState();
     state.setSetup({ completedAt: '2026-11-04T10:05:00.000Z' });

@@ -11,7 +11,9 @@
 // what an interrupted try left as skip-present: a chat there with at least the
 // source's messages (the node may have gone on), a case in the list. Items the
 // plan says need attention were shown to the owner before the press and are
-// not missing, except a case an earlier run landed incomplete.
+// not missing, except a case an earlier run landed incomplete or one on the node
+// that does not match the source. What is private on the desktop must be private
+// on the node, moved or already there: a mark lost would let a hosted model read it.
 const { shown } = require('../service/commands/io');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
@@ -21,15 +23,36 @@ const lastSegment = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const reasonOf = (err) => (err && (err.message || err.code)) || 'no answer';
 
-// The source's message count on each chat item: what the verification compares
-// the node's with. Plans carry ids and keys only, so the desktop adds this.
-function withSourceCounts(plan, source) {
-  const counted = (item) => {
-    if (item.category !== 'chat') return item;
-    const chat = source.getValue('chat', item.key);
-    return chat && Array.isArray(chat.messages) ? { ...item, messageCount: chat.messages.length } : item;
+const counted = (n, word) => `${n} private ${word}${n === 1 ? '' : 's'}`;
+function privateNote(chats, cases) {
+  if (!chats && !cases) return null;
+  const what = [chats ? counted(chats, 'chat') : null, cases ? counted(cases, 'case') : null].filter(Boolean).join(' and ');
+  return `${what} move and stay private. They answer only on a local model: until this node has a local server, which goes in the localInference block of its admin service.json, they answer PRIVATE_NO_LOCAL_MODEL.`;
+}
+
+// What only the desktop knows, on each item the verification compares with the
+// node: a chat's message count and private mark, a case's mark. A chat that
+// cannot be read counts as private. plan.private is what the owner is told.
+function withSourceFacts(plan, source) {
+  const caseEntries = new Map(arr(source.inventory && source.inventory.cases).map((c) => [c && c.dir, c]));
+  const facts = (item) => {
+    if (item.category === 'chat') {
+      const chat = source.getValue('chat', item.key);
+      if (!chat) return { ...item, private: true };
+      return {
+        ...item,
+        ...(Array.isArray(chat.messages) ? { messageCount: chat.messages.length } : {}),
+        ...(chat.private === true ? { private: true } : {})
+      };
+    }
+    const entry = item.category === 'case' ? caseEntries.get(item.key) : null;
+    return entry && entry.private === true ? { ...item, private: true } : item;
   };
-  return { ...plan, items: arr(plan && plan.items).map(counted) };
+  const items = arr(plan && plan.items).map(facts);
+  const moving = (category) => items.filter((i) => i.category === category && i.private === true && CHECKED_ACTIONS.has(i.action)).length;
+  const chats = moving('chat');
+  const cases = moving('case');
+  return { ...plan, items, private: { chats, cases, note: privateNote(chats, cases) } };
 }
 
 function reportProblems(report, note) {
@@ -76,6 +99,8 @@ async function checkChats(items, invoke, note) {
       note('chat', item.key, 'the node did not say how many messages it holds');
     } else if (WRITE_ACTIONS.has(item.action) ? onNode.messageCount !== item.messageCount : onNode.messageCount < item.messageCount) {
       note('chat', item.key, `the node holds ${onNode.messageCount} messages where the desktop has ${item.messageCount}`);
+    } else if (item.private === true && onNode.private !== true) {
+      note('chat', item.key, 'it is private on the desktop and not private on the node; mark it private on the node and try again');
     }
   }
 }
@@ -92,15 +117,17 @@ async function checkCases(items, invoke, note) {
     note('case', 'case:list', (list && list.error) || 'the node has no case list to read');
     return;
   }
-  const dirs = new Set(list.cases.filter(Boolean).map((c) => lastSegment(c.dir)));
+  const dirs = new Map(list.cases.filter(Boolean).map((c) => [lastSegment(c.dir), c]));
   for (const item of items) {
-    if (!dirs.has(item.key)) note('case', item.key, 'it is not on the node');
+    const onNode = dirs.get(item.key);
+    if (!onNode) note('case', item.key, 'it is not on the node');
+    else if (item.private === true && onNode.private !== true) note('case', item.key, 'it is private on the desktop and not private on the node; mark it private on the node and try again');
   }
 }
 
 // { ok: true, checked: { chats, cases } } or { ok: false, code:
 // 'MIGRATION_UNVERIFIED', missing: [{ category, key, why }] }, every string
-// through shown. `plan`'s chat items carry messageCount (withSourceCounts).
+// through shown. `plan`'s chat items carry messageCount (withSourceFacts).
 // Never throws.
 async function verifyMigration({ plan, report, invoke }) {
   const missing = [];
@@ -120,4 +147,4 @@ async function verifyMigration({ plan, report, invoke }) {
   return { ok: true, checked: { chats: chats.length, cases: cases.length } };
 }
 
-module.exports = { verifyMigration, withSourceCounts };
+module.exports = { verifyMigration, withSourceFacts };

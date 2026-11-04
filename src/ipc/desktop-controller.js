@@ -13,7 +13,8 @@ const { MESSAGES } = require('../desktop-bridge/protocol');
 const { unavailableTabsFor } = require('../desktop-bridge/allowlist');
 const { loadDesktopSource, planImport, applyImport } = require('./desktop-export');
 const { detectOldProfile, backupProfile, backupDirFor, readBackupManifest } = require('../migration/profile-backup');
-const { verifyMigration, withSourceCounts } = require('../migration/migration-verify');
+const { verifyMigration, withSourceFacts } = require('../migration/migration-verify');
+const { SECRET_CATEGORIES } = require('../migration/desktop-import');
 const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
 const { shown } = require('../service/commands/io');
 const { STANDALONE_FLAG, STANDALONE_ONCE_FLAG: STANDALONE_ONCE } = require('../desktop-bridge/launch-mode');
@@ -978,6 +979,29 @@ function createDesktopController({
     notes: Array.isArray(report.notes) ? report.notes.map((n) => shown(n, 400)) : []
   });
 
+  // What the owner must still see, as plain data: secrets that did not come, and
+  // whatever the plan, the source or the landing says needs attention. Each once.
+  function leftBehindOf({ plan, source, report = null }) {
+    const items = Array.isArray(plan.items) ? plan.items : [];
+    const entry = ({ category, key, note }) => shownEntry({ category, key, note: note || null });
+    const once = (list) => {
+      const seen = new Set();
+      return list.filter(({ category, key }) => {
+        const id = `${category}:${key}`;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      }).map(entry);
+    };
+    const isSecret = (i) => SECRET_CATEGORIES.has(i.category);
+    const open = items.filter((i) => i.action === 'needs-attention' || i.action === 'needs-desktop');
+    const reported = (key) => (report && Array.isArray(report[key]) ? report[key].filter(Boolean) : []);
+    return {
+      needsAttention: once([...open.filter((i) => !isSecret(i)), ...reported('attention').filter((i) => !isSecret(i)), ...(source.attention || [])]),
+      secrets: once([...open.filter(isSecret), ...reported('secretsMissing'), ...reported('attention').filter(isSecret)])
+    };
+  }
+
   function migrationPlan() {
     return runMove('plan', async () => {
       if (state.migration) return profileMigrated();
@@ -998,7 +1022,7 @@ function createDesktopController({
         const problem = sourceProblem(source, backup);
         if (problem) return moveSourceRefusal(`The old profile did not read whole, so nothing was moved: ${problem}`);
         closeImportSession();
-        const plan = withSourceCounts(await planImport({ client: target.client, source }), source);
+        const plan = withSourceFacts(await planImport({ client: target.client, source }), source);
         importSession = {
           client: target.client,
           temporary: false,
@@ -1018,7 +1042,8 @@ function createDesktopController({
           },
           plan: { ...plan, items: plan.items.map(shownEntry) },
           attention: shownEntries(source.attention),
-          staysBehind: staysBehindLines(plan)
+          staysBehind: staysBehindLines(plan),
+          leftBehind: leftBehindOf({ plan, source })
         };
       } catch (err) {
         closeImportSession();
@@ -1058,12 +1083,14 @@ function createDesktopController({
           invoke: (channel, args = []) => session.client.invoke(channel, args)
         });
         const shownOut = shownReport(report);
+        const leftBehind = leftBehindOf({ plan: session.plan, source: session.source, report });
         if (!verified.ok) {
           return {
             ok: false,
             code: 'MIGRATION_UNVERIFIED',
             error: `${verified.missing.length} ${verified.missing.length === 1 ? 'item' : 'items'} could not be found on the node, so this profile was not marked as moved. Nothing was removed; try again.`,
             report: shownOut,
+            leftBehind,
             verified
           };
         }
@@ -1073,14 +1100,15 @@ function createDesktopController({
             backupDir: backup.dest,
             nodeDataDir: service.dataDir || null,
             nodeId: service.nodeId,
-            counts: { ...verified.checked, attention: Array.isArray(report.attention) ? report.attention.length : 0 }
+            counts: { ...verified.checked, attention: Array.isArray(report.attention) ? report.attention.length : 0 },
+            leftBehind
           });
         } catch (err) {
           log.warn(`the migration marker was not written: ${err.message}`);
-          return { ok: false, code: 'MIGRATION_MARK_FAILED', error: `The move is on the node, but this profile could not be marked as moved (${shown(err.message, 300)}). Try again.`, report: shownOut, verified };
+          return { ok: false, code: 'MIGRATION_MARK_FAILED', error: `The move is on the node, but this profile could not be marked as moved (${shown(err.message, 300)}). Try again.`, report: shownOut, leftBehind, verified };
         }
         log.info('this profile was moved into the node and verified', verified.checked);
-        return { ok: true, report: shownOut, verified };
+        return { ok: true, report: shownOut, leftBehind, verified };
       } catch (err) {
         return { ok: false, code: err.code || 'IMPORT_FAILED', error: shown(err.message, 600) };
       } finally {

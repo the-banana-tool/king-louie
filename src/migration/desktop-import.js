@@ -9,6 +9,7 @@ const { createLogger } = require('../logging');
 const { DEFAULT_SETTINGS, mergeSettings } = require('../core/settings');
 const { resolveCasesRoot } = require('../cases');
 const { initRepo, git } = require('../cases/git');
+const { parseCaseYaml } = require('../cases/case-store');
 const UserProfile = require('../telos/user-profile');
 const { writeFileAtomic } = require('../desktop-bridge/pairing');
 const { MESSAGES } = require('../desktop-bridge/protocol');
@@ -106,6 +107,8 @@ const ALLOWLIST_NOTE = 'who may reach this bot';
 const ALLOWLIST_LEFT_BEHIND = 'this node already has a list for this bot; the desktop\'s list was left behind';
 const profilesNotMoved = (n) => `your ${n} model ${n === 1 ? 'profile was' : 'profiles were'} not moved: this node's models were already set up, so they were left as they are; set the ${n === 1 ? 'profile' : 'profiles'} up again under Settings > Models`;
 const landedIncomplete = (dir) => `${dir} is on this node but an earlier import landed it incomplete, so it does not count as moved. Stop the node, remove that folder from its cases folder, and try again.`;
+const caseOnNodeDiffers = (dir) => `a folder named ${dir} is already on this node and is not this case as the desktop has it (its history or files differ), so it does not count as moved. Compare the two; to move the desktop's, stop the node, remove that folder from its cases folder, and try again.`;
+const LANDED_NO_RECORD = 'already on this node, its history and files as the desktop has them';
 const RESTART_NOTE = 'MCP servers, channel bots and hook choices that moved take effect when the node next starts.';
 
 class ImportError extends Error {
@@ -299,6 +302,20 @@ async function rebuildIndexFromHead(dir) {
     return null;
   } catch (err) {
     return String((err && err.message) || err).split(/\r?\n/)[0];
+  }
+}
+
+// Whether a case directory already on the node is the desktop's: the commit the
+// source's HEAD names is its HEAD or in its history (the node may have gone on),
+// and its tree is clean. Any doubt is a no.
+async function landedAsSource(dir, head) {
+  if (typeof head !== 'string' || !head) return false;
+  try {
+    const nodeHead = (await git(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).trim();
+    if (nodeHead !== head) await git(dir, ['merge-base', '--is-ancestor', head, nodeHead]);
+    return (await git(dir, ['status', '--porcelain'])).trim() === '';
+  } catch {
+    return false;
   }
 }
 
@@ -606,13 +623,21 @@ class DesktopImporter {
         add('case', dir, 'new');
         caseExpected.set(dir, {
           files: Number.isFinite(c.files) ? c.files : null,
-          bytes: Number.isFinite(c.bytes) ? c.bytes : null
+          bytes: Number.isFinite(c.bytes) ? c.bytes : null,
+          private: c.private === true
         });
       } else if (done('case', dir)?.incomplete) {
         add('case', dir, 'needs-attention', landedIncomplete(dir));
         items[items.length - 1].incomplete = true;
       } else if (done('case', dir)) add('case', dir, 'skip-present');
-      else add('case', dir, 'needs-attention', 'a case with this directory already exists on the service');
+      else if (!this.personal) add('case', dir, 'needs-attention', 'a case with this directory already exists on the service');
+      // A try that stopped after the rename and before the manifest, or a case
+      // moved by hand: what is there is compared with the source, never assumed.
+      else if (await landedAsSource(path.join(root, dir), c.head)) add('case', dir, 'skip-present', LANDED_NO_RECORD);
+      else {
+        add('case', dir, 'needs-attention', caseOnNodeDiffers(dir));
+        items[items.length - 1].incomplete = true;
+      }
     }
 
     const secretMode = inventory.secrets || 'included';
@@ -694,7 +719,7 @@ class DesktopImporter {
       try {
         const out = (await this.write(plan, item, entry.value)) || {};
         results.push(out.note ? { category, key, ok: true, note: out.note } : { category, key, ok: true });
-        if (category !== 'case') plan.results.set(k, { ok: true, note: out.note || null, attention: Boolean(out.attention), incomplete: Boolean(out.incomplete), record: out.record || null });
+        if (category !== 'case') plan.results.set(k, { ok: true, note: out.note || null, attention: Boolean(out.attention), incomplete: this.personal && Boolean(out.incomplete), record: out.record || null });
       } catch (err) {
         log.warn(`importing ${category}${SECRET_CATEGORIES.has(category) ? '' : ` ${key}`} failed: ${err.message}`);
         results.push({ category, key, ok: false, error: err.message });
@@ -941,12 +966,46 @@ class DesktopImporter {
     if (late) return late;
     // A copy keeps the source's message ids; the history store gives any id
     // it already holds a fresh one.
-    this.context.upsertChat(chat, { position: 'front' });
+    this.landChat(chat, Object.prototype.hasOwnProperty.call(value, 'private') && value.private !== false);
     return {
       note,
       attention: Boolean(note),
       record: { sourceUpdatedAt: value.updatedAt || null, targetKey: chat.id, targetUpdatedAt: chat.updatedAt || null }
     };
+  }
+
+  // A private chat lands and is marked in one transaction, so nothing can read
+  // or embed it in between, and a chat that cannot be marked does not land.
+  landChat(chat, isPrivate) {
+    if (!isPrivate) {
+      this.context.upsertChat(chat, { position: 'front' });
+      return;
+    }
+    const store = typeof this.context.getHistoryStore === 'function' ? this.context.getHistoryStore() : null;
+    if (!store || typeof store.transaction !== 'function') throw new ImportError('PRIVATE_MARK_FAILED', 'this chat is private and the history store here cannot mark it, so it was not imported');
+    store.transaction(() => {
+      this.context.upsertChat(chat, { position: 'front' });
+      store.markPrivate(chat.id);
+      const ref = store.chatRef(chat.id);
+      if (!ref || ref.private !== true) throw new ImportError('PRIVATE_MARK_FAILED', 'this chat is private and the mark did not hold, so it was not imported');
+    });
+  }
+
+  // A case the desktop holds as private: its case.yaml normally says so, as it
+  // came with the repository. One that does not (the key was lost and its chats
+  // were what made it private) is marked by the runtime. Null, or what failed.
+  async ensureCasePrivate(dest) {
+    try {
+      const meta = parseCaseYaml(fs.readFileSync(path.join(dest, 'case.yaml'), 'utf8'));
+      if (!meta) return 'its case.yaml names no case';
+      if (meta.private === true) return null;
+      const runtime = typeof this.context.getCaseRuntime === 'function' ? this.context.getCaseRuntime() : null;
+      if (!runtime) return 'no case runtime here can mark it';
+      await runtime.markPrivate(meta.id);
+      return null;
+    } catch (err) {
+      return String((err && err.message) || err).split(/\r?\n/)[0];
+    }
   }
 
   ensureRealDirs(root, dir) {
@@ -1139,6 +1198,8 @@ class DesktopImporter {
         const notes = [];
         if (short) notes.push(`received ${files.count} file(s)/${files.bytes} byte(s); the inventory listed ${expected.files ?? '?'} file(s)/${expected.bytes ?? '?'} byte(s) — the case may be incomplete`);
         if (headProblem) notes.push(`its git history does not read (${headProblem}) — the case may be incomplete`);
+        const markProblem = expected && expected.private ? await this.ensureCasePrivate(dest) : null;
+        if (markProblem) notes.push(`it is private on the desktop and could not be marked private here (${markProblem})`);
         // Fix round 4, ruling (c): names Windows can't store were skipped;
         // the rest of the case landed, and the owner is told which.
         if (files.unstorable && files.unstorable.size) {
@@ -1148,7 +1209,7 @@ class DesktopImporter {
           ok: true,
           attention: notes.length > 0,
           note: notes.length ? notes.join('; ') : null,
-          incomplete: this.personal && (short || Boolean(headProblem)),
+          incomplete: Boolean(markProblem) || (this.personal && (short || Boolean(headProblem))),
           record: { targetKey: dir }
         });
       } catch (err) {
@@ -1194,10 +1255,10 @@ class DesktopImporter {
       }
       if (r.attention) attention.push({ category: item.category, key: item.key, note: r.note });
       // Written, but not all of it: a retry must not read this as done.
-      if (this.personal && r.incomplete) incomplete.push({ category: item.category, key: item.key, note: r.note });
+      if (r.incomplete) incomplete.push({ category: item.category, key: item.key, note: r.note });
       if (item.category === 'cron') cronDisabled += 1;
       if (this.personal && (item.category === 'channelToken' || (item.category === 'settings' && ['channels', 'hooks', 'mcpServers'].includes(item.key)))) needsRestart = true;
-      manifest.items[k] = { at, result: 'ok', ...(r.record || {}), ...(this.personal && r.incomplete ? { incomplete: true } : {}) };
+      manifest.items[k] = { at, result: 'ok', ...(r.record || {}), ...(r.incomplete ? { incomplete: true } : {}) };
     }
     manifest.runs.push({ planId: plan.planId, at, source: plan.source });
     this.writeManifest(manifest);

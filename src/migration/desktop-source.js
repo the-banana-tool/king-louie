@@ -13,6 +13,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { parseCaseYaml } = require('../cases/case-store');
 const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS } = require('./desktop-import');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
@@ -249,16 +250,35 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     return null;
   };
 
+  // The private mark (local inference R-LI-10, kept through a move): a chat's
+  // own, its case's, and a case's from any chat of it. What cannot be read is
+  // private: a case.yaml that does not parse, and a chat naming a case when not
+  // every case could be read.
+  for (const c of chats) {
+    if (!Object.prototype.hasOwnProperty.call(c, 'private')) continue;
+    if (c.private === false) delete c.private;
+    else c.private = true;
+  }
+  const chatMarkedCases = new Set(chats.filter((c) => c.private === true && c.caseId).map((c) => String(c.caseId)));
+  const caseIds = new Map(); // case id -> private
+  let everyCaseRead = !casesRootSetting;
+
   const cases = [];
   if (!casesRootSetting) {
     const listed = reader.listDir('cases');
+    if (listed.refused.length) everyCaseRead = false;
     for (const r of listed.refused) attention.push({ category: 'case', key: r.relPath, note: r.reason });
     for (const dir of listed.dirs) {
       if (dir === '.index') continue; // cases stage 5: the cross-case index cache, not a case (M9)
       if (!CASE_DIR_RE.test(dir)) {
+        everyCaseRead = false;
         attention.push({ category: 'case', key: dir, note: 'not a valid case directory name; it was not copied' });
         continue;
       }
+      const mark = readCaseMark(reader, dir);
+      if (mark.id === null) everyCaseRead = false;
+      const casePrivate = mark.private || (mark.id !== null && chatMarkedCases.has(mark.id));
+      if (mark.id !== null) caseIds.set(mark.id, casePrivate || caseIds.get(mark.id) === true);
       const { files, refused } = reader.listFiles(path.join('cases', dir));
       for (const r of refused) attention.push({ category: 'case', key: `${dir}/${r.relPath}`, note: r.reason });
       const held = refusedCaseNote(files);
@@ -266,8 +286,13 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
         attention.push({ category: 'case', key: dir, note: held });
         continue;
       }
-      cases.push({ dir, files: files.length, bytes: files.reduce((n, f) => n + f.size, 0) });
+      cases.push({ dir, files: files.length, bytes: files.reduce((n, f) => n + f.size, 0), head: readCaseHead(reader, dir), ...(casePrivate ? { private: true } : {}) });
     }
+  }
+  for (const c of chats) {
+    if (!c.caseId || c.private === true) continue;
+    const known = caseIds.get(String(c.caseId));
+    if (known === true || (known === undefined && !everyCaseRead)) c.private = true;
   }
 
   const inventory = {
@@ -340,6 +365,49 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
   }
 
   return { installId, inventory, attention, getValue, caseFiles };
+}
+
+// A case's id and private mark from its case.yaml. A file that is missing or
+// does not parse gives no id and counts as private; a `private` that is not
+// exactly false is private (CaseRuntime#isPrivate).
+function readCaseMark(reader, dir) {
+  const unread = { id: null, private: true };
+  const r = reader.readFile(path.join('cases', dir, 'case.yaml'));
+  if (!r.ok) return unread;
+  let meta;
+  try {
+    meta = parseCaseYaml(r.data.toString('utf8'));
+  } catch {
+    return unread;
+  }
+  if (!meta) return unread;
+  return {
+    id: String(meta.id),
+    private: Object.prototype.hasOwnProperty.call(meta, 'private') && meta.private !== false
+  };
+}
+
+// The commit a case's HEAD names, from its own files, with no git and nothing
+// written into the old profile; null when there is none to read.
+const COMMIT_ID = /^[0-9a-f]{40,64}$/;
+function readCaseHead(reader, dir) {
+  const read = (rel) => {
+    const r = reader.readFile(path.join('cases', dir, '.git', rel));
+    return r.ok ? r.data.toString('utf8') : null;
+  };
+  const head = read('HEAD');
+  if (head === null) return null;
+  const text = head.trim();
+  if (COMMIT_ID.test(text)) return text;
+  const ref = /^ref: (\S+)$/.exec(text);
+  if (!ref || ref[1].split('/').includes('..')) return null;
+  const loose = read(ref[1]);
+  if (loose !== null) return COMMIT_ID.test(loose.trim()) ? loose.trim() : null;
+  for (const line of (read('packed-refs') || '').split(/\r?\n/)) {
+    const [id, name] = line.split(' ');
+    if (name === ref[1] && COMMIT_ID.test(id)) return id;
+  }
+  return null;
 }
 
 // Apply batches for the plan's write items. Secret values appear only here.

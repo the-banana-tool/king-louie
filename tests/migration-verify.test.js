@@ -12,7 +12,7 @@ const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { createDesktopScope } = require('../src/desktop-bridge/desktop-scope');
 const { checkPath } = require('../src/desktop-bridge/check-path');
 const { DesktopImporter, buildImportTargets } = require('../src/migration/desktop-import');
-const { verifyMigration, withSourceCounts } = require('../src/migration/migration-verify');
+const { verifyMigration, withSourceFacts } = require('../src/migration/migration-verify');
 const { CaseRuntime } = require('../src/cases/case-runtime');
 const { CaseStore } = require('../src/cases/case-store');
 const git = require('../src/cases/git');
@@ -195,9 +195,9 @@ describe('verifyMigration', () => {
     assert.ok(!out.missing[0].key.includes('\u202E'));
   });
 
-  it('withSourceCounts puts the source\'s count on each chat item and leaves the rest alone', () => {
+  it('withSourceFacts puts the source\'s count on each chat item and leaves the rest alone', () => {
     const plan = { planId: 'p', counts: {}, items: [chatItem('c1', undefined), caseItem('lot')] };
-    const out = withSourceCounts(plan, { getValue: (cat, id) => (cat === 'chat' && id === 'c1' ? { id, messages: [{}, {}] } : null) });
+    const out = withSourceFacts(plan, { getValue: (cat, id) => (cat === 'chat' && id === 'c1' ? { id, messages: [{}, {}] } : null) });
     assert.strictEqual(out.items[0].messageCount, 2);
     assert.strictEqual('messageCount' in out.items[1], false);
     assert.strictEqual(out.planId, 'p');
@@ -234,6 +234,8 @@ describe('the move over a real bridge', () => {
     fs.mkdirSync(userDataDir, { recursive: true });
     const seeded = HistoryStore.open(path.join(userDataDir, 'history.sqlite'));
     seedChat(seeded, { id: 'c1', title: 'Lakeside lot', messages: [{ sender: 'user', text: 'one' }, { sender: 'assistant', text: 'two' }, { sender: 'user', text: 'three' }] });
+    seedChat(seeded, { id: 'secret-1', title: 'Private', messages: [{ sender: 'user', text: 'hush' }] });
+    seeded.markPrivate('secret-1');
     seeded.close();
     fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify({ settings: {} }));
     const runtime = new CaseRuntime({ root: path.join(userDataDir, 'cases') });
@@ -273,16 +275,19 @@ describe('the move over a real bridge', () => {
 
       const planned = await controller.migrationPlan();
       assert.strictEqual(planned.ok, true, JSON.stringify(planned));
-      assert.deepStrictEqual(planned.backup.history, { chats: 1, messages: 3 });
+      assert.deepStrictEqual(planned.backup.history, { chats: 2, messages: 4 });
+      assert.strictEqual(planned.plan.private.chats, 1);
       assert.strictEqual(planned.plan.items.find((i) => i.category === 'chat').action, 'new');
       assert.strictEqual(planned.plan.items.find((i) => i.category === 'case').action, 'new');
       assert.doesNotMatch(planned.staysBehind.join('\n'), /bot tokens stay|hooks spawn|MCP servers spawn/, 'a personal node carries these');
 
       const out = await controller.migrationApply({ confirmed: true });
       assert.strictEqual(out.ok, true, JSON.stringify(out));
-      assert.deepStrictEqual(out.verified, { ok: true, checked: { chats: 1, cases: 1 } });
+      assert.deepStrictEqual(out.verified, { ok: true, checked: { chats: 2, cases: 1 } });
 
       assert.strictEqual(core.context.getChat('c1').messages.length, 3);
+      assert.strictEqual(core.context.getHistoryStore().chatRef('secret-1').private, true);
+      assert.strictEqual(core.context.getHistoryStore().chatRef('c1').private, false);
       const landed = path.join(nodeCases, path.basename(caseDir));
       assert.strictEqual((await git.git(landed, ['rev-parse', 'HEAD'])).trim(), sourceHead);
       assert.strictEqual((await git.git(landed, ['status', '--porcelain'])).trim(), '');
@@ -368,7 +373,7 @@ describe('verifyMigration against a real importer', () => {
 
   async function move(importer, { chats = [], cases = [], files = {}, declared = null }) {
     const inventory = inventoryOf({ chats, cases: declared || cases.map((c) => inventoryEntry(c, files[c])) });
-    const plan = withSourceCounts(await importer.plan({ installId, inventory }), sourceFor(chats));
+    const plan = withSourceFacts(await importer.plan({ installId, inventory }), sourceFor(chats));
     const batch = [];
     for (const item of plan.items) {
       if (!['new', 'update', 'copy'].includes(item.action)) continue;
@@ -455,5 +460,394 @@ describe('verifyMigration against a real importer', () => {
     const out = await verifyMigration({ ...retry, invoke });
     assert.strictEqual(out.ok, false);
     assert.deepStrictEqual(out.missing.map((m) => m.key), ['c1']);
+  });
+});
+
+// Controller ruling: a private chat stays private through the move.
+describe('verifyMigration: the private mark', () => {
+  it('a chat private on the desktop and not on the node is unverified, moved or skip-present', async () => {
+    for (const action of ['new', 'update', 'skip-present']) {
+      const item = chatItem('c1', 1, { action, private: true });
+      const bare = await verifyMigration({ plan: { items: [item] }, report: cleanReport(), invoke: nodeAnswers({ chats: [{ id: 'c1', messageCount: 1 }] }).invoke });
+      assert.strictEqual(bare.ok, false, action);
+      assert.strictEqual(bare.code, 'MIGRATION_UNVERIFIED');
+      assert.match(bare.missing[0].why, /private/);
+      const marked = await verifyMigration({ plan: { items: [item] }, report: cleanReport(), invoke: nodeAnswers({ chats: [{ id: 'c1', messageCount: 1, private: true }] }).invoke });
+      assert.strictEqual(marked.ok, true, action);
+    }
+  });
+
+  it('a chat the desktop has as ordinary may be private on the node', async () => {
+    const out = await verifyMigration({ plan: { items: [chatItem('c1', 1)] }, report: cleanReport(), invoke: nodeAnswers({ chats: [{ id: 'c1', messageCount: 1, private: true }] }).invoke });
+    assert.strictEqual(out.ok, true);
+  });
+
+  it('a case private on the desktop and not on the node is unverified', async () => {
+    const item = caseItem('lot', { private: true });
+    assert.strictEqual((await verifyMigration({ plan: { items: [item] }, report: cleanReport(), invoke: nodeAnswers({ cases: [nodeCase('lot')] }).invoke })).ok, false);
+    assert.strictEqual((await verifyMigration({ plan: { items: [item] }, report: cleanReport(), invoke: nodeAnswers({ cases: [{ ...nodeCase('lot'), private: true }] }).invoke })).ok, true);
+  });
+
+  it('withSourceFacts reads the mark and fails closed: a chat it cannot read counts as private', () => {
+    const plan = { items: [chatItem('c1'), chatItem('c2'), chatItem('c3'), caseItem('lot'), caseItem('open')] };
+    const source = {
+      inventory: { cases: [{ dir: 'lot', private: true }, { dir: 'open' }] },
+      getValue: (cat, id) => ({ c1: { id, messages: [{}] }, c2: { id, messages: [{}], private: true } }[id] || null)
+    };
+    const out = withSourceFacts(plan, source);
+    assert.deepStrictEqual(out.items.map((i) => i.private === true), [false, true, true, true, false]);
+    assert.strictEqual(out.private.chats, 2);
+    assert.strictEqual(out.private.cases, 1);
+    assert.match(out.private.note, /2 private chats and 1 private case/);
+    assert.match(out.private.note, /PRIVATE_NO_LOCAL_MODEL/);
+    assert.match(out.private.note, /admin service\.json/);
+    assert.match(out.private.note, /localInference/);
+  });
+
+  it('with nothing private the plan says so, in numbers and no words', () => {
+    const out = withSourceFacts({ items: [chatItem('c1')] }, { getValue: (_c, id) => ({ id, messages: [] }) });
+    assert.deepStrictEqual(out.private, { chats: 0, cases: 0, note: null });
+  });
+
+  it('what will not move is not counted as moving', () => {
+    const plan = { items: [caseItem('held', { action: 'needs-attention' })] };
+    const out = withSourceFacts(plan, { inventory: { cases: [{ dir: 'held', private: true }] }, getValue: () => null });
+    assert.strictEqual(out.private.cases, 0);
+  });
+});
+
+describe('reading the mark from an old profile', () => {
+  const { createSafeReader, readDesktopSource } = require('../src/migration/desktop-source');
+  const { readHistoryChats } = require('../src/migration/desktop-history');
+  const { downgradeToVersion1 } = require('./helpers/history-fixture');
+  const { DatabaseSync } = require('node:sqlite');
+
+  function profile(fill) {
+    const root = tmp();
+    const store = HistoryStore.open(path.join(root, 'history.sqlite'));
+    fill(store);
+    store.close();
+    fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ settings: {} }));
+    return root;
+  }
+  const writeCase = (root, dir, yamlText) => {
+    fs.mkdirSync(path.join(root, 'cases', dir), { recursive: true });
+    if (yamlText !== null) fs.writeFileSync(path.join(root, 'cases', dir, 'case.yaml'), yamlText);
+  };
+  async function read(root) {
+    const reader = createSafeReader({ root });
+    const history = await readHistoryChats({ reader });
+    return readDesktopSource({ userDataDir: root, reader, secrets: 'needs-desktop', history });
+  }
+
+  it('the store\'s mark reaches the chat, and an ordinary chat has no key', async () => {
+    const root = profile((s) => { seedChat(s, { id: 'secret-1', messages: [] }); seedChat(s, { id: 'open-1', messages: [] }); s.markPrivate('secret-1'); });
+    const source = await read(root);
+    assert.strictEqual(source.getValue('chat', 'secret-1').private, true);
+    assert.strictEqual('private' in source.getValue('chat', 'open-1'), false);
+  });
+
+  it('a store from before the column has no marks: no chat could have one, and the mark is one way', async () => {
+    const root = profile((s) => { seedChat(s, { id: 'old-1', messages: [] }); });
+    const db = new DatabaseSync(path.join(root, 'history.sqlite'));
+    downgradeToVersion1(db);
+    db.close();
+    const source = await read(root);
+    assert.strictEqual(source.getValue('chat', 'old-1').private, undefined);
+  });
+
+  it('a chat of a private case follows it; case.yaml says so on the inventory entry', async () => {
+    const root = profile((s) => { seedChat(s, { id: 'in-case', caseId: 'case-a', messages: [] }); seedChat(s, { id: 'other', caseId: 'case-b', messages: [] }); });
+    writeCase(root, 'alpha', 'id: case-a\nslug: alpha\ntitle: Alpha\nprivate: true\n');
+    writeCase(root, 'beta', 'id: case-b\nslug: beta\ntitle: Beta\nprivate: false\n');
+    const source = await read(root);
+    assert.strictEqual(source.getValue('chat', 'in-case').private, true);
+    assert.strictEqual('private' in source.getValue('chat', 'other'), false);
+    assert.strictEqual(source.inventory.cases.find((c) => c.dir === 'alpha').private, true);
+    assert.strictEqual('private' in source.inventory.cases.find((c) => c.dir === 'beta'), false);
+  });
+
+  it('a case with a marked chat and no key is private; a private: that is not a boolean is private', async () => {
+    const root = profile((s) => { seedChat(s, { id: 'marked', caseId: 'case-a', messages: [] }); s.markPrivate('marked'); });
+    writeCase(root, 'alpha', 'id: case-a\nslug: alpha\ntitle: Alpha\n');
+    writeCase(root, 'beta', 'id: case-b\nslug: beta\ntitle: Beta\nprivate: "yes"\n');
+    const source = await read(root);
+    assert.strictEqual(source.inventory.cases.find((c) => c.dir === 'alpha').private, true);
+    assert.strictEqual(source.inventory.cases.find((c) => c.dir === 'beta').private, true);
+  });
+
+  it('a case.yaml that cannot be read is private, and so is a chat naming a case nothing can vouch for', async () => {
+    const root = profile((s) => { seedChat(s, { id: 'lost', caseId: 'case-x', messages: [] }); seedChat(s, { id: 'free', messages: [] }); });
+    writeCase(root, 'broken', 'id: [unclosed\n');
+    const source = await read(root);
+    assert.strictEqual(source.inventory.cases.find((c) => c.dir === 'broken').private, true);
+    assert.strictEqual(source.getValue('chat', 'lost').private, true);
+    assert.strictEqual('private' in source.getValue('chat', 'free'), false);
+  });
+
+  it('a case\'s HEAD is read from its own files: a ref, or packed', async () => {
+    const root = profile(() => {});
+    const sha = 'a'.repeat(40);
+    writeCase(root, 'loose', 'id: case-a\nslug: loose\ntitle: A\n');
+    fs.mkdirSync(path.join(root, 'cases', 'loose', '.git', 'refs', 'heads'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'cases', 'loose', '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(path.join(root, 'cases', 'loose', '.git', 'refs', 'heads', 'main'), `${sha}\n`);
+    writeCase(root, 'packed', 'id: case-b\nslug: packed\ntitle: B\n');
+    fs.mkdirSync(path.join(root, 'cases', 'packed', '.git'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'cases', 'packed', '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(path.join(root, 'cases', 'packed', '.git', 'packed-refs'), `# pack-refs\n${'b'.repeat(40)} refs/heads/main\n`);
+    writeCase(root, 'bare', 'id: case-c\nslug: bare\ntitle: C\n');
+    const { inventory } = await read(root);
+    assert.strictEqual(inventory.cases.find((c) => c.dir === 'loose').head, sha);
+    assert.strictEqual(inventory.cases.find((c) => c.dir === 'packed').head, 'b'.repeat(40));
+    assert.strictEqual(inventory.cases.find((c) => c.dir === 'bare').head, null);
+  });
+});
+
+describe('landing a private chat and case on the node', () => {
+  const { startEmbedIndexer } = require('../src/history/embed-indexer');
+  const { readDb } = require('./helpers/history-fixture');
+
+  async function node({ hosting = 'personal' } = {}) {
+    const dataDir = tmp();
+    process.env.KL_CASES_ROOT = path.join(dataDir, 'cases');
+    const core = createCore({
+      paths: { dataDir },
+      store: new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: { chats: [], activeChatId: null, apiTokens: {}, apiStatus: {}, toolApprovals: { alwaysApproveTools: {} } } }),
+      vaultStore: new JsonFileStore({ dir: dataDir, name: 'config' }),
+      cipher: createAesGcmCipher(crypto.randomBytes(32)),
+      prompter: createHeadlessPrompter(),
+      builtinSkillsDir: path.join(__dirname, '..', 'skills'),
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false }
+    });
+    cores.push(core);
+    await core.start();
+    const importer = async () => new DesktopImporter({
+      context: core.context, targets: await buildImportTargets({ context: core.context, dataDir }), dataDir, checkPath,
+      scope: createDesktopScope({ dataDir, context: core.context }), hosting
+    });
+    const root = path.join(dataDir, 'cases');
+    const refOf = (c) => ({ ...c, ...(core.context.getHistoryStore().chatRef(c.id)?.private === true ? { private: true } : {}) });
+    const invoke = async (channel) => {
+      if (channel === 'chat:load') return { ok: true, data: { chats: core.context.listChats({ messages: false }).map(refOf), history: { available: true } } };
+      if (channel === 'case:list') return { ok: true, cases: new CaseStore({ root }).list() };
+      throw new Error(`unexpected ${channel}`);
+    };
+    return { core, dataDir, root, importer, invoke, store: core.context.getHistoryStore() };
+  }
+  const privateChat = (id, n = 2, text = 'the private matter') => ({
+    id, title: id, private: true, createdAt: '2026-09-01T10:00:00.000Z', updatedAt: '2026-09-20T10:00:00.000Z',
+    messages: Array.from({ length: n }, (_, i) => ({ id: `${id}-m${i}`, sender: 'user', text: `${text} ${i}`, timestamp: '2026-09-20T10:00:00.000Z' }))
+  });
+  const land = async (imp, chats) => {
+    const inventory = { installId: 'install-0009', chats: chats.map((c) => ({ id: c.id, updatedAt: c.updatedAt, title: c.title })), cases: [], secrets: 'included' };
+    const plan = await imp.plan({ installId: 'install-0009', inventory });
+    await imp.apply({ planId: plan.planId, batch: chats.map((c) => ({ category: 'chat', key: c.id, value: c })) });
+    return { plan: withSourceFacts(plan, { getValue: (_cat, id) => chats.find((c) => c.id === id) || null }), report: { ...(await imp.finish({ planId: plan.planId })), skipped: [], sendFailures: [] } };
+  };
+
+  for (const hosting of ['personal', 'service']) {
+    it(`a private chat lands marked, through markPrivate (${hosting} hosting): verified`, async () => {
+      const n = await node({ hosting });
+      const calls = [];
+      const real = n.store.markPrivate.bind(n.store);
+      n.store.markPrivate = (id) => { calls.push(id); return real(id); };
+      try {
+        const moved = await land(await n.importer(), [privateChat('secret-1')]);
+        assert.deepStrictEqual(moved.report.failures, []);
+        assert.deepStrictEqual(calls, ['secret-1']);
+        assert.strictEqual(n.store.chatRef('secret-1').private, true);
+        assert.strictEqual(n.core.context.getChat('secret-1').messages.length, 2);
+        assert.strictEqual((await verifyMigration({ ...moved, invoke: n.invoke })).ok, true);
+      } finally {
+        n.store.markPrivate = real;
+      }
+    });
+  }
+
+  it('the landing and the mark are one transaction: another connection never sees the chat unmarked', async () => {
+    const n = await node();
+    const real = n.store.markPrivate.bind(n.store);
+    const file = path.join(n.dataDir, 'history.sqlite');
+    const seenAtMark = [];
+    n.store.markPrivate = (id) => {
+      const other = readDb(file);
+      seenAtMark.push(other.prepare('SELECT COUNT(*) AS n FROM chats WHERE id = ?').get(id).n);
+      other.close();
+      return real(id);
+    };
+    try {
+      await land(await n.importer(), [privateChat('secret-1')]);
+    } finally {
+      n.store.markPrivate = real;
+    }
+    assert.deepStrictEqual(seenAtMark, [0], 'the row is not committed when the mark is written');
+    const after = readDb(file);
+    assert.strictEqual(Number(after.prepare('SELECT private FROM chats WHERE id = ?').get('secret-1').private), 1);
+    after.close();
+  });
+
+  it('a hosted embedder running through the landing gets no chunk of a private chat', async () => {
+    const n = await node();
+    const texts = [];
+    const hosted = { name: 'openai:fake', kind: 'openai', model: 'fake', dim: 4, tokens: 0, async embed(batch) { texts.push(...batch); return batch.map(() => Float32Array.from([1, 0, 0, 0])); } };
+    const host = { active: hosted, current() { return this.active; }, fail() {}, keepLocalKey: () => null, ensureKeepLocal: () => null };
+    const indexer = startEmbedIndexer({ store: n.store, host, getSettings: () => ({ history: { embedder: { batchSize: 8 } } }), setTimer: () => 1, clearTimer: () => {}, log: { warn() {}, info() {}, debug() {} } });
+    try {
+      const open = { ...privateChat('open-1', 1, 'the ordinary matter') };
+      delete open.private;
+      const imp = await n.importer();
+      await indexer.tick();
+      const moved = land(imp, [privateChat('secret-1'), open]);
+      await indexer.tick();
+      await moved;
+      for (let i = 0; i < 3; i += 1) await indexer.tick();
+      assert.ok(texts.some((t) => t.includes('ordinary')), 'the indexer ran over what landed');
+      assert.deepStrictEqual(texts.filter((t) => t.includes('private matter')), []);
+      assert.deepStrictEqual(n.store.pendingEmbeddings('openai:fake').filter((r) => String(r.text).includes('private matter')), []);
+    } finally {
+      await indexer.stop();
+    }
+  });
+
+  it('a chat that cannot be marked does not land, and is a failure', async () => {
+    const n = await node();
+    const real = n.store.markPrivate.bind(n.store);
+    n.store.markPrivate = () => { throw new Error('the mark could not be written'); };
+    let moved;
+    try {
+      moved = await land(await n.importer(), [privateChat('secret-1')]);
+    } finally {
+      n.store.markPrivate = real;
+    }
+    assert.strictEqual(n.core.context.getChat('secret-1', { messages: false }), null);
+    assert.deepStrictEqual(moved.report.failures.map((f) => f.key), ['secret-1']);
+    assert.strictEqual((await verifyMigration({ ...moved, invoke: n.invoke })).ok, false);
+  });
+
+  it('an update of a chat that cannot be marked leaves the node\'s copy as it was', async () => {
+    const n = await node();
+    const first = privateChat('secret-1', 1);
+    delete first.private;
+    await land(await n.importer(), [first]);
+    const real = n.store.markPrivate.bind(n.store);
+    n.store.markPrivate = () => { throw new Error('no'); };
+    try {
+      await land(await n.importer(), [{ ...privateChat('secret-1', 4), updatedAt: '2026-09-21T10:00:00.000Z' }]);
+    } finally {
+      n.store.markPrivate = real;
+    }
+    assert.strictEqual(n.core.context.getChat('secret-1').messages.length, 1);
+  });
+
+  async function sourceCase({ asPrivate = false, chop = false } = {}) {
+    const runtime = new CaseRuntime({ root: tmp() });
+    const made = await runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot', force: true, private: asPrivate });
+    const { dir, id } = runtime.getCase(made.id);
+    if (chop) {
+      const text = fs.readFileSync(path.join(dir, 'case.yaml'), 'utf8').replace(/^private:.*\n/m, '');
+      fs.writeFileSync(path.join(dir, 'case.yaml'), text);
+      await git.commitAll(dir, 'lost the key');
+    }
+    const files = [];
+    const walk = (rel) => {
+      for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+        const child = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) walk(child);
+        else files.push({ relPath: child, mode: 0o644, offset: 0, b64: fs.readFileSync(path.join(dir, child)).toString('base64') });
+      }
+    };
+    walk('');
+    return { dir, id, name: path.basename(dir), files, head: (await git.git(dir, ['rev-parse', 'HEAD'])).trim() };
+  }
+  const entry = (src, extra = {}) => ({ dir: src.name, head: src.head, files: src.files.length, bytes: src.files.reduce((a, f) => a + Buffer.from(f.b64, 'base64').length, 0), ...extra });
+  async function landCase(imp, src, { extra = {}, chats = [] } = {}) {
+    const inventory = { installId: 'install-0009', chats: chats.map((c) => ({ id: c.id, updatedAt: c.updatedAt, title: c.title })), cases: [entry(src, extra)], secrets: 'included' };
+    const plan = await imp.plan({ installId: 'install-0009', inventory });
+    const batch = chats.map((c) => ({ category: 'chat', key: c.id, value: c }));
+    if (plan.items.find((i) => i.category === 'case').action === 'new') for (const f of src.files) batch.push({ category: 'case', key: src.name, value: f });
+    if (batch.length) await imp.apply({ planId: plan.planId, batch });
+    return {
+      plan: withSourceFacts(plan, { inventory, getValue: (_c, id) => chats.find((c) => c.id === id) || null }),
+      report: { ...(await imp.finish({ planId: plan.planId })), skipped: [], sendFailures: [] }
+    };
+  }
+
+  it('a private case travels with its case.yaml and verifies; its chat lands private', async () => {
+    const n = await node();
+    const src = await sourceCase({ asPrivate: true });
+    const moved = await landCase(await n.importer(), src, { extra: { private: true }, chats: [{ ...privateChat('in-case'), caseId: src.id }] });
+    assert.deepStrictEqual(moved.report.incomplete, []);
+    assert.strictEqual(n.store.chatRef('in-case').private, true);
+    assert.strictEqual(new CaseStore({ root: n.root }).list()[0].private, true);
+    assert.strictEqual((await verifyMigration({ ...moved, invoke: n.invoke })).ok, true);
+  });
+
+  it('a private case whose case.yaml lost the key is marked on landing', async () => {
+    const n = await node();
+    const src = await sourceCase({ asPrivate: true, chop: true });
+    const moved = await landCase(await n.importer(), src, { extra: { private: true }, chats: [{ ...privateChat('in-case'), caseId: src.id }] });
+    assert.strictEqual(new CaseStore({ root: n.root }).list()[0].private, true);
+    assert.deepStrictEqual(moved.report.incomplete, []);
+    assert.strictEqual((await verifyMigration({ ...moved, invoke: n.invoke })).ok, true);
+  });
+
+  // Concern 2: the landing is on disk, the manifest never written.
+  const forgetManifest = (n) => fs.rmSync(path.join(n.dataDir, 'imports'), { recursive: true, force: true });
+
+  it('a retry recognises a case landed with no record, by HEAD and a clean tree', async () => {
+    const n = await node();
+    const src = await sourceCase();
+    await landCase(await n.importer(), src);
+    forgetManifest(n);
+    const retry = await landCase(await n.importer(), src);
+    const item = retry.plan.items.find((i) => i.category === 'case');
+    assert.strictEqual(item.action, 'skip-present');
+    assert.strictEqual((await verifyMigration({ ...retry, invoke: n.invoke })).ok, true);
+  });
+
+  it('a retry recognises one the node has gone on from: the source\'s HEAD is in its history', async () => {
+    const n = await node();
+    const src = await sourceCase();
+    await landCase(await n.importer(), src);
+    forgetManifest(n);
+    const landed = path.join(n.root, src.name);
+    fs.writeFileSync(path.join(landed, 'later.md'), 'later\n');
+    await git.commitAll(landed, 'went on');
+    const retry = await landCase(await n.importer(), src);
+    assert.strictEqual(retry.plan.items.find((i) => i.category === 'case').action, 'skip-present');
+  });
+
+  for (const [what, spoil] of [
+    ['a dirty tree', (dir) => fs.writeFileSync(path.join(dir, 'brief.md'), 'changed\n')],
+    ['a file gone', (dir) => fs.rmSync(path.join(dir, 'brief.md'))],
+    ['another history', async (dir) => { fs.rmSync(path.join(dir, '.git'), { recursive: true, force: true }); await git.initRepo(dir); await git.commitAll(dir, 'another'); }],
+    ['no repository', (dir) => fs.rmSync(path.join(dir, '.git'), { recursive: true, force: true })]
+  ]) {
+    it(`a retry does not forgive a case that does not match: ${what}`, async () => {
+      const n = await node();
+      const src = await sourceCase();
+      await landCase(await n.importer(), src);
+      forgetManifest(n);
+      await spoil(path.join(n.root, src.name));
+      const retry = await landCase(await n.importer(), src);
+      const item = retry.plan.items.find((i) => i.category === 'case');
+      assert.strictEqual(item.action, 'needs-attention');
+      assert.strictEqual(item.incomplete, true);
+      const out = await verifyMigration({ ...retry, invoke: n.invoke });
+      assert.strictEqual(out.code, 'MIGRATION_UNVERIFIED');
+      assert.deepStrictEqual(out.missing.map((m) => m.key), [src.name]);
+    });
+  }
+
+  it('a fleet import keeps today\'s plain needs-attention for a directory already there', async () => {
+    const n = await node({ hosting: 'service' });
+    const src = await sourceCase();
+    await landCase(await n.importer(), src);
+    forgetManifest(n);
+    const retry = await landCase(await n.importer(), src);
+    const item = retry.plan.items.find((i) => i.category === 'case');
+    assert.strictEqual(item.action, 'needs-attention');
+    assert.strictEqual('incomplete' in item, false);
   });
 });

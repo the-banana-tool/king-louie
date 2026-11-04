@@ -1695,6 +1695,9 @@ class FakeNodeClient extends EventEmitter {
     this.service = { version: '1.0.0', account: 'alex', profile: 'agent', providersConfigured: true, hosting };
     this.chats = new Map();
     this.cases = new Set();
+    this.marked = new Set();
+    this.loseMark = false;
+    this.attentionItems = [];
     this.plans = 0;
     this.finishes = 0;
     Object.assign(this, { dropChat, shortChat, finishExtra: finish, failFinish, excluded });
@@ -1710,7 +1713,8 @@ class FakeNodeClient extends EventEmitter {
       const items = [
         ...inventory.chats.map((c) => ({ category: 'chat', key: c.id, action: this.chats.has(c.id) ? 'skip-present' : 'new', note: null, targetKey: c.id })),
         ...inventory.cases.map((c) => ({ category: 'case', key: c.dir, action: this.cases.has(c.dir) ? 'skip-present' : 'new', note: null, targetKey: c.dir })),
-        ...this.excluded.map((e) => ({ category: 'excluded', key: e.key, action: 'skip-excluded', note: e.note, targetKey: e.key }))
+        ...this.excluded.map((e) => ({ category: 'excluded', key: e.key, action: 'skip-excluded', note: e.note, targetKey: e.key })),
+        ...this.attentionItems
       ];
       return { planId: `plan-${this.plans}`, items, counts: {} };
     }
@@ -1720,6 +1724,7 @@ class FakeNodeClient extends EventEmitter {
         if (entry.category === 'chat' && entry.key !== this.dropChat) {
           const n = entry.value.messages.length;
           this.chats.set(entry.key, entry.key === this.shortChat ? n - 1 : n);
+          if (entry.value.private === true && !this.loseMark) this.marked.add(entry.key);
         }
         if (entry.category === 'case') this.cases.add(entry.key);
         results.push({ category: entry.category, key: entry.key, ok: true });
@@ -1734,7 +1739,7 @@ class FakeNodeClient extends EventEmitter {
     throw new Error(`unexpected ${method}`);
   }
   async invoke(channel) {
-    if (channel === 'chat:load') return { ok: true, data: { chats: [...this.chats].map(([id, messageCount]) => ({ id, messageCount })), history: { available: true } } };
+    if (channel === 'chat:load') return { ok: true, data: { chats: [...this.chats].map(([id, messageCount]) => ({ id, messageCount, ...(this.marked.has(id) ? { private: true } : {}) })), history: { available: true } } };
     if (channel === 'case:list') return { ok: true, cases: [...this.cases].map((dir) => ({ dir: path.join('C:', 'node', 'cases', dir) })) };
     throw new Error(`unexpected ${channel}`);
   }
@@ -1757,7 +1762,7 @@ describe('desktop controller: the one-time move', () => {
       fs.rmSync(temp.dir, { recursive: true, force: true });
       fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify({ settings: {} }));
       fs.mkdirSync(path.join(userDataDir, 'cases', 'lakeside-lot'), { recursive: true });
-      fs.writeFileSync(path.join(userDataDir, 'cases', 'lakeside-lot', 'case.yaml'), 'title: Lakeside lot\n');
+      fs.writeFileSync(path.join(userDataDir, 'cases', 'lakeside-lot', 'case.yaml'), 'id: case-lot\nslug: lakeside-lot\ntitle: Lakeside lot\n');
     }
     const state = openDesktopState(userDataDir, fakeSafeStorage(), { storeFactory });
     state.setMode('attached');
@@ -2046,6 +2051,54 @@ describe('desktop controller: the one-time move', () => {
     assert.strictEqual(out.code, 'MIGRATION_SOURCE');
     assert.strictEqual(state.migration, null);
     assert.strictEqual(client.finishes, 0);
+    controller.dispose();
+  });
+
+  it('a private chat moves private: the plan counts it and says what it needs; the node losing the mark is no marker', async () => {
+    const client = new FakeNodeClient();
+    client.loseMark = true;
+    const { controller, state, userDataDir } = moveController({ client });
+    const { HistoryStore } = require('../src/history');
+    const store = HistoryStore.open(path.join(userDataDir, 'history.sqlite'));
+    store.markPrivate('c1');
+    store.close();
+    const planned = await controller.migrationPlan();
+    assert.strictEqual(planned.ok, true, JSON.stringify(planned));
+    assert.strictEqual(planned.plan.private.chats, 1);
+    assert.match(planned.plan.private.note, /PRIVATE_NO_LOCAL_MODEL/);
+    assert.strictEqual(planned.plan.items.find((i) => i.key === 'c1').private, true);
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.code, 'MIGRATION_UNVERIFIED');
+    assert.deepStrictEqual(out.verified.missing.map((m) => m.key), ['c1']);
+    assert.strictEqual(state.migration, null);
+    client.loseMark = false;
+    client.chats.clear();
+    await controller.migrationPlan();
+    assert.strictEqual((await controller.migrationApply({ confirmed: true })).ok, true);
+    assert.ok(state.migration);
+    controller.dispose();
+  });
+
+  it('what needs attention and the secrets left behind are plain data on the plan, the result and the marker', async () => {
+    const client = new FakeNodeClient();
+    client.attentionItems = [
+      { category: 'settings', key: 'models', action: 'needs-attention', note: 'your 2 model profiles were not moved', targetKey: 'models' },
+      { category: 'vault', key: 'github', action: 'needs-attention', note: 'secure storage is off', targetKey: 'github' },
+      { category: 'providerToken', key: 'anthropic', action: 'needs-desktop', note: 'only the desktop', targetKey: 'anthropic' },
+      { category: 'case', key: 'held\u202E', action: 'needs-attention', note: 'already there', targetKey: 'held' }
+    ];
+    client.finishExtra = { secretsMissing: [{ category: 'searchKey', key: 'brave' }], failures: [], attention: [{ category: 'chat', key: 'c1', note: 'its working directory was dropped' }] };
+    const { controller, state } = moveController({ client });
+    const planned = await controller.migrationPlan();
+    assert.deepStrictEqual(planned.leftBehind.secrets.map((s) => s.key), ['github', 'anthropic']);
+    assert.deepStrictEqual(planned.leftBehind.needsAttention.map((s) => s.key.slice(0, 4)), ['mode', 'held']);
+    assert.ok(!JSON.stringify(planned.leftBehind).includes('\u202E'));
+    const out = await controller.migrationApply({ confirmed: true });
+    assert.strictEqual(out.ok, true, JSON.stringify(out));
+    assert.deepStrictEqual(out.leftBehind.secrets.map((s) => s.key), ['github', 'anthropic', 'brave']);
+    assert.ok(out.leftBehind.needsAttention.some((a) => a.key === 'c1'));
+    assert.deepStrictEqual(state.migration.leftBehind, out.leftBehind);
+    assert.deepStrictEqual((await controller.status()).migration.leftBehind, out.leftBehind);
     controller.dispose();
   });
 

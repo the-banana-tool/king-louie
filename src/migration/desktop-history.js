@@ -20,12 +20,19 @@ const path = require('path');
 const sqlite = require('node:sqlite');
 const { HistoryStore, DERIVED_CHAT_KEYS } = require('../history');
 
-function forImport(chat) {
+function forImport(chat, isPrivate = false) {
   const out = { ...chat };
   for (const key of DERIVED_CHAT_KEYS) delete out[key];
   out.messages = (chat.messages || []).map(({ seq: _seq, ...message }) => message);
+  if (isPrivate) out.private = true;
   return out;
 }
+
+// The chat's private mark, through the store's own reading: one it cannot read
+// is private. Below the schema that added the column there is no mark to read,
+// since none could ever have been written, and the mark cannot be taken back:
+// reading those as private would lock a whole old history for good.
+const markedPrivate = (store, id) => store.privacyAware && store.isPrivate(id);
 
 const sizeOf = (file) => {
   try {
@@ -118,7 +125,7 @@ async function readHistoryChats({ reader, tmpRoot = os.tmpdir(), backup = sqlite
     // chats and messages are read).
     await snapshotHistoryFile(checked.path, file, { backup });
     snapshot = openSnapshot(file);
-    return { found: true, chats: snapshot.listChats({ messages: true }).map(forImport), attention };
+    return { found: true, chats: snapshot.listChats({ messages: true }).map((chat) => forImport(chat, markedPrivate(snapshot, chat.id))), attention };
   } catch (err) {
     attention.push({
       category: 'source',
