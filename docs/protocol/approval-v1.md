@@ -999,6 +999,7 @@ pad comes before the limit is read, so it counts against it.
 | Code | Where | Means |
 |---|---|---|
 | `no_sealed_recipient` | node, building | sealing is on and no phone can read it; nothing was sent |
+| `relay_too_old` | node, submitting | the relay answered a sealed request `malformed` or `bad_request`, so its validator has only the clear shape; the request ends at once. A clear request's refusal still waits for a reconnect |
 | `action_too_large` | node, building | over `SEALED_PAYLOAD_MAX` when sealed |
 | `sealed_required` | node, on an answer | a clear answer with no clear ask of that token |
 | `not_recipient`, `open_failed` | phone, node | not sealed to this key, or it would not open |

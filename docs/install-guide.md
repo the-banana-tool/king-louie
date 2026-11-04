@@ -985,7 +985,9 @@ questions, task cards and pictures. The relay carries them and cannot read them.
    seals, and cannot say why. **If the app shows nothing for a node, update the app.**
 2. **The relay or front door.** It adds the route a phone sends its box key to. On an
    older one the app says `This relay is older than this app. Upgrade it, then try
-   again.`
+   again.` A node that seals through an older one has its tool approvals refused at
+   once: the tool or job says `relay_too_old` and nothing runs, until the relay is
+   upgraded. Leases and questions still get through it.
 3. **Each node.** Its service makes the node's own box key when it starts. It still
    sends in clear.
 4. **On each phone**, in its list: `Read sealed messages on this phone. Set up once:

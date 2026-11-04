@@ -771,6 +771,23 @@ describe('PhoneApprover with a seal policy', () => {
         approver.stop();
         await Promise.all(asks);
       });
+
+      it(`${code} finishes the request at once: relay_too_old, sent once, audited, and the tool is told`, async () => {
+        const { approver, link, ledger } = await sealedSetup({ link: refusingLink(code) });
+        const outcome = await ask(approver);
+        assert.deepEqual([outcome.decision, outcome.reason], ['unavailable', 'relay_too_old']);
+        assert.equal(link.submitted.length, 1);
+        assert.deepEqual(approver.pending(), []);
+        link.connect();
+        await tick();
+        assert.equal(link.submitted.length, 1, 'a reconnect sends nothing: it is over');
+        assert.ok(ledger.entries.some((e) => e.kind === 'approval.outcome' && e.data.reason === 'relay_too_old'));
+        const metadata = {};
+        assert.equal(await approver.requestApproval('Bash', { command: PARAM }, metadata), 'unavailable');
+        assert.match(metadata.refusal.error, /^Phone approval unavailable \(relay_too_old\): the relay or front door is older than this node/);
+        assert.match(metadata.refusal.error, /Nothing ran\.$/);
+        approver.stop();
+      });
     }
 
     it('another failure of a sealed request is the ordinary retry', async () => {
@@ -925,6 +942,190 @@ describe('PhoneApprover with a seal policy', () => {
       const { identity } = await sealedSetup({ holders: 0, plain: 1 });
       const sealPolicy = { sealing: () => true, canSeal: () => true, recipients: () => ({ [identity.nodeId]: identity.box.jwk }), senderId: identity.nodeId, nodeBox: identity.box.jwk };
       assert.throws(() => buildRequest({ identity, action: liveAction(), sealPolicy }), (e) => e.reason === 'no_sealed_recipient');
+    });
+  });
+
+  describe('a clear request resent after the latch', () => {
+    // Holds a clear request with the link down, then gives a phone a box key.
+    async function heldClear(options = {}) {
+      const link = fakeLink({ connected: false });
+      const setup = await sealedSetup({ holders: 0, plain: 1, link, ...options });
+      const pending = setup.approver.requestAction(liveAction(), { origin: ORIGIN, signal: options.signal || null, currentAction: options.currentAction || liveAction });
+      for (let i = 0; i < 20 && setup.approver.pending().length === 0; i += 1) await tick();
+      assert.equal(setup.approver.pending().length, 1);
+      assert.deepEqual(link.submitted, []);
+      return { ...setup, link, pending };
+    }
+    async function giveBoxKey(store) {
+      const phone = createFakePhone({ name: 'New box phone', boxKey: true });
+      fs.writeFileSync(path.join(store.dir, `${phone.deviceId}.json`), JSON.stringify(phone.approverRecord({ boxKey: true })), { mode: 0o644 });
+      await store.ready();
+      return phone;
+    }
+
+    it('goes out as a new sealed request, audited first, and the phone that opens it decides', async () => {
+      const { approver, link, store, ledger, pending, identity } = await heldClear();
+      const heldId = approver.pendingRequests.list()[0].request.request_id;
+      const phone = await giveBoxKey(store);
+      link.connect();
+      const envelope = await waitForSubmit(link);
+      assert.equal(link.submitted.length, 1);
+      const { message } = open(envelope);
+      assert.equal(isSealedShape(REQUEST_TYPE, message), true);
+      assert.notEqual(message.request_id, heldId);
+      assert.ok(ledger.entries.some((e) => e.kind === 'approval.request' && e.data.envelope === envelope), 'audited before it went');
+      assert.ok(ledger.entries.some((e) => e.kind === 'approval.outcome' && e.data.request_id === heldId && e.data.state === 'withdrawn'));
+      assert.deepEqual(approver.pending().map((p) => p.request_id), [message.request_id]);
+      const opened = openSealed({ type: REQUEST_TYPE, message, recipientId: identity.nodeId, agree: identity.box.agree });
+      assert.deepEqual(opened.content.action, liveAction());
+      assert.deepEqual(await approver.handleResponse(phone.respond(envelope, 'approve')), { accepted: true, reason: null });
+      assert.equal((await pending).decision, 'approve');
+      approver.stop();
+    });
+
+    it('is rebuilt from the kept currentAction, so what goes is the action now', async () => {
+      let command = 'deploy --target before';
+      const currentAction = () => toolAction('Bash', { command }, '/srv/site');
+      const { approver, link, store, identity, pending } = await heldClear({ currentAction });
+      await giveBoxKey(store);
+      command = 'deploy --target after';
+      link.connect();
+      const { message } = open(await waitForSubmit(link));
+      assert.deepEqual(openSealed({ type: REQUEST_TYPE, message, recipientId: identity.nodeId, agree: identity.box.agree }).content.action, currentAction());
+      approver.stop();
+      await pending;
+    });
+
+    it('with the latch set and no phone to seal to it ends no_sealed_recipient, sending nothing', async () => {
+      const { approver, link, dataDir, pending, others, store } = await heldClear();
+      writeLatch(dataDir);
+      assert.ok(others.length === 1 && store);
+      const sealPolicy = approver.sealPolicy;
+      sealPolicy.sealing = () => true;
+      sealPolicy.canSeal = () => false;
+      link.connect();
+      const outcome = await pending;
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'no_sealed_recipient']);
+      assert.deepEqual(link.submitted, []);
+      assert.deepEqual(approver.pending(), []);
+      approver.stop();
+    });
+
+    it('a policy that throws is never read as clear', async () => {
+      const { approver, link, pending } = await heldClear();
+      approver.sealPolicy.sealing = () => { throw new Error('store boom'); };
+      link.connect();
+      const outcome = await pending;
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'no_sealed_recipient']);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('a currentAction that throws ends it action_changed, sending nothing', async () => {
+      let boom = false;
+      const currentAction = () => { if (boom) throw new Error('gone'); return liveAction(); };
+      const { approver, link, store, pending } = await heldClear({ currentAction });
+      await giveBoxKey(store);
+      boom = true;
+      link.connect();
+      const outcome = await pending;
+      assert.deepEqual([outcome.decision, outcome.reason], ['deny', 'action_changed']);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('an action too large to seal ends with the words for that', async () => {
+      const big = toolAction('Write', { content: 'x'.repeat(200 * 1024) }, null);
+      const { approver, link, store, pending } = await heldClear({ currentAction: () => big });
+      await giveBoxKey(store);
+      link.connect();
+      const outcome = await pending;
+      assert.deepEqual([outcome.decision, outcome.reason, outcome.sealed], ['error', 'action_too_large', true]);
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('a clear request on a node that does not seal is resent as it was, and a sealed one too', async () => {
+      const clear = await heldClear();
+      const held = clear.approver.pendingRequests.list()[0].envelope;
+      clear.link.connect();
+      assert.equal(await waitForSubmit(clear.link), held);
+      clear.approver.stop();
+      await clear.pending;
+
+      const link = fakeLink();
+      const { approver } = await sealedSetup({ link });
+      const pending = ask(approver);
+      const first = await waitForSubmit(link);
+      link.connect();
+      assert.equal(await waitForSubmit(link, 2), first, 'a sealed request is the same bytes again');
+      approver.stop();
+      await pending;
+    });
+
+    it('a stop while the new request is being audited sends nothing', async () => {
+      const { approver, link, store, ledger, pending } = await heldClear();
+      await giveBoxKey(store);
+      const append = ledger.append;
+      let release;
+      ledger.append = async (entry) => {
+        if (entry.kind === 'approval.request') await new Promise((resolve) => { release = resolve; });
+        return append(entry);
+      };
+      link.connect();
+      for (let i = 0; i < 50 && !release; i += 1) await tick();
+      approver.stop();
+      release();
+      const outcome = await pending;
+      assert.equal(outcome.decision, 'unavailable');
+      assert.deepEqual(link.submitted, []);
+    });
+
+    it('an abort while it waits on the link, then a reconnect, sends nothing', async () => {
+      const controller = new AbortController();
+      const { approver, link, store, pending } = await heldClear({ signal: controller.signal });
+      await giveBoxKey(store);
+      controller.abort();
+      assert.equal((await pending).decision, 'withdrawn');
+      link.connect();
+      await tick();
+      assert.deepEqual(link.submitted, []);
+      approver.stop();
+    });
+
+    it('an abort after the rebuild withdraws the new request', async () => {
+      const controller = new AbortController();
+      const { approver, link, store, pending } = await heldClear({ signal: controller.signal });
+      await giveBoxKey(store);
+      link.connect();
+      await waitForSubmit(link);
+      controller.abort();
+      assert.equal((await pending).decision, 'withdrawn');
+      assert.deepEqual(approver.pending(), []);
+      approver.stop();
+    });
+
+    it('a decision being audited is not rebuilt under it', async () => {
+      const link = fakeLink();
+      const { approver, others, store, ledger } = await sealedSetup({ holders: 0, plain: 1, link });
+      const pending = ask(approver);
+      const clearRequest = await waitForSubmit(link);
+      await giveBoxKey(store);
+      const append = ledger.append;
+      let release;
+      ledger.append = async (entry) => {
+        if (entry.kind === 'approval.response') await new Promise((resolve) => { release = resolve; });
+        return append(entry);
+      };
+      const answer = approver.handleResponse(others[0].respond(clearRequest, 'approve'));
+      for (let i = 0; i < 50 && !release; i += 1) await tick();
+      link.connect();
+      await tick();
+      assert.equal(link.submitted.length, 1);
+      release();
+      assert.deepEqual(await answer, { accepted: true, reason: null });
+      assert.equal((await pending).decision, 'approve');
+      approver.stop();
     });
   });
 
