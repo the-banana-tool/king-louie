@@ -12,11 +12,19 @@
 // fields into a payload, and nothing is kept alive by being marked. Only the
 // standalone host's ipcMain wrapper and the bridge dispatcher call
 // markLocalDesktopEvent (tests/core-origin.test.js pins that).
+//
+// A remote window's event (remote window plan R-RW-9) is never local: only the
+// bridge dispatcher marks one, for a remote connection. An event carries one
+// mark at most; marking it one way deletes the other.
 const localEvents = new WeakMap();
 const localRequesters = new WeakMap();
+const remoteEvents = new WeakMap();
 
 function markLocalDesktopEvent(event, { deviceId = null } = {}) {
-  if (event && typeof event === 'object') localEvents.set(event, { deviceId: deviceId || null });
+  if (event && typeof event === 'object') {
+    remoteEvents.delete(event);
+    localEvents.set(event, { deviceId: deviceId || null });
+  }
   return event;
 }
 
@@ -28,6 +36,31 @@ function isLocalDesktopEvent(event) {
 function localDesktopDeviceId(event) {
   if (!isLocalDesktopEvent(event)) return null;
   return localEvents.get(event).deviceId;
+}
+
+// `approved` is the phone's request_id when the dispatcher's phone gate approved
+// this call; nothing but a request id counts as one.
+function markRemoteWindowEvent(event, { deviceId = null, approved = null } = {}) {
+  if (event && typeof event === 'object') {
+    localEvents.delete(event);
+    remoteEvents.set(event, {
+      deviceId: deviceId || null,
+      approved: typeof approved === 'string' && approved ? approved : null
+    });
+  }
+  return event;
+}
+
+function isRemoteWindowEvent(event) {
+  return Boolean(event) && typeof event === 'object' && remoteEvents.has(event);
+}
+
+function remoteWindowDeviceId(event) {
+  return isRemoteWindowEvent(event) ? remoteEvents.get(event).deviceId : null;
+}
+
+function remoteWindowApproved(event) {
+  return isRemoteWindowEvent(event) ? remoteEvents.get(event).approved : null;
 }
 
 // Mark only a fresh closure created for this one run — never a shared or
@@ -48,6 +81,10 @@ module.exports = {
   markLocalDesktopEvent,
   isLocalDesktopEvent,
   localDesktopDeviceId,
+  markRemoteWindowEvent,
+  isRemoteWindowEvent,
+  remoteWindowDeviceId,
+  remoteWindowApproved,
   markLocalRequester,
   isLocalRequester
 };

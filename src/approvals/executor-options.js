@@ -72,6 +72,7 @@ function runOrigin({ executorOptions, event, local, helpers }) {
   if (executorOptions.origin) return executorOptions.origin;
   const session = executorOptions.chatId || null;
   if (local) return { client: 'desktop', deviceId: helpers.localDesktopDeviceId(event), session, job_id: null };
+  if (helpers.isRemoteWindowEvent(event)) return { client: 'remote-window', deviceId: helpers.remoteWindowDeviceId(event), session, job_id: null };
   return { client: 'king-louie', session, job_id: null };
 }
 
@@ -161,9 +162,12 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
 // → { toolExecutorOptions, attach(executor), local, origin }
 function approvalSeam({ remoteApprovals, event = null, approvalRequester = null, executorOptions = {}, phoneApprover = null,
   auditLedger = null, nodePolicy = null, helpers = originHelpers }) {
-  const local = helpers.isLocalDesktopEvent(event) || helpers.isLocalRequester(approvalRequester);
+  // A remote window's run is never local and never auto-approved, in any mode
+  // and whatever requester it was handed (remote window plan R-RW-9).
+  const remote = helpers.isRemoteWindowEvent(event);
+  const local = !remote && (helpers.isLocalDesktopEvent(event) || helpers.isLocalRequester(approvalRequester));
   const origin = runOrigin({ executorOptions, event, local, helpers });
-  const denyAutoApproval = (remoteApprovals !== 'allow' && !local) || executorOptions.denyAutoApproval === true;
+  const denyAutoApproval = remote || (remoteApprovals !== 'allow' && !local) || executorOptions.denyAutoApproval === true;
   // Set by a delegate turn (executorOptions) or inherited through the
   // re-threaded requester of its sub-agents.
   const refuseUnsafe = executorOptions.refuseUnsafe === true || Boolean(approvalRequester && approvalRequester.refuseUnsafe === true);
@@ -188,7 +192,7 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
   }
 
   let requester;
-  if (remoteApprovals === 'allow') requester = approvalRequester;
+  if (remoteApprovals === 'allow' && !remote) requester = approvalRequester;
   else requester = local && helpers.isLocalRequester(approvalRequester) ? approvalRequester : null;
   return {
     toolExecutorOptions: { approvalRequester: requester, denyAutoApproval, localOrigin: local, origin, ...gate },
