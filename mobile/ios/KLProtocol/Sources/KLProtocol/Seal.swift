@@ -33,6 +33,39 @@ public struct SealKeyUnavailable: Error, Equatable {
 /// who sealed it. A wrapper over `Seal.opener` sees only verified messages.
 public typealias Opener = (_ type: String, _ message: JSONValue) throws -> JSONValue
 
+/// Telling a box key that stopped working from a phone that is locked, or was just
+/// unlocked (sealed phones, Task 10's review; BoxKeyHealth in Seal.kt). Only failures
+/// on an unlocked phone count, and only when there are several and they last. A fresh
+/// open, or a phone seen locked, starts the count again.
+public struct BoxKeyHealth {
+    private let strikesToBreak: Int
+    private let afterMs: Int64
+    private var strikes = 0
+    private var failingSinceMs: Int64 = 0
+
+    public private(set) var broken = false
+
+    public init(strikesToBreak: Int = 3, afterMs: Int64 = 30_000) {
+        self.strikesToBreak = strikesToBreak
+        self.afterMs = afterMs
+    }
+
+    public mutating func failedUnlocked(nowMs: Int64) {
+        if strikes == 0 { failingSinceMs = nowMs }
+        strikes += 1
+        if strikes >= strikesToBreak && nowMs - failingSinceMs >= afterMs { broken = true }
+    }
+
+    public mutating func opened() { reset() }
+
+    public mutating func locked() { reset() }
+
+    public mutating func reset() {
+        strikes = 0
+        broken = false
+    }
+}
+
 /// How a message reached a reader: never sealed, sealed and opened, or sealed and not this phone's to open.
 public enum SealState: Equatable {
     case clear

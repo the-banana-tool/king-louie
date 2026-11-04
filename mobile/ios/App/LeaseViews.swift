@@ -9,8 +9,12 @@ struct LeaseRequestsSection: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        if !model.leaseRequests.isEmpty || !model.leaseStatusRows.isEmpty {
+        if !model.leaseRequests.isEmpty || !model.leaseStatusRows.isEmpty || !model.unreadableRows(AppModel.leaseRef).isEmpty {
             Section("Computer use") {
+                // R-SP-6, R-SP-15: what cannot be read or answered, with no decision.
+                ForEach(model.unreadableRows(AppModel.leaseRef)) { row in
+                    UnreadableRow(row: row)
+                }
                 ForEach(model.leaseRequests) { item in
                     NavigationLink { LeaseRequestView(item: item) } label: {
                         VStack(alignment: .leading, spacing: 4) {

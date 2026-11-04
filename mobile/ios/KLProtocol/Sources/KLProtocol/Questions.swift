@@ -37,6 +37,8 @@ public struct QuestionItem: Equatable, Identifiable {
     /// The opened ask's node box, which its answer is sealed to (R-SP-3). nil for a clear ask.
     public let nodeBox: JSONValue?
     public let seal: SealState
+    /// When the ask ends, a clear field, so a row that cannot be read still has its time left. nil: no deadline.
+    public let expiresAt: String?
 
     /// nil unless `message` is a complete `kl.question.ask`, clear or sealed; a
     /// sealed one is held to the node's rules (`validateAskMessage`), its clear
@@ -67,6 +69,7 @@ public struct QuestionItem: Equatable, Identifiable {
         self.nodeName = nodeName
         self.unreadable = why
         self.seal = state
+        self.expiresAt = message["expires_at"]?.stringValue
         guard let full = readable else {
             self.caseId = ""
             self.questionId = ""

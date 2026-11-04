@@ -107,6 +107,12 @@ struct PendingListView: View {
             TimelineView(.periodic(from: .now, by: 1)) { _ in
                 List {
                     LeaseRequestsSection()
+                    // The box key's set-up (R-SP-10), for a phone enrolled before it.
+                    if model.boxKeySetupNeeded {
+                        Section {
+                            Button(AppModel.boxKeySetupTitle) { Task { await model.setUpBoxKey() } }.disabled(model.boxKeySetupBusy)
+                        }
+                    }
                     if model.mode == .live {
                         Section {
                             if let problem = model.pollProblem {
@@ -134,8 +140,12 @@ struct PendingListView: View {
                             }
                         }
                     }
+                    // R-SP-6, R-SP-15: what cannot be read or answered, with no decision.
+                    ForEach(model.unreadableRows(AppModel.toolRef)) { row in
+                        UnreadableRow(row: row)
+                    }
                 }
-                .overlay { if model.pending.isEmpty && model.leaseRequests.isEmpty { Text("Nothing is waiting for you.").foregroundStyle(.secondary) } }
+                .overlay { if model.pending.isEmpty && model.leaseRequests.isEmpty && model.unreadableRows(AppModel.toolRef).isEmpty && model.unreadableRows(AppModel.leaseRef).isEmpty { Text("Nothing is waiting for you.").foregroundStyle(.secondary) } }
                 // Computer-use requests: pull to load them (this may ask for Face ID, as any check does).
                 .refreshable { await model.refreshLeases() }
             }
@@ -144,6 +154,28 @@ struct PendingListView: View {
             .navigationTitle("Pending approvals")
             .navigationDestination(for: String.self) { id in
                 ApprovalDetailView(itemId: id)
+            }
+        }
+    }
+}
+
+/// A message a pinned node signed that this phone cannot read or may not answer
+/// (R-SP-6, R-SP-15): the node, the kind, the time left and one line. It offers no
+/// decision and leads nowhere; the core's row has no buttons and no detail.
+struct UnreadableRow: View {
+    let row: ApprovalList.Row
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(row.nodeName).font(.headline)
+            HStack {
+                Text(row.label)
+                Spacer()
+                if let left = row.timeLeftMs { Text(formatLeft(.milliseconds(left))).monospacedDigit() }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            ForEach(row.cardLines, id: \.self) { line in
+                Text(line).font(.caption).foregroundStyle(.orange)
             }
         }
     }
@@ -401,6 +433,31 @@ struct SettingsView: View {
                 }
                 if model.mode == .demo {
                     Button("Leave demo") { model.leaveDemo() }
+                }
+                if model.mode == .live {
+                    Section("Box key") {
+                        if model.boxKeyRefused {
+                            Text(AppModel.boxKeyRefusedLine).foregroundStyle(.orange)
+                            Button("Try again") { Task { await model.retryBoxKey() } }.disabled(model.boxKeySetupBusy)
+                        } else {
+                            Text(verbatim: model.boxKeyFingerprint.map { "Box key \($0)" } ?? "No box key yet").font(.caption.monospaced())
+                            if model.boxKeyBroken {
+                                Text(AppModel.unreadableLine(AppModel.boxKeyBrokenReason, nodeName: "")).foregroundStyle(.orange)
+                                Button("Make a new box key") { Task { await model.remakeBoxKey() } }.disabled(model.boxKeySetupBusy)
+                            }
+                            ForEach(model.state.nodes, id: \.id) { node in
+                                switch model.boxKeyState(node.id) {
+                                case .inUse:
+                                    Text(verbatim: "\(Display.escape(node.name)): in use").font(.caption)
+                                case .waitingForApply:
+                                    Text(verbatim: "\(Display.escape(node.name)): waiting for `device apply` on the node").font(.caption).foregroundStyle(.orange)
+                                case .notSent:
+                                    Text(verbatim: "\(Display.escape(node.name)): not sent yet").font(.caption).foregroundStyle(.orange)
+                                    Button("Send again") { Task { await model.sendBoxKeyAgain() } }.disabled(model.boxKeySetupBusy)
+                                }
+                            }
+                        }
+                    }
                 }
                 Section {
                     Button("Reset this phone", role: .destructive) { model.reset() }

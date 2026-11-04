@@ -65,7 +65,7 @@ struct KingLouieApp: App {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active: model.resumePolling()
-            case .background: model.stopPolling()
+            case .background: model.didEnterBackground()
             default: break
             }
         }

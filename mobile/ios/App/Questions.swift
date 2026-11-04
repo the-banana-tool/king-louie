@@ -19,42 +19,55 @@ struct QuestionsView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if model.mode == .live {
-                    Button("Check for questions") { Task { await model.refreshQuestions() } }
-                }
-                ForEach(model.questions) { item in
-                    let busy = model.answering.contains(item.token)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("\(Display.escape(item.caseTitle)) · \(Display.escape(item.nodeName))").font(.caption).foregroundStyle(.secondary)
-                        Text(Display.escape(item.text)).fontWeight(item.urgency == "high" ? .bold : .regular)
-                        if item.kind == "briefing" {
-                            Button("Got it") { Task { await model.answer(item, optionId: nil, text: "ok") } }
-                                .buttonStyle(.bordered).disabled(busy)
-                        } else {
-                            ForEach(item.options) { option in
-                                Button(Display.escape(option.label)) { Task { await model.answer(item, optionId: option.id, text: nil) } }
-                                    .buttonStyle(.bordered).disabled(busy)
-                            }
-                            HStack {
-                                TextField("Answer…", text: Binding(get: { drafts[item.token] ?? "" }, set: { drafts[item.token] = $0 }))
-                                    .textFieldStyle(.roundedBorder)
-                                Button("Send") {
-                                    let text = draft(item.token)
-                                    Task { await model.answer(item, optionId: nil, text: text) }
+            // Each second: the time left of a row that cannot be read.
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                List {
+                    if model.mode == .live {
+                        Button("Check for questions") { Task { await model.refreshQuestions() } }
+                    }
+                    // R-SP-6, R-SP-15: what cannot be read or answered, with no decision.
+                    ForEach(model.unreadableRows(AppModel.questionRef)) { row in
+                        UnreadableRow(row: row)
+                    }
+                    ForEach(model.questions) { item in
+                        let busy = model.answering.contains(item.token)
+                        VStack(alignment: .leading, spacing: 6) {
+                            if let why = item.unreadable {
+                                // A sealed ask has no case, no text and no options here, and takes no answer.
+                                Text(Display.escape(item.nodeName)).font(.headline)
+                                Text(model.unreadableText(reason: why, nodeName: item.nodeName)).font(.caption).foregroundStyle(.orange)
+                            } else {
+                                Text("\(Display.escape(item.caseTitle)) · \(Display.escape(item.nodeName))").font(.caption).foregroundStyle(.secondary)
+                                Text(Display.escape(item.text)).fontWeight(item.urgency == "high" ? .bold : .regular)
+                                if item.kind == "briefing" {
+                                    Button("Got it") { Task { await model.answer(item, optionId: nil, text: "ok") } }
+                                        .buttonStyle(.bordered).disabled(busy)
+                                } else {
+                                    ForEach(item.options) { option in
+                                        Button(Display.escape(option.label)) { Task { await model.answer(item, optionId: option.id, text: nil) } }
+                                            .buttonStyle(.bordered).disabled(busy)
+                                    }
+                                    HStack {
+                                        TextField("Answer…", text: Binding(get: { drafts[item.token] ?? "" }, set: { drafts[item.token] = $0 }))
+                                            .textFieldStyle(.roundedBorder)
+                                        Button("Send") {
+                                            let text = draft(item.token)
+                                            Task { await model.answer(item, optionId: nil, text: text) }
+                                        }
+                                        .disabled(busy || draft(item.token).isEmpty || tooLong(item.token))
+                                    }
+                                    if tooLong(item.token) {
+                                        Text("At most \(AppModel.maxAnswerChars) characters.").font(.caption).foregroundStyle(.red)
+                                    }
                                 }
-                                .disabled(busy || draft(item.token).isEmpty || tooLong(item.token))
-                            }
-                            if tooLong(item.token) {
-                                Text("At most \(AppModel.maxAnswerChars) characters.").font(.caption).foregroundStyle(.red)
                             }
                         }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
                 }
+                .overlay { if model.questions.isEmpty && model.unreadableRows(AppModel.questionRef).isEmpty { Text("No open questions").foregroundStyle(.secondary) } }
+                .refreshable { await model.refreshQuestions() }
             }
-            .overlay { if model.questions.isEmpty { Text("No open questions").foregroundStyle(.secondary) } }
-            .refreshable { await model.refreshQuestions() }
             .task { await model.refreshQuestions(onlyIfUnlocked: true) }
             .navigationTitle("Questions")
         }

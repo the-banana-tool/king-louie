@@ -101,14 +101,15 @@ describe('iOS lease screens (owner ruling R-F5-8)', () => {
     // The app: requests come through the pin and the core, and nothing else opens an envelope.
     const refresh = section(leases, 'func refreshLeases', 'func decideLease');
     assert.match(refresh, /let pin = state\.nodes\.first\(where: \{ \$0\.id == envelope\.kid \}\)/);
-    assert.match(refresh, /let message = Leases\.verifiedMessage\(envelope, pin: pin\), let request = LeaseRequest\(message: message,/);
-    assert.match(refresh, /LeaseRequestItem\(request: request, nodeName: pin\.name, status: status\)/);
+    assert.match(refresh, /let message = Leases\.verifiedMessage\(envelope, pin: pin\) else \{ return nil \}/);
+    assert.match(refresh, /LeaseRequest\.check\(message, open: opener\(\), sealedSeen: sealedSeen\)/);
+    assert.match(refresh, /LeaseRequestItem\(request: request, nodeName: pin\.name, status: status, seal: check\.seal\)/);
     const apply = section(leases, 'private func apply(', 'func closeLiveLease');
-    assert.match(apply, /Leases\.verifiedMessage\(envelope, pin: pin\)/);
-    assert.match(apply, /let check = Leases\.verifyView\(envelope, pin: pin\)\n\s+guard check\.accepted, let view = check\.view, view\.leaseId == live\.leaseId else \{ return \}/);
+    assert.match(apply, /readStatus\(envelope, pin: pin\)/);
+    assert.match(apply, /let check = Leases\.verifyView\(envelope, pin: pin, open: opener\(\)\)\n\s+dropOpenedView\(envelope\)\n\s+guard check\.accepted, let view = check\.view, view\.leaseId == live\.leaseId else \{ return \}/);
     none(live, ['.message()', 'payloadData', 'JSONParser', '.payload'], 'the lease section (an envelope opened outside the core)');
     // The request screen draws the signed request, and the model keeps nothing else for it.
-    assert.match(leases, /struct LeaseRequestItem: Identifiable, Equatable \{\n\s+var id: String \{ request\.requestId \}\n\s+let request: LeaseRequest\n\s+let nodeName: String\n\s+var status: LeaseStatus\?\n\s+\}/);
+    assert.match(leases, /struct LeaseRequestItem: Identifiable, Equatable \{\n\s+var id: String \{ request\.requestId \}\n\s+let request: LeaseRequest\n\s+let nodeName: String\n\s+var status: LeaseStatus\?\n\s+var seal: SealState = \.clear\n\s+\}/);
     for (const shown of ['item.request.apps', 'app.name', 'app.path', 'app.processes', 'item.request.reason', "Agent's reason (unverified)",
       'item.request.originClient', 'item.request.jobId', 'item.request.maxMinutes', 'item.request.limits', 'item.nodeName']) {
       assert.ok(views.includes(shown), `the request screen shows ${shown}`);
@@ -125,7 +126,7 @@ describe('iOS lease screens (owner ruling R-F5-8)', () => {
     assert.match(live, /let signedAt = Timestamps\.string\(client\.now\(\)\)/);
     none(live, ['Timestamps.string(Date())', 'Timestamps.string(.now'], 'the lease section (the phone clock in a signed message)');
     // A request is dropped once it is past its expiry on that clock.
-    assert.match(live, /let expires = Timestamps\.date\(request\.expiresAt\), expires > client\.now\(\)/);
+    assert.match(live, /let expires = message\["expires_at"\]\?\.stringValue\.flatMap\(\{ Timestamps\.date\(\$0\) \}\), expires > relayNow/);
   });
 });
 
@@ -264,11 +265,12 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     const iosLeases = section(ios, '// MARK: Leases (fleet stage 5)', '// MARK: Leases end');
     const listed = section(iosLeases, 'private func noteListedLease', '\n    }\n');
     // Only a status the pinned node it is listed under signed; then by seq, and gone once the node says ended.
-    assert.match(listed, /guard let nodeId = entry\["node_id"\]\?\.stringValue, let pin = state\.nodes\.first\(where: \{ \$0\.id == nodeId \}\),\n\s+let json = entry\["status"\], let signed = try\? Envelope\(json: json\),\n\s+let message = Leases\.verifiedMessage\(signed, pin: pin\), let status = LeaseStatus\(message: message\) else \{ return \}/);
+    assert.match(listed, /guard let nodeId = entry\["node_id"\]\?\.stringValue, let pin = state\.nodes\.first\(where: \{ \$0\.id == nodeId \}\),\n\s+let json = entry\["status"\], let signed = try\? Envelope\(json: json\),\n\s+let status = readStatus\(signed, pin: pin\) else \{ return \}/);
     assert.match(listed, /apply\(signed, pin: pin, deviceId: deviceId, to: &live\)/);
     assert.match(listed, /guard Leases\.acceptsStatus\(status, appliedSeq: known\.map \{ runningLeases\[\$0\]\.appliedSeq \} \?\? 0\) else \{ return \}/);
     assert.match(listed, /guard Leases\.isLive\(state: status\.state\) \|\| mayStart else \{\n\s+if status\.state == "ended" \{ signedLeaseGrants\[status\.leaseId\] = nil \}\n\s+return\n\s+\}/);
-    assert.ok(listed.indexOf('Leases.verifiedMessage(') < listed.indexOf('runningLeases.append('));
+    assert.ok(listed.indexOf('readStatus(') >= 0 && listed.indexOf('readStatus(') < listed.indexOf('runningLeases.append('));
+    assert.match(section(ios, 'private func readStatus(', '\n    }\n'), /Leases\.verifiedMessage\(envelope, pin: pin\)/);
     // It comes with the one list request, and only from entries that carry no request.
     const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
     assert.match(refreshIos, /if entry\["envelope"\]\?\.isNull \?\? true \{\n\s+noteListedLease\(entry, deviceId: key\.deviceId\)\n\s+continue\n\s+\}/);
@@ -496,7 +498,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     // Confirmed: one place, after the check accepted, with this phone's clock and what the node listed.
     assert.equal(count(ios, '.confirmed(at: '), 1, 'one way to be confirmed');
     const inOrder = (text, needles) => { let at = -1; for (const n of needles) { const next = text.indexOf(n, at + 1); assert.ok(next > at, `"${n}" after the one before it`); at = next; } };
-    inOrder(refreshIos, ['let checkedAt = Date()', 'guard check.accepted else { checks[pin.id] = .unconfirmed; continue }', 'let listed = Leases.listedStatuses(check, pin: pin)',
+    inOrder(refreshIos, ['let checkedAt = Date()', 'guard check.accepted else { checks[pin.id] = .unconfirmed; continue }', 'let listed = Leases.listedStatuses(check, pin: pin, open: openedOnly())',
       'checks[pin.id] = .confirmed(at: checkedAt, running: listed.filter { Leases.isLive(state: $0.state) }.count,', 'waiting: listed.filter { $0.state == "pending" }.count)', 'leaseChecks = checks']);
     // The words of a row: nothing asked is "not checked yet"; a confirmed row always shows its time (and its
     // date when that was not today), so a session that lapsed does not leave an old answer looking current.
@@ -510,7 +512,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     // The screen: every pinned node has a line; the first two states in the Computer use section, the third in the banner.
     const views = read('mobile', 'ios', 'App', 'LeaseViews.swift');
     const requests = section(views, 'struct LeaseRequestsSection', '\nstruct LeaseRequestView');
-    assert.match(requests, /if !model\.leaseRequests\.isEmpty \|\| !model\.leaseStatusRows\.isEmpty \{/);
+    assert.match(requests, /if !model\.leaseRequests\.isEmpty \|\| !model\.leaseStatusRows\.isEmpty \|\| !model\.unreadableRows\(AppModel\.leaseRef\)\.isEmpty \{/);
     assert.match(requests, /ForEach\(model\.leaseStatusRows\) \{ row in\n\s+Text\(model\.leaseCheckText\(row\)\)/);
     assert.match(requests, /if model\.leaseStatusRows\.contains\(where: \{ \$0\.check == nil \}\) \{\n\s+Text\(Leases\.notCheckedYetDetail\)/);
     assert.match(iosLeases, /var leaseStatusRows: \[LeaseCheckRow\] \{ leaseCheckRows\.filter \{ \$0\.check != \.unconfirmed \} \}/);
@@ -568,7 +570,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     // A status its node signed: live, or pending with a grant this phone signed, gets a row; "ended" forgets the grant.
     const noteIos = section(iosLeases, 'private func noteListedLease', '\n    }\n');
     assert.match(noteIos, /let mayStart = Leases\.mayStillStart\(state: status\.state, signedGrant: signedLeaseGrants\[status\.leaseId\] != nil\)\n\s+guard Leases\.isLive\(state: status\.state\) \|\| mayStart else \{\n\s+if status\.state == "ended" \{ signedLeaseGrants\[status\.leaseId\] = nil \}\n\s+return\n\s+\}/);
-    assert.ok(noteIos.indexOf('Leases.verifiedMessage(signed, pin: pin)') < noteIos.indexOf('Leases.mayStillStart('), 'only on the pinned node\'s signed word');
+    assert.ok(noteIos.indexOf('readStatus(signed, pin: pin)') >= 0 && noteIos.indexOf('readStatus(signed, pin: pin)') < noteIos.indexOf('Leases.mayStillStart('), 'only on the pinned node\'s signed word');
     // Dropped for an absence only after a listing that was accepted, and only once the request has expired on both clocks.
     const refreshIos = section(iosLeases, 'func refreshLeases', 'func decideLease');
     assert.ok(refreshIos.indexOf('guard check.accepted else { checks[pin.id] = .unconfirmed; continue }') < refreshIos.indexOf('dropMayStartRows(of: pin, named: Set(listed.map { $0.leaseId }), relayNow: client.now())'));
@@ -650,7 +652,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.ok(accepted > 0 && accepted < refreshIos.indexOf('dropMayStartRows(') && refreshIos.indexOf('dropMayStartRows(') < noted);
     assert.equal(count(iosLeases, 'notePendingListed('), 2, 'declared, and called from that one place');
     const pendingIos = section(iosLeases, 'private func notePendingListed', '\n    }\n');
-    assert.match(pendingIos, /guard check\.accepted else \{ return \}\n\s+for signed in check\.statuses \{\n\s+guard let message = Leases\.verifiedMessage\(signed, pin: pin\), let status = LeaseStatus\(message: message\) else \{ continue \}/);
+    assert.match(pendingIos, /guard check\.accepted else \{ return \}\n\s+for signed in check\.statuses \{\n\s+guard let status = readStatus\(signed, pin: pin\) else \{ continue \}/);
     assert.match(pendingIos, /guard Leases\.listedPendingGetsRow\(state: status\.state, shownAsRequest: shownAsRequest\.contains\(status\.leaseId\), signedGrant: remembered\) else \{ continue \}/);
     assert.match(pendingIos, /guard Leases\.acceptsStatus\(status, appliedSeq: 0\) else \{ continue \}\n\s+runningLeases\.append\(RunningLease\(/);
     assert.match(pendingIos, /status: signed\)\)/, 'the row carries the signed status, so Stop starts from it');
