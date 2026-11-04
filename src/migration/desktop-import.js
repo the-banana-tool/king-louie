@@ -105,6 +105,15 @@ const EXCLUDED = Object.freeze({
   'settings.models': 'model profiles are set up on the service; a local server comes only from the administrator\'s service.json'
 });
 
+// A setting that stays behind, on a personal node, in the owner's words. Each its own
+// line: the stays-behind list shows a sentence once.
+const PERSONAL_SETTING_LINES = Object.freeze({
+  playbooks: 'Playbook sources and auto-update do not move. On the node they come only from the playbooks block of its service.json.',
+  executors: 'External agents and their settings (the agents a case can send through, the default country code, check timing and your own outbound keywords) do not move. On the node, external agents are set up in its service.json.',
+  contactPolicy: 'How questions reach you (contact ladders, quiet hours, breakthrough and digest) does not move. Set it again under Settings > Contact on the node.',
+  contact: 'Who you are to the contact channels (your identity and addresses) does not move. On the node they come only from the contact block of its service.json.'
+});
+
 // What the owner reads on a carried item: a move that looks complete in a
 // count can still leave something to do.
 const PERSONAL_NOTES = Object.freeze({
@@ -587,6 +596,13 @@ class DesktopImporter {
     if (cleanupStaging) this.cleanupOrphanedStaging();
   }
 
+  // Why a setting the desktop holds does not move.
+  settingStaysNote(key) {
+    if (!this.personal) return EXCLUDED[`settings.${key}`] || 'this setting is managed on the service';
+    if (Object.hasOwn(PERSONAL_SETTING_LINES, key)) return PERSONAL_SETTING_LINES[key];
+    return EXCLUDED[`settings.${key}`] || `The setting ${key} does not move: it stays on this computer.`;
+  }
+
   // Whether the node still holds its own default for a setting, so an import
   // may fill it in.
   settingUntouched(key, settings, defaults) {
@@ -718,7 +734,7 @@ class DesktopImporter {
     const settings = this.context.getSettings();
     const defaults = mergeSettings(DEFAULT_SETTINGS);
     for (const key of arr(inventory.settingsKeys)) {
-      if (!this.settingsKeys.includes(key)) { add('settings', key, 'skip-excluded', EXCLUDED[`settings.${key}`] || 'this setting is managed on the service'); continue; }
+      if (!this.settingsKeys.includes(key)) { add('settings', key, 'skip-excluded', this.settingStaysNote(key)); continue; }
       const carried = PERSONAL_SETTINGS_KEYS.includes(key);
       if (this.settingUntouched(key, settings, defaults)) { add('settings', key, 'new', carried ? PERSONAL_NOTES[key] : null); continue; }
       // A skip reads as done, so profiles this node does not hold are said
