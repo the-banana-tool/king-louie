@@ -189,6 +189,12 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
       return 1;
     }
     const replacing = heldBox && !samePoint(heldBox, device.box_key) ? `, replacing box key ${boxKeyText(heldBox)}` : '';
+    // A node that seals sends this phone nothing it can read. An enrollment is still
+    // the administrator's call, for a phone that will stop leases and no more.
+    const { readLatch } = require('../../approvals/seal-policy');
+    if (readLatch(dataDir).latched && !device.box_key) {
+      io.stdout.write('This node seals what it sends and this phone has no box key: this phone will see nothing from this node.\n');
+    }
     // The name and platform come from the phone: printed without control or
     // bidi characters so they cannot rewrite what the administrator reads.
     io.stdout.write(`Device "${printable(device.name)}" (${printable(device.platform)}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)}${withReadKey(device)}${withBoxKey(device)}${replacing} — does the phone show the same? [y/N] `);

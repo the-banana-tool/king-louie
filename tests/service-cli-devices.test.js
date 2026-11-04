@@ -7,6 +7,7 @@ const path = require('path');
 const { PassThrough } = require('stream');
 const { main } = require('../src/service/cli');
 const { runEnrollDevice, runDevice, describeAge } = require('../src/service/commands/devices');
+const { writeLatch } = require('../src/approvals/seal-policy');
 const { CourierPump } = require('../src/approvals/courier');
 const { ApproverStore } = require('../src/approvals/approver-store');
 const { checkApproverDir } = require('../src/approvals/approver-store');
@@ -141,6 +142,42 @@ describe('enroll-device', () => {
     assert.equal(open(done.enroll).message.device.device_id, phone.deviceId);
     const ledger = new AuditLedger({ dir: path.join(n.dataDir, 'audit'), nodeId: null });
     assert.deepEqual(ledger.tail(1).map((e) => [e.kind, e.writer, e.data.device_id]), [['device.enrolled', 'cli', phone.deviceId]]);
+  });
+
+  it('on a latched node a claim with no box key says the phone will see nothing; otherwise the prompt is as it was', async () => {
+    const warning = /this phone will see nothing from this node/;
+    const plain = await enroll('n');
+    assert.doesNotMatch(plain.io.text.out, warning);
+
+    const latched = node();
+    writeLatch(latched.dataDir);
+    const { pump, calls } = servicePump(latched);
+    assert.ok(pump && calls);
+    const io = streamIo();
+    const phone = createFakePhone({ name: 'Pixel 9' });
+    const running = runEnrollDevice({ ...latched, io, deps });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope: phone.enroll({ codeId: qr.code_id, code: qr.code }) });
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    assert.match(io.text.out, warning);
+    assert.ok(io.text.out.indexOf('see nothing') < io.text.out.indexOf('does the phone show'), 'said before the question');
+    io.stdin.write('y\n');
+    assert.equal(await running, 0);
+
+    const withBox = node();
+    writeLatch(withBox.dataDir);
+    const boxed = servicePump(withBox);
+    const boxIo = streamIo();
+    const boxPhone = createFakePhone({ name: 'Pixel 9', boxKey: true });
+    const boxRun = runEnrollDevice({ ...withBox, io: boxIo, deps });
+    const boxText = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(boxIo.text.out), 'the pairing code');
+    const boxQr = decodeQr(boxText[1]);
+    boxed.pump.deliver(boxed.pump.routeFor('enroll.claim', { code_id: boxQr.code_id }), 'enroll.claim', { code_id: boxQr.code_id, envelope: boxPhone.enroll({ device: boxPhone.device({ boxKey: true }), codeId: boxQr.code_id, code: boxQr.code }) });
+    await waitFor(() => /does the phone show the same\? \[y\/N\]/.test(boxIo.text.out), 'the prompt');
+    assert.doesNotMatch(boxIo.text.out, warning);
+    boxIo.stdin.write('n\n');
+    await boxRun;
   });
 
   // Personal hosting (spec 2026-10-25 §6, last row): the owner runs it
