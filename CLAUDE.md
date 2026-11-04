@@ -1055,9 +1055,9 @@ work while attached appends it to `PROXIED_DOMAINS`).
   - A stored key that will not decrypt (`setAsideUnreadableSecrets`, at the plan): it comes
     out of the inventory, so no plan holds it and verify cannot miss it; its name goes in
     **Stays on this computer** and `leftBehind`, it stays sealed in the profile and backup,
-    and the mark goes on. Secure storage unavailable, or more than half the keys failing,
-    is a wrong environment: `MIGRATION_SOURCE`, nothing moved (so one key alone, failing,
-    refuses too).
+    and the mark goes on. Secure storage unavailable, at any count, or more than half the
+    keys failing with at least 3 stored, is a wrong environment: `MIGRATION_SOURCE`,
+    nothing moved.
   - `detectOldProfile` is also `found` for `apiTokens`, the Anthropic sign-in, search and
     image keys, a vault key in `config.json`, or a carried setting that is not its default
     (`settingsWouldMove`; `keysOrSettings` on the answer).

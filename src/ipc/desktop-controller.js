@@ -73,6 +73,8 @@ const STAYS_BEHIND_FIXED = Object.freeze([
 const agentLine = ({ dir, agents }) => `Case ${dir}: its agent ${agents.join(', ')} is in the executors folder and does not move. Set it up on the node before this case sends anything.`;
 // A key that can never decrypt must not hold the mark back; a mass failure is the wrong
 // environment, and must not be marked as a move that lost them.
+// One or two keys failing say nothing about the environment.
+const WRONG_ENVIRONMENT_MIN_KEYS = 3;
 const UNREADABLE_KEY_WORDS = Object.freeze({ providerToken: 'Provider key', searchKey: 'Search key', imageKey: 'Image key', vault: 'Vault entry', anthropicOAuth: 'The Anthropic sign-in', channelToken: 'Bot token' });
 const UNREADABLE_KEY_NOTE = 'it can no longer be read on this computer and stays sealed here and in the backup; enter it again on the node';
 const unreadableKeyLine = ({ category, key }) => (category === 'anthropicOAuth'
@@ -1458,7 +1460,7 @@ function createDesktopController({
         if (problem) return moveSourceRefusal(`The old profile did not read whole, so nothing was moved: ${problem}`);
         if (source.inventory.secrets === 'unavailable') return moveSourceRefusal(NO_SECURE_STORAGE);
         const keys = setAsideUnreadableSecrets(source);
-        if (keys.unreadable.length * 2 > keys.total) return moveSourceRefusal(keysUnreadable(keys.unreadable.length, keys.total));
+        if (keys.total >= WRONG_ENVIRONMENT_MIN_KEYS && keys.unreadable.length * 2 > keys.total) return moveSourceRefusal(keysUnreadable(keys.unreadable.length, keys.total));
         closeImportSession();
         const plan = withSourceFacts(await planImport({ client: target.client, source }), source);
         // A case the reader holds back whole is in no plan, so nothing could ever

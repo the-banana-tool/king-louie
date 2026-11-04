@@ -201,6 +201,23 @@ describe('a stored key that will not decrypt', () => {
     });
   });
 
+  for (const names of [['anthropic'], ['anthropic', 'openai']]) {
+    it(`${names.length} of ${names.length} failing is too few to call a wrong environment: named, and the move goes on`, async () => {
+      await realBridge({
+        seed,
+        chatData: { settings: {}, apiTokens: tokens(names) },
+        unreadable: (text) => text.startsWith('value-')
+      }, async ({ controller, state }) => {
+        const planned = await controller.migrationPlan();
+        assert.strictEqual(planned.ok, true, JSON.stringify(planned));
+        for (const name of names) assert.ok(planned.staysBehind.some((l) => l.includes(name) && /enter it again on the node/i.test(l)), name);
+        const out = await controller.migrationApply({ confirmed: true });
+        assert.strictEqual(out.ok, true, JSON.stringify(out.verified || out));
+        assert.ok(state.migration);
+      });
+    });
+  }
+
   it('exactly half is not more than half: the move goes on', async () => {
     await realBridge({
       seed,

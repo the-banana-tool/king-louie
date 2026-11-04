@@ -1341,8 +1341,8 @@ move it into the node, once.
    profile as moved. A difference shows what is missing, nothing is marked, and pressing
    again plans again: what landed is already present.
    A stored key this computer can no longer read is named under **Stays on this computer**:
-   enter it again on the node. If secure storage is unavailable, or more than half your
-   keys fail, the move refuses with nothing moved, since that points to the session and
+   enter it again on the node. If secure storage is unavailable, or more than half of three
+   or more keys fail, the move refuses with nothing moved, since that points to the session and
    not the keys.
 5. When channels, hooks or MCP servers moved, they start when the node next starts. The
    app asks: **Restart King Louie Node now** or **Later**. A restart ends a turn, take or
