@@ -431,7 +431,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   const sealType = 'kl.approval.request';
   const boxA = { [A.id]: KEYS.devices.A_box.jwk };
   const boxB = { [B.id]: KEYS.devices.B_box.jwk };
-  const sealedRequest = (label, { recipients = { ...boxA, ...boxB }, actionHash = null } = {}) => {
+  const sealParts = (label, actionHash = null) => {
     const salt = sha(`seal salt ${label}`).toString('base64url');
     const content = { action: toolActionLit, origin: { client: 'gateway', session: 'chat-1', job_id: null }, salt };
     const clear = {
@@ -439,6 +439,10 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
       action_hash: actionHash || saltedHash(salt, toolActionLit), created_at: NOW, expires_at: iso(NOW_MS + 300000),
       nonce: nonceOf(`seal ${label}`), node_box: KEYS.nodes['web-01'].box.jwk
     };
+    return { clear, content };
+  };
+  const sealedRequest = (label, { recipients = { ...boxA, ...boxB }, actionHash = null } = {}) => {
+    const { clear, content } = sealParts(label, actionHash);
     const random = (n) => (n === 32 ? sha(`seal cek ${label}`) : sha(`seal iv ${label}`).subarray(0, n));
     const message = sealContent({ type: sealType, senderId: web.nodeId, clear, content, recipients, ephemeral: fixedBox(sha(`seal epk ${label}`)), random });
     return { message, full: { ...clear, ...content } };
@@ -462,6 +466,30 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   // Opens, but the clear hash is today's unsalted one and not the content's.
   const unsalted = crypto.createHash('sha256').update(canonicalize(toolActionLit)).digest('base64url');
   sealVector('seal-hash-mismatch', sealedRequest('hash mismatch', { actionHash: unsalted }).message, 'action_hash_mismatch');
+  // A sender that does not follow the format, which sealContent refuses to be:
+  // R-SP-1 by hand over any plaintext bytes. Both tags hold; only the content is wrong.
+  const gcmSealed = (key, iv, plaintext, aad = null) => {
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
+    if (aad) cipher.setAAD(aad);
+    const body = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    return Buffer.concat([body, cipher.getAuthTag()]);
+  };
+  const handSealed = (label, clear, plaintext) => {
+    const eph = fixedBox(sha(`seal epk ${label}`));
+    const cek = sha(`seal cek ${label}`);
+    const iv = sha(`seal iv ${label}`).subarray(0, 12);
+    const info = Buffer.from(`kl-seal-v1\n${sealType}\n${web.nodeId}\n${A.id}`, 'utf8');
+    const kek = Buffer.from(crypto.hkdfSync('sha256', eph.agree(KEYS.devices.A_box.jwk), Buffer.alloc(0), info, 32));
+    const ct = gcmSealed(cek, iv, plaintext, Buffer.from(canonicalize(clear), 'utf8'));
+    const wrap = gcmSealed(kek, Buffer.alloc(12), cek);
+    return { ...clear, sealed: { v: 1, epk: eph.jwk, iv: iv.toString('base64url'), ct: ct.toString('base64url'), keys: { [A.id]: wrap.toString('base64url') } } };
+  };
+  // The right keys and values in another order: JSON, but not the JCS bytes.
+  const notJcs = sealParts('content not jcs');
+  sealVector('seal-content-not-jcs', handSealed('content not jcs', notJcs.clear, Buffer.from(JSON.stringify({ salt: notJcs.content.salt, origin: notJcs.content.origin, action: notJcs.content.action }), 'utf8')), 'content_malformed');
+  // JCS bytes, but the content overrules a key the AAD covers.
+  const clearKey = sealParts('content clear key');
+  sealVector('seal-content-clear-key', handSealed('content clear key', clearKey.clear, Buffer.from(canonicalize({ ...clearKey.content, node_name: 'other-node' }), 'utf8')), 'content_malformed');
 
   return vectors;
 }

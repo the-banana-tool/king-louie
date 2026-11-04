@@ -270,6 +270,7 @@ describe('sealContent and openSealed', () => {
     assert.equal(reasonOf(() => sealContent({ ...base, type: 'kl.lease.grant' })), 'malformed');
     assert.equal(reasonOf(() => sealContent({ ...base, content: { ...content, node_name: 'other' } })), 'malformed');
     assert.equal(reasonOf(() => sealContent({ ...base, clear: { ...clear, action: content.action } })), 'malformed');
+    assert.equal(reasonOf(() => sealContent({ ...base, clear: { ...clear, sealed: { v: 1 } } })), 'malformed', 'a clear part holding sealed');
     assert.equal(reasonOf(() => sealContent({ ...base, random: () => Buffer.alloc(4) })), 'malformed');
   });
 
@@ -363,6 +364,17 @@ describe('isSealedShape', () => {
     assert.equal(isSealedShape(type, null), false);
     const { sealed: _gone, ...clearOnly } = message;
     assert.equal(isSealedShape(type, clearOnly), false, 'the clear shape is not the sealed shape');
+  });
+
+  it('answers false, and never throws, for every type name that is not sealed or has no clear keys', () => {
+    for (const type of Object.keys(SEAL_SPLIT)) {
+      assert.equal(isSealedShape(type, { type }), false, type);
+    }
+    for (const type of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'kl.lease.grant', '', 42, null, undefined]) {
+      assert.equal(isSealedShape(type, { type }), false, String(type));
+      assert.equal(reasonOf(() => sealContent({ type, senderId: NODE_ID, clear: { type, node_id: NODE_ID }, content: {}, recipients: { [NODE_ID]: NODE_BOX.jwk } })), 'malformed', String(type));
+      assert.equal(reasonOf(() => splitMessage(type, { type })), 'malformed', String(type));
+    }
   });
 
   // The clear column of R-SP-4, written out here so the table in seal.js is

@@ -37,7 +37,7 @@ const READ_KEY = [
 ];
 const READ_KEY_ANDROID = ['phone-api-auth-read', 'enroll-console-read-key', 'read-key-valid'];
 // The seal (sealed phones, R-SP-1, R-SP-2): the node's for now.
-const SEAL = ['seal-open', 'seal-not-recipient', 'seal-tampered-ct', 'seal-tampered-clear', 'seal-hash-mismatch'];
+const SEAL = ['seal-open', 'seal-not-recipient', 'seal-tampered-ct', 'seal-tampered-clear', 'seal-hash-mismatch', 'seal-content-not-jcs', 'seal-content-clear-key'];
 const EXPECTED = [
   'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
   'request-malformed', 'request-display-edge', 'request-malformed-equivalent-keys',
@@ -114,8 +114,8 @@ describe('approval-v1 vectors', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
   });
 
-  it('54 vectors; the read-key ones name node and android only, android where the phone builds or signs', () => {
-    assert.equal(EXPECTED.length, 54);
+  it('56 vectors; the read-key ones name node and android only, android where the phone builds or signs', () => {
+    assert.equal(EXPECTED.length, 56);
     for (const name of READ_KEY) {
       const want = READ_KEY_ANDROID.includes(name) ? ['node', 'android'] : ['node'];
       assert.deepEqual(byName.get(name).consumers, want, name);

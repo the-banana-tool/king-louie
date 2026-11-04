@@ -10,6 +10,11 @@
 // The zero iv is safe because a kek is fresh per message and recipient: `epk`
 // is new every time. An injected `ephemeral` is for vectors only.
 //
+// A successful open is not authentication. A box key is public, so anyone can
+// seal to it and name any sender: the open proves only that this message was
+// sealed to this recipient, and that nothing in it changed since. A caller
+// verifies the signed envelope and binds its signer to the sender id first.
+//
 // The message a validator checks is clear ∪ content. Nothing here reads a
 // clear value but the sender id; whether the fields hold what they should is
 // the validators' work.
@@ -25,27 +30,37 @@ class SealError extends Error {
   }
 }
 
-const freeze = (table) => Object.freeze(Object.fromEntries(Object.entries(table).map(([k, keys]) => [k, Object.freeze(keys)])));
-
-// The content column of R-SP-4.
-const SEAL_SPLIT = freeze({
-  'kl.approval.request': ['action', 'origin', 'salt'],
-  'kl.lease.request': ['lease', 'origin', 'salt'],
-  'kl.lease.status': ['name'],
-  'kl.lease.view': ['foreground', 'frame', 'frame_dropped', 'actions'],
-  'kl.question.ask': ['case_id', 'question_id', 'case_title', 'text', 'options'],
-  'kl.question.answer': ['case_id', 'question_id', 'answer']
+// R-SP-4, one row per type, so a type cannot have one column and not the other.
+// A sealed message holds exactly the clear keys and `sealed`.
+const SEAL_TABLE = Object.freeze({
+  'kl.approval.request': {
+    content: ['action', 'origin', 'salt'],
+    clear: ['v', 'type', 'request_id', 'node_id', 'node_name', 'action_hash', 'created_at', 'expires_at', 'nonce', 'node_box']
+  },
+  'kl.lease.request': {
+    content: ['lease', 'origin', 'salt'],
+    clear: ['v', 'type', 'request_id', 'lease_id', 'node_id', 'node_name', 'lease_hash', 'created_at', 'expires_at', 'nonce', 'node_box']
+  },
+  'kl.lease.status': {
+    content: ['name'],
+    clear: ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'state', 'locked', 'reason', 'expires_at', 'contact_token', 'granted_by', 'kind', 'unattended']
+  },
+  'kl.lease.view': {
+    content: ['foreground', 'frame', 'frame_dropped', 'actions'],
+    clear: ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'to_device', 'state', 'locked', 'remaining_s', 'contact_token']
+  },
+  'kl.question.ask': {
+    content: ['case_id', 'question_id', 'case_title', 'text', 'options'],
+    clear: ['v', 'type', 'node_id', 'token', 'kind', 'urgency', 'expires_at', 'node_box']
+  },
+  'kl.question.answer': {
+    content: ['case_id', 'question_id', 'answer'],
+    clear: ['v', 'type', 'node_id', 'token', 'device_id', 'nonce', 'signed_at']
+  }
 });
 
-// The clear column. A sealed message holds exactly these and `sealed`.
-const SEAL_CLEAR = freeze({
-  'kl.approval.request': ['v', 'type', 'request_id', 'node_id', 'node_name', 'action_hash', 'created_at', 'expires_at', 'nonce', 'node_box'],
-  'kl.lease.request': ['v', 'type', 'request_id', 'lease_id', 'node_id', 'node_name', 'lease_hash', 'created_at', 'expires_at', 'nonce', 'node_box'],
-  'kl.lease.status': ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'state', 'locked', 'reason', 'expires_at', 'contact_token', 'granted_by', 'kind', 'unattended'],
-  'kl.lease.view': ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'to_device', 'state', 'locked', 'remaining_s', 'contact_token'],
-  'kl.question.ask': ['v', 'type', 'node_id', 'token', 'kind', 'urgency', 'expires_at', 'node_box'],
-  'kl.question.answer': ['v', 'type', 'node_id', 'token', 'device_id', 'nonce', 'signed_at']
-});
+// The content column, the shape the rest of the code reads.
+const SEAL_SPLIT = Object.freeze(Object.fromEntries(Object.entries(SEAL_TABLE).map(([type, row]) => [type, Object.freeze(row.content)])));
 
 // Which clear key names the sender, the third line of the HKDF info. A phone
 // sends only the answer; a node sends the rest.
@@ -61,7 +76,7 @@ const ZERO_IV = Buffer.alloc(IV_BYTES);
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
   && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
-const isSealedType = (type) => typeof type === 'string' && Object.hasOwn(SEAL_SPLIT, type);
+const isSealedType = (type) => typeof type === 'string' && Object.hasOwn(SEAL_TABLE, type);
 
 function byteLength(text) {
   try {
@@ -88,7 +103,7 @@ function isSealedObject(sealed) {
 // Exactly the type's clear keys plus `sealed`, and `sealed` well formed.
 function isSealedShape(type, message) {
   if (!isSealedType(type) || !isPlainObject(message) || message.type !== type) return false;
-  return hasExactly(message, [...SEAL_CLEAR[type], 'sealed']) && isSealedObject(message.sealed);
+  return hasExactly(message, [...SEAL_TABLE[type].clear, 'sealed']) && isSealedObject(message.sealed);
 }
 
 // JCS refuses what has no one encoding (a lone surrogate, a non-finite number).
@@ -144,6 +159,8 @@ function freshBytes(random, length) {
 function sealContent({ type, senderId, clear, content, recipients, ephemeral = null, random = crypto.randomBytes }) {
   if (!isSealedType(type)) throw new SealError('malformed', 'this type is not sealed');
   if (!isPlainObject(clear) || !isPlainObject(content) || !isPlainObject(recipients)) throw new SealError('malformed', 'clear, content and recipients are objects');
+  // The spread below would overwrite it, and the AAD would cover what no opener sees.
+  if (Object.hasOwn(clear, 'sealed')) throw new SealError('malformed', 'the clear part holds sealed');
   if (typeof senderId !== 'string' || clear[senderKey(type)] !== senderId) throw new SealError('malformed', 'senderId is not the sender the clear part names');
   if (!Object.keys(content).every((k) => SEAL_SPLIT[type].includes(k))) throw new SealError('malformed', 'content holds a key the type does not seal');
   const ids = Object.keys(recipients);
