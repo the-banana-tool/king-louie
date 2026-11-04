@@ -45,7 +45,7 @@ The spec's open points, each a ruling the owner may overrule; the plan builds on
   |---|---|---|
   | `kl.approval.request` | `action`, `origin`, `salt` | `v`, `type`, `request_id`, `node_id`, `node_name`, `action_hash`, `created_at`, `expires_at`, `nonce`, `node_box` |
   | `kl.lease.request` | `lease`, `origin`, `salt` | `v`, `type`, `request_id`, `lease_id`, `node_id`, `node_name`, `lease_hash`, `created_at`, `expires_at`, `nonce`, `node_box` |
-  | `kl.lease.status` | `name` | the other thirteen keys |
+  | `kl.lease.status` | `name` | the other fourteen keys |
   | `kl.lease.view` | `foreground`, `frame`, `frame_dropped`, `actions` | `v`, `type`, `node_id`, `lease_id`, `seq`, `at`, `to_device`, `state`, `locked`, `remaining_s`, `contact_token` |
   | `kl.question.ask` | `case_id`, `question_id`, `case_title`, `text`, `options` | `v`, `type`, `node_id`, `token`, `kind`, `urgency`, `expires_at`, `node_box` |
   | `kl.question.answer` (phone → node) | `case_id`, `question_id`, `answer` | `v`, `type`, `node_id`, `token`, `device_id`, `nonce`, `signed_at` |
@@ -149,7 +149,7 @@ it('a published box test key is refused test_key unless allowTestKeys', ...)
 
 - [ ] **Step 2: Run** `node --test tests/approvals-box-key.test.js`; expected: FAIL (`validateMessage` says `malformed` for the new type).
 - [ ] **Step 3: Implement** the record fields, validator, `judgeBoxKey`, staging and apply, the CLI words and the doctor rows (`'sealing to phones'`, `'phones without a box key'`; the second lists `fingerprintGroups(device_id)` of active records with no `box_key`).
-- [ ] **Step 4: Add the six vectors** to `generate.js` and `EXPECTED`; regenerate; `--check` expected `60 vectors match`.
+- [ ] **Step 4: Add the six vectors** to `generate.js` and `EXPECTED`; regenerate; `--check` expected `62 vectors match`.
 - [ ] **Step 5: Run** `node --test tests/approvals-box-key.test.js tests/approvals-protocol.test.js tests/approvals-approver-store.test.js tests/approvals-read-key.test.js tests/service-cli-devices.test.js tests/approvals-service-wiring.test.js`; expected `# fail 0`.
 - [ ] **Step 6: Commit** `feat(approvals): the box key enrolls, is stated, staged and applied like the read key`.
 
@@ -211,7 +211,7 @@ it('the relay cache accepts a sealed request and lists it; its view carries no a
 
 - [ ] **Step 2: Run** `node --test tests/approvals-phone-approver.test.js`; expected: FAIL.
 - [ ] **Step 3: Implement**: `buildRequest` splits with `splitMessage`, computes the salted hash, seals to `sealPolicy.recipients()`, adds `node_box`; the validator accepts `isSealedShape('kl.approval.request', m)`; the approver stores `salt` on the entry and `currentAction` hashing uses it.
-- [ ] **Step 4: Add the four vectors**, extend `phone-reference.js`, regenerate; `--check` expected `64 vectors match`.
+- [ ] **Step 4: Add the four vectors**, extend `phone-reference.js`, regenerate; `--check` expected `66 vectors match`.
 - [ ] **Step 5: Run** `node --test tests/approvals-*.test.js tests/frontdoor-stores.test.js tests/frontdoor-relay.test.js tests/sealed-types.test.js tests/core-remote-approvals.test.js tests/mcp-stdio-approvals.test.js`; expected `# fail 0`.
 - [ ] **Step 6: Commit** `feat(approvals): tool approvals are sealed once a phone has a box key`.
 
@@ -222,13 +222,13 @@ it('the relay cache accepts a sealed request and lists it; its view carries no a
 - Vectors: `question-ask-sealed` (`given.box`: opens to the clear ask; the clear part has no `text`), `question-answer-sealed` (node opens with `web-01`'s box `d`; `expect.message` is the full answer; a phone later builds it from `given.ask` and `given.answer`).
 
 **Interfaces:**
-- Consumes: `sealContent`, `openSealed`, `createSealPolicy`.
+- Consumes: `sealContent`, `openSealed`, `createSealPolicy`. Opening is not authentication: anyone can seal to the public box key, so `handleAnswer` verifies the envelope and binds its signer to `device_id` before it opens.
 - Produces: `MobileAppChannel({ …, sealPolicy })`; the ask's clear part carries `node_box`; an answer whose `sealed` does not open is refused `open_failed` before `unknown_question`, and an answer with a clear `answer` key on a sealing node is still accepted (an older phone answering an older clear ask; the node never refuses a well-formed clear answer).
 
 - [ ] **Step 1: Write the failing tests** in `tests/contact-mobile.test.js`: a sealing node's ask has no `text`, `case_title` or `options` in clear; the fake phone opens it; a sealed answer is accepted and `ownerProven`; a sealed answer with its `token` changed in clear is refused (AAD); the relay route forwards a sealed answer unchanged.
 - [ ] **Step 2: Run** `node --test tests/contact-mobile.test.js`; expected: FAIL.
 - [ ] **Step 3: Implement**; the ask's `node_box` is `sealPolicy.nodeBox`.
-- [ ] **Step 4: Add the two vectors**, regenerate; `--check` expected `66 vectors match`.
+- [ ] **Step 4: Add the two vectors**, regenerate; `--check` expected `68 vectors match`.
 - [ ] **Step 5: Run** `node --test tests/contact-mobile.test.js tests/approvals-protocol.test.js tests/frontdoor-phone-routes.test.js`; expected `# fail 0`.
 - [ ] **Step 6: Commit** `feat(contact): questions and their answers are sealed`.
 
@@ -256,10 +256,10 @@ it('the relay cache accepts a sealed request and lists it; its view carries no a
 - Modify: `Messages.kt` (`Rules.request` accepts the sealed shape; `device(…, boxKey)`; `boxKeyStatement`; `boxKeyFingerprint`), `Questions.kt` (`QuestionItem.from(message, open)`, `Questions.answer(…, sealTo: nodeBox)`), `Lease.kt` (`LeaseRequest.from`, `LeaseStatus.from`, `verifyView` take an opener; `grant` over the request's salted `lease_hash` as received), `Display.kt` (`view(envelope, pinned, open)`), `ProtocolVectorTest.kt`, `LeaseVectorTest.kt`, `QuestionTest.kt`; `tests/vectors/approval-v1/generate.js` and `tests/vectors/lease-v1/generate.js` (add `android` to the consumers of `seal-*`, `request-sealed-display`, `enroll-console-box-key`, `box-key-valid`, `question-ask-sealed`, `question-answer-sealed`, `request-sealed`, `status-sealed`, `view-sealed`, `listing-with-sealed-status`), `tests/lease-vectors.test.js` (`PHONE`/`ANDROID` lists)
 
 **Interfaces:**
-- Produces: `object Seal { fun open(type: String, message: JsonObject, recipientId: String, agree: (x: String, y: String) -> ByteArray): JsonObject; fun seal(type: String, senderId: String, clear: JsonObject, content: JsonObject, recipient: Pair<String, JsonObject>): JsonObject; fun saltedHash(salt: String, value: JsonElement): String; fun isSealedShape(type: String, message: JsonObject): Boolean }`. HKDF over `Mac("HmacSHA256")` (extract with a zero-length salt, one expand block); ECDH for tests over a software `KeyAgreement("ECDH")` from the vector's `d`; AES/GCM/NoPadding with `updateAAD`. Phone-side reasons `not_recipient`, `open_failed`, `action_hash_mismatch`, `lease_hash_mismatch`.
+- Produces: `object Seal { fun open(type: String, message: JsonObject, recipientId: String, agree: (x: String, y: String) -> ByteArray): JsonObject; fun seal(type: String, senderId: String, clear: JsonObject, content: JsonObject, recipient: Pair<String, JsonObject>): JsonObject; fun saltedHash(salt: String, value: JsonElement): String; fun isSealedShape(type: String, message: JsonObject): Boolean }`. HKDF over `Mac("HmacSHA256")` (extract with 32 zero bytes as the salt (`SecretKeySpec` refuses an empty key; RFC 5869 defines this as the same result), one expand block); ECDH for tests over a software `KeyAgreement("ECDH")` from the vector's `d`; AES/GCM/NoPadding with `updateAAD`. Phone-side reasons `not_recipient`, `open_failed`, `content_malformed`, `action_hash_mismatch`, `lease_hash_mismatch`. As in `seal.js`: content that is not exact JCS, or holds a key outside its type's row, is `content_malformed`; the sender id in the HKDF info and the AAD is `device_id` for `kl.question.answer` and `node_id` for every other type; a successful open proves nothing about the sender, so the signature is verified first. A sealed answer the phone builds is exact JCS.
 
 - [ ] **Step 1: Write the failing tests**: `SealVectorTest` runs every vector whose consumers include `android` and whose name starts with `seal-`, `request-sealed`, `question-`, `box-key-valid`, `enroll-console-box-key`; the lease test runs `request-sealed` (build the grant, compare `expect.message` bytes), `status-sealed`, `view-sealed`, `listing-with-sealed-status`. The consumers sets in both test files list the new names.
-- [ ] **Step 2: Flip the consumers** in both generators, regenerate, `--check` both (`66`, `86`); run `node --test tests/approvals-protocol.test.js tests/lease-vectors.test.js` (expected `# fail 0`), then `cd mobile/android/protocol && ../gradlew test`; expected: the new tests FAIL to compile.
+- [ ] **Step 2: Flip the consumers** in both generators, regenerate, `--check` both (`68`, `86`); run `node --test tests/approvals-protocol.test.js tests/lease-vectors.test.js` (expected `# fail 0`), then `cd mobile/android/protocol && ../gradlew test`; expected: the new tests FAIL to compile.
 - [ ] **Step 3: Implement** the Kotlin.
 - [ ] **Step 4: Run** `../gradlew test`; expected: `BUILD SUCCESSFUL`, every test passed. (Needs JDK 17; if none is on this machine, say so in the commit body and leave the CI job of Task 12 as the proof.)
 - [ ] **Step 5: Commit** `feat(android): the protocol core opens sealed messages and seals answers`.
@@ -271,6 +271,7 @@ it('the relay cache accepts a sealed request and lists it; its view carries no a
 - Modify: `Messages.swift`, `Questions.swift`, `Lease.swift`, `Display.swift` (the same surface as Task 8 in Swift), `ProtocolVectorTests.swift`, `LeaseVectorTests.swift`, `QuestionTests.swift`; both generators (add `ios` to the same vectors' consumers, except `box-key-valid`'s read-key sibling rules: iOS consumes `enroll-console-box-key` and `box-key-valid`, since iOS gets the statement flow), `tests/lease-vectors.test.js` (`PHONE`)
 
 **Interfaces:**
+- The same rules as Task 8 for `content_malformed`, the sender id and verifying before opening.
 - Produces: `public enum Seal { static func open(type:message:recipientId:agree:) throws -> JSONValue; static func seal(type:senderId:clear:content:recipient:) throws -> JSONValue; static func saltedHash(salt:value:) -> String; static func isSealedShape(type:message:) -> Bool }` over CryptoKit (`P256.KeyAgreement`, `HKDF<SHA256>.deriveKey(inputKeyMaterial:salt:info:outputByteCount:)`, `AES.GCM.open(_:using:authenticating:)`). The test's `agree` uses `P256.KeyAgreement.PrivateKey(rawRepresentation:)` from the vector's `d`.
 
 - [ ] **Step 1: Write the tests** (the Swift mirrors of Task 8's), flip `ios` into the consumers, regenerate, `--check` both, run `node --test tests/approvals-protocol.test.js tests/lease-vectors.test.js`; expected `# fail 0`.
@@ -309,12 +310,12 @@ it('the relay cache accepts a sealed request and lists it; its view carries no a
 ### Task 12: Docs, CI, the full suite
 
 **Files:**
-- Modify: `docs/protocol/approval-v1.md` (section "Revised 2026-11-04: sealed phones": R-SP-1 to R-SP-6 and R-SP-10 as the format, the per-type table, the phone's checks and refusals, the route, the vectors table and the new count), `docs/protocol/lease-v1.md` (its revision: sealed request/status/view, salted `lease_hash`, the listing unchanged, the frame cap, vectors), `mobile/PRIVACY.md` (rewrite "What the relay operator can see": what is sealed, what stays in clear per R-SP-4's residuals, 135 KB frames, the mirrored audit; add "The box key" beside "The read key"), `docs/install-guide.md` (section 13 step 3 and a new "Sealing to your phone" note: the upgrade order of R-SP-13, `device apply` for box keys, doctor's rows, and that an app that shows nothing for a node needs updating), `CLAUDE.md` ("Approvals and relay": the box key, the seal, the switch, the vector counts `66` and `86`, the CI jobs; "Session helper": the frame cap and sealed statuses; "Tasks": the card is sealed), `CONTEXT.md` (words **Box key** and **Sealed**, with _Avoid_ lines), `.github/workflows/test.yml` (R-SP-12's two jobs)
+- Modify: `docs/protocol/approval-v1.md` (section "Revised 2026-11-04: sealed phones": R-SP-1 to R-SP-6 and R-SP-10 as the format, the per-type table, the phone's checks and refusals, the route, the vectors table and the new count), `docs/protocol/lease-v1.md` (its revision: sealed request/status/view, salted `lease_hash`, the listing unchanged, the frame cap, vectors), `mobile/PRIVACY.md` (rewrite "What the relay operator can see": what is sealed, what stays in clear per R-SP-4's residuals, 135 KB frames, the mirrored audit; add "The box key" beside "The read key"), `docs/install-guide.md` (section 13 step 3 and a new "Sealing to your phone" note: the upgrade order of R-SP-13, `device apply` for box keys, doctor's rows, and that an app that shows nothing for a node needs updating), `CLAUDE.md` ("Approvals and relay": the box key, the seal, the switch, the vector counts `68` and `86`, the CI jobs; "Session helper": the frame cap and sealed statuses; "Tasks": the card is sealed), `CONTEXT.md` (words **Box key** and **Sealed**, with _Avoid_ lines), `.github/workflows/test.yml` (R-SP-12's two jobs)
 - Test: `tests/docs-driving.test.js` and `tests/docs-front-door.test.js` (they pin parts of the guide and the protocol docs; keep them green); `npm test`.
 
 - [ ] **Step 1: Write the docs** in the files above; every protocol statement matches `seal.js` and the vectors (a reviewer reads them side by side).
 - [ ] **Step 2: Add the CI jobs**: `phone-cores-android` (`ubuntu-24.04`; `actions/setup-java` at its current major with `distribution: temurin`, `java-version: 17`; `cd mobile/android/protocol && ../gradlew test --no-daemon`) and `phone-cores-ios` (`macos-latest`; `cd mobile/ios/KLProtocol && swift test`). Both run on `pull_request` and `push` to `main` like `unit`.
-- [ ] **Step 3: Run** `node tests/vectors/approval-v1/generate.js --check` (`66 vectors match`), `node tests/vectors/lease-v1/generate.js --check` (`86 vectors match`), then `npm test`; expected `# fail 0`.
+- [ ] **Step 3: Run** `node tests/vectors/approval-v1/generate.js --check` (`68 vectors match`), `node tests/vectors/lease-v1/generate.js --check` (`86 vectors match`), then `npm test`; expected `# fail 0`.
 - [ ] **Step 4: Commit** `docs: sealed phones in the protocols, PRIVACY, the guide and CI`.
 
 ### After the last task
@@ -328,7 +329,7 @@ it('the relay cache accepts a sealed request and lists it; its view carries no a
 
 - **Spec coverage.** §14's six bullets: the box key (Tasks 2, 3, 10, 11), sealing with formats and vectors (1, 5, 6, 7, 8, 9), what gets sealed (R-SP-4; every PRIVACY.md item is in a task or named as a residual), the audit mirror (R-SP-7, Task 7), phones that have not updated and the downgrade rule with a test (R-SP-6, Task 2), doctor (Task 2), the upgrade order (Task 12), push unchanged, the security review (after the last task). §2 decision 6 and §3's anti-goal are met for everything but the named residuals.
 - **The eight questions the brief asked** are answered in the Rulings: 1 (R-SP-4's clear column, Task 5's relay test), 2 (R-SP-2), 3 (R-SP-3, R-SP-4's last row), 4 (R-SP-1, R-SP-8), 5 (R-SP-9), 6 (R-SP-7), 7 (R-SP-6, R-SP-10, R-SP-11, R-SP-13, Task 2's downgrade test), 8 (Tasks 8 to 12, R-SP-12).
-- **Step scan.** Each test step names its tests; each implement step names its signatures and values; the vector counts are stated after each task (54, 60, 64, 66; lease 86).
+- **Step scan.** Each test step names its tests; each implement step names its signatures and values; the vector counts are stated after each task (56, 62, 66, 68; lease 86).
 - **Type consistency.** `sealContent`/`openSealed`/`SEAL_SPLIT`/`saltedHash` (Task 1) are the names Tasks 5 to 7 consume; `createSealPolicy` and `identity.box` (Task 4) are what Tasks 5 to 7 pass as `sealPolicy`; `node_box` is the clear key in every table and builder.
 - **Review Focus.** Each of the five lines names its task and test.
 - **Proportion.** The plan carries decisions and signatures; bodies appear only for the format (R-SP-1), which no signature determines.
