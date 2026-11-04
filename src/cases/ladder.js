@@ -471,7 +471,10 @@ class LadderEngine {
     if (channel === 'present') {
       const present = this.presence.presentChannel(new Date(nowMs));
       if (!present) {
-        this._attempt(e, { channel: 'present', outcome: 'absent' });
+        // Sealing has the phone off, so it could not be present whoever holds it.
+        // Recorded as held, so the question goes back when the phone can read.
+        if (this.router.channelStatus(SEAL_CHANNEL).sealing) this._attempt(e, { channel: SEAL_CHANNEL, outcome: 'skipped', reason: 'sealing', viaPresent: true });
+        else this._attempt(e, { channel: 'present', outcome: 'absent' });
         this._advance(e, policy);
         return { kind: 'next' };
       }
@@ -586,6 +589,14 @@ class LadderEngine {
     return e.attempts.some((a) => a.channel === SEAL_CHANNEL && (a.reason === 'sealing' || deliveries[a.deliveryId]?.sealed === true));
   }
 
+  // A rung that only asked for wherever the owner is: it goes back to the phone
+  // when he is there, and until then spends nothing.
+  _heldOnlyAtPresent(e, deliveries) {
+    return e.attempts
+      .filter((a) => a.channel === SEAL_CHANNEL && (a.reason === 'sealing' || deliveries[a.deliveryId]?.sealed === true))
+      .every((a) => a.viaPresent === true);
+  }
+
   // The phone keys that can read now and that this entry has neither been sealed
   // to nor been re-sent for. A key is a device and its fingerprint, so a phone
   // that was Reset counts as new, and each new key buys at most one re-send.
@@ -628,8 +639,10 @@ class LadderEngine {
     if (policy.away && Date.parse(policy.away.until) > nowMs) return;
     const quiet = policy.quietHours && this.presence.inQuietHours(now);
     const caps = this.router.adapter(SEAL_CHANNEL).contactCapabilities() || {};
+    const phonePresent = this.presence.presentChannel(now) === SEAL_CHANNEL;
     const due = live
       .filter((e) => (!e.pinnedChannel || e.pinnedChannel === SEAL_CHANNEL) && !(quiet && caps.interrupts && !policy.quietHours.breakthrough.includes(e.urgency)))
+      .filter((e) => phonePresent || !this._heldOnlyAtPresent(e, deliveries))
       .map((e) => ({ e, keys: this._unsentKeys(e, deliveries, seal.readers) }))
       .filter(({ keys }) => keys.length > 0)
       .sort((a, b) => String(a.e.startedAt).localeCompare(String(b.e.startedAt)))

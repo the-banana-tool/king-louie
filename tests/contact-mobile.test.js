@@ -95,7 +95,7 @@ async function world({ records = null, sealing = false, sealFrom = 'start', pres
 function ladderOn(w, steps = [{ channel: 'mobile', afterMin: 0 }, { channel: 'telegram', afterMin: 0 }], options = {}) {
   const telegram = new LoopbackChannel({ id: 'telegram', owner: 'telegram-owner', caps: {} });
   w.adapters.set('telegram', telegram);
-  const policy = { ...w.policy, digest: null, ladders: { high: steps, normal: steps, low: steps } };
+  const policy = { ...w.policy, digest: null, ladders: steps ? { high: steps, normal: steps, low: steps } : w.policy.ladders };
   const ladder = new LadderEngine({ state: w.state, casesRoot: w.runtime.root, runtime: w.runtime, router: w.router, presence: w.presence, getPolicy: () => policy, clock: w.clock, dataDir: w.data, ...options });
   return { ladder, telegram, policy };
 }
@@ -617,7 +617,7 @@ describe('sealed questions: latched with nobody to seal to', () => {
     assert.deepStrictEqual(w.router.channelStatus('mobile'), { enabled: true, configured: false, reason: 'no owner target is configured' });
   });
 
-  it('the present rung: a phone in front on a latched node is not present, so the ladder tries the next rung', async () => {
+  it('the present rung: a phone in front on a latched node is not present, so the ladder records the sealing skip and tries the next rung', async () => {
     const other = createFakePhone({ name: 'Tablet' });
     const w = await world({ sealing: true, presenceByConfigured: true, records: (phone) => [phone.approverRecord({ boxKey: true }), other.approverRecord()] });
     assert.deepStrictEqual(await w.ping(w.fg()), { ok: true });
@@ -631,7 +631,7 @@ describe('sealed questions: latched with nobody to seal to', () => {
     w.advance(120000);
     await ladder.tick();
     const entry = w.state.ladder().entries[`${w.info.id}/${w.q.id}`];
-    assert.deepStrictEqual(entry.attempts.map((a) => `${a.channel}:${a.outcome}`), ['present:absent', 'telegram:sent']);
+    assert.deepStrictEqual(entry.attempts.map((a) => `${a.channel}:${a.outcome}:${a.reason || ''}`), ['mobile:skipped:sealing', 'telegram:sent:']);
     assert.strictEqual(w.link.sent.length, before);
     assert.ok(telegram.sent.length >= 1);
   });
@@ -675,6 +675,51 @@ describe('sealed questions: back to the phone once it can read', () => {
     const reply = sealedAnswer(w, { clear: { token: entry.token, signed_at: w.clock().toISOString() } });
     assert.strictEqual((await w.call(reply)).ok, true);
     assert.strictEqual(w.answerOf().optionId, 'a');
+  });
+
+  it('the default ladder: held at its present rung, the question reaches the phone once, when it has a key and comes to the front', async () => {
+    const w = await world({ sealing: true, presenceByConfigured: true });
+    const p = settablePolicy(w, {});
+    const warnings = [];
+    const { ladder } = ladderOn(w, null, { warnOwner: (text) => warnings.push(text) });
+    assert.deepStrictEqual(w.policy.ladders.high.map((step) => step.channel), ['present', 'sms', 'voice'], 'the default');
+    w.advance(120000);
+    await ladder.tick();
+    const entry = entryOf(w);
+    assert.strictEqual(entry.steps[0].channel, 'present');
+    assert.deepStrictEqual(mobileAttempts(entry).map((a) => [a.outcome, a.reason]), [['skipped', 'sealing']]);
+    assert.ok(!entry.attempts.some((a) => a.channel === 'present'), 'not recorded as absent');
+    assert.strictEqual(warnings.length, 1);
+    const token = entry.token;
+
+    // The key alone: the rung asked for where the owner is, and he is not there.
+    p.keys[w.phone.deviceId] = w.phone.boxJwk;
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, 0);
+    assert.deepStrictEqual(Object.keys(entryOf(w).sealResends || {}), [], 'waiting spends nothing');
+
+    assert.deepStrictEqual(await w.ping(w.fg({ at: w.clock().toISOString() })), { ok: true });
+    await ladder.tick();
+    const sent = asksOf(w, token);
+    assert.strictEqual(sent.length, 1);
+    assert.strictEqual(w.phone.open(sent[0].envelope, 'kl.question.ask').message.question_id, w.q.id);
+    await ladder.tick();
+    await ladder.tick();
+    assert.strictEqual(asksOf(w, token).length, 1, 'once');
+    assert.strictEqual(entryOf(w).token, token);
+    assert.strictEqual(warnings.length, 1);
+    assert.strictEqual((await w.call(sealedAnswer(w, { clear: { token, signed_at: w.clock().toISOString() } }))).ok, true);
+    assert.strictEqual(w.answerOf().optionId, 'a');
+  });
+
+  it('the present rung with nothing held back still records absent', async () => {
+    const w = await world({ sealing: true, presenceByConfigured: true });
+    settablePolicy(w, { [w.phone.deviceId]: w.phone.boxJwk });
+    const { ladder } = ladderOn(w, null);
+    w.advance(120000);
+    await ladder.tick();
+    assert.ok(entryOf(w).attempts.some((a) => a.channel === 'present' && a.outcome === 'absent'));
+    assert.deepStrictEqual(mobileAttempts(entryOf(w)), []);
   });
 
   it('a new episode warns again, and a changed reason does too', async () => {
