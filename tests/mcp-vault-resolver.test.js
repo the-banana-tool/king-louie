@@ -90,6 +90,18 @@ test('leaves ${vault:contact.…} references unresolved, never reads them, and l
   assert.match(warnings[0], /contact/);
 });
 
+test('leaves ${vault:local.…} references unresolved and never reads them', () => {
+  const reads = [];
+  const store = { get: (k) => { reads.push(k); return 'encrypted'; } };
+  const resolver = createVaultEnvResolver({ vaultStore: store, decryptToken: () => 'secret', logger: { warn() {} } });
+  const refs = ['${vault:local.box}', '${vault: Local.box}', '${vault:LOCAL.box}', '${vault:local[0]}'];
+  const env = Object.fromEntries(refs.map((r, i) => [`K${i}`, r]));
+  const resolved = resolver({ env: { ...env, OK: '${vault:github_token}' } });
+  refs.forEach((r, i) => assert.strictEqual(resolved.env[`K${i}`], r));
+  assert.strictEqual(resolved.env.OK, 'secret');
+  assert.deepStrictEqual(reads, ['__vault_github_token']);
+});
+
 test('a name that walks off a branch is the normal refusal, on the real store', () => {
   const fs = require('fs');
   const os = require('os');

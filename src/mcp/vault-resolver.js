@@ -11,6 +11,7 @@
 
 const { createLogger } = require('../logging');
 const { isContactVaultKey } = require('../cases/contact-settings');
+const { isLocalServerVaultKey } = require('../models/local-vault-keys');
 
 const log = createLogger('mcp/vault-resolver');
 const VAULT_PREFIX = '__vault_';
@@ -27,8 +28,9 @@ function createVaultEnvResolver({ vaultStore, decryptToken, onMissing, logger = 
     return value.replace(VAULT_REF, (match, key) => {
       // Cases stage 4: contact channel credentials never reach an MCP server.
       // A backslash is an escape to the desktop vault, so it is refused too.
-      if (isContactVaultKey(key) || key.includes('\\')) {
-        logger.warn(`not resolving ${match}: contact credentials and keys with a backslash are not available to MCP servers`);
+      // Nor does a local server's key, which only the administrator's config names.
+      if (isContactVaultKey(key) || isLocalServerVaultKey(key) || key.includes('\\')) {
+        logger.warn(`not resolving ${match}: contact credentials, local server keys and keys with a backslash are not available to MCP servers`);
         return match;
       }
       try {
