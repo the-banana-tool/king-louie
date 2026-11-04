@@ -2,6 +2,7 @@
   "name": "seal-tampered-clear",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "given": {

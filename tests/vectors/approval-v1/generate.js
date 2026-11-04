@@ -378,7 +378,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   const AB = KEYS.devices.A_box.jwk;
   const BB = KEYS.devices.B_box.jwk;
   add({
-    name: 'enroll-console-box-key', consumers: ['node', 'android'], given: consoleGiven,
+    name: 'enroll-console-box-key', consumers: ['node', 'ios', 'android'], given: consoleGiven,
     input: consoleEnroll(A, code, { boxKey: AB, label: `enroll ${A.id} box key` }),
     expect: { accepted: true, reason: null, device_id: A.id, box_key: AB }
   });
@@ -395,7 +395,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     created_at: iso(created), expires_at: iso(created + BOX_KEY_MAX_MS), nonce: nonceOf(label)
   });
   const boxStatement = boxKeyStatement(A, AB);
-  stageVector('box-key-valid', [seal(boxStatement, A)], [{ state: 'box-key-pending-apply' }], [A.id, B.id], {}, { consumers: ['node', 'android'], expect: { staged_box_keys: [AB] } });
+  stageVector('box-key-valid', [seal(boxStatement, A)], [{ state: 'box-key-pending-apply' }], [A.id, B.id], {}, { consumers: ['node', 'ios', 'android'], expect: { staged_box_keys: [AB] } });
   // The same statement signed by the device's read key: only the device key may.
   stageVector('box-key-wrong-signer', [seal(boxStatement, AR)], [{ state: 'rejected', reason: 'bad_signature' }], [A.id, B.id]);
   // Not newer than the key the record holds: a relay's replay of an old statement.
@@ -481,7 +481,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     return bytes.toString('base64url');
   };
   const sealVector = (name, input, reason, message = null) => add({
-    name, consumers: ['node', 'android'], given: { box: { device_id: A.id, d: KEYS.devices.A_box.d }, type: sealType }, input, expect: { reason, message }
+    name, consumers: ['node', 'ios', 'android'], given: { box: { device_id: A.id, d: KEYS.devices.A_box.d }, type: sealType }, input, expect: { reason, message }
   });
 
   const sealedMain = sealedRequest('main');
@@ -521,7 +521,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
 
   // ── Sealed tool approvals (R-SP-2, R-SP-5): a node-signed sealed request ────
   // To both phones and the node itself, as a node sends one. The response vectors
-  // are the node's; Android reads the request.
+  // are the node's; the phones read the request.
   const webBox = KEYS.nodes['web-01'].box.jwk;
   const signedSealedRequest = (label, action, origin) => {
     const salt = sha(`sealed request salt ${label}`).toString('base64url');
@@ -540,7 +540,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   const sealedDisplay = signedSealedRequest('display', runbookAction, { client: 'stdio-mcp', session: null, job_id: 'job-1' });
   const boxOfA = { device_id: A.id, d: KEYS.devices.A_box.d };
   add({
-    name: 'request-sealed-display', consumers: ['node', 'android'], given: { now: NOW, pinned_nodes: pinnedWeb, box: boxOfA },
+    name: 'request-sealed-display', consumers: ['node', 'ios', 'android'], given: { now: NOW, pinned_nodes: pinnedWeb, box: boxOfA },
     input: sealedDisplay.envelope, expect: phoneView(sealedDisplay.envelope, { pinned: pinnedWeb, box: boxOfA })
   });
   const sealedPending = signedSealedRequest('response', toolActionLit, { client: 'gateway', session: 'chat-1', job_id: null });
@@ -568,7 +568,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     ephemeral: fixedBox(sha('sealed ask epk')), random: (n) => (n === 32 ? sha('sealed ask cek') : sha('sealed ask iv').subarray(0, n))
   });
   add({
-    name: 'question-ask-sealed', consumers: ['node', 'android'], given: { box: boxOfA, type: askType, node_public_key: web.key },
+    name: 'question-ask-sealed', consumers: ['node', 'ios', 'android'], given: { box: boxOfA, type: askType, node_public_key: web.key },
     input: seal(sealedAsk, nodeSigner(web)), expect: { reason: null, message: fullAsk }
   });
   const answerType = 'kl.question.answer';
@@ -582,7 +582,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     ephemeral: fixedBox(sha('sealed answer epk')), random: (n) => (n === 32 ? sha('sealed answer cek') : sha('sealed answer iv').subarray(0, n))
   });
   add({
-    name: 'question-answer-sealed', consumers: ['node', 'android'],
+    name: 'question-answer-sealed', consumers: ['node', 'ios', 'android'],
     given: {
       box: { node_id: web.nodeId, d: KEYS.nodes['web-01'].box.d }, type: answerType, device: { device_id: A.id, jwk: A.jwk },
       ask: fullAsk, answer: fullAnswer.answer, nonce: fullAnswer.nonce, signed_at: NOW

@@ -2,6 +2,7 @@
   "name": "enroll-console-box-key",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "given": {

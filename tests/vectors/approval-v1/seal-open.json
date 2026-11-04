@@ -2,6 +2,7 @@
   "name": "seal-open",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "given": {

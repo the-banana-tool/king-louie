@@ -2,6 +2,7 @@
   "name": "request-sealed-display",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "given": {

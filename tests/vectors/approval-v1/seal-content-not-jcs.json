@@ -2,6 +2,7 @@
   "name": "seal-content-not-jcs",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "given": {

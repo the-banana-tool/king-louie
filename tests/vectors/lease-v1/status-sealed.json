@@ -2,6 +2,7 @@
   "name": "status-sealed",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "check": null,

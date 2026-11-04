@@ -2,6 +2,7 @@
   "name": "listing-with-sealed-status",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "check": null,

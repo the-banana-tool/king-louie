@@ -156,7 +156,7 @@ final class AppModel: ObservableObject {
     private func verifiedQuestion(_ entry: JSONValue) -> QuestionItem? {
         guard let json = entry["envelope"], let envelope = try? Envelope(json: json),
               let pin = state.nodes.first(where: { $0.id == envelope.kid }), envelope.verifyEd25519(spkiHex: pin.key),
-              let message = try? envelope.message(), let item = QuestionItem(message: message, nodeName: pin.name),
+              let message = try? envelope.message(), let item = QuestionItem(message: message, nodeName: pin.name, sealedSeen: []),
               item.nodeId == pin.id else { return nil }
         // Listed under the node that signed it.
         if let listed = entry["node_id"]?.stringValue, listed != pin.id { return nil }
@@ -176,7 +176,7 @@ final class AppModel: ObservableObject {
         answering.insert(item.token)
         defer { answering.remove(item.token) }
         do {
-            let message = Questions.answer(to: item, optionId: optionId, text: text, deviceId: key.deviceId,
+            let message = try Questions.answer(to: item, optionId: optionId, text: text, deviceId: key.deviceId,
                                            nonce: Messages.randomNonce(), signedAt: Timestamps.string(client.now()))
             let choice = optionId.flatMap { id in item.options.first(where: { $0.id == id })?.label } ?? text ?? ""
             let reason = "Answer \(Self.promptText(item.caseTitle, 40)): \(Self.promptText(item.text, 80)) → \(Self.promptText(choice, 40))"
@@ -365,7 +365,7 @@ final class AppModel: ObservableObject {
                 }
                 guard let json = entry["envelope"], let envelope = try? Envelope(json: json),
                       let pin = state.nodes.first(where: { $0.id == envelope.kid }),
-                      let message = Leases.verifiedMessage(envelope, pin: pin), let request = LeaseRequest(message: message),
+                      let message = Leases.verifiedMessage(envelope, pin: pin), let request = LeaseRequest(message: message, sealedSeen: []),
                       !decidedLeaseRequests.contains(request.requestId),
                       let expires = Timestamps.date(request.expiresAt), expires > client.now() else { continue }
                 // Listed under the node that signed it.
@@ -1043,7 +1043,7 @@ final class AppModel: ObservableObject {
         closeLiveLease()
         leaseRequests = []
         if let env = try? fleet.leaseRequest(on: 0, apps: ["calculator", "textedit"], minutes: 15),
-           let message = Leases.verifiedMessage(env, pin: fleet.pins[0]), let request = LeaseRequest(message: message) {
+           let message = Leases.verifiedMessage(env, pin: fleet.pins[0]), let request = LeaseRequest(message: message, sealedSeen: []) {
             leaseRequests = [LeaseRequestItem(request: request, nodeName: fleet.pins[0].name, status: nil)]
         }
     }
@@ -1277,7 +1277,7 @@ final class AppModel: ObservableObject {
     /// signature); everything displayed comes from its display model.
     private func receive(_ item: JSONValue, pins: [NodePin]) {
         guard let envJSON = item["envelope"] else { return }
-        let view = Display.view(envJSON, pinned: pins)
+        let view = Display.view(envJSON, pinned: pins, sealedSeen: [])
         guard view.shown, let display = view.display else {
             if view.reason == "bad_node_signature", let payload = envJSON["payload"]?.stringValue, !warnedPayloads.contains(payload) {
                 if warnedPayloads.count >= 64 { warnedPayloads.removeAll() }

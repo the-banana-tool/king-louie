@@ -2,6 +2,7 @@
   "name": "seal-content-clear-key",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "given": {

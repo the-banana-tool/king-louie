@@ -58,11 +58,42 @@ public struct LeaseRequest: Equatable, Identifiable {
     public var isTake: Bool { kind == "take" }
     public var isTask: Bool { kind == "task" }
 
-    /// nil unless `message` is a complete kl.lease.request whose lease_hash is the hash of its lease,
-    /// and whose lease has exactly the keys of its kind (`Leases.isLease`).
-    public init?(message: JSONValue) {
-        guard message["type"]?.stringValue == Self.messageType, message["v"]?.intValue == 1,
-              let requestId = message["request_id"]?.stringValue, let leaseId = message["lease_id"]?.stringValue,
+    /// `check`'s request: nil unless it can be answered.
+    public init?(message: JSONValue, open: Opener? = nil, sealedSeen: Set<String>) {
+        guard let request = Self.check(message, open: open, sealedSeen: sealedSeen).request else { return nil }
+        self = request
+    }
+
+    /// A complete kl.lease.request whose lease_hash is the hash of its lease (the
+    /// salted one when it came sealed, R-SP-2), and whose lease has exactly the keys
+    /// of its kind (`Leases.isLease`); else the reason: `malformed`,
+    /// `lease_hash_mismatch`, `not_recipient`, `open_failed`, `key_locked`,
+    /// `clear_after_sealed`. `message` has passed the node's signature: only then
+    /// may `open` read it.
+    public static func check(_ message: JSONValue, open: Opener? = nil, sealedSeen: Set<String>) -> LeaseRequestCheck {
+        func refused(_ reason: String, _ seal: SealState = .clear) -> LeaseRequestCheck { LeaseRequestCheck(request: nil, reason: reason, seal: seal) }
+        guard message["type"]?.stringValue == messageType, message["v"]?.intValue == 1 else { return refused("malformed") }
+        if Seal.clearRefused(type: messageType, message: message, sealedSeen: sealedSeen) { return refused(Seal.clearAfterSealed) }
+        if message["sealed"] != nil && !Leases.isSealedRequest(message) { return refused("malformed") }
+        guard let read = Seal.read(type: messageType, message: message, open: open) else { return refused("malformed", .unread) }
+        guard read.opened else { return refused(read.reason ?? "malformed", read.state) }
+        let opened = read.state == .opened
+        if opened, let problem = Leases.openedRequestProblem(read.message) { return refused(problem, read.state) }
+        guard let request = LeaseRequest(parsed: read.message, saltedHashHeld: opened) else {
+            return refused(!opened && hashDiffers(read.message) ? "lease_hash_mismatch" : "malformed", read.state)
+        }
+        return LeaseRequestCheck(request: request, reason: nil, seal: read.state)
+    }
+
+    /// Whether a clear request's lease is well formed but not the one it hashed.
+    private static func hashDiffers(_ message: JSONValue) -> Bool {
+        guard let lease = message["lease"], Leases.isLease(lease), let hash = message["lease_hash"]?.stringValue else { return false }
+        return Digest.sha256B64url(JCS.data(lease)) != hash
+    }
+
+    /// `saltedHashHeld`: a sealed request's hash, which `Leases.openedRequestProblem` has held to the lease with its salt.
+    private init?(parsed message: JSONValue, saltedHashHeld: Bool) {
+        guard let requestId = message["request_id"]?.stringValue, let leaseId = message["lease_id"]?.stringValue,
               let nodeId = message["node_id"]?.stringValue, let nodeName = message["node_name"]?.stringValue,
               let lease = message["lease"], let leaseHash = message["lease_hash"]?.stringValue,
               let nonce = message["nonce"]?.stringValue, let createdAt = message["created_at"]?.stringValue,
@@ -70,7 +101,7 @@ public struct LeaseRequest: Equatable, Identifiable {
               Leases.isLease(lease), let kind = lease["kind"]?.stringValue, let jobId = lease["job_id"]?.stringValue,
               let maxMinutes = lease["max_minutes"]?.intValue,
               let reason = lease["reason"]?.stringValue,
-              Digest.sha256B64url(JCS.data(lease)) == leaseHash else { return nil }
+              saltedHashHeld || Digest.sha256B64url(JCS.data(lease)) == leaseHash else { return nil }
         // A task has no apps; every other kind has at least one.
         let task = kind == "task"
         var apps: [LeaseApp] = []
@@ -110,6 +141,19 @@ public struct LeaseRequest: Equatable, Identifiable {
     }
 }
 
+/// One read of a kl.lease.request: the request when it can be answered, else why not.
+public struct LeaseRequestCheck: Equatable {
+    public let request: LeaseRequest?
+    public let reason: String?
+    public let seal: SealState
+
+    public init(request: LeaseRequest?, reason: String?, seal: SealState = .clear) {
+        self.request = request
+        self.reason = reason
+        self.seal = seal
+    }
+}
+
 public struct LeaseStatus: Equatable {
     public static let messageType = "kl.lease.status"
     public let leaseId: String
@@ -134,17 +178,39 @@ public struct LeaseStatus: Equatable {
     public let kind: String
     public let unattended: Bool
     public let name: String?
+    /// `.unread`: sealed and its name not read, so `name` is nil whatever the
+    /// kind; every other field is the clear part's (R-SP-9).
+    public let seal: SealState
 
-    public init?(message: JSONValue) {
-        guard message["type"]?.stringValue == Self.messageType, let leaseId = message["lease_id"]?.stringValue,
+    /// `message` has passed the node's signature: only then may `open` read it.
+    /// Every field but the name is read from its clear part. A status sealed in
+    /// the right shape is never dropped for what is inside: content that is
+    /// malformed, a bad name, a locked phone or a wrap that does not open leave the
+    /// clear part, so a phone cannot say no session is running while one is.
+    public init?(message: JSONValue, open: Opener? = nil) {
+        guard message["type"]?.stringValue == Self.messageType,
+              message["sealed"] == nil || Seal.isSealedShape(type: Self.messageType, message: message),
+              let leaseId = message["lease_id"]?.stringValue,
               let nodeId = message["node_id"]?.stringValue, let seq = message["seq"]?.intValue,
               let state = message["state"]?.stringValue, let locked = message["locked"]?.boolValue,
               let kind = message["kind"]?.stringValue, Leases.leaseKinds.contains(kind),
-              let unattended = message["unattended"]?.boolValue, kind != "computer_use" || !unattended,
-              let nameValue = message["name"], (kind == "computer_use" ? nameValue.isNull : Leases.isTakeName(nameValue)) else { return nil }
+              let unattended = message["unattended"]?.boolValue, kind != "computer_use" || !unattended else { return nil }
+        var shownName: String?
+        var sealState = SealState.unread
+        if let read = Seal.read(type: Self.messageType, message: message, open: open), read.opened {
+            let nameValue = read.message["name"]
+            let fits = nameValue.map { kind == "computer_use" ? $0.isNull : Leases.isTakeName($0) } ?? false
+            if fits {
+                shownName = nameValue?.stringValue
+                sealState = read.state
+            } else if read.state == .clear {
+                return nil
+            }
+        }
         self.kind = kind
         self.unattended = unattended
-        self.name = nameValue.stringValue
+        self.name = shownName
+        self.seal = sealState
         self.leaseId = leaseId
         self.nodeId = nodeId
         self.seq = seq
@@ -190,6 +256,8 @@ public struct LeaseView: Equatable {
     public let actions: [LeaseAction]
     /// The token this view carries for the phone's next watch to echo (R-F5-15).
     public let contactToken: String?
+    /// `.unread`: sealed and not this phone's to open, so no frame, foreground or actions: the clear part alone.
+    public var seal: SealState = .clear
 }
 
 /// What a phone made of one node's answer to "what is running" (owner
@@ -382,6 +450,48 @@ public enum Leases {
               let id = a["id"]?.stringValue, isAppId(id) else { return false }
         return Rules.withinLength(a["name"], 64) && Rules.withinLength(a["path"], 1024)
             && isStringList(a["processes"], 16, { $0.unicodeScalars.count <= 1024 })
+    }
+
+    /// The most a sealed request's window may be (REQUEST_TTL_MS).
+    private static let requestTtlMs: Int64 = 5 * 60 * 1000
+
+    /// What a kl.lease.request holds in clear (requestClearFields).
+    private static func requestClearFields(_ m: [String: JSONValue]) -> Bool {
+        guard Rules.isUuidV4(m["request_id"]), Rules.isUuidV4(m["lease_id"]), Rules.isNodeId(m["node_id"]), Rules.withinLength(m["node_name"], 64),
+              Rules.isHash(m["lease_hash"]), Rules.isNonce(m["nonce"]),
+              let created = m["created_at"]?.stringValue.flatMap(Timestamps.epochMillis),
+              let expires = m["expires_at"]?.stringValue.flatMap(Timestamps.epochMillis) else { return false }
+        return expires > created && expires - created <= requestTtlMs
+    }
+
+    /// The sealed shape of a request (VALIDATORS['kl.lease.request']).
+    static func isSealedRequest(_ message: JSONValue) -> Bool {
+        guard let m = message.objectValue else { return false }
+        return Seal.isSealedShape(type: LeaseRequest.messageType, message: message) && requestClearFields(m) && Rules.isDeviceJwk(m["node_box"])
+    }
+
+    /// checkOrigin.
+    private static func isOrigin(_ v: JSONValue?) -> Bool {
+        guard let o = v?.objectValue, Rules.hasExactKeys(o, ["client", "session", "job_id"]), o["client"]?.stringValue != nil else { return false }
+        return o.values.allSatisfy { $0.isNull || Rules.withinLength($0, 200) }
+    }
+
+    /// A sealed request after opening (clear part and content together): nil, or
+    /// `malformed`, or `lease_hash_mismatch` before anything is shown (R-SP-2).
+    /// validateOpenedLeaseRequest in src/gui/lease-protocol.js.
+    static func openedRequestProblem(_ message: JSONValue) -> String? {
+        guard var m = message.objectValue else { return "malformed" }
+        let salt = m.removeValue(forKey: "salt")
+        let nodeBox = m.removeValue(forKey: "node_box")
+        let keys = ["v", "type", "request_id", "lease_id", "node_id", "node_name", "lease", "lease_hash", "origin", "created_at", "expires_at", "nonce"]
+        guard Rules.hasExactKeys(m, keys), requestClearFields(m), isLease(m["lease"]), isOrigin(m["origin"]),
+              let lease = m["lease"], let leaseId = m["lease_id"]?.stringValue else { return "malformed" }
+        if let resumes = lease["resumes"], !resumes.isNull {
+            guard let resumed = resumes.stringValue, ExactText.same(resumed, leaseId) else { return "malformed" }
+        }
+        guard Rules.isDeviceJwk(nodeBox), Rules.isHash(salt), let saltText = salt?.stringValue, let hash = m["lease_hash"]?.stringValue,
+              let recomputed = try? Seal.saltedHash(salt: saltText, value: lease) else { return "malformed" }
+        return ExactText.same(recomputed, hash) ? nil : "lease_hash_mismatch"
     }
 
     /// The fields only a take has (checkTakeFields).
@@ -640,10 +750,11 @@ public enum Leases {
     }
 
     /// The statuses an accepted listing names, read. None for a listing
-    /// that was not accepted: such a listing says nothing.
-    public static func listedStatuses(_ check: ListingCheck, pin: NodePin) -> [LeaseStatus] {
+    /// that was not accepted: such a listing says nothing. `open` reads their
+    /// names; nothing else needs it (R-SP-9).
+    public static func listedStatuses(_ check: ListingCheck, pin: NodePin, open: Opener? = nil) -> [LeaseStatus] {
         guard check.accepted else { return [] }
-        return check.statuses.compactMap { envelope in verifiedMessage(envelope, pin: pin).flatMap { LeaseStatus(message: $0) } }
+        return check.statuses.compactMap { envelope in verifiedMessage(envelope, pin: pin).flatMap { LeaseStatus(message: $0, open: open) } }
     }
 
     /// A node-signed message (request, status or view) whose signature, kid
@@ -654,13 +765,37 @@ public enum Leases {
         return message
     }
 
-    public static func verifyView(_ envelope: Envelope, pin: NodePin) -> (accepted: Bool, reason: String?, view: LeaseView?) {
+    /// A sealed view after opening holds what a clear one holds
+    /// (VALIDATORS['kl.lease.view']); its frame is checked by `verifyView` itself.
+    private static func isOpenedView(_ message: JSONValue) -> Bool {
+        let keys = ["v", "type", "node_id", "lease_id", "seq", "at", "to_device", "state", "locked", "remaining_s", "foreground", "frame", "frame_dropped", "actions", "contact_token"]
+        guard let m = message.objectValue, Rules.hasExactKeys(m, keys),
+              let foreground = m["foreground"]?.objectValue, Rules.hasExactKeys(foreground, ["app_id", "matches"]),
+              foreground["matches"]?.boolValue != nil, m["frame_dropped"]?.boolValue != nil,
+              let actions = m["actions"]?.arrayValue, actions.count <= 50 else { return false }
+        if let appId = foreground["app_id"], !appId.isNull {
+            guard let text = appId.stringValue, isAppId(text) else { return false }
+        }
+        return actions.allSatisfy { action in
+            guard let fields = action.objectValue else { return false }
+            return Rules.hasExactKeys(fields, ["seq", "at", "tool", "summary", "result"])
+        }
+    }
+
+    /// The checks of `verifyLeaseView`: the size, the pinned node's signature, the
+    /// node, and only then `open` on a sealed one. Not this phone's to open:
+    /// accepted, the clear part alone (no frame, no actions), `seal` `.unread`,
+    /// and `reason` says why (`not_recipient`, `open_failed`, `key_locked`).
+    public static func verifyView(_ envelope: Envelope, pin: NodePin, open: Opener? = nil) -> (accepted: Bool, reason: String?, view: LeaseView?) {
         guard let bytes = try? envelope.payloadData() else { return (false, "malformed", nil) }
         guard bytes.count <= viewMaxBytes else { return (false, "too_large", nil) }
         guard envelope.alg == "Ed25519", envelope.kid == pin.id else { return (false, "malformed", nil) }
         guard envelope.verifyEd25519(spkiHex: pin.key) else { return (false, "bad_signature", nil) }
-        guard let m = try? envelope.message(), m["type"]?.stringValue == "kl.lease.view" else { return (false, "malformed", nil) }
-        guard m["node_id"]?.stringValue == pin.id else { return (false, "wrong_node", nil) }
+        guard let received = try? envelope.message(), received["type"]?.stringValue == "kl.lease.view" else { return (false, "malformed", nil) }
+        guard received["node_id"]?.stringValue == pin.id else { return (false, "wrong_node", nil) }
+        guard let read = Seal.read(type: "kl.lease.view", message: received, open: open) else { return (false, "malformed", nil) }
+        let m = read.message
+        if read.state == .opened && !isOpenedView(m) { return (false, "malformed", nil) }
         var frame: Data?
         if let f = m["frame"], !f.isNull {
             guard let text = f["data"]?.stringValue, let data = Data(base64Encoded: text), let hash = f["sha256"]?.stringValue else { return (false, "malformed", nil) }
@@ -678,8 +813,8 @@ public enum Leases {
                              remainingS: m["remaining_s"]?.intValue ?? 0, foregroundAppId: m["foreground"]?["app_id"]?.stringValue,
                              foregroundMatches: m["foreground"]?["matches"]?.boolValue ?? false, frame: frame,
                              frameDropped: m["frame_dropped"]?.boolValue ?? false, actions: actions,
-                             contactToken: m["contact_token"]?.stringValue)
-        return (true, nil, view)
+                             contactToken: m["contact_token"]?.stringValue, seal: read.state)
+        return (true, read.reason, view)
     }
 
     /// The live screen's action log after a view: each action once (by its

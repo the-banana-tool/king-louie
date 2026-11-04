@@ -18,6 +18,10 @@ public struct PhoneView: Equatable {
     public let shown: Bool
     public let reason: String?
     public let display: JSONValue?
+    /// How the request reached this screen: `.unread` is sealed and not this phone's to open.
+    public var seal: SealState = .clear
+    /// A sealed request that was shown, opened: what `Messages.responseToOpened` answers. nil for anything else.
+    public var opened: JSONValue? = nil
 
     public var json: JSONValue {
         .object(["shown": .bool(shown), "reason": reason.map { .string($0) } ?? .null, "display": display ?? .null])
@@ -206,10 +210,15 @@ public enum Display {
 
     /// Shape first (`malformed`, even from a pinned node), then the pin
     /// (`unpinned_node`: node_id not pinned or kid ≠ node_id), then the
-    /// node's signature over the received bytes (`bad_node_signature`).
-    /// Pins come from a pairing or invite QR only.
-    public static func view(_ envelopeJSON: JSONValue, pinned: [NodePin]) -> PhoneView {
-        func hide(_ reason: String) -> PhoneView { PhoneView(shown: false, reason: reason, display: nil) }
+    /// node's signature over the received bytes (`bad_node_signature`). Only then
+    /// is a sealed one opened with `open`: `not_recipient` (no opener, or no wrap
+    /// for this phone), `open_failed` and `key_locked` keep their own reason,
+    /// `action_hash_mismatch` is refused before anything is shown, and content that
+    /// is no such content is `malformed`. A clear one from a node in `sealedSeen`
+    /// is `clear_after_sealed`. Pins come from a pairing or invite QR only.
+    public static func view(_ envelopeJSON: JSONValue, pinned: [NodePin], open: Opener? = nil, sealedSeen: Set<String>) -> PhoneView {
+        let requestType = "kl.approval.request"
+        func hide(_ reason: String, _ seal: SealState = .clear) -> PhoneView { PhoneView(shown: false, reason: reason, display: nil, seal: seal) }
         guard let envelope = try? Envelope(json: envelopeJSON), let message = try? envelope.message() else {
             return hide("malformed")
         }
@@ -222,7 +231,11 @@ public enum Display {
         guard envelope.verifyEd25519(spkiHex: pin.key) else {
             return hide("bad_node_signature")
         }
-        return PhoneView(shown: true, reason: nil, display: build(message))
+        if Seal.clearRefused(type: requestType, message: message, sealedSeen: sealedSeen) { return hide(Seal.clearAfterSealed) }
+        guard let read = Seal.read(type: requestType, message: message, open: open) else { return hide("malformed", .unread) }
+        guard read.opened else { return hide(read.reason ?? "malformed", read.state) }
+        if read.state == .opened, let problem = Messages.validateOpenedRequest(read.message) { return hide(problem, read.state) }
+        return PhoneView(shown: true, reason: nil, display: build(read.message), seal: read.state, opened: read.state == .opened ? read.message : nil)
     }
 }
 

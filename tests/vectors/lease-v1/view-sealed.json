@@ -2,6 +2,7 @@
   "name": "view-sealed",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "check": null,

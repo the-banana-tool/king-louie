@@ -2,6 +2,7 @@
   "name": "seal-hash-mismatch",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "given": {

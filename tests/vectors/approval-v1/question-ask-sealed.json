@@ -2,6 +2,7 @@
   "name": "question-ask-sealed",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "given": {

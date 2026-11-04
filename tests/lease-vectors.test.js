@@ -34,15 +34,14 @@ const EXPECTED = [
   'task-request-usd-over', 'task-request-usd-fraction', 'task-request-attended', 'task-request-minutes-over-240', 'task-request-with-apps',
   'task-request-name-hidden', 'task-request-name-too-long', 'task-grant-with-apps', 'task-grant-minutes-over-requested', 'task-grant-minutes-over-240',
   'task-grant-ignores-take-cap', 'computer-use-grant-no-apps', 'take-grant-no-apps',
-  // Revised 2026-11-04: sealed. Not in PHONE until iOS reads them.
+  // Revised 2026-11-04: sealed. The phones read all but the changed lease.
   'request-sealed', 'grant-to-sealed', 'grant-sealed-lease-changed', 'status-sealed', 'view-sealed', 'listing-with-sealed-status'
 ];
 // What the phones consume (android-slim spec §5): iOS consumes PHONE, Android
 // PHONE and the read-key vectors a phone signs (iOS has no read key).
 const ANDROID_READ_KEY = ['watch-read-key'];
-// Sealed (sealed phones, R-SP-4): Android's core reads them, iOS's not yet.
-const ANDROID_SEALED = ['request-sealed', 'grant-to-sealed', 'status-sealed', 'view-sealed', 'listing-with-sealed-status'];
-const PHONE = ['grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'watch-no-token',
+const PHONE = ['request-sealed', 'grant-to-sealed', 'status-sealed', 'view-sealed', 'listing-with-sealed-status',
+  'grant-valid', 'grant-narrowed', 'deny-valid', 'resume-capped', 'revoke-valid', 'watch-valid', 'watch-no-token',
   'status-valid', 'status-no-contact', 'status-pending', 'status-granted-unnamed', 'view-node-sig-valid', 'view-tampered-frame',
   'listing-none', 'listing-live', 'listing-nonce-mismatch', 'listing-status-withheld', 'listing-status-stale', 'listing-other-device', 'listing-bad-signature',
   'listing-other-node', 'listing-wrong-node', 'listing-extra-status', 'listing-duplicate-lease', 'listing-too-many', 'listing-extra-key', 'listing-bad-at',
@@ -170,7 +169,7 @@ describe('lease-v1 vectors', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
     const consumedBy = (phone) => vectors.filter((v) => v.consumers.includes(phone)).map((v) => v.name).sort();
     assert.deepEqual(consumedBy('ios'), [...PHONE].sort());
-    assert.deepEqual(consumedBy('android'), [...PHONE, ...ANDROID_READ_KEY, ...ANDROID_SEALED].sort());
+    assert.deepEqual(consumedBy('android'), [...PHONE, ...ANDROID_READ_KEY].sort());
     assert.ok(vectors.every((v) => v.consumers.includes('node')));
   });
 

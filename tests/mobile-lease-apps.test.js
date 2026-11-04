@@ -94,14 +94,14 @@ describe('iOS lease screens (owner ruling R-F5-8)', () => {
     assert.match(verified, /envelope\.kid == pin\.id/);
     assert.match(verified, /envelope\.verifyEd25519\(spkiHex: pin\.key\)/);
     assert.match(verified, /message\["node_id"\]\?\.stringValue == pin\.id/);
-    assert.match(section(core, 'public struct LeaseRequest', 'public struct LeaseStatus'), /Digest\.sha256B64url\(JCS\.data\(lease\)\) == leaseHash/);
+    assert.match(section(core, 'public struct LeaseRequest:', 'public struct LeaseStatus'), /Digest\.sha256B64url\(JCS\.data\(lease\)\) == leaseHash/);
     const view = section(core, 'public static func verifyView', '\n    }\n');
     assert.match(view, /guard envelope\.verifyEd25519\(spkiHex: pin\.key\) else/);
     assert.match(view, /guard Digest\.sha256B64url\(data\) == hash else/);
     // The app: requests come through the pin and the core, and nothing else opens an envelope.
     const refresh = section(leases, 'func refreshLeases', 'func decideLease');
     assert.match(refresh, /let pin = state\.nodes\.first\(where: \{ \$0\.id == envelope\.kid \}\)/);
-    assert.match(refresh, /let message = Leases\.verifiedMessage\(envelope, pin: pin\), let request = LeaseRequest\(message: message\)/);
+    assert.match(refresh, /let message = Leases\.verifiedMessage\(envelope, pin: pin\), let request = LeaseRequest\(message: message,/);
     assert.match(refresh, /LeaseRequestItem\(request: request, nodeName: pin\.name, status: status\)/);
     const apply = section(leases, 'private func apply(', 'func closeLiveLease');
     assert.match(apply, /Leases\.verifiedMessage\(envelope, pin: pin\)/);
@@ -450,10 +450,8 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(section(kotlin, 'fun verifyListing', '\n    }\n'), /if \(!isListing\(m\)\) return refused\("malformed"\)/);
     // Both cores' vector tests name every listing vector the generator marks for phones, and no other.
     const dir = path.join(ROOT, 'tests', 'vectors', 'lease-v1');
-    const listing = fs.readdirSync(dir).filter((f) => f.startsWith('listing-')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')))
-      // listing-with-sealed-status is the node's and Android's until iOS reads it (sealed phones, Task 9).
-      .filter((v) => v.consumers.includes('ios'));
-    assert.equal(listing.length, 14);
+    const listing = fs.readdirSync(dir).filter((f) => f.startsWith('listing-')).map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+    assert.equal(listing.length, 15);
     for (const v of listing) assert.deepEqual(v.consumers.slice().sort(), ['android', 'ios', 'node'], v.name);
     const names = listing.map((v) => v.name).sort();
     const swiftTests = read('mobile', 'ios', 'KLProtocol', 'Tests', 'KLProtocolTests', 'LeaseVectorTests.swift');
@@ -486,7 +484,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.match(checkedKotlin, /return "Checked \$\{Display\.escape\(nodeName\)\} at \$time: \$sessions\$requests"/);
     for (const core of [swift, kotlin]) assert.equal(count(core, 'no computer-use session'), 1, 'only in the sentence that says when it was checked');
     // What a listing listed is read only from one that was accepted.
-    assert.match(swift, /public static func listedStatuses\(_ check: ListingCheck, pin: NodePin\) -> \[LeaseStatus\] \{\n\s+guard check\.accepted else \{ return \[\] \}/);
+    assert.match(swift, /public static func listedStatuses\(_ check: ListingCheck, pin: NodePin, open: Opener\? = nil\) -> \[LeaseStatus\] \{\n\s+guard check\.accepted else \{ return \[\] \}/);
     assert.match(kotlin, /fun listedStatuses\(check: ListingCheck, pin: NodePin, open: Opener\? = null\): List<LeaseStatus> =\n\s+if \(!check\.accepted\) emptyList\(\) else /);
 
     // iOS: the state per node; absent means not asked.
@@ -1081,7 +1079,7 @@ describe('take leases on the phones', () => {
       grantCap: ['let cap = min(request.maxMinutes, request.kind == "computer_use" ? maxMinutes : takeMaxMinutes)', 'guard cap >= 1, (1...cap).contains(minutes) else { throw'],
       status: ['let kind = message["kind"]?.stringValue, Leases.leaseKinds.contains(kind)',
         'let unattended = message["unattended"]?.boolValue, kind != "computer_use" || !unattended',
-        'let nameValue = message["name"], (kind == "computer_use" ? nameValue.isNull : Leases.isTakeName(nameValue)) else { return nil }'],
+        'let fits = nameValue.map { kind == "computer_use" ? $0.isNull : Leases.isTakeName($0) } ?? false'],
       kinds: /static let leaseKinds = \["computer_use", "take", "task"\]/
     },
     Android: {

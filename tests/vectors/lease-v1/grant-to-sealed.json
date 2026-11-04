@@ -2,6 +2,7 @@
   "name": "grant-to-sealed",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "check": null,

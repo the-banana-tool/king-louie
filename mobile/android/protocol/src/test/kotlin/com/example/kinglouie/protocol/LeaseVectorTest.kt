@@ -68,14 +68,16 @@ class LeaseVectorTest {
     private val readKeyVectors = setOf("watch-read-key")
 
     // Revised 2026-11-04: sealed (sealed phones, R-SP-2, R-SP-4, R-SP-9).
-    private val sealedVectors = setOf("request-sealed", "grant-to-sealed", "status-sealed", "view-sealed", "listing-with-sealed-status")
+    private val sealedVectors = setOf("request-sealed", "grant-to-sealed", "status-sealed", "view-sealed")
 
     private val listingVectors = setOf(
         "listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
         "listing-other-device", "listing-bad-signature",
         // Fourth security review: another pinned node's listing, an extra status beside one, and the shape.
         "listing-other-node", "listing-wrong-node", "listing-extra-status", "listing-duplicate-lease",
-        "listing-too-many", "listing-extra-key", "listing-bad-at"
+        "listing-too-many", "listing-extra-key", "listing-bad-at",
+        // Revised 2026-11-04: a sealed status is listed without being opened, R-SP-9.
+        "listing-with-sealed-status"
     )
 
     /** R-F5-20: a node's listing is taken whole or not at all. */

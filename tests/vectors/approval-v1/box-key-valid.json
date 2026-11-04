@@ -2,6 +2,7 @@
   "name": "box-key-valid",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "given": {

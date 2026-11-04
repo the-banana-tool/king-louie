@@ -2,6 +2,7 @@
   "name": "request-sealed",
   "consumers": [
     "node",
+    "ios",
     "android"
   ],
   "check": "request",
