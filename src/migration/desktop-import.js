@@ -9,10 +9,11 @@ const { createLogger } = require('../logging');
 const { DEFAULT_SETTINGS, mergeSettings } = require('../core/settings');
 const { resolveCasesRoot } = require('../cases');
 const { initRepo, git } = require('../cases/git');
-const { parseCaseYaml } = require('../cases/case-store');
+const { parseCaseYaml, newId: newCaseId } = require('../cases/case-store');
+const yaml = require('js-yaml');
 const UserProfile = require('../telos/user-profile');
 const { writeFileAtomic } = require('../desktop-bridge/pairing');
-const { MESSAGES } = require('../desktop-bridge/protocol');
+const { MESSAGES, LIMITS } = require('../desktop-bridge/protocol');
 const { normalizeDirectory } = require('../desktop-bridge/desktop-scope');
 const { guardCheck } = require('../platform/write-guard');
 
@@ -20,6 +21,11 @@ const log = createLogger('desktop-import');
 
 const PLAN_TTL_MS = 30 * 60 * 1000;
 const MAX_BATCH_BYTES = 2 * 1024 * 1024;
+// A personal node takes a chat in parts (final review, finding 1). A part is one
+// run of messages under the batch limit, except a message bigger than that, which
+// goes alone in its own batch up to what a bridge frame or a CLI channel line can
+// carry. A message past this cannot be sent at all.
+const MAX_CHAT_PART_BYTES = LIMITS.frameBytes - 1024 * 1024;
 const IMPORTED_SETTINGS_KEYS = Object.freeze(['defaults', 'checkpoints', 'templateVariables', 'notifications', 'voice', 'cases']);
 // What a personal node takes besides (attach stage 2 spec C-9). It is the
 // owner's own machine and account, and the desktop has no core once it is
@@ -109,12 +115,21 @@ const profilesNotMoved = (n) => `your ${n} model ${n === 1 ? 'profile was' : 'pr
 // Trying again cannot help either of these: the plan comes out the same. What
 // helps is the owner looking, and removing the node's folder is the last resort,
 // after that, with what it would lose named.
-const lastResort = (added) => `Compare the two first; the desktop's copy and the backup are not touched. Only if nothing in the node's copy matters (${added}), stop the node, remove that folder from its cases folder, and move again.`;
+const lastResort = (added) => `Two ways keep both copies. If the node's copy is the one you work in, press Not now to open the old standalone mode once, open this case there and choose Moved elsewhere, then plan again. To bring the desktop's copy over as well, close this app, rename the case's folder inside the cases folder of this app's own profile, open the app and plan again: it lands as a second case. Only if nothing in the node's copy matters (${added}), stop the node, remove that folder from its cases folder, and move again.`;
 const landedIncomplete = (dir, added) => `${dir} is on this node but an earlier import landed it incomplete, so it does not count as moved, and trying again will not change that. ${lastResort(added)}`;
 const caseOnNodeDiffers = (dir, added) => `a folder named ${dir} is on this node and is not this case as the desktop has it (its history or files differ), so it does not count as moved, and trying again will not change that. ${lastResort(added)}`;
 const MOVED_OUT_NOTE = 'moved to this node by hand and closed on the desktop as moved elsewhere; the copy on this node is the live one and was left as it is. Anything done in the desktop\'s copy after the move is only in the backup';
 const LANDED_NO_RECORD = 'already on this node, its history and files as the desktop has them';
 const RESTART_NOTE = 'MCP servers, channel bots and hook choices that moved take effect when the node next starts.';
+const SECOND_CASE_NOTE = 'the node has this case under another folder; it lands as a second case, with an id of its own';
+// EXCLUDED's reasons are the fleet's. On a personal node the owner is the
+// administrator and these panes work, so the line says what he will find.
+const PERSONAL_EXCLUDED = Object.freeze({
+  skills: 'Skills, their pins and customizations do not move: they stay on this computer, and the node starts without them. Install them again in Settings > Skills on the node.',
+  workflows: 'Workflows do not move: they stay on this computer, and the node starts with none. Set them up again in Settings > Workflows on the node.',
+  webhooks: 'Webhooks do not move: they stay on this computer. Set them up again in Settings > Webhooks on the node.'
+});
+const tooLargeNote = (c, exists) => `chat "${String(c.title || c.id).slice(0, 80)}" has a message of ${(c.tooLargeBytes / (1024 * 1024)).toFixed(1)} MB, too large to send to the node. ${exists ? 'The node already holds this chat, and it is left as it is.' : 'The chat moves without what that message holds, with a line saying so in its place.'} The whole message stays in this computer's copy and in the backup.`;
 
 class ImportError extends Error {
   constructor(code, message) {
@@ -149,6 +164,25 @@ function modelsUntouched(current, dflt, isFreshProfile) {
   if (stable(rest) !== stable(base)) return false;
   if (profiles.length === 0) return defaultProfileId === null;
   return profiles.length === 1 && profiles[0].id === defaultProfileId && isFreshProfile(profiles[0]);
+}
+// Whether a stored setting is one the move would carry and is not the default. The
+// one profile a first start makes is nobody having chosen anything; the fleet does
+// not ask.
+function settingsWouldMove(settings) {
+  let merged;
+  try {
+    merged = mergeSettings(settings);
+  } catch {
+    return false;
+  }
+  const base = mergeSettings(DEFAULT_SETTINGS);
+  return importedSettingsKeys('personal').filter((key) => settings[key] !== undefined).some((key) => {
+    if (key === 'cases') return stable(withoutRoot(merged.cases)) !== stable(withoutRoot(base.cases));
+    if (key !== 'models') return stable(merged[key]) !== stable(base[key]);
+    const { profiles = [], defaultProfileId: _id, ...rest } = withoutLocalServers(merged.models);
+    const { profiles: _p, defaultProfileId: _d, ...plain } = withoutLocalServers(base.models);
+    return profiles.length > 1 || stable(rest) !== stable(plain);
+  });
 }
 function countActions(items) {
   const counts = Object.fromEntries(ACTIONS.map((a) => [a, 0]));
@@ -721,6 +755,14 @@ class DesktopImporter {
     };
     for (const c of arr(inventory.chats)) {
       if (!c || typeof c.id !== 'string' || !c.id) continue;
+      // Shown before the press, and landed as far as it can be. It is not a write
+      // action, so nothing here counts it as moved and no check asks for it.
+      if (this.personal && Number.isFinite(c.tooLargeBytes)) {
+        const held = chats.some((x) => x.id === c.id || x.id === done('chat', c.id)?.targetKey);
+        add('chat', c.id, 'needs-attention', tooLargeNote(c, held));
+        if (!held) items[items.length - 1].partial = true;
+        continue;
+      }
       const entry = done('chat', c.id);
       if (entry) {
         const target = chats.find((x) => x.id === entry.targetKey);
@@ -752,28 +794,36 @@ class DesktopImporter {
     // What the inventory said a case should land with, kept so finish() can
     // tell a short delivery (fix round 1, M8) from a complete one.
     const caseExpected = new Map();
+    // A case the owner renamed on the desktop lands beside the node's copy, and two
+    // cases cannot share an id: every lookup would find the first. Its chats follow.
+    const caseIdRemap = new Map();
+    const heldCaseIds = this.personal && fs.existsSync(root) ? new Set(fs.readdirSync(root).map((d) => nodeCaseId(path.join(root, d))).filter(Boolean)) : new Set();
     for (const c of arr(inventory.cases)) {
       const dir = c && c.dir;
       if (!isValidCaseDir(dir)) { add('case', String(dir), 'needs-attention', 'not a valid case directory name'); continue; }
       const exists = fs.existsSync(path.join(root, dir));
       if (!exists) {
-        add('case', dir, 'new');
+        const secondId = typeof c.caseId === 'string' && heldCaseIds.has(c.caseId) ? newCaseId() : null;
+        add('case', dir, 'new', secondId ? SECOND_CASE_NOTE : null);
+        if (secondId) caseIdRemap.set(c.caseId, secondId);
         caseExpected.set(dir, {
           files: Number.isFinite(c.files) ? c.files : null,
           bytes: Number.isFinite(c.bytes) ? c.bytes : null,
           private: c.private === true,
-          landedFrom: this.personal ? sourceRecord(c) : null
+          landedFrom: this.personal ? sourceRecord(c) : null,
+          secondId
         });
+      // The owner moved this one by hand and closed the desktop's copy: the node
+      // has the live one, and the two are meant to differ. Only if it is that case.
+      // Before the checks below: this is what their words tell him to do.
+      } else if (this.personal && c.movedElsewhere === true && nodeCaseId(path.join(root, dir)) === c.caseId) {
+        add('case', dir, 'needs-attention', MOVED_OUT_NOTE);
       } else if (done('case', dir)?.incomplete) {
         add('case', dir, 'needs-attention', landedIncomplete(dir, await whatTheNodeAdded(path.join(root, dir), done('case', dir).landedFrom?.head, c.head)));
         items[items.length - 1].incomplete = true;
       } else if (!this.personal) {
         if (done('case', dir)) add('case', dir, 'skip-present');
         else add('case', dir, 'needs-attention', 'a case with this directory already exists on the service');
-      // The owner moved this one by hand and closed the desktop's copy: the node
-      // has the live one, and the two are meant to differ. Only if it is that case.
-      } else if (c.movedElsewhere === true && nodeCaseId(path.join(root, dir)) === c.caseId) {
-        add('case', dir, 'needs-attention', MOVED_OUT_NOTE);
       // On record, and the source is what landed: the node's own work since (its
       // sweep commits what it finds within a minute) is no reason to doubt it.
       } else if (await recordedLandingHolds(path.join(root, dir), done('case', dir), c)) {
@@ -831,7 +881,7 @@ class DesktopImporter {
     }
     for (const key of arr(inventory.excluded)) {
       if (this.personal && PERSONAL_CARRIED.has(key)) continue;
-      add('excluded', key, 'skip-excluded', EXCLUDED[key] || 'stays with the desktop');
+      add('excluded', key, 'skip-excluded', (this.personal && PERSONAL_EXCLUDED[key]) || EXCLUDED[key] || 'stays with the desktop');
     }
 
     items.sort((a, b) => CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category));
@@ -843,33 +893,42 @@ class DesktopImporter {
       results: new Map(),
       caseFiles: new Map(),
       caseExpected,
-      chatExpected
+      chatExpected,
+      chatParts: new Map(),
+      caseIdRemap
     });
     log.info(`planned a desktop import: ${items.length} items`, { planId, source });
-    return { planId, items, counts: countActions(items) };
+    return { planId, items, counts: countActions(items), ...(this.personal ? { chatParts: true } : {}) };
   }
 
   async apply({ planId, batch } = {}) {
     const plan = this.getPlan(planId);
     if (!Array.isArray(batch)) throw new ImportError('BAD_REQUEST', 'batch must be an array');
-    if (Buffer.byteLength(JSON.stringify(batch)) > MAX_BATCH_BYTES) throw new ImportError('BATCH_TOO_LARGE', 'an import batch is at most 2 MiB');
+    const batchBytes = Buffer.byteLength(JSON.stringify(batch));
+    const onePart = this.personal && batch.length === 1 && batch[0] && batch[0].category === 'chat' && batchBytes <= MAX_CHAT_PART_BYTES;
+    if (batchBytes > MAX_BATCH_BYTES && !onePart) throw new ImportError('BATCH_TOO_LARGE', 'an import batch is at most 2 MiB');
     const results = [];
     for (const entry of batch) {
       const category = entry && entry.category;
       const key = entry ? String(entry.key) : '';
       const k = itemKey(category, key);
       const item = plan.items.get(k);
-      if (!item || !WRITE_ACTIONS.has(item.action)) {
+      if (!item || (!WRITE_ACTIONS.has(item.action) && item.partial !== true)) {
         results.push({ category, key, ok: false, error: 'not planned for import' });
         continue;
       }
       try {
         const out = (await this.write(plan, item, entry.value)) || {};
+        if (out.pending) {
+          results.push({ category, key, ok: true });
+          continue;
+        }
         results.push(out.note ? { category, key, ok: true, note: out.note } : { category, key, ok: true });
         if (category !== 'case') plan.results.set(k, { ok: true, note: out.note || null, attention: Boolean(out.attention), incomplete: this.personal && Boolean(out.incomplete), record: out.record || null });
       } catch (err) {
         log.warn(`importing ${category}${SECRET_CATEGORIES.has(category) ? '' : ` ${key}`} failed: ${err.message}`);
         results.push({ category, key, ok: false, error: err.message });
+        plan.chatParts.delete(key);
         if (category === 'case') {
           const files = plan.caseFiles.get(key) || { count: 0, bytes: 0, failed: null, seen: new Map() };
           files.failed = files.failed || err.message;
@@ -946,7 +1005,7 @@ class DesktopImporter {
         return {};
       }
       case 'chat':
-        return this.writeChat(plan, item, value);
+        return value && value.chatPart ? this.collectChatPart(plan, item, value) : this.writeChat(plan, item, value);
       case 'memory': {
         if (!value || value.id !== item.key) throw new ImportError('BAD_VALUE', 'the memory entry does not match the plan');
         const out = this.targets.memory.importEntry(value);
@@ -1057,7 +1116,7 @@ class DesktopImporter {
   // pre-checkPath call did (fix round 1, I4); returns a result to short
   // -circuit on, or null if the write is still safe to make.
   chatRaceCheck(plan, item, value, liveChats) {
-    if (item.action === 'new') {
+    if (item.action === 'new' || item.partial === true) {
       const collision = liveChats.find((c) => c.id === item.targetKey);
       if (collision) {
         return {
@@ -1077,6 +1136,27 @@ class DesktopImporter {
       }
     }
     return null;
+  }
+
+  // One part of a chat sent in several (a personal node only). Held under the plan
+  // and in memory, so a plan that ends early leaves nothing; the last part lands the
+  // whole chat through writeChat, in one transaction with its private mark.
+  collectChatPart(plan, item, value) {
+    if (!this.personal) throw new ImportError('BAD_VALUE', 'this service takes a chat whole');
+    const { index, total } = value.chatPart;
+    if (!Number.isInteger(index) || !Number.isInteger(total) || total < 1 || index < 0 || index >= total || !Array.isArray(value.messages)) {
+      throw new ImportError('BAD_VALUE', 'the chat part does not say where it belongs');
+    }
+    const held = index === 0 ? { next: 0, total, head: null, messages: [] } : plan.chatParts.get(item.key);
+    if (!held || held.next !== index || held.total !== total) throw new ImportError('BAD_OFFSET', 'a part of this chat arrived out of order');
+    const { chatPart: _part, messages, ...rest } = value;
+    if (index === 0) held.head = rest;
+    for (const message of messages) held.messages.push(message);
+    held.next += 1;
+    plan.chatParts.set(item.key, held);
+    if (held.next < total) return { pending: true };
+    plan.chatParts.delete(item.key);
+    return this.writeChat(plan, item, { ...held.head, messages: held.messages });
   }
 
   async writeChat(plan, item, value) {
@@ -1103,6 +1183,8 @@ class DesktopImporter {
     chat = item.action === 'copy'
       ? { ...chat, id: item.targetKey, title: `${chat.title || 'Chat'}${COPY_SUFFIX}` }
       : { ...chat, id: item.targetKey };
+    const secondCase = chat.caseId ? plan.caseIdRemap.get(String(chat.caseId)) : null;
+    if (secondCase) chat.caseId = secondCase;
 
     // Read live state again immediately before writing, with no await
     // between this read and the upsert, and re-run the same check against
@@ -1312,6 +1394,12 @@ class DesktopImporter {
       // rather than leaving something broken and unfixable in place.
       try {
         assertGitDirSafe(stagedDir);
+        const secondId = plan.caseExpected.get(dir)?.secondId;
+        if (secondId) {
+          const meta = parseCaseYaml(fs.readFileSync(path.join(stagedDir, 'case.yaml'), 'utf8'));
+          if (!meta) throw new ImportError('BAD_VALUE', 'its case.yaml names no case');
+          fs.writeFileSync(path.join(stagedDir, 'case.yaml'), yaml.dump({ ...meta, id: secondId, slug: dir }, { noRefs: true }));
+        }
         await initRepo(stagedDir);
       } catch (err) {
         stillOpen();
@@ -1409,6 +1497,14 @@ class DesktopImporter {
     for (const item of items) {
       const k = itemKey(item.category, item.key);
       if (item.action === 'needs-attention') attention.push({ category: item.category, key: item.key, note: item.note });
+      // Landed as far as it can be, and on record as not whole. The owner read the
+      // line before the press, so a landing that failed is said, and blocks nothing.
+      if (item.partial === true) {
+        const landed = plan.results.get(k);
+        if (landed && landed.ok) manifest.items[k] = { at, result: 'ok', ...(landed.record || {}), incomplete: true };
+        else if (landed) attention.push({ category: item.category, key: item.key, note: landed.error });
+        continue;
+      }
       if (!WRITE_ACTIONS.has(item.action)) continue;
       const r = plan.results.get(k);
       if (!r || !r.ok) {
@@ -1446,6 +1542,7 @@ class DesktopImporter {
       incomplete,
       secretsMissing,
       cronDisabled,
+      ...(needsRestart ? { needsRestart: true } : {}),
       notes: [
         ...(cronDisabled ? [`${cronDisabled} cron job(s) were imported disabled; enable them in Settings > Scheduler.`] : []),
         ...(needsRestart ? [RESTART_NOTE] : [])
@@ -1494,6 +1591,7 @@ module.exports = {
   buildImportTargets,
   IMPORTED_SETTINGS_KEYS,
   importedSettingsKeys,
+  settingsWouldMove,
   CHANNEL_TOKEN_KEYS,
   CHANNEL_ALLOWLISTS_KEY,
   ALLOWLIST_CHANNELS,
@@ -1502,6 +1600,7 @@ module.exports = {
   EXCLUDED,
   PLAN_TTL_MS,
   MAX_BATCH_BYTES,
+  MAX_CHAT_PART_BYTES,
   INSTALL_ID_RE,
   CASE_DIR_RE,
   isSkippedCaseFile,

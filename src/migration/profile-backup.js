@@ -7,8 +7,8 @@
 // place and named, and the move does not begin.
 //
 // Everything that can take long is asynchronous, for the desktop's main
-// process. The reader's own SQLite reads are synchronous; a large store's
-// counts hold the loop for as long as the desktop import's plan does.
+// process. Reading every message runs in a child (old-profile-read.js); the
+// snapshot's own counts here are one query on a store with no message loaded.
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -19,6 +19,7 @@ const { writeFileAtomic } = require('../approvals/approver-store');
 const { resolveCasesRoot } = require('../cases/case-runtime');
 const { readHistoryChats, snapshotHistoryFile, openSnapshot, countChats } = require('./desktop-history');
 const { createSafeReader, readDesktopSource } = require('./desktop-source');
+const { settingsWouldMove } = require('./desktop-import');
 
 const log = createLogger('profile-backup');
 
@@ -31,6 +32,14 @@ const EXCLUDED_DIRS = Object.freeze([
   'Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'blob_storage', 'Session Storage', 'Local Storage', 'Service Worker', 'logs',
   'DawnGraphiteCache', 'DawnWebGPUCache', 'Network'
 ]);
+// Under browser-profiles/<name> and browser-profiles/<name>/<profile>: Chromium's
+// caches, which it rebuilds and which were most of a real profile's 800 MB. Only
+// these names: Network, Local Storage and the rest hold the owner's logins there.
+const BROWSER_CACHE_DIRS = Object.freeze([
+  'Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'DawnGraphiteCache', 'DawnWebGPUCache',
+  'GrShaderCache', 'GraphiteDawnCache', 'ShaderCache', 'blob_storage'
+]);
+const BROWSER_PROFILE_LEVELS = /^browser-profiles\/[^/]+(\/[^/]+)?$/;
 const STORE_FILE = 'history.sqlite';
 // Top level only as well: a document under a case may have the name.
 const STORE_FILES = new Set([STORE_FILE, `${STORE_FILE}-wal`, `${STORE_FILE}-shm`, `${STORE_FILE}-journal`]);
@@ -93,6 +102,7 @@ async function listProfile(root, io, { strict = true, withStore = false } = {}) 
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
       const child = path.join(abs, entry.name);
       if (!rel && EXCLUDED_DIRS.includes(entry.name) && !entry.isFile()) continue;
+      if (BROWSER_PROFILE_LEVELS.test(rel) && BROWSER_CACHE_DIRS.includes(entry.name) && !entry.isFile()) continue;
       let stat;
       try {
         stat = await io.lstat(child);
@@ -272,6 +282,25 @@ async function snapshotStore({ userDataDir, dest, backup }) {
   return { history, file };
 }
 
+const asSize = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
+// Before anything is written: a full disk is otherwise found minutes in, with a
+// half-made directory to delete. A disk that will not say goes on: ENOSPC still refuses.
+async function assertRoom({ root, dest, totalBytes, io }) {
+  let free;
+  try {
+    const fsStat = await io.statfs(path.dirname(dest));
+    free = Number(fsStat.bavail) * Number(fsStat.bsize);
+  } catch {
+    return;
+  }
+  if (!Number.isFinite(free)) return;
+  let store = 0;
+  for (const name of STORE_FILES) store += await io.lstat(path.join(root, name)).then((s) => s.size, () => 0);
+  const needs = totalBytes + store;
+  if (needs > free) throw new Refusal(`there is not enough room on the disk: the backup needs ${asSize(needs)} and ${asSize(free)} is free. Free some space and try again`);
+}
+
 // { dest, bytes, files (a count), history: { chats, messages }, customCasesRoot,
 // customCases }, or throws BACKUP_FAILED with err.dest. Writes only under
 // `dest`. A write to a King Louie store from the first listing to the end of
@@ -306,6 +335,7 @@ async function backupProfile({
     const { files, dirs } = await listProfile(root, io);
     const totalFiles = files.length;
     const totalBytes = files.reduce((n, f) => n + f.size, 0);
+    await assertRoom({ root, dest, totalBytes, io });
 
     try {
       await io.mkdir(dest); // not recursive: fails if it appeared since the check
@@ -436,6 +466,28 @@ async function readBackupManifest(dest, { onProgress = null } = {}) {
 
 const STORE_PROBLEM_KEYS = new Set([STORE_FILE, 'chat-data.json']);
 
+// Keys, a vault or settings the move would carry: a profile with only these is worth
+// moving, or the owner enters every key again.
+function holdsKeysOrSettings(reader) {
+  const json = (rel) => {
+    const read = reader.readFile(rel);
+    if (!read.ok) return {};
+    try {
+      return JSON.parse(read.data.toString('utf8')) || {};
+    } catch {
+      return {};
+    }
+  };
+  const chatData = json('chat-data.json');
+  if (Object.values(chatData.apiTokens || {}).some(Boolean)) return true;
+  if (chatData.anthropicOAuth && chatData.anthropicOAuth.accessToken) return true;
+  const settings = chatData.settings && typeof chatData.settings === 'object' ? chatData.settings : {};
+  const hasKey = (section) => Object.values(settings[section] || {}).some((v) => v && v.apiKey);
+  if (hasKey('webSearch') || hasKey('imageGeneration')) return true;
+  if (settingsWouldMove(settings)) return true;
+  return Object.entries(json('config.json')).some(([k, v]) => k.startsWith('__vault_') && v);
+}
+
 // { found, chats, messages, cases, bytes, schemaProblem, customCasesRoot,
 // customCases, customCasesMissing }. Never throws, and never answers "nothing here" for a profile
 // it could not read: a store or a chat-data.json the reader refuses is found,
@@ -480,9 +532,11 @@ async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, r
     const chat = getValue('chat', c.id);
     return n + (chat && Array.isArray(chat.messages) ? chat.messages.length : 0);
   }, 0);
+  const keysOrSettings = holdsKeysOrSettings(safe);
   const found = Boolean(
     history.found || schemaProblem || inventory.chats.length || inventory.cases.length
     || settingRoot || (customCases !== 0 && !customCasesMissing) || attention.some((a) => a.category === 'case')
+    || keysOrSettings
   );
   if (!found) return nothing;
   let bytes = 0;
@@ -501,7 +555,8 @@ async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, r
     schemaProblem,
     customCasesRoot: customCasesRoot ? shown(customCasesRoot, 400) : null,
     customCases,
-    customCasesMissing
+    customCasesMissing,
+    ...(keysOrSettings ? { keysOrSettings: true } : {})
   };
 }
 

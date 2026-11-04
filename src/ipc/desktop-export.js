@@ -3,7 +3,7 @@
 // would write defaults), decrypt secrets in memory with safeStorage, and send
 // them only inside import.apply batches over the authenticated bridge.
 const { createSafeReader, readDesktopSource, planBatches } = require('../migration/desktop-source');
-const { readHistoryChats } = require('../migration/desktop-history');
+const { readHistoryApart } = require('../migration/old-profile-read');
 const { createSafeStorageCipher } = require('../platform/cipher');
 const { secureStorageUsable } = require('./desktop-state');
 const path = require('path');
@@ -56,18 +56,19 @@ async function addCaseCleanliness(source, userDataDir) {
   return source;
 }
 
-async function loadDesktopSource({ userDataDir, safeStorage, platform = process.platform, customRootEmpty = false }) {
+async function loadDesktopSource({ userDataDir, safeStorage, platform = process.platform, customRootEmpty = false, maxMessageBytes, readHistory = () => readHistoryApart({ userDataDir }) }) {
   const usable = secureStorageUsable(safeStorage, platform);
   const cipher = usable ? createSafeStorageCipher(safeStorage) : null;
   const reader = createSafeReader({ root: userDataDir, platform });
-  const history = await readHistoryChats({ reader });
+  const history = await readHistory();
   return addCaseCleanliness(readDesktopSource({
     userDataDir,
     reader,
     decrypt: cipher ? (encrypted) => cipher.decryptString(encrypted) : null,
     secrets: usable ? 'included' : 'unavailable',
     history,
-    customRootEmpty
+    customRootEmpty,
+    ...(maxMessageBytes ? { maxMessageBytes } : {})
   }), userDataDir);
 }
 
@@ -86,7 +87,7 @@ async function applyImport({ client, plan, source, onProgress = () => {} }) {
   const total = plan.items.filter((i) => WRITE_ACTIONS.has(i.action)).length;
   const done = new Set();
   let fatal = null;
-  for (const batch of planBatches(plan.items, source, { skipped })) {
+  for (const batch of planBatches(plan.items, source, { skipped, chatParts: plan.chatParts === true })) {
     let results;
     try {
       const response = await client.call('import.apply', { planId: plan.planId, batch });

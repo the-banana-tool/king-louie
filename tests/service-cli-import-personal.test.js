@@ -99,6 +99,28 @@ const snapshot = (dir) => {
 const ELEVATED_REFUSAL = /import on a personal node runs as you, not elevated: open a normal prompt/;
 
 describe('import --from under hosting: personal', () => {
+  it('a private chat lands private: the mark and the chat in one transaction', async () => {
+    const { HistoryStore } = require('../src/history');
+    const root = userData();
+    const store = HistoryStore.open(path.join(root, 'history.sqlite'));
+    store.createChat({ id: 'hush', title: 'Private', createdAt: '2026-09-20T10:00:00Z', updatedAt: '2026-09-20T10:00:00Z', messages: [{ id: 'm1', sender: 'user', text: 'quiet', timestamp: '2026-09-20T10:00:00Z' }] });
+    store.markPrivate('hush');
+    store.close();
+    const dataDir = keyedDataDir();
+    const w = recordingWriter();
+    const o = io();
+    const code = await runImportCommand({ flags: { from: root }, dataDir, io: o.io, deps: deps({ openWriter: w.openWriter }) });
+    assert.strictEqual(code, 0, o.out.stderr + o.out.stdout);
+    const landed = HistoryStore.open(path.join(dataDir, 'history.sqlite'), { readonly: true });
+    try {
+      assert.strictEqual(landed.chatRef('hush').private, true);
+      assert.strictEqual(landed.chatRef('c1').private, false);
+      assert.strictEqual(landed.getChat('hush').messages.length, 1);
+    } finally {
+      landed.close();
+    }
+  });
+
   it('a whole import runs unelevated and reads node.yaml without --case', async () => {
     const root = userData();
     const dataDir = keyedDataDir();

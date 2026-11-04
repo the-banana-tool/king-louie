@@ -1590,6 +1590,68 @@ describe('fix round 2: a landing on record, and the node\'s sweep', () => {
     assert.strictEqual(item.incomplete, true);
   });
 
+  it('final review 4: renaming the desktop\'s folder lands a second case, with its own id and its chats, and nothing counts as missing', async () => {
+    const n = await node();
+    const s = await profile();
+    await move(n, s);
+    const landed = path.join(n.root, s.name);
+    fs.writeFileSync(path.join(landed, 'turn.md'), 'x');
+    await git.commitAll(landed, 'a turn');
+    fs.writeFileSync(path.join(s.dir, 'later.md'), 'only on the desktop\n');
+    await git.commitAll(s.dir, 'the desktop went on');
+    assert.strictEqual((await move(n, s)).verified.ok, false, 'blocked as it stands');
+
+    const renamed = `${s.name}-desktop`;
+    fs.renameSync(s.dir, path.join(path.dirname(s.dir), renamed));
+    fs.writeFileSync(path.join(s.p, 'chat-data.json'), JSON.stringify({ settings: {}, chats: [{ id: 'with-case', title: 'Of the case', caseId: s.id, createdAt: '2026-09-20T10:00:00.000Z', updatedAt: '2026-09-20T10:00:00.000Z', messages: [{ id: 'm1', sender: 'user', text: 'hello', timestamp: '2026-09-20T10:00:00.000Z' }] }] }));
+    const second = await move(n, { ...s, dir: path.join(path.dirname(s.dir), renamed), name: renamed });
+    assert.strictEqual(second.item.action, 'new');
+    assert.match(second.item.note, /second case/);
+    assert.strictEqual(second.verified.ok, true, JSON.stringify(second.verified));
+    const list = new CaseStore({ root: n.root }).list();
+    const first = list.find((c) => path.basename(c.dir) === s.name);
+    const other = list.find((c) => path.basename(c.dir) === renamed);
+    assert.strictEqual(first.id, s.id, 'the node\'s copy is left as it was');
+    assert.notStrictEqual(other.id, s.id);
+    assert.strictEqual(n.core.context.getCaseRuntime().getCase(other.id).dir, other.dir, 'and it opens as itself');
+    assert.strictEqual(n.core.context.getChat('with-case').caseId, other.id, 'its chats go with it');
+    assert.ok(fs.existsSync(path.join(other.dir, 'later.md')));
+  });
+
+  it('final review 4: Moved elsewhere also clears a landing on record as incomplete', async () => {
+    const n = await node();
+    const s = await profile();
+    await move(n, s);
+    const manifestDir = path.join(n.dataDir, 'imports');
+    const file = path.join(manifestDir, fs.readdirSync(manifestDir)[0]);
+    const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+    manifest.items[`case:${s.name}`].incomplete = true;
+    fs.writeFileSync(file, JSON.stringify(manifest));
+    const blocked = await move(n, s);
+    assert.strictEqual(blocked.item.incomplete, true);
+    assert.match(blocked.item.note, /Moved elsewhere/);
+    await closeAsMoved(s);
+    const retry = await move(n, s);
+    assert.strictEqual('incomplete' in retry.item, false);
+    assert.match(retry.item.note, /live one/);
+    assert.strictEqual(retry.verified.ok, true);
+  });
+
+  it('final review 9: stays-behind lines are the owner\'s under personal, the fleet\'s otherwise', async () => {
+    const n = await node();
+    const imp = await n.importer();
+    const inventory = { chats: [], cases: [], secrets: 'included', excluded: ['skills', 'workflows', 'webhooks'] };
+    const plan = await imp.plan({ installId: 'i-9', inventory });
+    const note = (key) => plan.items.find((i) => i.key === key).note;
+    assert.match(note('skills'), /do not move.*Settings > Skills on the node/);
+    assert.match(note('workflows'), /do not move.*Settings > Workflows on the node/);
+    assert.match(note('webhooks'), /Settings > Webhooks on the node/);
+    assert.doesNotMatch(`${note('skills')} ${note('workflows')} ${note('webhooks')}`, /administrator|while attached/);
+    const fleet = new DesktopImporter({ context: n.core.context, targets: await buildImportTargets({ context: n.core.context, dataDir: n.dataDir }), dataDir: n.dataDir, checkPath, scope: createDesktopScope({ dataDir: n.dataDir, context: n.core.context }), hosting: 'service' });
+    const fleetPlan = await fleet.plan({ installId: 'i-9', inventory });
+    assert.match(fleetPlan.items.find((i) => i.key === 'skills').note, /by an administrator/);
+  });
+
   it('what a refusal says: not that trying again helps; last resort after comparing, naming what the node added', async () => {
     const n = await node();
     const s = await profile();
@@ -1601,9 +1663,11 @@ describe('fix round 2: a landing on record, and the node\'s sweep', () => {
     await git.commitAll(s.dir, 'the desktop went on');
     const { item, verified } = await move(n, s);
     assert.match(item.note, /trying again will not change/i);
-    assert.match(item.note, /[Cc]ompare/);
+    assert.match(item.note, /Moved elsewhere/);
+    assert.match(item.note, /rename the case's folder/);
     assert.match(item.note, /1 commit\b/);
-    assert.ok(item.note.indexOf('ompare') < item.note.indexOf('remove'));
+    assert.ok(item.note.indexOf('Moved elsewhere') < item.note.indexOf('rename'), 'the non-destructive ways first');
+    assert.ok(item.note.indexOf('rename') < item.note.indexOf('remove that folder'), 'removing is last');
     assert.match(verified.missing[0].why, /1 commit\b/, 'the note reaches the list uncut');
     forget(n);
     const noRecord = await move(n, s);

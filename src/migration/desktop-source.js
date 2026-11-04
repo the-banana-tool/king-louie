@@ -14,13 +14,23 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { parseCaseYaml } = require('../cases/case-store');
-const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS } = require('./desktop-import');
+const { BUILTIN_IDS } = require('../cases/executors/builtins');
+const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS, MAX_CHAT_PART_BYTES } = require('./desktop-import');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 // A desktop store file or a case file bigger than this is refused rather
 // than read into memory (fix round 1): the tree is user-controlled.
 const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const arr = (v) => (Array.isArray(v) ? v : []);
+// What takes a message's place on the node when it cannot be sent at all.
+const TOO_LARGE_TEXT = 'This message was too large to move to King Louie Node. The whole message is in the old profile on this computer and in the backup.';
+const jsonBytes = (value) => Buffer.byteLength(JSON.stringify(value));
+function withoutTooLarge(chat, maxMessageBytes) {
+  const messages = chat.messages.map((m) => (jsonBytes(m) <= maxMessageBytes ? m : {
+    ...(m.id ? { id: m.id } : {}), sender: m.sender, ...(m.timestamp ? { timestamp: m.timestamp } : {}), text: TOO_LARGE_TEXT
+  }));
+  return { ...chat, messages };
+}
 
 // Windows residual (fix round 1, I3): there is no owner check on win32. The
 // owner SID of each file could be read through the installers' handle-based
@@ -170,7 +180,7 @@ function createSafeReader({ root, platform = process.platform, fsImpl = fs, maxF
 // with a custom root gets them moved (attach stage 2 §6.5): the setting cannot be
 // changed from a window with no core, and the desktop never writes this profile's
 // stores. The CLI does not pass it.
-function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null, customRootEmpty = false }) {
+function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null, customRootEmpty = false, maxMessageBytes = MAX_CHAT_PART_BYTES }) {
   const attention = [];
   const readJson = (rel) => {
     const r = reader.readFile(rel);
@@ -269,6 +279,10 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
   let everyCaseRead = !casesRootSetting;
 
   const cases = [];
+  // A case whose external agent is in the profile's executors folder, which does not
+  // move: what the plan says of it, never sent to the node.
+  const agentPackages = readAgentPackages(reader);
+  const agentCases = [];
   if (!casesRootSetting) {
     const listed = reader.listDir('cases');
     if (listed.refused.length) everyCaseRead = false;
@@ -299,6 +313,8 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
         attention.push({ category: 'case', key: dir, note: held, wholeCase: true });
         continue;
       }
+      const agents = caseAgents(reader, dir, mark.type, agentPackages);
+      if (agents.length) agentCases.push({ dir, agents });
       const counted = files.filter((f) => caseTreeCounted(f.relPath));
       cases.push({
         dir,
@@ -321,7 +337,11 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
   const inventory = {
     installId,
     sourceVersion: null,
-    chats: chats.map((c) => ({ id: c.id, updatedAt: c.updatedAt || null, title: String(c.title || '') })),
+    chats: chats.map((c) => {
+      // Only past the limit, so every other chat's entry is as it always was.
+      const largest = arr(c.messages).reduce((most, m) => Math.max(most, jsonBytes(m)), 0);
+      return { id: c.id, updatedAt: c.updatedAt || null, title: String(c.title || ''), ...(largest > maxMessageBytes ? { tooLargeBytes: largest } : {}) };
+    }),
     settingsKeys: Object.keys(settings).filter((k) => !['allowedDirectories', 'webSearch', 'imageGeneration'].includes(k)),
     userProfile: Boolean(chatData.userProfile),
     permissionRules: arr(toolApprovals.permissionRules).filter((r) => r && r.tool && r.action).map((r) => ({ tool: r.tool, pattern: r.pattern || '*', action: r.action })),
@@ -387,7 +407,36 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     return reader.listFiles(base).files.map((f) => ({ ...f, read: () => reader.readFile(path.join(base, ...f.relPath.split('/'))) }));
   }
 
-  return { installId, inventory, attention, getValue, caseFiles };
+  return { installId, inventory, attention, getValue, caseFiles, maxMessageBytes, agentCases };
+}
+
+// The external agents installed in the profile: each package's executor id.
+function readAgentPackages(reader) {
+  const ids = [];
+  for (const dir of reader.listDir('executors').dirs) {
+    const r = reader.readFile(path.join('executors', dir, 'package.json'));
+    if (!r.ok) continue;
+    try {
+      const id = JSON.parse(r.data.toString('utf8'))?.kingLouie?.executor?.id;
+      if (typeof id === 'string' && id) ids.push(id);
+    } catch { /* not a package */ }
+  }
+  return ids;
+}
+
+// Which of those a case needs: the agents its own executor snapshot names, and for an
+// outreach case, whose sends go through an agent, every one when it names none yet.
+function caseAgents(reader, dir, type, packages) {
+  if (!packages.length) return [];
+  let named = [];
+  const r = reader.readFile(path.join('cases', dir, '.kl', 'executors.json'));
+  if (r.ok) {
+    try {
+      named = Object.keys(JSON.parse(r.data.toString('utf8')) || {}).filter((id) => !BUILTIN_IDS.includes(id) && packages.includes(id));
+    } catch { /* an unreadable snapshot names nobody */ }
+  }
+  if (named.length) return named;
+  return type === 'outreach' ? packages : [];
 }
 
 // A case's id and private mark from its case.yaml. A file that is missing or
@@ -406,6 +455,7 @@ function readCaseMark(reader, dir) {
   if (!meta) return unread;
   return {
     id: String(meta.id),
+    type: typeof meta.type === 'string' ? meta.type : null,
     private: Object.prototype.hasOwnProperty.call(meta, 'private') && meta.private !== false,
     movedElsewhere: meta.status === 'abandoned' && Boolean(meta.statusReason) && meta.statusReason.kind === 'moved'
   };
@@ -434,8 +484,41 @@ function readCaseHead(reader, dir) {
   return null;
 }
 
+// A chat as entries: one when it fits a batch, as it always went; else one per run of
+// messages under maxBytes, in order, and a message bigger than that alone. Measured
+// message by message: a long chat with its attachments can be more than one string
+// can hold.
+function chatEntries(item, chat, maxBytes) {
+  const { messages, ...head } = chat;
+  const room = maxBytes - jsonBytes(head) - 256;
+  const parts = [];
+  let part = [];
+  let size = 0;
+  let whole = 0;
+  for (const message of messages) {
+    const bytes = jsonBytes(message) + 1;
+    whole += bytes;
+    if (part.length && size + bytes > room) {
+      parts.push(part);
+      part = [];
+      size = 0;
+    }
+    part.push(message);
+    size += bytes;
+  }
+  if (whole <= room) return [{ category: item.category, key: item.key, value: chat }];
+  parts.push(part);
+  return parts.map((run, index) => ({
+    category: item.category,
+    key: item.key,
+    value: { ...(index === 0 ? head : { id: chat.id }), messages: run, chatPart: { index, total: parts.length } }
+  }));
+}
+
 // Apply batches for the plan's write items. Secret values appear only here.
-function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024 * 1024, skipped = [] } = {}) {
+// `chatParts`: the plan said this node takes a chat in parts. Without it, as ever, a
+// chat that overflows a batch is skipped.
+function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024 * 1024, skipped = [], chatParts = false } = {}) {
   let batch = [];
   let size = 2;
   function* push(entry) {
@@ -449,7 +532,7 @@ function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024
     size += s;
   }
   for (const item of planItems) {
-    if (!WRITE_ACTIONS.has(item.action)) continue;
+    if (!WRITE_ACTIONS.has(item.action) && item.partial !== true) continue;
     if (item.category === 'case') {
       for (const f of source.caseFiles(item.key)) {
         const r = f.read();
@@ -469,6 +552,10 @@ function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024
     }
     if (value === null || value === undefined) {
       skipped.push({ category: item.category, key: item.key, error: 'not found in the desktop profile' });
+      continue;
+    }
+    if (chatParts && item.category === 'chat' && Array.isArray(value.messages)) {
+      for (const entry of chatEntries(item, item.partial === true ? withoutTooLarge(value, source.maxMessageBytes ?? MAX_CHAT_PART_BYTES) : value, maxBytes)) yield* push(entry);
       continue;
     }
     const entry = { category: item.category, key: item.key, value };

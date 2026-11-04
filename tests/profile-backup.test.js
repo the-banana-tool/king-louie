@@ -1103,3 +1103,127 @@ describe('readBackupManifest', () => {
     });
   }
 });
+
+describe('final review: findings 8, 11 and minors 13, 16', () => {
+  const { detectOldProfileApart, readHistoryApart } = require('../src/migration/old-profile-read');
+  const { HistoryStore } = require('../src/history');
+  const fresh = () => {
+    const parent = tempParent();
+    const root = path.join(parent, 'king-louie');
+    fs.mkdirSync(root);
+    return { parent, root };
+  };
+  const write = (root, rel, text = 'x') => {
+    const f = path.join(root, ...rel.split('/'));
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, text);
+  };
+
+  it('a disk without room refuses with the numbers, before anything is written', async () => {
+    const { parent, root } = fresh();
+    write(root, 'chat-data.json', JSON.stringify({ settings: {} }));
+    write(root, 'cases/big/data.bin', Buffer.alloc(3 * 1024 * 1024));
+    const dest = path.join(parent, 'backup');
+    await assert.rejects(
+      backupProfile({ userDataDir: root, dest, fsImpl: { statfs: async () => ({ bavail: 1024, bsize: 1024 }) } }),
+      (err) => {
+        assert.strictEqual(err.code, 'BACKUP_FAILED');
+        assert.match(err.message, /needs 3\.0 MB/);
+        assert.match(err.message, /1\.0 MB is free/);
+        assert.match(err.message, /Nothing was written/);
+        return true;
+      }
+    );
+    assert.strictEqual(fs.existsSync(dest), false);
+  });
+
+  it('a disk that will not say does not stop the backup', async () => {
+    const { parent, root } = fresh();
+    write(root, 'chat-data.json', JSON.stringify({ settings: {} }));
+    const out = await backupProfile({ userDataDir: root, dest: path.join(parent, 'backup'), fsImpl: { statfs: async () => { throw new Error('no'); } } });
+    assert.ok(out.files >= 1);
+  });
+
+  it('caches under a browser profile stay out; its logins and everything elsewhere stay in', async () => {
+    const { parent, root } = fresh();
+    write(root, 'chat-data.json', JSON.stringify({ settings: {} }));
+    for (const rel of ['browser-profiles/king-louie/Default/Cache/data_0', 'browser-profiles/king-louie/Default/Code Cache/js/a', 'browser-profiles/king-louie/GrShaderCache/b', 'browser-profiles/take/Default/GPUCache/c']) write(root, rel);
+    for (const rel of ['browser-profiles/king-louie/Default/Network/Cookies', 'browser-profiles/king-louie/Default/Local Storage/leveldb/d', 'cases/lot/Cache/notes.md']) write(root, rel);
+    const dest = path.join(parent, 'backup');
+    await backupProfile({ userDataDir: root, dest });
+    const listed = (await readBackupManifest(dest)).files.map((f) => f.path);
+    assert.ok(!listed.some((p) => /browser-profiles.*(Cache)/.test(p)), listed.join(', '));
+    assert.ok(listed.includes('browser-profiles/king-louie/Default/Network/Cookies'));
+    assert.ok(listed.includes('browser-profiles/king-louie/Default/Local Storage/leveldb/d'));
+    assert.ok(listed.includes('cases/lot/Cache/notes.md'), 'a case\'s own Cache folder is data');
+  });
+
+  it('found for keys, a vault or settings the move carries; not for what it does not', async () => {
+    const found = async (files) => {
+      const { root } = fresh();
+      for (const [rel, doc] of Object.entries(files)) write(root, rel, JSON.stringify(doc));
+      return detectOldProfile(root);
+    };
+    const keyed = await found({ 'chat-data.json': { apiTokens: { anthropic: 'ENC' } } });
+    assert.strictEqual(keyed.found, true);
+    assert.strictEqual(keyed.keysOrSettings, true);
+    assert.strictEqual((await found({ 'config.json': { __vault_lot: 'ENC' } })).found, true);
+    assert.strictEqual((await found({ 'chat-data.json': { settings: { webSearch: { brave: { apiKey: 'ENC' } } } } })).found, true);
+    assert.strictEqual((await found({ 'chat-data.json': { settings: { hooks: { enabled: false } } } })).found, true);
+    assert.strictEqual((await found({ 'chat-data.json': { settings: { theme: 'dark' }, apiTokens: { anthropic: '' } } })).found, false);
+    assert.strictEqual((await found({ 'config.json': { other: 'x' } })).found, false);
+  });
+
+  it('detectOldProfileApart spawns with the environment it was given', async () => {
+    let seen = null;
+    const spawn = (_exe, _args, opts) => {
+      seen = opts.env;
+      const child = new (require('events').EventEmitter)();
+      child.stdout = new (require('events').EventEmitter)();
+      child.stderr = new (require('events').EventEmitter)();
+      setImmediate(() => child.emit('close', 1));
+      return child;
+    };
+    await detectOldProfileApart('C:\\p', { env: { KL_CASES_ROOT: 'D:\\cases', KL_FROM_THE_HOST: 'yes' }, spawn });
+    assert.strictEqual(seen.KL_CASES_ROOT, 'D:\\cases');
+    assert.strictEqual(seen.KL_FROM_THE_HOST, 'yes');
+    assert.strictEqual(seen.ELECTRON_RUN_AS_NODE, '1');
+  });
+
+  it('the plan\'s read of every message runs in a child and answers as the direct read does', async () => {
+    const { root } = fresh();
+    const store = HistoryStore.open(path.join(root, 'history.sqlite'));
+    store.createChat({ id: 'c1', title: 'One', messages: [{ id: 'm1', sender: 'user', text: 'line\u2028two', timestamp: '2026-09-20T10:00:00.000Z' }] });
+    store.createChat({ id: 'c2', title: 'Two', messages: [] });
+    store.markPrivate('c2');
+    store.close();
+    const apart = await readHistoryApart({ userDataDir: root });
+    assert.strictEqual(apart.found, true);
+    assert.deepStrictEqual(apart.attention, []);
+    assert.deepStrictEqual(apart.chats.map((c) => c.id).sort(), ['c1', 'c2']);
+    assert.strictEqual(apart.chats.find((c) => c.id === 'c1').messages[0].text, 'line\u2028two');
+    assert.strictEqual(apart.chats.find((c) => c.id === 'c2').private, true);
+  });
+
+  it('a child that dies is an attention row the move refuses on, never fewer chats', async () => {
+    const spawn = () => {
+      const { EventEmitter } = require('events');
+      const child = new EventEmitter();
+      child.stdout = Object.assign(new EventEmitter(), { setEncoding() {} });
+      child.stderr = new EventEmitter();
+      setImmediate(() => {
+        child.stdout.emit('data', 'KL_HISTORY_CHAT {"id":"c1"}\n');
+        child.emit('close', 3);
+      });
+      return child;
+    };
+    const out = await readHistoryApart({ userDataDir: 'C:\\p', spawn });
+    assert.deepStrictEqual(out.chats, []);
+    assert.strictEqual(out.attention[0].key, 'history.sqlite');
+  });
+
+  it('the desktop source reads through the child by default', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'ipc', 'desktop-export.js'), 'utf8');
+    assert.match(src, /readHistory = \(\) => readHistoryApart\(\{ userDataDir \}\)/);
+  });
+});

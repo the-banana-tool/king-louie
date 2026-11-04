@@ -151,7 +151,7 @@ async function checkCases(items, invoke, note) {
 // Never throws.
 async function verifyMigration({ plan, report, invoke }) {
   const missing = [];
-  const note = (category, key, why) => missing.push({ category: shown(category, 80), key: shown(key), why: shown(why, 800) });
+  const note = (category, key, why) => missing.push({ category: shown(category, 80), key: shown(key), why: shown(why, 1200) });
   reportProblems(report, note);
   if (!plan || !Array.isArray(plan.items)) note('import', 'plan', 'there is no plan to check against');
   const items = arr(plan && plan.items);
