@@ -26,7 +26,7 @@ describe('build/installer.nsh', () => {
     assert.match(c, /!macro customUnInstall/);
     assert.match(c, /uninstall --personal --yes/);
     assert.match(c, /resources\\app\.asar\\bin\\king-louie-service\.js/);
-    assert.match(c, /\$INSTDIR\\$\{APP_EXECUTABLE_FILENAME\}/);
+    assert.match(c, /\$INSTDIR\\\$\{APP_EXECUTABLE_FILENAME\}/);
     assert.doesNotMatch(c, /King Louie\.exe/);
     assert.match(c, /nsExec::ExecToLog/);
   });

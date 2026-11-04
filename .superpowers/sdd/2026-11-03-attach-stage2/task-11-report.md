@@ -1,7 +1,7 @@
 # Task 11 report: the uninstaller removes the logon task
 
 Files: build/installer.nsh (new), package.json (build.nsis.include), tests/installer-script.test.js (new).
-RED: 6 of 6 failed before the script existed. GREEN: installer-script, examples and the tracked-file test pass (115 pass, 0 fail).
+RED: 6 of 6 failed before the script existed. GREEN: installer-script, examples and the tracked-file test pass (116 pass, 0 fail).
 
 ## Update trap
 electron-builder's installer runs the old uninstaller during an update (installUtil.nsh passes `--updated`), and
