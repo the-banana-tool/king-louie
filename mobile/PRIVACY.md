@@ -58,7 +58,8 @@ can see:
 - every computer-use request a node sends you: the node's id and name, the
   apps it asks for (their ids, names, full paths and process names), for how
   long, for a take (a screen-recorded demo) the take's name and the hosts it
-  may visit, the agent's stated reason (up to 280 characters the agent wrote
+  may visit, for a task its name, the hosts it may act on, what it may do and
+  the most it may spend, the agent's stated reason (up to 280 characters the agent wrote
   itself, so it can say anything), the job id, the name of the client that
   asked and its session id, and what the node cannot detect (no lock
   detection, say); your answer and any stop or watch you send, with your
@@ -108,6 +109,11 @@ can see:
   detail is on screen and the app is in front, and loads the pictures as
   they come; when you close the detail or leave the app the watches stop,
   and a lease this phone allowed pauses about two minutes later;
+- for a task, what a client sent and got back passes through a front door on its way
+  to and from your node, as any tool call does: the task's text, your client's
+  messages and the answer, the node's name, the task's state and what it spent. The
+  card your phone shows is listed above; its name is the first 60 characters of the
+  task's text, and the node's audit history holds the same fields as the card;
 - each node's audit history (the slices you open, and the copy a relay keeps
   when it mirrors a node's ledger). For computer use an entry holds the job
   and lease ids, the tool, the app in front before and after (its path and
@@ -144,7 +150,8 @@ says, in words the app builds on the phone:
 - a computer-use session or take ended, unless you stopped it from this
   phone;
 - a computer-use session paused because no phone was watching (only to the
-  phone that allowed it).
+  phone that allowed it);
+- a task ended.
 
 On Android, a tap fetches with the phone's read key, without a fingerprint,
 and shows only what the node signed; a notification has no buttons of its

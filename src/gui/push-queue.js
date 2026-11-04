@@ -1,7 +1,7 @@
 // src/gui/push-queue.js
 // The node's push.notify queue (push spec §6.2, C-1): content-free hints that
 // a granted lease ended (`session_ended`) or paused for want of contact
-// (`session_paused`), sent to the relay over the node's link. Small and in
+// (`session_paused`), or that a task ended (`task_ended`), sent to the relay over the node's link. Small and in
 // memory: sent at once while the link is up, else on its next `connected`;
 // an entry over an hour old is dropped (the phone's next list says as much),
 // and it holds at most PUSH_QUEUE_MAX entries, the oldest out. A relay older

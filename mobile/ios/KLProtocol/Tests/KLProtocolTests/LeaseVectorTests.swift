@@ -41,7 +41,7 @@ final class LeaseVectorTests: XCTestCase {
 
     func testEveryIosVectorIsCovered() throws {
         let names = Set(try allVectors().filter { ($0["consumers"]?.arrayValue ?? []).contains(.string("ios")) }.compactMap { $0["name"]?.stringValue })
-        XCTAssertEqual(names, ["grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "watch-no-token",
+        XCTAssertEqual(names, Set<String>(["grant-valid", "grant-narrowed", "deny-valid", "resume-capped", "revoke-valid", "watch-valid", "watch-no-token",
                                "status-valid", "status-no-contact", "status-pending", "status-granted-unnamed",
                                "view-node-sig-valid", "view-tampered-frame",
                                "listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
@@ -50,8 +50,18 @@ final class LeaseVectorTests: XCTestCase {
                                "listing-too-many", "listing-extra-key", "listing-bad-at",
                                // Revised 2026-10-24: the take lease.
                                "take-grant", "take-grant-minutes-over-cap", "take-request-missing-name", "computer-use-with-unattended",
-                               "status-take"])
+                               "status-take"]
+                               + Self.taskRequestsAccepted + Self.taskRequestsRefused + Self.taskGrantsBuilt + Self.taskGrantsRefused + Self.taskStatuses))
     }
+
+    // Revised 2026-11-03: the task lease (tasks stage 1 spec §4.6, §4.9).
+    static let taskRequestsAccepted = ["task-request", "task-request-read-only"]
+    static let taskRequestsRefused = ["task-request-allows-unsorted", "task-request-allows-repeated", "task-request-allows-unknown", "task-request-resumes",
+                                      "task-request-sites-over-32", "task-request-bad-site", "task-request-usd-under", "task-request-usd-over", "task-request-usd-fraction",
+                                      "task-request-attended", "task-request-minutes-over-240", "task-request-with-apps", "task-request-name-hidden", "task-request-name-too-long"]
+    static let taskGrantsBuilt = ["task-grant", "task-grant-ignores-take-cap"]
+    static let taskGrantsRefused = ["task-grant-with-apps", "task-grant-minutes-over-requested", "task-grant-minutes-over-240", "computer-use-grant-no-apps", "take-grant-no-apps"]
+    static let taskStatuses = ["task-status", "task-status-no-name"]
 
     static let listingVectors = ["listing-none", "listing-live", "listing-nonce-mismatch", "listing-status-withheld", "listing-status-stale",
                                  "listing-other-device", "listing-bad-signature",
@@ -231,6 +241,139 @@ final class LeaseVectorTests: XCTestCase {
         XCTAssertTrue(Leases.isLease(with("max_minutes", .number("240"))))
     }
 
+    func taskCard(_ name: String) throws -> LeaseRequest {
+        let v = try vector(name)
+        return try XCTUnwrap(LeaseRequest(message: try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)))), name)
+    }
+
+    /// task-request's message with some of its lease changed and hashed again.
+    func taskCard(changing changes: [String: JSONValue]) throws -> LeaseRequest {
+        let v = try vector("task-request")
+        guard case .object(var m) = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v))),
+              case .object(var lease)? = m["lease"] else { throw ProtocolError.malformed("fixture") }
+        for (k, value) in changes { lease[k] = value }
+        m["lease"] = .object(lease)
+        m["lease_hash"] = .string(Digest.sha256B64url(JCS.data(.object(lease))))
+        return try XCTUnwrap(LeaseRequest(message: .object(m)))
+    }
+
+    /// A task's request: no apps, its own sites, allows and usd; empty allows is the card that raises a look-only task's spend.
+    func testTaskRequests() throws {
+        for name in Self.taskRequestsAccepted {
+            let r = try taskCard(name)
+            XCTAssertTrue(r.isTask, name)
+            XCTAssertFalse(r.isTake, name)
+            XCTAssertFalse(r.isResume, name)
+            XCTAssertTrue(r.apps.isEmpty, name)
+            XCTAssertEqual(r.name, "Find a dentist", name)
+            XCTAssertEqual(r.sites, ["*.example.com"], name)
+            XCTAssertEqual(r.usd, 2, name)
+            XCTAssertEqual(r.maxMinutes, 20, name)
+            XCTAssertTrue(r.unattended, name)
+        }
+        XCTAssertEqual(try taskCard("task-request").allows, ["browser-act"])
+        XCTAssertTrue(try taskCard("task-request-read-only").allows.isEmpty)
+        for name in Self.taskRequestsRefused {
+            let v = try vector(name)
+            let message = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)), name)
+            XCTAssertNil(LeaseRequest(message: message), name)
+            XCTAssertFalse(Leases.isLease(message["lease"]), name)
+            XCTAssertEqual(v["expect"]!["reason"]!.stringValue, "malformed", name)
+        }
+        XCTAssertEqual(Leases.taskUsdMax, 500)
+        XCTAssertEqual(Leases.taskUsdMin, 2)
+        XCTAssertEqual(Leases.taskAllows, ["browser-act", "files-write", "logins", "shell"])
+    }
+
+    /// The card, in the spec's order, host-built from the signed fields. Nothing is cut: the owner approves what it shows.
+    func testTaskCard() throws {
+        XCTAssertEqual(Leases.taskLines(try taskCard("task-request")),
+                       ["Task: Find a dentist", "Sites: *.example.com", "May: click and type in your signed-in browser",
+                        "For: 20 minutes", "Spend up to $2", "Node: gpu-box"])
+        XCTAssertEqual(Leases.taskLines(try taskCard("task-request-read-only"))[2], "May: read only")
+        let sites = (0..<16).map { "s\($0).example.com" }
+        let all = try taskCard(changing: ["sites": .array(sites.map { .string($0) }),
+                                          "allows": .array(["browser-act", "files-write", "logins", "shell"].map { .string($0) }),
+                                          "usd": .number("500"), "max_minutes": .number("240")])
+        XCTAssertEqual(Leases.taskLines(all),
+                       ["Task: Find a dentist", "Sites: " + sites.joined(separator: ", "),
+                        "May: click and type in your signed-in browser, sign in with saved logins, run shell commands, write files",
+                        "For: 240 minutes", "Spend up to $500", "Node: gpu-box"])
+        // No sites (a shell-only grant): the line is left out.
+        XCTAssertEqual(Leases.taskLines(try taskCard(changing: ["sites": .array([]), "allows": .array([.string("shell")])])),
+                       ["Task: Find a dentist", "May: run shell commands", "For: 20 minutes", "Spend up to $2", "Node: gpu-box"])
+        // The name the phone pinned, when the screen has it; escaped whichever it is.
+        let base = try taskCard("task-request")
+        XCTAssertEqual(Leases.taskLines(base, nodeName: "pinned-name").last, "Node: pinned-name")
+        XCTAssertEqual(Leases.taskLines(base, nodeName: "gpu\u{202E}box").last?.unicodeScalars.contains("\u{202E}"), false)
+        XCTAssertEqual(Leases.taskTitle(nodeName: "gpu-box", name: "Find a dentist"), "Task on gpu-box: Find a dentist")
+        XCTAssertFalse(Leases.taskTitle(nodeName: "gpu\u{202E}box", name: "Find a dentist").unicodeScalars.contains("\u{202E}"))
+    }
+
+    /// Fix round 1: one minute is reachable, every class has its words, a class with none is not read, and a pending task says task.
+    func testTaskWords() throws {
+        XCTAssertEqual(Leases.taskLines(try taskCard(changing: ["max_minutes": .number("1")]))[3], "For: 1 minute")
+        XCTAssertEqual(Leases.taskLines(try taskCard(changing: ["max_minutes": .number("2")]))[3], "For: 2 minutes")
+        for allow in Leases.taskAllows { XCTAssertNotNil(Leases.taskMayWords(allow), allow) }
+        XCTAssertNil(Leases.taskMayWords("desktop-input"))
+        guard case .object(var lease)? = try Envelope(json: try vector("task-request")["input"]!).message()["lease"] else { return XCTFail("fixture") }
+        lease["allows"] = .array([.string("desktop-input")])
+        XCTAssertFalse(Leases.isLease(.object(lease)))
+        XCTAssertEqual(Leases.pendingDetail(signedGrant: false, task: true), Leases.taskRequestWaitingDetail)
+        XCTAssertTrue(Leases.taskRequestWaitingDetail.contains("a request for a task"))
+        XCTAssertFalse(Leases.taskRequestWaitingDetail.contains("computer use"))
+        XCTAssertEqual(Leases.pendingDetail(signedGrant: true, task: true), Leases.mayStillStartDetail)
+        XCTAssertEqual(Leases.pendingDetail(signedGrant: false), Leases.requestWaitingDetail)
+    }
+
+    /// Fix round 1: what Stop's prompt may read of a status its pinned node signed. The name only when it is one plain line.
+    func testTaskStopPrompt() throws {
+        func signed(_ name: String) throws -> JSONValue {
+            let v = try vector(name)
+            return try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)), name)
+        }
+        func with(_ message: JSONValue, name: String) -> JSONValue {
+            var o = message.objectValue!
+            o["name"] = .string(name)
+            return .object(o)
+        }
+        let task = try signed("task-status")
+        XCTAssertTrue(Leases.isTaskStatus(task))
+        XCTAssertEqual(Leases.taskStopName(task), "Find a dentist")
+        // A task with no readable name is still a task: its prompt names the node alone.
+        let noName = try signed("task-status-no-name")
+        XCTAssertTrue(Leases.isTaskStatus(noName))
+        XCTAssertNil(Leases.taskStopName(noName))
+        XCTAssertNil(Leases.taskStopName(with(task, name: "Find\u{200B}a dentist")))
+        XCTAssertNil(Leases.taskStopName(with(task, name: String(repeating: "x", count: 61))))
+        XCTAssertFalse(Leases.isTaskStatus(try signed("status-take")))
+        XCTAssertFalse(Leases.isTaskStatus(try signed("status-valid")))
+        XCTAssertFalse(Leases.isTaskStatus(nil))
+        XCTAssertNil(Leases.taskStopName(nil))
+    }
+
+    /// A task's grant names no apps and the minutes the card shows; anything else is refused before it is signed.
+    func testTaskGrants() throws {
+        for name in Self.taskGrantsBuilt {
+            try assertBuilds(name) { v, expect in
+                XCTAssertEqual(expect["grant"]!["apps"]!.arrayValue!.count, 0, name)
+                let req = try request(v)
+                return try Leases.grant(to: req, apps: [], minutes: req.maxMinutes,
+                                        deviceId: expect["device_id"]!.stringValue!, signedAt: expect["signed_at"]!.stringValue!)
+            }
+        }
+        for name in Self.taskGrantsRefused {
+            let v = try vector(name)
+            let expect = v["expect"]!["message"]!
+            XCTAssertThrowsError(try Leases.grant(to: try request(v), apps: expect["grant"]!["apps"]!.arrayValue!.compactMap { $0.stringValue },
+                                                  minutes: expect["grant"]!["minutes"]!.intValue!,
+                                                  deviceId: expect["device_id"]!.stringValue!, signedAt: expect["signed_at"]!.stringValue!), name)
+        }
+        // Fewer minutes than the card shows is no grant of a task either.
+        let task = try request(try vector("task-grant"))
+        XCTAssertThrowsError(try Leases.grant(to: task, apps: [], minutes: task.maxMinutes - 1, deviceId: "d-aaaaaaaaaaaaaaaa", signedAt: "2026-09-23T18:04:16.201Z"))
+    }
+
     func testDeny() throws {
         try assertBuilds("deny-valid") { v, expect in
             Leases.deny(try request(v), deviceId: expect["device_id"]!.stringValue!, signedAt: expect["signed_at"]!.stringValue!)
@@ -255,7 +398,7 @@ final class LeaseVectorTests: XCTestCase {
 
     /// R-F5-15: a status the pinned node signed gives the token the next watch echoes.
     func testStatuses() throws {
-        for name in ["status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "status-take"] {
+        for name in ["status-valid", "status-no-contact", "status-pending", "status-granted-unnamed", "status-take", "task-status"] {
             let v = try vector(name)
             let message = try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: v["input"]!), pin: pin(v)), name)
             let status = try XCTUnwrap(LeaseStatus(message: message), name)
@@ -291,6 +434,11 @@ final class LeaseVectorTests: XCTestCase {
         XCTAssertNotNil(status(["kind": .string("take"), "name": .string("A take"), "unattended": .bool(false)]))
         XCTAssertNil(status(["kind": .string("take"), "name": .string("A  take"), "unattended": .bool(true)]))
         XCTAssertNil(status(["kind": .string("screen")]))
+        // Revised 2026-11-03: a task as a take: a name, and unattended allowed.
+        XCTAssertNil(status(["kind": .string("task")]))
+        XCTAssertNotNil(status(["kind": .string("task"), "name": .string("A task"), "unattended": .bool(true)]))
+        let noName = try vector("task-status-no-name")
+        XCTAssertNil(LeaseStatus(message: try XCTUnwrap(Leases.verifiedMessage(try Envelope(json: noName["input"]!), pin: pin(noName)))))
         XCTAssertNil(status(["kind": nil]))
         XCTAssertEqual(Leases.noContact, "no_contact")
         XCTAssertFalse(Leases.isPausedForContact(state: "suspended", reason: "foreground_changed"))

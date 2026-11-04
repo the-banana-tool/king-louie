@@ -455,3 +455,75 @@ it is accepted.
 The phone sets now differ: iOS consumes the phone vectors of §5 and the take
 section; Android consumes those and `watch-read-key`
 (`tests/lease-vectors.test.js`).
+
+## Revised 2026-11-03: the task lease
+
+A task (tasks stage 1, spec
+`docs/superpowers/specs/2026-11-03-tasks-stage1-design.md` §4.6) is free-text
+work a client hands a node, approved with one press: a lease of a third kind,
+`task`. `kl.lease.request`, `kl.lease.revoke`, `kl.lease.watch`,
+`kl.lease.view` and `kl.lease.listing` keep their shapes; `lease` may now be
+a task, a grant may name no apps, and a status's `kind` may say `task`.
+
+```jsonc
+"lease": { "kind": "task", "job_id": "chat:…",
+           "name": "Find a dentist" (1–60 code points, one plain line),
+           "sites": ["*.example.com"] (0–32),
+           "allows": ["browser-act"] (0–4, sorted),
+           "max_minutes": 20, "usd": 2 (2–500, whole dollars), "unattended": true,
+           "reason": "Find a dentist", "resumes": null, "limits": [] }
+"grant": { "apps": [], "minutes": 20 }
+{ "v": 1, "type": "kl.lease.status", …, "kind": "task", "unattended": true, "name": "Find a dentist" }
+```
+
+Rules:
+
+- A task's lease has exactly those keys, and no `apps`. `name` is as for a
+  take. Each of `sites` is as for a take, but there may be none (a shell-only
+  grant). `allows` is sorted, each once, from `TASK_ALLOWS`: `browser-act`,
+  `files-write`, `logins`, `shell`. It is empty only on the card that raises
+  a look-only task's spend cap: such a task sends no first card, and the phone
+  shows `May: read only`. `resumes` is always null: a raise is a fresh request
+  with a new lease id. `usd` is an integer from 2 to 500 (`TASK_USD_MAX`).
+  `unattended` is always `true`, with the meaning the take section gives it.
+- `kl.lease.grant`'s shape no longer says how many apps a grant names; check 12
+  does, by kind (`apps_not_requested`): a `computer_use` or `take` grant names
+  at least one requested app, a task's names none.
+- A task's `max_minutes` is 1–240, and a grant's `minutes` at most
+  `min(max_minutes, 240)`, else `minutes_out_of_range` (check 12). No
+  `gui.*` setting binds a task: `gui.take.max_minutes` is a take's.
+- A status's `kind` is one of `computer_use`, `take`, `task`. `computer_use`
+  still says `unattended: false`, `name: null`; every other kind carries a name
+  as above, and a boolean `unattended`.
+
+Vectors: twenty-five more, 80 in all (`node tests/vectors/lease-v1/generate.js
+--check` says `80 vectors match`). The node and both phones consume every one;
+every grant vector here carries `given.request` and `expect.message`, and a phone
+refuses to build the refused ones. A phone is stricter than check 12 on a
+task's minutes: its card has no choice of them, so its grant is exactly
+`max_minutes`.
+
+| Vector | What |
+|---|---|
+| `task-request`, `task-request-read-only` | a node-signed task request (`check: 'request'`), the second with `allows: []`: accepted |
+| `task-request-allows-unsorted`, `-allows-repeated`, `-allows-unknown`, `-resumes`, `-sites-over-32`, `-bad-site`, `-usd-under`, `-usd-over`, `-usd-fraction`, `-attended`, `-minutes-over-240`, `-with-apps`, `-name-hidden`, `-name-too-long` | the same request with its lease altered and hashed again, so that only the shape is wrong: `malformed` |
+| `task-grant` | `apps: []`, the requested minutes; `given.request` and `expect.message` as for the other phone-built grants: accepted |
+| `task-grant-with-apps` | a task's grant naming an app: `apps_not_requested` |
+| `task-grant-minutes-over-requested`, `task-grant-minutes-over-240` | `minutes_out_of_range` |
+| `task-grant-ignores-take-cap` | `gui_take_max_minutes: 120` below the requested and granted 180: accepted |
+| `computer-use-grant-no-apps`, `take-grant-no-apps` | `apps: []` on a kind that has apps: `apps_not_requested` |
+| `task-status` | `expect.status` holds `kind`, `unattended` and `name` too |
+| `task-status-no-name` | a task's status with `name: null`: `malformed` |
+
+The phones (spec §4.9): the card is `Leases.taskLines`, host-built from the
+signed fields in the spec's order, with every site and nothing cut, and `May:
+read only` for an empty `allows`, and an allow class with no words on the card
+is not read at all. It has no app choices and no stepper. A
+running task is a row, `Task on <node>: <name>`, with Stop (the lease revoke)
+and no live view: a task has no frames. An `ended` status's `reason` may be one
+of a task's codes (`duration`, `spend_cap`, `became_case`, `private`,
+`chat_deleted`, ...), shown as any free reason is. A phone from before this
+revision reads no task status, so a node with a task shows there as "Could not
+confirm": upgrade nodes before phones. Android gets the `task_ended` push
+(approval-v1 §8), and a tap opens the Approvals list. iOS gets no such push
+(it is fcm only): its banner row goes when a signed `ended` status arrives.

@@ -77,6 +77,8 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
 
   let delegateSessions = null;
   let caseTools = null;
+  let taskManager = null;
+  let tasksStopping = null;
   let fleetService = null;
   let courierPump = approvals.courierPump || null;
   let ownPump = false;
@@ -87,6 +89,15 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
     ? (h) => core.context.setFleetToolHandler(h)
     : null;
   let chatFleetSet = false;
+  // Once, whoever asks first: the host stops tasks before it ends their leases,
+  // or a lease ending under a running turn would read as the task's own end.
+  const stopTasks = () => {
+    if (!tasksStopping) {
+      tasksStopping = (taskManager ? Promise.resolve().then(() => taskManager.stop()) : Promise.resolve())
+        .catch((err) => log.warn(`tasks did not stop cleanly: ${err.message}`));
+    }
+    return tasksStopping;
+  };
   // Undoes whatever has been started so far; used by stop() and by a
   // startup that fails partway (nothing may be left running either way).
   const teardown = () => {
@@ -95,6 +106,10 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
       setChatFleet(null);
     }
     if (fleetService) fleetService.stop();
+    if (taskManager) {
+      stopTasks();
+      delete core.context.isTaskChatRunning;
+    }
     if (delegateSessions) delegateSessions.stop();
     if (courierPump && ownPump) courierPump.stop();
     else if (courierPump && rpcInstalled) courierPump.setRpcHandler(null);
@@ -121,12 +136,21 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
         channel: 'mcp-stdio',
         audit: approvals.auditLedger || null
       });
+      // eslint-disable-next-line global-require -- agent profile only (the manager loads src/gui/leases.js)
+      const { createNodeTasks } = require('../tasks/wiring');
+      taskManager = createNodeTasks({
+        core, nodeConfig, dataDir, leaseManager: deps.leaseManager || null, pushQueue: deps.pushQueue || null, audit: approvals.auditLedger || null
+      });
+      // What the last run left is marked before anything can start another.
+      await taskManager.start();
+      core.context.isTaskChatRunning = (chatId) => taskManager.isChatRunning(chatId);
     }
 
     const readGuiStatus = deps.readGuiStatus === undefined ? defaultReadGuiStatus() : deps.readGuiStatus;
     const gui = readGuiStatus ? () => readGuiStatus({ dataDir }) : null;
     handler = new FleetToolHandler({
-      nodeConfig, runbookEngine, jobManager, approver: approvals.phoneApprover, auditLedger: approvals.auditLedger, delegateSessions, gui, caseTools
+      nodeConfig, runbookEngine, jobManager, approver: approvals.phoneApprover, auditLedger: approvals.auditLedger, delegateSessions, gui, caseTools,
+      tasks: taskManager, capabilityProbes: deps.capabilityProbes || null
     });
 
     if (nodeConfig.profile === 'agent' && setChatFleet) {
@@ -173,13 +197,14 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
     fleetService,
     courierPump,
     bootId,
+    stopTasks,
     // Stops taking work (link methods refuse, the courier handler is
     // removed), cancels every job, then waits (bounded) for running job
     // executions and delegate turns to settle, so the core is not shut down
     // underneath them.
     async stop() {
       teardown();
-      const running = [...handler.jobRuns.values(), ...(delegateSessions ? delegateSessions.turns.values() : [])];
+      const running = [...handler.jobRuns.values(), ...(delegateSessions ? delegateSessions.turns.values() : []), stopTasks()];
       if (!(await settleWithin(running, stopWaitMs))) {
         log.warn(`fleet node stop: ${running.length} job run(s) or delegate turn(s) still running after ${stopWaitMs} ms; shutting down anyway`);
       }

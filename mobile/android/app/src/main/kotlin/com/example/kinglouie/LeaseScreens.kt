@@ -62,6 +62,7 @@ private fun takeTitle(take: Pair<String, Long>?): String? =
 /** Exactly what the node signed: who asks, the agent's reason (unverified), each app with its path, and for how long. */
 @Composable
 fun LeaseRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, back: () -> Unit) {
+    if (item.request.isTask) return TaskRequestScreen(model, item, back)
     var chosen by remember { mutableStateOf(item.request.apps.map { it.id }.toSet()) }
     var minutes by remember { mutableStateOf(item.request.maxMinutes) }
     val deciding = item.request.requestId in model.decidingLease
@@ -118,6 +119,32 @@ fun LeaseRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, back: (
         // The decision, where a thumb reaches it: full width at the bottom, after everything the node signed above.
         DecisionBar {
             Button({ model.decideLease(item, chosen, minutes, grant = true) }, Modifier.weight(1f).height(DecisionHeight), enabled = chosen.isNotEmpty() && !deciding) { Text("Allow", style = MaterialTheme.typography.labelLarge) }
+            OutlinedButton({ model.decideLease(item, emptySet(), 1, grant = false) }, Modifier.weight(1f).height(DecisionHeight), enabled = !deciding,
+                colors = denyColors(), border = denyBorder(!deciding)) { Text("Deny", style = MaterialTheme.typography.labelLarge) }
+        }
+    }
+}
+
+/**
+ * A task's card (tasks stage 1 spec §4.6), the host's lines from what the node signed. No app switches and no
+ * stepper: a task has no apps, and Allow signs the minutes the card shows.
+ */
+@Composable
+private fun TaskRequestScreen(model: AppModel, item: AppModel.LeaseRequestItem, back: () -> Unit) {
+    val deciding = item.request.requestId in model.decidingLease
+    val warning = statusColors.warning
+    Column(Modifier.fillMaxSize()) {
+        BackBar("Task request", back)
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                for (line in Leases.taskLines(item.request, item.nodeName)) Text(line, style = MaterialTheme.typography.bodyLarge)
+                for (limit in item.request.limits) Text(LIMIT_TEXT[limit] ?: Display.escape(limit), color = warning)
+                item.unconfirmed?.let { Text(it, color = warning, fontWeight = FontWeight.Bold) }
+                Secondary("Allow and Deny each ask for your fingerprint once.", Modifier.padding(top = 8.dp))
+            }
+        }
+        DecisionBar {
+            Button({ model.decideLease(item, emptySet(), item.request.maxMinutes, grant = true) }, Modifier.weight(1f).height(DecisionHeight), enabled = !deciding) { Text("Allow", style = MaterialTheme.typography.labelLarge) }
             OutlinedButton({ model.decideLease(item, emptySet(), 1, grant = false) }, Modifier.weight(1f).height(DecisionHeight), enabled = !deciding,
                 colors = denyColors(), border = denyBorder(!deciding)) { Text("Deny", style = MaterialTheme.typography.labelLarge) }
         }

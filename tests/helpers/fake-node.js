@@ -5,9 +5,10 @@
 // max_bytes paging run) over an in-memory handler; the hub is the NodeHub
 // subset the router uses. The real mesh path is covered end to end in
 // tests/frontdoor-e2e.test.js.
+const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const { NodeFleetService } = require('../../src/fleet/node-fleet-service');
-const { ToolError } = require('../../src/fleet/tool-definitions');
+const { ToolError, untrustedOutput } = require('../../src/fleet/tool-definitions');
 const { LinkRpcError } = require('../../src/approvals/link-rpc');
 const { rawEd25519 } = require('../../src/frontdoor/protocol/messages');
 const { testNodeIdentity } = require('./fake-phone');
@@ -18,15 +19,25 @@ const DEFAULT_RUNBOOKS = [
   { name: 'site.restart', description: 'Restart', tier: 'unsafe', params: {} }
 ];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// A task as the node's handler answers it: text and answer already wrapped.
+const taskClientView = (t) => ({
+  ...t,
+  text: untrustedOutput([t.text]),
+  answer: t.answer ? { ...t.answer, text: untrustedOutput([t.answer.text]) } : null
+});
 
-function fakeHandler({ name, profile, runbooks }) {
+function fakeHandler({ name, profile, runbooks, capabilities = [] }) {
   const jobManager = new EventEmitter();
   const jobs = new Map();
   let n = 0;
   const handler = {
     jobManager,
     jobs,
+    tasks: new Map(), // task id → a task record; a test may seed rows
     calls: [],
+    // What NodeFleetService#hello asks of a FleetToolHandler.
+    capabilitiesWith: () => [...capabilities],
+    guiBlock: () => null,
     runbookEngine: {
       runbooks: new Map(runbooks.map((r) => [r.name, r])),
       getRunbook: (x) => runbooks.find((r) => r.name === x) || null
@@ -75,15 +86,40 @@ function fakeHandler({ name, profile, runbooks }) {
         const job = handler.getJobOrThrow(args.job_id, origin);
         return { job_id: job.job_id, status: job.status };
       }
+      if (tool === 'run_task') {
+        const task = {
+          task_id: crypto.randomUUID(),
+          chat_id: crypto.randomUUID(),
+          node: name,
+          text: args.task,
+          state: 'running',
+          seq: 1,
+          placement: args.placement,
+          answer: null,
+          created_at: new Date().toISOString()
+        };
+        handler.tasks.set(task.task_id, task);
+        return taskClientView(task);
+      }
+      if (tool === 'get_task' || tool === 'send_to_task' || tool === 'cancel_task') {
+        const task = handler.tasks.get(args.task_id);
+        if (!task) throw new ToolError('task_not_found', 'task_not_found: no such task on this node');
+        if (tool === 'cancel_task') task.state = 'cancelled';
+        return taskClientView(task);
+      }
+      if (tool === 'list_tasks') {
+        const rows = [...handler.tasks.values()].filter((t) => args.state === undefined || t.state === args.state);
+        return { tasks: rows.sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).slice(0, 50).map(taskClientView) };
+      }
       throw new ToolError('invalid_params', `invalid_params: the fake node has no ${tool}`);
     }
   };
   return handler;
 }
 
-function createFakeNode({ name = 'web-01', profile = 'runbook', runbooks = DEFAULT_RUNBOOKS } = {}) {
+function createFakeNode({ name = 'web-01', profile = 'runbook', runbooks = DEFAULT_RUNBOOKS, capabilities = [] } = {}) {
   const identity = testNodeIdentity({ nodeName: name });
-  const handler = fakeHandler({ name, profile, runbooks });
+  const handler = fakeHandler({ name, profile, runbooks, capabilities });
   const service = new NodeFleetService({ handler, relayClient: null, nodeConfig: { name, profile, capabilities: [], nodeId: identity.nodeId }, version: '0.0.0-test' }).start();
   const record = {
     node_id: identity.nodeId,
@@ -106,7 +142,7 @@ function createFakeNode({ name = 'web-01', profile = 'runbook', runbooks = DEFAU
       node_id: identity.nodeId,
       name,
       profile,
-      capabilities: [],
+      capabilities: [...capabilities],
       catalog_digest: service.catalogDigest(),
       boot_id: service.bootId,
       version: '0.0.0-test'

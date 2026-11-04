@@ -1866,6 +1866,127 @@ describe('take leases', () => {
   });
 });
 
+describe('task leases (tasks stage 1, spec §4.6)', () => {
+  const TASK = { name: 'File the permit', sites: ['*.example.com'], allows: ['browser-act', 'logins'], usd: 25 };
+  const taskRequest = (extra = {}) => leases.request({ jobId: 'job-1', origin: ORIGIN, minutes: 90, reason: 'the permit form', kind: 'task', task: { ...TASK }, ...extra });
+
+  async function grantedTask({ minutes = 90, ...extra } = {}) {
+    const p = taskRequest({ minutes, ...extra });
+    const reply = leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes, apps: [] }));
+    assert.equal(reply.state, 'active');
+    return p;
+  }
+
+  it('grants without apps: active, minutes on, status says task, unattended and the name', async () => {
+    const lease = await grantedTask();
+    const req = relay.last('kl.lease.request').message.lease;
+    assert.deepEqual([req.kind, req.name, req.sites, req.allows, req.usd, req.unattended], ['task', 'File the permit', ['*.example.com'], ['browser-act', 'logins'], 25, true]);
+    assert.ok(!('apps' in req));
+    assert.equal(lease.state, 'active');
+    assert.deepEqual(lease.apps, []);
+    assert.equal(lease.expiresAt, clock.now() + 90 * 60000);
+    assert.deepEqual([lease.kind, lease.unattended, lease.name], ['task', true, 'File the permit']);
+    assert.deepEqual(lease.task, TASK);
+    const status = relay.last('kl.lease.status').message;
+    assert.deepEqual([status.kind, status.unattended, status.name], ['task', true, 'File the permit']);
+  });
+
+  it('sorts allows before it asks the phone, and a task may run 240 minutes', async () => {
+    const lease = await grantedTask({ minutes: 240, task: { ...TASK, allows: ['shell', 'browser-act'] } });
+    assert.deepEqual(relay.last('kl.lease.request').message.lease.allows, ['browser-act', 'shell']);
+    assert.equal(lease.expiresAt, clock.now() + 240 * 60000);
+    leases.stopAll();
+    await assert.rejects(taskRequest({ minutes: 241 }), (e) => e.code === 'invalid_params' && /1–240/.test(e.message));
+  });
+
+  it('no contact timer: ten minutes with no watch and it is still active', async () => {
+    const lease = await grantedTask();
+    timers.advance(10 * 60000);
+    assert.equal(lease.state, 'active');
+    assert.equal(lease.contactTimer, null);
+    assert.ok(!kinds().includes('lease.suspended'));
+    assert.equal(leases.assertUsable('job-1'), lease);
+  });
+
+  it('a revoke from the other enrolled phone ends it and the state event is seen', async () => {
+    const states = [];
+    leases.on('state', (l) => states.push(l.state));
+    const lease = await grantedTask();
+    assert.equal(leases.onRevoke(other.leaseRevoke(identity.nodeId, lease.leaseId)).state, 'ended');
+    assert.equal(lease.endReason, 'revoked');
+    assert.ok(states.includes('ended'));
+  });
+
+  it('endLease ends it by id', async () => {
+    const lease = await grantedTask();
+    leases.endLease(lease.leaseId, 'task_done');
+    assert.equal(lease.state, 'ended');
+    assert.equal(lease.endReason, 'task_done');
+  });
+
+  it('allows is normalised where the lease is made: the audit says what was signed', async () => {
+    const lease = await grantedTask({ task: { ...TASK, allows: ['shell', 'browser-act', 'shell'] } });
+    assert.deepEqual(relay.last('kl.lease.request').message.lease.allows, ['browser-act', 'shell']);
+    assert.deepEqual(lease.task.allows, ['browser-act', 'shell']);
+    for (const k of ['lease.requested', 'lease.granted']) {
+      assert.deepEqual(audits.find((a) => a.kind === k).data.allows, ['browser-act', 'shell'], k);
+    }
+  });
+
+  it('audit: lease.requested and lease.granted hold name, sites, allows and usd, never the reason', async () => {
+    await grantedTask();
+    for (const k of ['lease.requested', 'lease.granted']) {
+      const a = audits.find((x) => x.kind === k);
+      assert.equal(a.data.kind, 'task', k);
+      assert.deepEqual([a.data.name, a.data.sites, a.data.allows, a.data.usd], ['File the permit', ['*.example.com'], ['browser-act', 'logins'], 25], k);
+      assert.ok(!JSON.stringify(a.data).includes('the permit form'), `${k} does not hold the reason`);
+      assert.ok(!('credentials' in a.data), k);
+    }
+  });
+
+  it('deny → lease_denied; unanswered → lease_request_expired', async () => {
+    const denied = taskRequest();
+    leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { decision: 'deny' }));
+    await assert.rejects(denied, (e) => e.code === 'lease_denied');
+    const waiting = taskRequest();
+    timers.advance(5 * 60000 + 1);
+    await assert.rejects(waiting, (e) => e.code === 'lease_request_expired');
+  });
+
+  it('is not gated on gui.take.enabled or gui.take.max_minutes', async () => {
+    const off = new LeaseManager({
+      approvals: leases.approvals, guiConfig: { ...guiConfig, take: { enabled: false, maxMinutes: 5 } }, broker, nodeName: 'gpu-box',
+      clock: () => clock.now(), timers, jobOpen: () => true
+    });
+    const p = off.request({ jobId: 'job-1', origin: ORIGIN, minutes: 120, reason: 'x', kind: 'task', task: { ...TASK } });
+    assert.equal(off.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { minutes: 120, apps: [] })).state, 'active');
+    assert.equal((await p).state, 'active');
+  });
+
+  it('a task from a non-local origin is accepted', async () => {
+    const lease = await grantedTask({ nodeLocalOrigin: false });
+    assert.equal(lease.state, 'active');
+  });
+
+  it('a grant that names an app is refused', async () => {
+    const p = taskRequest();
+    const reply = leases.onGrant(phone.leaseGrant(relay.last('kl.lease.request').envelope, { apps: ['notepad'] }));
+    assert.equal(reply.state, 'rejected');
+    leases.stopAll();
+    await assert.rejects(p);
+  });
+
+  it('refuses a task block that is missing', async () => {
+    await assert.rejects(taskRequest({ task: null }), (e) => e.code === 'invalid_params');
+  });
+
+  it('a job holding an active task that asks for computer_use is refused lease_busy', async () => {
+    await grantedTask();
+    await assert.rejects(leases.request({ jobId: 'job-1', origin: ORIGIN, appIds: ['notepad'], minutes: 10, reason: 'x' }),
+      (e) => e.code === 'lease_busy' && e.detail === 'this job already holds a task lease');
+  });
+});
+
 // android-slim spec §8.5, §8.6: a watch may be signed by either key of its
 // device; every other lease message only by the device key.
 describe('the read key signs watches and nothing else', () => {

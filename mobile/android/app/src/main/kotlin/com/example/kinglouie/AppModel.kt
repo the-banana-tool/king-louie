@@ -735,7 +735,8 @@ class AppModel(context: Context) {
             ApprovalList.Kind.CLIENT_CONNECTION -> Selection.Client(row.ref)
             ApprovalList.Kind.NODE_PAIRING -> Selection.Pairing(row.ref)
             ApprovalList.Kind.ALERT -> Selection.Alert(row.ref)
-            ApprovalList.Kind.RUNNING_LEASE -> {
+            // A task's lease has no live view: its row and Stop are all of it.
+            ApprovalList.Kind.RUNNING_LEASE -> if (!row.hasDetail) null else {
                 if (liveLease?.leaseId != row.ref) runningLeases.firstOrNull { it.leaseId == row.ref }?.let { openRunningLease(it) }
                 followLiveView()
                 if (liveLease?.leaseId == row.ref) Selection.RunningLease(row.ref) else null
@@ -1115,7 +1116,7 @@ class AppModel(context: Context) {
         if (state == "pending" || signed == null) return null
         val pin = storage.nodes.firstOrNull { it.id == nodeId } ?: return null
         val status = Leases.verifiedMessage(signed, pin)?.let { LeaseStatus.from(it) } ?: return null
-        if (status.leaseId != leaseId || !status.unattended) return null
+        if (status.leaseId != leaseId || status.kind != "take" || !status.unattended) return null
         val name = status.name ?: return null
         val ends = status.expiresAt?.let { Timestamps.epochMillis(it) } ?: return null
         return name to ends
@@ -1176,12 +1177,13 @@ class AppModel(context: Context) {
         scope.launch {
             try {
                 val signedAt = Timestamps.string(api.now())
+                val task = item.request.isTask
                 val envelope = if (grant) {
-                    val names = item.request.apps.filter { it.id in apps }.joinToString(", ") { promptText(it.name, 30) }
-                    signEnvelope(k, Leases.grant(item.request, apps.toList(), minutes, k.deviceId, signedAt), "Allow computer use",
-                        "$names on ${promptText(item.nodeName, 30)} for $minutes min")
+                    val what = if (task) promptText(item.request.name ?: "", 40) else item.request.apps.filter { it.id in apps }.joinToString(", ") { promptText(it.name, 30) }
+                    signEnvelope(k, Leases.grant(item.request, apps.toList(), minutes, k.deviceId, signedAt), if (task) "Allow this task" else "Allow computer use",
+                        "$what on ${promptText(item.nodeName, 30)} for $minutes min" + if (task) ", up to \$${item.request.usd}" else "")
                 } else {
-                    signEnvelope(k, Leases.deny(item.request, k.deviceId, signedAt), "Deny computer use", promptText(item.nodeName, 30))
+                    signEnvelope(k, Leases.deny(item.request, k.deviceId, signedAt), if (item.request.isTask) "Deny this task" else "Deny computer use", promptText(item.nodeName, 30))
                 }
                 // Signed: from here on the lease may start, whatever the relay answers.
                 if (grant) signedLeaseGrants[item.request.leaseId] = Timestamps.epochMillis(item.request.expiresAt) ?: Long.MAX_VALUE
@@ -1195,7 +1197,9 @@ class AppModel(context: Context) {
                         // A decided row until a minute past the request's expiry (§7.2).
                         leaseDecided[id] = item.copy(unconfirmed = null) to ApprovalList.Decided(if (grant) "Allowed" else "Denied", SystemClock.elapsedRealtime())
                         leaseRequests.removeAll { it.request.requestId == id }
-                        if (grant && outcome.state == "active") {
+                        // A task has no live view: its row comes from the status its node signed for this answer.
+                        if (grant && item.request.isTask) noteListedLease(JsonObject(mapOf("node_id" to JsonPrimitive(item.request.nodeId), "status" to (sent.json["status"] ?: JsonNull))), storage.nodes)
+                        else if (grant && outcome.state == "active") {
                             openLiveLease(item.request.nodeId, item.request.leaseId, outcome.state)
                             // The node's answer carries the status it signed for it, and with that the
                             // first contact token: the live view's first watch can echo it (R-F5-15).
@@ -1501,7 +1505,12 @@ class AppModel(context: Context) {
             var next = live.copy(unconfirmed = null)
             try {
                 val message = Leases.revoke(live.nodeId, live.leaseId, "kill_switch", k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
-                val sent = sendLease(api, "revoke", live.leaseId, signEnvelope(k, message, "Stop computer use now", promptText(live.nodeName, 30)))
+                // What it stops, from the status its node signed: a task by its checked name.
+                val signedStatus = live.lastStatus?.let { envelope -> storage.nodes.firstOrNull { it.id == live.nodeId }?.let { Leases.verifiedMessage(envelope, it) } }
+                val task = Leases.isTaskStatus(signedStatus)
+                val node = promptText(live.nodeName, 30)
+                val description = if (task) Leases.taskStopName(signedStatus)?.let { "${promptText(it, 40)} on $node" } ?: node else node
+                val sent = sendLease(api, "revoke", live.leaseId, signEnvelope(k, message, if (task) "Stop this task" else "Stop computer use now", description))
                 next = next.copy(unconfirmed = Leases.stopNotice(sent.outcome, sent.problem))
                 // The answer may carry the status the node signed for it. Only that, verified by
                 // applyLease, can show the lease as ended here; then there is nothing left to confirm.
@@ -2504,7 +2513,7 @@ class AppModel(context: Context) {
                         alerts.firstOrNull { it["id"].str() == id && it["acked"].bool() != true }?.let { Selection.Alert(id) }
                     }
                     // The list: opensList took these above; named so every kind has its line.
-                    "test" -> return@launch
+                    "test", "task_ended" -> return@launch
                     else -> return@launch
                 }
                 if (found is Selection.RunningLease) followLiveView()
@@ -2524,13 +2533,15 @@ class AppModel(context: Context) {
      * whose lease_id is. `session_paused` and `session_ended` (spec 3's kinds;
      * the id is the lease_id): that lease's live view; ended, its signed ended
      * status and reason; gone from a listing that passed, "<node> no longer
-     * has this session; it is not running" (C-18).
+     * has this session; it is not running" (C-18). A task's lease has no live
+     * view, so any of these says on the list what its node signed of it.
      */
     private suspend fun pushedLease(api: RelayApi, kind: String, id: String): Selection? {
         val knownNode = liveLease?.takeIf { it.leaseId == id }?.let { it.nodeId to it.nodeName }
             ?: runningLeases.firstOrNull { it.leaseId == id }?.let { it.nodeId to it.nodeName }
         refreshLeases(api)
         if (kind == "lease") leaseRequests.firstOrNull { it.request.requestId == id }?.let { return Selection.LeaseRequest(id) }
+        taskNotice(id)?.let { listNotice = it; return null }
         if (liveLease?.leaseId == id) return Selection.RunningLease(id)
         runningLeases.firstOrNull { it.leaseId == id }?.let { lease ->
             openRunningLease(lease)
@@ -2548,6 +2559,25 @@ class AppModel(context: Context) {
         }
         if (kind != "lease" && knownNode != null && leaseChecks[knownNode.first] is LeaseNodeCheck.Confirmed) {
             listNotice = "${Display.escape(knownNode.second)} no longer has this session; it is not running."
+        }
+        return null
+    }
+
+    /** What the list says of a lease its node signed as a task: running (its row has the Stop), or how it ended. Null for any other lease. */
+    private fun taskNotice(leaseId: String): String? {
+        val listed = lastLeaseEntries.filter { isStatusOnly(it) }.map { entry ->
+            entry["node_id"].str() to entry["status"]?.takeIf { it !is JsonNull }?.let { runCatching { Envelope.fromJson(it) }.getOrNull() }
+        }
+        val known = listOfNotNull(
+            liveLease?.takeIf { it.leaseId == leaseId }?.let { it.nodeId to it.lastStatus },
+            runningLeases.firstOrNull { it.leaseId == leaseId }?.let { it.nodeId to it.status }
+        ) + listed
+        for ((nodeId, signed) in known) {
+            if (nodeId == null || signed == null) continue
+            val status = signedStatus(nodeId, signed) ?: continue
+            if (status.leaseId != leaseId || status.kind != "task") continue
+            val node = storage.nodes.firstOrNull { it.id == nodeId }?.name ?: continue
+            return if (status.state == "ended") Leases.taskEnded(node, status.name ?: "", status.reason) else Leases.taskTitle(node, status.name ?: "")
         }
         return null
     }

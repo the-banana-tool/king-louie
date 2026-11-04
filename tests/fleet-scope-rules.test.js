@@ -90,7 +90,7 @@ describe('scope-rules stays pure', () => {
     assert.equal(REGISTRY_SCOPE_RE.flags, messages.SCOPE_RE.flags);
   });
 
-  it('REQUIRED_SCOPE is frozen and covers the nine fleet tools', () => {
+  it('REQUIRED_SCOPE is frozen and covers the nine fleet tools and the five task tools', () => {
     assert.ok(Object.isFrozen(S.REQUIRED_SCOPE));
     assert.deepEqual({ ...S.REQUIRED_SCOPE }, {
       list_machines: 'fleet:read',
@@ -101,7 +101,12 @@ describe('scope-rules stays pure', () => {
       run_runbook: 'fleet:run',
       cancel_job: 'fleet:run',
       delegate: 'fleet:delegate',
-      send_to_job: 'fleet:delegate'
+      send_to_job: 'fleet:delegate',
+      run_task: 'fleet:delegate',
+      send_to_task: 'fleet:delegate',
+      cancel_task: 'fleet:delegate',
+      get_task: 'fleet:read',
+      list_tasks: 'fleet:read'
     });
   });
 });
@@ -118,7 +123,9 @@ describe('allows', () => {
 
   it('every fleet tool: allowed with its scope, refused without it', () => {
     for (const [tool, scope] of Object.entries(S.REQUIRED_SCOPE)) {
-      assert.deepEqual(S.allows([scope], tool, { machine: 'web-01' }), { ok: true }, tool);
+      // What moves a task also needs fleet:unsafe (tests/fleet-task-tools.test.js).
+      const held = ['run_task', 'send_to_task', 'cancel_task'].includes(tool) ? [scope, 'fleet:unsafe'] : [scope];
+      assert.deepEqual(S.allows(held, tool, { machine: 'web-01' }), { ok: true }, tool);
       const others = ['fleet:read', 'fleet:run', 'fleet:unsafe', 'fleet:delegate'].filter((s) => s !== scope);
       assert.deepEqual(S.allows(others, tool, { machine: 'web-01' }), { ok: false, code: 'insufficient_scope', required: scope }, tool);
     }
@@ -325,7 +332,7 @@ describe('ScopeRegistry', () => {
 
   it('toolsFor lists what a token may see', () => {
     const r = createFleetScopeRegistry();
-    assert.deepEqual([...r.toolsFor(['fleet:read'])].sort(), ['describe_machine', 'get_job', 'get_job_logs', 'get_state', 'list_machines']);
+    assert.deepEqual([...r.toolsFor(['fleet:read'])].sort(), ['describe_machine', 'get_job', 'get_job_logs', 'get_state', 'get_task', 'list_machines', 'list_tasks']);
     assert.ok(r.toolsFor(['fleet:run']).has('run_runbook'));
   });
 
@@ -334,7 +341,7 @@ describe('ScopeRegistry', () => {
     assert.deepEqual([...r.toolsFor(['fleet:unsafe'])], []);
     assert.deepEqual([...r.toolsFor(['cases:read', 'fleet:*', '*'])], []);
     assert.deepEqual([...r.toolsFor(null)], []);
-    assert.deepEqual([...r.toolsFor(['fleet:delegate'])].sort(), ['delegate', 'send_to_job']);
+    assert.deepEqual([...r.toolsFor(['fleet:delegate'])].sort(), ['cancel_task', 'delegate', 'run_task', 'send_to_job', 'send_to_task']);
   });
 
   it('requiredScopeFor: fleet tools keep their scope, unknown tools have none', () => {

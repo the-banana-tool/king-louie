@@ -89,10 +89,43 @@ The machines King Louie runs on and what an owner does to them: nodes, the
 relay, runbooks, jobs, enrolled phones.
 _Avoid_: fleet (for case management), mesh (the older peer network)
 
+**Node**:
+One machine King Louie runs on: a personal node runs as the owner in their
+login session; a fleet node runs as a service account on a server.
+_Avoid_: machine (except in the fleet tools' parameter names), server, host
+
+**Client**:
+Whatever hands a node work and reads the answer: the desktop window, an MCP
+client such as claude.ai or ChatGPT, a Claude Code session, a paired phone.
+_Avoid_: driver, caller, UI (for the set)
+
+**Task**:
+One piece of work a client hands the fleet, run to an answer by one node's
+own agent loop, with the owner's one grant on the phone covering it.
+_Avoid_: job (a job is a runbook run or one executor run inside a case),
+delegate session, request
+
+**Task grant**:
+The owner's one approval over a task's scope: its sites, tool classes,
+duration and spend cap. An action outside it is asked for on its own; a task
+with no acting class in its scope needs none.
+_Avoid_: lease (that is the computer-use kind), take grant, blanket approval
+
+**Placement**:
+Choosing the node a task runs on from the nodes' capabilities and the task's
+needs; the client is asked only when several qualify or none does.
+_Avoid_: routing, scheduling, dispatch
+
+**Front door**:
+The one public endpoint of a fleet: where MCP clients connect, phones pair
+and nodes link in.
+_Avoid_: hub, gateway (that is the older in-app chat API), relay (the part
+of it that carries approvals)
+
 **Case**:
-A long-running task with its own repository, worked in turns, that asks the
-owner questions when it needs them.
-_Avoid_: task, project, job (a job is one executor run inside a case)
+A long-running piece of work with its own repository, worked in turns over
+days, that asks the owner questions when it needs them. A task may become one.
+_Avoid_: task (for the long-running thing), project, job (a job is one executor run inside a case)
 
 **Owner**:
 The one person whose words are host-verified: typed into the app, signed by

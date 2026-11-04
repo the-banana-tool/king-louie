@@ -309,10 +309,11 @@ async function fcmServer(respond = () => [200, '{}']) {
 
 describe('push text', () => {
   it('KINDS holds the three fcm-only kinds with their titles', () => {
-    assert.deepEqual(FCM_ONLY_KINDS, ['session_ended', 'session_paused', 'test']);
+    assert.deepEqual(FCM_ONLY_KINDS, ['session_ended', 'session_paused', 'task_ended', 'test']);
     for (const k of FCM_ONLY_KINDS) assert.ok(KINDS.includes(k));
     assert.equal(alertText({ kind: 'session_ended', node_name: 'gpu-box' }), 'Session ended on gpu-box');
     assert.equal(alertText({ kind: 'session_paused' }), 'Session paused');
+    assert.equal(alertText({ kind: 'task_ended', node_name: 'gpu-box' }), 'Task ended on gpu-box');
     assert.equal(alertText({ kind: 'test' }), 'Test');
   });
 });
@@ -330,6 +331,7 @@ describe('push kinds and the FCM payload (push spec §6.5, §7.1)', () => {
     await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-4', count: 2.5 });
     await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-5', count: '7' });
     await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-6', count: 999 });
+    await sender.notify(device('fcm', 'a'), { kind: 'task_ended', id: 'task-1', node_name: 'gpu-box', text: 'Find a dentist', reason: 'done' });
     const data = fcm.sends.map((s) => s.message.data);
     assert.deepEqual(data[0], { rid: 'lease-1', n: 'gpu-box', k: 'session_ended' });
     assert.deepEqual(data[1], { rid: 'lease-2', n: 'gpu-box', k: 'session_paused' });
@@ -339,10 +341,11 @@ describe('push kinds and the FCM payload (push spec §6.5, §7.1)', () => {
     assert.equal(data[5].c, '999', 'a count above 999 is sent as 999');
     for (const d of data.slice(6, 8)) assert.equal(d.c, undefined);
     assert.equal(data[8].c, '999');
+    assert.deepEqual(data[9], { rid: 'task-1', n: 'gpu-box', k: 'task_ended' }, 'no task text, name or reason');
     for (const d of data) for (const v of Object.values(d)) assert.equal(typeof v, 'string');
   });
 
-  it('sets ttl: seconds to expires_at, else 3600 for session_ended, else 300', async () => {
+  it('sets ttl: seconds to expires_at, else 3600 for session_ended and task_ended, else 300', async () => {
     const fcm = await fcmServer();
     const now = Date.parse('2026-10-29T12:00:00.000Z');
     const sender = createFcmSender({ ...fcm.options, now: () => now });
@@ -352,7 +355,8 @@ describe('push kinds and the FCM payload (push spec §6.5, §7.1)', () => {
     await sender.notify(device('fcm', 'a'), { kind: 'session_paused', id: 'l-3' });
     await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-1' });
     await sender.notify(device('fcm', 'a'), { kind: 'test', id: 't-1' });
-    assert.deepEqual(fcm.sends.map((s) => s.message.android.ttl), ['90s', '3600s', '300s', '300s', '300s']);
+    await sender.notify(device('fcm', 'a'), { kind: 'task_ended', id: 'task-2' });
+    assert.deepEqual(fcm.sends.map((s) => s.message.android.ttl), ['90s', '3600s', '300s', '300s', '300s', '3600s']);
   });
 
   it('drops a token on 403 SENDER_ID_MISMATCH, never on a 400', async () => {
@@ -380,10 +384,13 @@ describe('the pusher and the fcm-only kinds (push spec C-2)', () => {
     await pusher.notify(device('apns'), { kind: 'session_ended', id: 'l-1', node_name: 'gpu-box' });
     await pusher.notify(device('apns'), { kind: 'session_paused', id: 'l-2' });
     await pusher.notify(device('apns'), { kind: 'test', id: 't-1' });
+    await pusher.notify(device('apns'), { kind: 'task_ended', id: 'task-1' });
+    await pusher.notify(device('fcm', 'tok-3', 'd-cccccccccccccccc'), { kind: 'task_ended', id: 'task-1', node_name: 'gpu-box' });
     await pusher.notify(device('apns'), { kind: 'approval', id: 'r-2', node_name: 'gpu-box', count: 3 });
     assert.deepEqual(seen, [
       ['fcm', { kind: 'approval', id: 'r-1', node_name: 'gpu-box', expires_at: null, count: 3 }],
       ['fcm', { kind: 'session_ended', id: 'l-1', node_name: 'gpu-box', expires_at: null }],
+      ['fcm', { kind: 'task_ended', id: 'task-1', node_name: 'gpu-box', expires_at: null }],
       ['apns', { kind: 'approval', id: 'r-2', node_name: 'gpu-box', expires_at: null }]
     ]);
   });
@@ -528,6 +535,33 @@ describe('the pusher: dedupe per (node, kind, id) on fcm devices (push spec §6.
     await step(phone, { node_id: 'n-1', kind: 'session_ended', id: 'l-1' });
     assert.equal(seen.length, 8);
     for (const p of seen) assert.equal('node_id' in p, false, 'node_id is the relay key, never sent');
+    pusher.stop();
+  });
+
+  it('keeps a task_ended 24 hours, coalesces two into one with a count, and the hourly cap applies', async () => {
+    const clock = fakeClock();
+    const { pusher, seen } = recordingPusher(clock);
+    const phone = device('fcm');
+    const ended = (id) => ({ node_id: 'n-1', kind: 'task_ended', id, node_name: 'gpu-box' });
+    await pusher.notify(phone, ended('task-1'));
+    await clock.advance(11 * SEC);
+    await pusher.notify(phone, ended('task-1'));
+    await clock.advance(11 * SEC);
+    assert.equal(seen.length, 1, 'the same task is not pushed twice');
+    await clock.advance(23 * HOUR);
+    await pusher.notify(phone, ended('task-1'));
+    await clock.advance(11 * SEC);
+    assert.equal(seen.length, 1, 'still remembered at 23 hours');
+    await clock.advance(HOUR);
+    await pusher.notify(phone, ended('task-1'));
+    await clock.advance(11 * SEC);
+    assert.equal(seen.length, 2, 'pushed again after 24 hours');
+    await pusher.notify(phone, ended('task-2'));
+    await pusher.notify(phone, ended('task-3'));
+    await pusher.notify(phone, ended('task-4'));
+    await clock.advance(11 * SEC);
+    assert.equal(seen[2].count, undefined, 'the first of a burst goes at once');
+    assert.equal(seen[3].count, 2, 'two held in one window go out as one push with a count');
     pusher.stop();
   });
 

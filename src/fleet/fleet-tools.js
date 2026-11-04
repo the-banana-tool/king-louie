@@ -16,7 +16,8 @@ const log = createLogger('fleet-tools');
 // Tool definitions, ToolError and the untrusted-output wrapper are pure and
 // live in tool-definitions.js, so the front door (which must not load
 // src/runbooks/) can list the same tools (Task 27).
-const { MCP_TOOLS, ToolError, untrustedOutput } = require('./tool-definitions');
+const { MCP_TOOLS, TASK_TOOL_NAMES, WAIT_MS_MAX, ToolError, untrustedOutput } = require('./tool-definitions');
+const { detectCapabilities } = require('./capabilities');
 
 function paramsSha256(params) {
   try {
@@ -91,9 +92,35 @@ function auditOrigin(origin, jobId = null) {
   return base;
 }
 
+// A task as a client reads it. The text is a client's words and the answer a
+// page's: both go back wrapped (tasks spec §4.4).
+function taskClientView(view) {
+  return {
+    ...view,
+    // Null: a private chat's view (src/tasks/values.js) withheld it.
+    text: view.text === null ? null : untrustedOutput([view.text]),
+    answer: view.answer ? { ...view.answer, text: untrustedOutput([view.answer.text]) } : null
+  };
+}
+
+function readTaskWait(value) {
+  if (value === undefined || value === null) return 0;
+  if (!Number.isInteger(value) || value < 0 || value > WAIT_MS_MAX) {
+    throw new ToolError('invalid_params', `invalid_params: "wait_ms" must be an integer from 0 to ${WAIT_MS_MAX}`);
+  }
+  return value;
+}
+
+// Only the router's two answers are a placement; a call with neither names this node or no node.
+function readPlacement(args) {
+  const by = args.placement && args.placement.by;
+  if (by === 'named' || by === 'only-node') return { by };
+  return { by: args.node ? 'named' : 'only-node' };
+}
+
 class FleetToolHandler {
   constructor({ nodeConfig = null, runbookEngine = null, jobManager = null, approver = null, auditLedger = null, delegateSessions = null,
-    gui = null, workingDirectory = null, caseTools = null } = {}) {
+    gui = null, workingDirectory = null, caseTools = null, tasks = null, capabilityProbes = null } = {}) {
     this.nodeConfig = nodeConfig || { name: 'local-node', profile: 'agent', capabilities: [], policy: {} };
     this.runbookEngine = runbookEngine;
     this.jobManager = jobManager
@@ -115,6 +142,11 @@ class FleetToolHandler {
     // node (src/fleet/start.js), else null. Never required from here: the
     // runbook profile must not load src/mcp/.
     this.caseTools = caseTools || null;
+    // A TaskManager on an agent node (src/fleet/start.js), else null. Never
+    // required from here: it loads src/gui/leases.js.
+    this.tasks = tasks || null;
+    // What detectCapabilities reads besides the config (src/fleet/capabilities.js).
+    this.capabilityProbes = capabilityProbes || {};
   }
 
   // The tools this handler serves: the fleet tools, then the case tools
@@ -138,11 +170,10 @@ class FleetToolHandler {
     }
   }
 
-  // Fleet stage 5 §5.2: 'gui' is a capability while the session helper is up.
+  // The declared list and what is detected (tasks spec §4.2). Fleet stage 5
+  // §5.2: 'gui' is a capability while the session helper is up.
   capabilitiesWith(gui) {
-    const caps = Array.isArray(this.nodeConfig.capabilities) ? [...this.nodeConfig.capabilities] : [];
-    if (gui && gui.available === true && !caps.includes('gui')) caps.push('gui');
-    return caps;
+    return detectCapabilities({ nodeConfig: this.nodeConfig, gui, ...this.capabilityProbes });
   }
 
   guiBlock() {
@@ -247,7 +278,9 @@ class FleetToolHandler {
         allowed_roots: this.nodeConfig.policy?.allowed_roots || [],
         max_concurrent_jobs: this.jobManager.maxConcurrentJobs === Infinity ? null : this.jobManager.maxConcurrentJobs,
         runbooks: runbooksList,
-        ...(gui ? { gui } : {})
+        ...(gui ? { gui } : {}),
+        // Tasks run with no lease manager too, and each acting call then asks (tasks spec §4.6).
+        ...(this.tasks && !this.tasks.grants ? { tasks: 'per-call approvals' } : {})
       };
     }
 
@@ -361,7 +394,65 @@ class FleetToolHandler {
       return { success: ok, job_id: job.job_id, status: job.status };
     }
 
+    if (TASK_TOOL_NAMES.includes(toolName)) return this.callTask(toolName, args, origin);
+
     throw new Error(`Unknown tool: ${toolName}`);
+  }
+
+  // The manager's own refusals are ToolErrors. Anything else can name a path,
+  // so it is logged here and a client hears `internal`.
+  async callTask(toolName, args, origin) {
+    if (toolName === 'run_task') this.auditInbound(toolName, { task: args.task }, origin, null);
+    if (toolName === 'send_to_task') this.auditInbound(toolName, { message: args.message }, origin, typeof args.task_id === 'string' ? cut(args.task_id, 200) : null);
+    if (toolName === 'run_task' || toolName === 'list_tasks') this.assertThisMachine(args.node);
+    if (!this.tasks) throw this.tasksUnavailable();
+    try {
+      return await this.runTaskTool(toolName, args, origin);
+    } catch (err) {
+      if (err instanceof ToolError) throw err;
+      log.warn(`${toolName} failed: ${err && err.message}`);
+      throw new ToolError('internal', 'internal error');
+    }
+  }
+
+  async runTaskTool(toolName, args, origin) {
+    const { tasks } = this;
+    switch (toolName) {
+      case 'run_task': {
+        const waitMs = readTaskWait(args.wait_ms);
+        return this.heldTask(await tasks.run({ text: args.task, origin, placement: readPlacement(args) }), waitMs);
+      }
+      case 'get_task': {
+        const waitMs = readTaskWait(args.wait_ms);
+        const seen = args.seen_seq === undefined ? null : args.seen_seq;
+        if (seen !== null && (!Number.isInteger(seen) || seen < 0)) throw new ToolError('invalid_params', 'invalid_params: "seen_seq" must be a non-negative integer');
+        return taskClientView(await tasks.get(args.task_id, { seenSeq: seen, waitMs }));
+      }
+      case 'send_to_task': {
+        const waitMs = readTaskWait(args.wait_ms);
+        return this.heldTask(await tasks.send(args.task_id, args.message, { origin }), waitMs);
+      }
+      case 'cancel_task': return taskClientView(await tasks.cancel(args.task_id));
+      default: return { tasks: (await tasks.list({ state: args.state === undefined ? null : args.state })).map(taskClientView) };
+    }
+  }
+
+  // The work has started: a wait that then fails answers with what it has, so
+  // a client never starts it again.
+  async heldTask(view, waitMs) {
+    if (!(waitMs > 0)) return taskClientView(view);
+    try {
+      return taskClientView(await this.tasks.get(view.task_id, { seenSeq: view.seq, waitMs }));
+    } catch (err) {
+      log.warn(`a task's wait failed: ${err && err.message}`);
+      return taskClientView(view);
+    }
+  }
+
+  tasksUnavailable() {
+    return this.nodeConfig.profile === 'runbook'
+      ? new ToolError('capability_unavailable', 'capability_unavailable: a task needs an agent-profile node')
+      : new ToolError('capability_unavailable', 'capability_unavailable: a task needs the King Louie service running on this node');
   }
 
   // Audit is best effort for the inbound record; exec.start is not (below).

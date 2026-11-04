@@ -2454,7 +2454,7 @@ runbook graph, `lease-protocol.js`, for the empty listing below).
   (`tests/session-backend-windows.test.js`), which shows the rule is
   written, not that it works. Swift and Kotlin are not compiled by
   `npm test`.
-- Vectors: `node tests/vectors/lease-v1/generate.js --check` (55) and
+- Vectors: `node tests/vectors/lease-v1/generate.js --check` (80) and
   `node tests/vectors/session-v1/generate.js --check` (6).
 - The phones: iOS signs only `kl.lease.watch` with its API session (owner
   ruling R-F5-8) and sends it only while the live lease view is on screen
@@ -3003,6 +3003,151 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   checkout or worktree leaves a task that cannot start. The owner check
   reads owners only, not access lists: a data dir on a drive whose ACL lets
   other accounts write passes it (keep the default `%LOCALAPPDATA%`).
+
+## Tasks
+
+Spec `docs/superpowers/specs/2026-11-03-tasks-stage1-design.md`; ADR
+`docs/adr/0004-one-task-grant-not-per-call-approvals.md`; plan and ledger `docs/superpowers/plans/2026-11-03-tasks-stage1.md`,
+`.superpowers/sdd/2026-11-03-tasks-stage1/` (every `Ruling:`). Words in
+`CONTEXT.md`: a task, the fleet; never a job for a task or the mesh for the
+fleet. The driver's side is `docs/driving-king-louie.md` §3, the owner's the
+install guide's "Your first task".
+
+- **What a task is.** One piece of work a client hands the fleet, run by one
+  node's own agent loop with its models, tools, approvals and key: a real chat
+  (the chat fields `taskId`, `client`, `agentMode`) with a durable record beside it,
+  `<dataDir>/tasks/<task_id>.json` (`TaskStore`, `src/tasks/store.js`; states
+  `requested`, `awaiting_grant`, `running`, `waiting`, `done`, `failed`,
+  `cancelled`, `interrupted`), working in `<dataDir>/tasks/<task_id>/work`.
+  `TaskManager` (`src/tasks/manager.js`) owns them and runs one per node: a task
+  that waits for its client still holds the node (`task_busy`), until 24 hours with
+  no change to its record (`WAITING_BOUND_MS`, the manager's clock), when the next
+  `run_task`'s sweep (`_assertFree`) ends it `cancelled`, reason `abandoned`, with its
+  lease closed and one push. A live grant or a card out is not swept; a lease is at most 240
+  minutes and a press or a card writes the record, so a real one has lapsed by then. Only
+  `src/fleet/start.js`, on the agent branch, loads `src/tasks/wiring.js`: the
+  manager loads `src/gui/leases.js`, which stays off the runbook, relay and
+  front-door graphs.
+- **The tools.** `run_task`, `get_task`, `send_to_task`, `cancel_task`,
+  `list_tasks` (`TASK_TOOL_NAMES`, `src/fleet/tool-definitions.js`; `callTask`
+  in `src/fleet/fleet-tools.js`; `fleet.<name>` link methods, fitted to
+  `max_bytes` by `fitTaskView`/`fitTaskList`), on the front door and on
+  `king-louie-service mcp`, never in an owner chat or in a task's own turn.
+  `run_task`, `send_to_task` and `cancel_task` need `fleet:delegate` and
+  `fleet:unsafe` on the node (`insufficient_scope`, up front); `get_task` and
+  `list_tasks` need `fleet:read`, and any such grant reads any task there (Q25;
+  `JobCache` is not consulted). `wait_ms` (0 to 25000) holds the reply until `seq`
+  moves past `seen_seq`, on both surfaces. A public id is `<node>:<uuid>`. Text and
+  answer go out wrapped as `untrusted_output`; the front door never parses them.
+- **Placement** (`FleetRouter`, `src/frontdoor/router/router.js`). A named node, or
+  the one online agent node the grant reaches (`placement: { by: 'named' |
+  'only-node' }`), else `needs_placement` with each node's `capabilities`
+  (`src/fleet/capabilities.js`). No matching yet. The router never sends `run_task`,
+  `send_to_task` or `cancel_task` twice. A task call's forward has the router's
+  `timeoutMs` plus its `wait_ms`, so a full hold never reads as `task_unconfirmed`.
+- **A turn** has no owner text and `denyAutoApproval`, so `ownerQuote`, the
+  always-approve list, `autoApproveTools` and `allow` rules lift nothing. Its tools are
+  `taskToolNames` (`src/tasks/values.js`): an owner chat's minus the fleet, task and
+  `sessions_*` tools, `message`, the eight acting GUI tools, and what outlives a turn
+  (`BackgroundTask`, `TaskStatus`, `Cron`, `RemoteDispatch`). Its prompt has
+  `TASK_GUIDANCE` (`src/context/system-sections.js`). A reply that ends in a `STUCK:`
+  paragraph (`parseStuck`) is `waiting`, any other `done`. Every client row has
+  `author: 'client'`, which `ownerMessages` leaves out: a client's words are never
+  `user` provenance, in the task or in a case the chat later joins.
+- **The proposal** (`src/tasks/proposal.js`, prompt `src/tasks/prompts/task-scope-v1.md`;
+  a change is a new file). One utility-role call before any work, charged to the task,
+  routed with the chat's egress. It is off `tests/fixtures/egress-inventory.json`:
+  `oneShot` is outside that walk, and `tests/fleet-task-tools.test.js` pins the
+  routing. Malformed twice, or no model: the task runs with no proposal. Empty `allows`
+  is look-only: no card.
+- **The grant** (`src/tasks/grants.js`, `src/tasks/cards.js`): a lease of kind `task`
+  (lease-v1 "Revised 2026-11-03"), one card per task, sent every 5 minutes, 12 cards in
+  all, then `waiting`, reason `grant_pending`. Turns do not wait for the press; an
+  acting call the card would cover does. With no press nothing a model proposed binds:
+  a $2 cap and at most 30 minutes. Only a press moves a cap or a deadline: to the card's
+  `usd` and the lease's expiry. At the cap or past the deadline the task `waiting`s and
+  a raise card goes (`raisedUsd`, doubling; a look-only raise is `May: read only`);
+  what a send comes to is the table in `src/tasks/send-rules.js`. A press clears
+  `spend_cap`, `duration` and `grant_pending` from `reason` (never `stuck`): `waiting`
+  with no reason means send. A raise card refused `approval_unavailable` or
+  `capability_unavailable` ends the task `failed`; any other refusal (`lease_busy`: a
+  take holds the node's lease) leaves it `waiting`, and the next send asks again. Without a lease
+  manager (`gui` off) there are no cards: each acting call asks for itself, and the
+  cap or deadline ends the task `failed`. A denied card ends it `cancelled`, reason
+  `grant_denied`; Stop or a revoked device, reason `stopped`. A task `interrupted`
+  by a restart re-proposes and cards again on its next send.
+- **The policy** (`createTaskPolicy`, `src/tasks/policy.js`), consulted in `ToolExecutor`
+  where it would ask, after hooks, deny rules, the `denied` tier, denied dirs and the
+  roots check. No never list: the phone is the gate, so a call outside the grant takes
+  the ordinary path to a signed approval and the policy refuses only after the task is
+  over (`task_ended`). A tool's dangerous-pattern match asks too. What still stops a
+  call outright: the node's deny rules and `denied` tier, the denied dirs, the denial
+  tracker on the owner's third no, and the loop guardrails (ADR 0004). Answers: look-class
+  actions (`LOOK_ACTIONS`) always `{ allow, look }`; navigation by the sites (only a
+  look-only or no-proposal task is unbounded); `browser-act` and `logins` on a granted
+  host; `shell`; `files-write` under the work dir. `evaluate`, `evaluate_in_frame`,
+  `set_input_files` and `fill_payment` are in no class and always ask; `reload` is
+  `browser-act`. A look allow lifts only the tool's default gate; a grant's also an
+  `always_confirm` match; neither lifts an `ask` rule or another unsafe tier reason.
+- **The owner can take the chat.** A send, a press or the next `run_task` that finds the
+  chat in a case, private or deleted ends the task (`became_case`, `private`,
+  `chat_deleted`) and a send is refused `task_ended`; a `done` task stays `done`. Only
+  an answer ends it: a read that throws, or the core's `unknown-mark`, refuses a send
+  `task_busy` (`retry_after`), is skipped by the sweep, lets a press stand, and leaves the
+  record as it was. For what a client reads, a mark that cannot be read still counts as
+  private (`_chatPrivate`). `privateView` gives a client the id, state and
+  `private: true` only. `case:attach` answers `CHAT_BUSY` while a task's turn runs
+  (`core.context.isTaskChatRunning`).
+- **Telling.** `task_ended` (`SESSION_KINDS`, `PushQueue`, content-free, fcm only) to
+  every device, on `done`, `failed`, `cancelled` and `interrupted`. Audit:
+  `task.requested { task_id, client, node }`, `task.ended { task_id, reason, usd }`,
+  `task.refused { tool, code, origin }` (`task_ended`, or `phone_denied` for the owner's no to a
+  call outside the grant; the seam's `approvalDenied` listener). No text and no URL in
+  those. `lease.requested` and `lease.granted` carry `name`, and the ledger is mirrored to
+  the relay, so the first 60 code points of each task's text sit in the relay's mirror.
+- **Codes.** To a client: `task_busy` (`retry_after`), `task_not_found`, `task_ended`,
+  `task_unconfirmed` (no answer after sending: it may have started, so look, never
+  resend), `unknown_machine`, `machine_offline`, `capability_unavailable`,
+  `insufficient_scope`, `invalid_params`, `bad_node_answer`, `frontdoor_busy`,
+  `node_timeout`. `ended.reason` and `reason`: `done`, `cancelled`, `grant_denied`,
+  `stopped`, `spend_cap`, `duration`, `grant_pending`, `stuck`, `abandoned`, `became_case`, `private`,
+  `chat_deleted`, `turn_failed`, `max_iterations`, `guardrail_halt`, or a failure's own
+  code (`failureCode`, never its message).
+- **Tests.** `tests/helpers/tasks-harness.js`: a `TaskManager` over a real in-memory store
+  and a temp `TaskStore`, a scripted adapter, a fake clock (`time.advance`), recording push
+  and audit sinks; `tests/tasks-grants.test.js` adds a real `LeaseManager` and the fake
+  phone. `createFakeNode`'s handler holds tasks for router tests
+  (`tests/frontdoor-tasks.test.js`). `tests/tasks-e2e.test.js` is the whole path, with a
+  real core: a scripted provider under the real adapter, the real policy, `ToolExecutor`,
+  `PhoneApprover`, `LeaseManager` and `PushQueue`, the real router, the fake phone, a
+  fake link, and a stand-in `BrowserPage` registered after `core.start()` (which
+  registers the real one). It is a browser-free path: no Chromium. `tests/tasks-browser.test.js`
+  is the one turn on the real `BrowserPage`, on Playwright's headless Chromium, with the
+  granted and off-list hosts fulfilled by the context's `route`: snapshot, `click ref=eN`.
+- Residuals. A task acts in the owner's signed-in browser. `fleet:delegate` with
+  `fleet:unsafe` on a node reads that node's non-private cases. One task runs per node. A
+  node that is offline answers no `get_task`. A look-only task can put data in a URL to any
+  site in the signed-in browser. A page can change between the policy's decision and the
+  act. Frames are judged by the top page. A granted host allows http and any port. A
+  login for host A can be filled while the page is on host B when both are granted. A
+  waiting task holds the node for up to 24 hours from its last change, and only another
+  `run_task` looks. The reply on the call that crosses the
+  cap is lost. Sub-agent spend lands when the child finishes, so one `SpawnAgent` can
+  overshoot the cap by its bill. A task's prompt is the adapter's full one (node memory,
+  user profile, project context), as a delegate turn's is, so a hosted model and an answer
+  can carry them. `Vault` stays in a task's tools, asks per call, and an approved `get` can
+  reach the answer. Capabilities in `hello` can be stale until the next connect (`describe_machine`
+  and `list_machines` read live). `browser:headless` means Chromium is on disk, not that it
+  launches. A merged `list_tasks` is not bounded to `maxBytes`. `TaskManager#list`'s cut
+  at 50 is not counted in `left_out`. Task tools have no per-grant rate limit, so a looping
+  client with `fleet:unsafe` spends $2 a task until the grant is revoked. Client rows in a
+  case turn's tail are ordinary user rows to the model. A client's send during an owner's
+  turn in that chat is not refused. An owner's row in a waiting task chat, or an attach
+  then detach with no send between, leaves a later client send ordinary, so the answer
+  can carry the owner's words. A raise card reads like a first card: no signed field holds
+  the earlier cap. Swift has not been compiled on the machine that built this. The task
+  tools show clients nothing about leases. A live lease's name stays on the phones until
+  the task ends.
 
 ## Icons
 

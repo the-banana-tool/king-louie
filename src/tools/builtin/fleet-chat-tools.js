@@ -16,8 +16,11 @@
 // treats like stdio (a session the node started itself). An unsafe runbook
 // still waits for a signed phone approval; the usual tool approval comes
 // first (the acting tools require approval).
+//
+// The task tools are for clients: an owner's chat does not start a task in
+// stage 1 (tasks spec §2).
 const { Tool } = require('../tool-schema');
-const { MCP_TOOLS, ToolError } = require('../../fleet/tool-definitions');
+const { MCP_TOOLS, TASK_TOOL_NAMES, ToolError } = require('../../fleet/tool-definitions');
 const { chatSchema } = require('./management-tools');
 
 const SERVICE_CHAT_ORIGIN_KIND = 'service-chat';
@@ -97,7 +100,7 @@ function fleetChatTool(def) {
   });
 }
 
-const FLEET_CHAT_TOOLS = Object.freeze(MCP_TOOLS.map(fleetChatTool));
+const FLEET_CHAT_TOOLS = Object.freeze(MCP_TOOLS.filter((def) => !TASK_TOOL_NAMES.includes(def.name)).map(fleetChatTool));
 const FLEET_CHAT_TOOL_NAMES = Object.freeze(FLEET_CHAT_TOOLS.map((t) => t.name));
 
 function registerFleetChatTools(registry) {

@@ -183,8 +183,8 @@ private fun ApprovalRow(model: AppModel, row: ApprovalList.Row) {
         else -> KlTokens.bgSurface
     }
     val textColor = if (row.warning) statusColors.warning else KlTokens.textPrimary
-    // A node's "Could not confirm" or "Not checked yet" has no detail.
-    if (row.kind == ApprovalList.Kind.NODE_CHECK) ItemCard(color = tint) { RowBody(model, row, textColor) }
+    // A node's "Could not confirm" or "Not checked yet" has no detail, and nor has a running task (no frames).
+    if (row.kind == ApprovalList.Kind.NODE_CHECK || !row.hasDetail) ItemCard(color = tint) { RowBody(model, row, textColor) }
     else ItemCard(onClick = { model.open(row) }, color = tint) { RowBody(model, row, textColor) }
 }
 
@@ -198,7 +198,9 @@ private fun RowBody(model: AppModel, row: ApprovalList.Row, textColor: Color) {
         row.timeLeftMs?.let { left -> if (row.status == null) TimePill(formatLeft(left), urgent = left < 60_000) }
         row.at?.let { Secondary(it) }
     }
-    Text(
+    // A task's card in full and uncut: Allow on the row signs what the row shows.
+    if (row.cardLines.isNotEmpty()) for (line in row.cardLines) Text(line, style = MaterialTheme.typography.bodyLarge, color = textColor)
+    else Text(
         row.summary, style = MaterialTheme.typography.bodyLarge, color = textColor, fontWeight = if (row.highUrgency) FontWeight.Bold else FontWeight.Normal,
         maxLines = 1, overflow = TextOverflow.Ellipsis,
         onTextLayout = { model.reportOverflow(row.id, it.hasVisualOverflow) }

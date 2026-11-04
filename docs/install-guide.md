@@ -1193,6 +1193,54 @@ name it: its vault, chats and browser cookies). Nothing in
 with phone approvals. A shell the phone approves can do anything you can:
 the deny list fences the file tools, never a shell.
 
+### Your first task
+
+A task is one piece of work a client hands your node, such as "find a dentist
+for my child within 45 minutes of Lakeside". Your node's own model does it;
+the client gets the answer; your phone is the gate. You need the node running
+with a phone enrolled (above), `gui: enabled: true` in `node.yaml` (without it
+there are no cards, and each acting step asks on its own), and a client: Claude Code
+on this machine through `king-louie-service mcp`, or claude.ai through the front door
+with `fleet:delegate`, `fleet:read` and `fleet:unsafe` on this node. Those three let
+the client's tasks read this node's non-private cases, and any client with
+`fleet:read` here can read its tasks.
+
+1. Log in, once and by hand, to the sites you want tasks to use, in the node's
+   `king-louie` browser profile: from a session, ask it to "start the browser and open
+   https://app.example.com/", log in in the window that opens, then have it stop the
+   browser. A task acts in this signed-in browser, as you, on the sites you grant it.
+2. Ask the client: "Have King Louie find a dentist for my child within 45
+   minutes of Lakeside, with good reviews for children." With more than one node it
+   will ask you which.
+3. Your phone shows one card:
+
+   ```
+   Task: Find a dentist for my child within 45 minutes of Lakeside, w
+   Sites: www.reviews.example.com, *.maps.example.com
+   May: click and type in your signed-in browser
+   For: 20 minutes
+   Spend up to $2
+   Node: my-laptop
+   ```
+
+   King Louie builds these lines from what the node's model proposed; the name is the
+   start of what the client asked. Press Allow. The task reads meanwhile, so a slow
+   press costs little; the card is sent again every 5 minutes for about an hour.
+4. Inside the card the task acts with no more presses. Anything outside it (another
+   site, a shell, a form with a saved card) is one more approval of its own. A no
+   stands, and the task goes on without it.
+5. Your phone says "A task ended", and the client shows the answer, a table with
+   where each fact came from. The chat is in the node's history.
+
+A task that only reads gets no card, and runs on $2 and 30 minutes. One that reaches
+its limit asks with a card, which reads like a first card, so check the amount. Stop on the task's row ends it, from any of your phones, and so does Deny. One
+task runs at a time; a task waiting for an answer from its client still holds the node
+until the client answers, or `cancel_task` ends it (from any client with `fleet:unsafe`
+on the node, not only the one that started it), or you press Stop on its row (the row goes when its lease lapses), or you
+make its chat a case or private, which ends it for the client. After 24 hours with no
+change, the next `run_task` ends it, reason `abandoned`. A restart leaves a task `interrupted`, and it asks you again if
+the client continues it.
+
 ### Attaching the desktop app
 
 The desktop app can be the node's window, as it can for a fleet service

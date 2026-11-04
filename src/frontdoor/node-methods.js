@@ -11,6 +11,8 @@ const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArr
 const MAX_PUSH_ID = 128;
 // The kinds message.submit may push: push/text.js's KINDS less the ones only
 // push.notify (and the relay's own push-test) sends (push spec §7.1).
+// The only fields push.notify defines; any other is refused, so no text can ride along.
+const PUSH_NOTIFY_KEYS = ['kind', 'id', 'to_device', 'except_device', 'expires_at'];
 const PUSH_KINDS = KINDS.filter((k) => !FCM_ONLY_KINDS.includes(k));
 // The kinds push.notify may push (push spec §6.2): a lease's ending or
 // contact pause, keyed by its lease id (SESSION_KINDS, from push/text.js).
@@ -166,7 +168,7 @@ function registerNodeMethods(relay) {
     const toDevice = p && p.to_device !== undefined ? p.to_device : null;
     const exceptDevice = p && p.except_device !== undefined ? p.except_device : null;
     const expiresAt = p && p.expires_at !== undefined ? p.expires_at : null;
-    const ok = p && SESSION_KINDS.includes(p.kind) && typeof p.id === 'string' && UUID_V4_RE.test(p.id)
+    const ok = p && Object.keys(p).every((k) => PUSH_NOTIFY_KEYS.includes(k)) && SESSION_KINDS.includes(p.kind) && typeof p.id === 'string' && UUID_V4_RE.test(p.id)
       && optionalDevice(toDevice) && optionalDevice(exceptDevice) && !(toDevice !== null && exceptDevice !== null)
       && (expiresAt === null || isTimestamp(expiresAt));
     if (!ok) throw new LinkRpcError('bad_push', `push.notify must be { kind: ${SESSION_KINDS.join('|')}, id: uuid v4, to_device?, except_device? (not both), expires_at? }`);

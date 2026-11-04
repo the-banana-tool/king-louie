@@ -9803,13 +9803,17 @@ async function sendMessage() {
       appState.chats = data.chats || [];
     } catch { /* best-effort reload */ }
 
-    // onMessageError may have already displayed this error via IPC event.
-    // Only add a fallback message if no error element was rendered yet.
+    // The redraw first: it would wipe a bubble added before it, and it draws
+    // an error onMessageError stored, which the check below then finds.
+    refreshUI();
     const alreadyShown = dom.chatMessages.querySelector('.message.assistant:last-child .message-content p');
     if (!alreadyShown || !(alreadyShown.textContent.startsWith('Error:') || Object.values(PRIVATE_REFUSAL_SENTENCES).some((t) => alreadyShown.textContent.startsWith(t)))) {
       addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
     }
-    refreshUI();
+    // A refused send stored nothing (a failed turn stored its row): the words go back in the box.
+    const lastUser = (appState.chats.find((c) => c.id === appState.activeChatId)?.messages || []).findLast((m) => m.sender === 'user');
+    const storedRow = lastUser && lastUser.text === message && !String(lastUser.id).startsWith('temp-');
+    if (!storedRow && !dom.userInput.value) dom.userInput.value = message;
   } finally {
     setResponseActive(false, appState.activeChatId);
     flushToolGroup();
@@ -9859,6 +9863,11 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
   const chat = appState.chats.find((c) => c.id === chatId);
   const userMsg = chat?.messages?.[msgIndex];
   if (!userMsg || userMsg.sender !== 'user') return;
+  // Sent again it would be a new row of the owner's: a task client's words, as his.
+  if (userMsg.author === 'client') {
+    addMessage('assistant', 'A task\'s client wrote that message, so it cannot be sent again as yours. Type your own instead.');
+    return;
+  }
   const message = userMsg.text || '';
   const images = userMsg.images || [];
   const documents = userMsg.documents || [];
@@ -9934,11 +9943,12 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
       const data = unwrapIpcResult(await window.electron.chat.load(), 'reload');
       appState.chats = data.chats || [];
     } catch { /* best-effort reload */ }
+    // The redraw first, as in sendMessage.
+    refreshUI();
     const alreadyShown = dom.chatMessages.querySelector('.message.assistant:last-child .message-content p');
     if (!alreadyShown || !(alreadyShown.textContent.startsWith('Error:') || Object.values(PRIVATE_REFUSAL_SENTENCES).some((t) => alreadyShown.textContent.startsWith(t)))) {
       addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
     }
-    refreshUI();
   } finally {
     setResponseActive(false, chatId);
     flushToolGroup();
@@ -10385,7 +10395,7 @@ function renderRetryControl() {
   const messages = chat.messages || [];
   const lastUser = messages.findLastIndex((m) => m.sender === 'user');
   const lastReply = messages.findLastIndex((m) => m.sender === 'assistant');
-  if (lastUser < 0 || lastReply < lastUser) return;
+  if (lastUser < 0 || lastReply < lastUser || messages[lastUser].author === 'client') return;
   const replies = dom.chatMessages.querySelectorAll('.message.assistant:not(.case-nudge)');
   // The case nudge sits after the reply; Retry stays on the reply.
   const reply = replies[replies.length - 1];
@@ -10439,7 +10449,7 @@ async function retryWith(target) {
   const chat = getActiveChat();
   if (!chatId || !chat) return;
   const index = chat.messages.findLastIndex((m) => m.sender === 'user');
-  if (index < 0) return;
+  if (index < 0 || chat.messages[index].author === 'client') return;
   // Switch first: a failed switch leaves the chat exactly as it was, the
   // user message and its reply both still there (final review m3). Only
   // then truncate and re-send, keeping the switch's status line.

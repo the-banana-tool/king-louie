@@ -32,10 +32,17 @@ const MAX_MINUTES = 60;
 // its own kind, a screen-recorded demo approved with one tap, capped by
 // gui.take.max_minutes and never past this.
 const TAKE_MAX_MINUTES = 240;
-const LEASE_KINDS = Object.freeze(['computer_use', 'take']);
+// Revised 2026-11-03 (tasks stage 1, spec §4.6): a task is a lease of its own
+// kind, one press covering a task's scope. It has no apps; it has what it may
+// do (allows) and what it may spend (usd), in whole dollars.
+const TASK_ALLOWS = Object.freeze(['browser-act', 'files-write', 'logins', 'shell']);
+const TASK_USD_MIN = 2;
+const TASK_USD_MAX = 500;
+const LEASE_KINDS = Object.freeze(['computer_use', 'take', 'task']);
 const LEASE_KEYS = Object.freeze({
   computer_use: Object.freeze(['kind', 'job_id', 'apps', 'max_minutes', 'reason', 'resumes', 'limits']),
-  take: Object.freeze(['kind', 'job_id', 'name', 'sites', 'apps', 'browser', 'credentials', 'max_minutes', 'unattended', 'reason', 'resumes', 'limits'])
+  take: Object.freeze(['kind', 'job_id', 'name', 'sites', 'apps', 'browser', 'credentials', 'max_minutes', 'unattended', 'reason', 'resumes', 'limits']),
+  task: Object.freeze(['kind', 'job_id', 'name', 'sites', 'allows', 'max_minutes', 'usd', 'unattended', 'reason', 'resumes', 'limits'])
 });
 const SITE_RE = /^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 // R-F5-20: a listing names at most this many leases (the node lists the live
@@ -66,28 +73,43 @@ function checkApp(a) {
     && APP_ID_RE.test(a.id) && within(a.name, 64) && within(a.path, 1024) && isStringList(a.processes, 16, (s) => within(s, 1024));
 }
 
+const checkApps = (apps) => Array.isArray(apps) && apps.length >= 1 && apps.length <= 8 && apps.every(checkApp)
+  && new Set(apps.map((a) => a.id)).size === apps.length;
+// A take's or a task's name, in its request and in every status.
+const checkLeaseName = (name) => within(name, 60) && name.length > 0 && plainLineProblem(name) === null;
+
 // The fields only a take has: a name (one plain line), the hosts it may
 // visit, the browser allowance (true, or the browser actions it may use),
 // whether it may fill credentials from the vault, and whether it runs with
 // no contact window.
 function checkTakeFields(l) {
-  return within(l.name, 60) && l.name.length > 0 && plainLineProblem(l.name) === null
+  return checkLeaseName(l.name)
     && isStringList(l.sites, 32, (s) => SITE_RE.test(s)) && l.sites.length >= 1
     && (l.browser === true || (isStringList(l.browser, 64, (s) => s.length > 0) && l.browser.length >= 1))
     && typeof l.credentials === 'boolean' && typeof l.unattended === 'boolean';
 }
 
+// The fields only a task has beside its name: the hosts it may act on (none
+// for a shell-only grant), what it may do (sorted; empty only on the card that
+// raises a look-only task's spend cap, since such a task sends no first card),
+// the most it may spend. It is always unattended and never resumes: a raise is
+// a fresh request.
+function checkTaskFields(l) {
+  return checkLeaseName(l.name)
+    && isStringList(l.sites, 32, (s) => SITE_RE.test(s))
+    && isStringList(l.allows, TASK_ALLOWS.length, (s) => TASK_ALLOWS.includes(s)) && uniqueSorted(l.allows)
+    && Number.isInteger(l.usd) && l.usd >= TASK_USD_MIN && l.usd <= TASK_USD_MAX
+    && l.unattended === true && l.resumes === null;
+}
+
 function checkLease(l) {
   if (!isPlainObject(l) || !Object.hasOwn(LEASE_KEYS, l.kind) || !exactKeys(l, LEASE_KEYS[l.kind])) return false;
-  const take = l.kind === 'take';
   return within(l.job_id, 200) && l.job_id.length > 0
-    && Array.isArray(l.apps) && l.apps.length >= 1 && l.apps.length <= 8 && l.apps.every(checkApp)
-    && new Set(l.apps.map((a) => a.id)).size === l.apps.length
-    && Number.isInteger(l.max_minutes) && l.max_minutes >= 1 && l.max_minutes <= (take ? TAKE_MAX_MINUTES : MAX_MINUTES)
+    && Number.isInteger(l.max_minutes) && l.max_minutes >= 1 && l.max_minutes <= (l.kind === 'computer_use' ? MAX_MINUTES : TAKE_MAX_MINUTES)
     && within(l.reason, 280) && l.reason.length > 0
     && nullOr((v) => UUID_V4_RE.test(v))(l.resumes)
     && isStringList(l.limits, LEASE_LIMITS.length, (s) => LEASE_LIMITS.includes(s)) && uniqueSorted(l.limits)
-    && (!take || checkTakeFields(l));
+    && (l.kind === 'task' ? checkTaskFields(l) : checkApps(l.apps) && (l.kind !== 'take' || checkTakeFields(l)));
 }
 
 function checkOrigin(o) {
@@ -117,7 +139,8 @@ const VALIDATORS = {
     && NONCE_RE.test(m.nonce) && isTimestamp(m.expires_at) && DEVICE_ID_RE.test(m.device_id) && isTimestamp(m.signed_at)
     && ((m.decision === 'deny' && m.grant === null)
       || (m.decision === 'grant' && isPlainObject(m.grant) && exactKeys(m.grant, ['apps', 'minutes'])
-        && isStringList(m.grant.apps, 8, (s) => APP_ID_RE.test(s)) && m.grant.apps.length >= 1
+        // How many apps a grant must name is the kind's: verifyLeaseGrant checks it (a task has none).
+        && isStringList(m.grant.apps, 8, (s) => APP_ID_RE.test(s))
         && Number.isInteger(m.grant.minutes) && m.grant.minutes >= 1 && m.grant.minutes <= 1440)),
   'kl.lease.revoke': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'reason', 'device_id', 'nonce', 'signed_at'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && REVOKE_REASONS.includes(m.reason)
@@ -130,9 +153,9 @@ const VALIDATORS = {
     && STATES.includes(m.state) && typeof m.locked === 'boolean' && nullOr((v) => within(v, 64))(m.reason) && nullOr(isTimestamp)(m.expires_at)
     && isString(m.contact_token) && CONTACT_TOKEN_RE.test(m.contact_token)
     && nullOr((g) => isPlainObject(g) && exactKeys(g, ['device_id', 'name']) && DEVICE_ID_RE.test(g.device_id) && nullOr((n) => within(n, 64) && n.length > 0)(g.name))(m.granted_by)
-    // 2026-10-24: the lease's kind, whether it runs unattended, and a take's name (null for computer_use).
-    && LEASE_KINDS.includes(m.kind) && typeof m.unattended === 'boolean' && (m.kind === 'take' || m.unattended === false)
-    && (m.kind === 'take' ? within(m.name, 60) && m.name.length > 0 && plainLineProblem(m.name) === null : m.name === null),
+    // 2026-10-24: the lease's kind, whether it runs unattended, and a take's or task's name (null for computer_use).
+    && LEASE_KINDS.includes(m.kind) && typeof m.unattended === 'boolean'
+    && (m.kind === 'computer_use' ? m.unattended === false && m.name === null : checkLeaseName(m.name)),
   'kl.lease.view': (m) => exactKeys(m, ['v', 'type', 'node_id', 'lease_id', 'seq', 'at', 'to_device', 'state', 'locked', 'remaining_s', 'foreground', 'frame', 'frame_dropped', 'actions', 'contact_token'])
     && NODE_ID_RE.test(m.node_id) && UUID_V4_RE.test(m.lease_id) && Number.isInteger(m.seq) && m.seq >= 1 && isTimestamp(m.at)
     && isString(m.contact_token) && CONTACT_TOKEN_RE.test(m.contact_token)
@@ -160,12 +183,26 @@ for (const [type, validator] of Object.entries(VALIDATORS)) {
 const leaseHash = (lease) => sha256b64url(canonicalize(lease));
 
 // kind 'take' (2026-10-24): take = { name, sites, browser, credentials, unattended }.
-function buildLeaseRequest({ identity, nodeName, jobId, apps, maxMinutes, reason, resumes = null, limits = [], origin, now = Date.now(), requestId = null, leaseId = null, nonce = null, kind = 'computer_use', take = null }) {
+// kind 'task' (2026-11-03): task = { name, sites, allows, usd }; apps is not used.
+function buildLeaseRequest({ identity, nodeName, jobId, apps = [], maxMinutes, reason, resumes = null, limits = [], origin, now = Date.now(), requestId = null, leaseId = null, nonce = null, kind = 'computer_use', take = null, task = null }) {
   const lid = leaseId || crypto.randomUUID();
   const appList = apps.map((a) => ({ id: a.id, name: a.name, path: a.path, processes: [...a.processes] }));
   const limitList = [...new Set(limits)].filter((l) => LEASE_LIMITS.includes(l)).sort();
-  const lease = kind === 'take'
+  const lease = kind === 'task'
     ? {
+      kind: 'task',
+      job_id: String(jobId),
+      name: task.name,
+      sites: [...task.sites],
+      allows: [...task.allows],
+      max_minutes: maxMinutes,
+      usd: task.usd,
+      unattended: true,
+      reason: String(reason),
+      resumes: resumes ? lid : null,
+      limits: limitList
+    }
+    : kind === 'take' ? {
       kind: 'take',
       job_id: String(jobId),
       name: take.name,
@@ -212,7 +249,7 @@ function buildLeaseRequest({ identity, nodeName, jobId, apps, maxMinutes, reason
 // lease, or null while nobody has granted it. A phone that did not grant a
 // lease shows this beside its Stop.
 // kind, unattended, name (2026-10-24): every status says which kind of lease
-// it is; name is a take's, null for computer_use.
+// it is; name is a take's or a task's, null for computer_use.
 function buildLeaseStatus({ identity, leaseId, seq, state, locked = false, reason = null, expiresAt = null, contactToken = null, grantedBy = null, kind = 'computer_use', unattended = false, name = null, now = Date.now() }) {
   return seal({
     v: 1, type: 'kl.lease.status', node_id: identity.nodeId, lease_id: leaseId, seq, at: iso(now), state, locked,
@@ -220,7 +257,7 @@ function buildLeaseStatus({ identity, leaseId, seq, state, locked = false, reaso
     expires_at: expiresAt === null || expiresAt === undefined ? null : iso(expiresAt),
     contact_token: contactToken || newContactToken(),
     granted_by: grantedBy && grantedBy.deviceId ? { device_id: grantedBy.deviceId, name: typeof grantedBy.name === 'string' && grantedBy.name ? grantedBy.name : null } : null,
-    kind, unattended: unattended === true, name: kind === 'take' ? name : null
+    kind, unattended: unattended === true, name: kind === 'computer_use' ? null : name
   }, nodeSigner(identity));
 }
 
@@ -288,17 +325,22 @@ function verifyLeaseGrant(envelope, { approverStore, nodeId, nonces, pending, gu
   if (m.expires_at !== request.expires_at) return reject('expires_mismatch');
   if (!(now <= Date.parse(request.expires_at))) return reject('expired');
   if (leaseHash(request.lease) !== m.lease_hash) return reject('lease_changed');
-  for (const app of request.lease.apps) {
+  // A task has no apps.
+  for (const app of request.lease.apps || []) {
     const live = guiApps && Object.hasOwn(guiApps, app.id) ? guiApps[app.id] : null;
     if (!live || live.path !== app.path || !sameList(live.processes, app.processes)) return reject('lease_changed');
   }
   if (!jobOpen(request.lease.job_id)) return reject('job_closed');
   if (m.decision === 'grant') {
-    const requested = request.lease.apps.map((a) => a.id);
+    const { kind } = request.lease;
+    const requested = (request.lease.apps || []).map((a) => a.id);
     const apps = m.grant.apps;
     if (new Set(apps).size !== apps.length || !apps.every((id) => requested.includes(id))) return reject('apps_not_requested');
-    // The kind's cap (2026-10-24): gui.take.max_minutes for a take, gui.lease.max_minutes otherwise.
-    const kindCap = request.lease.kind === 'take' ? Math.min(guiTakeMaxMinutes, TAKE_MAX_MINUTES) : Math.min(guiMaxMinutes, MAX_MINUTES);
+    if (kind !== 'task' && apps.length === 0) return reject('apps_not_requested');
+    // The kind's cap (2026-10-24): gui.take.max_minutes for a take, gui.lease.max_minutes for computer_use;
+    // a task (2026-11-03) is bound by its request and the protocol's cap, and no gui setting.
+    const kindCap = kind === 'task' ? TAKE_MAX_MINUTES
+      : kind === 'take' ? Math.min(guiTakeMaxMinutes, TAKE_MAX_MINUTES) : Math.min(guiMaxMinutes, MAX_MINUTES);
     const cap = Math.min(request.lease.max_minutes, kindCap);
     if (m.grant.minutes < 1 || m.grant.minutes > cap) return reject('minutes_out_of_range');
   }
@@ -400,7 +442,7 @@ function effectiveExpiry({ verifiedAt, minutes, resumeOf = null }) {
 
 module.exports = {
   LEASE_LIMITS, STATES, REQUEST_TTL_MS, VIEW_MAX_BYTES, CHECK_OF, CONTACT_TOKEN_RE, LISTING_MAX, LIST_NONCE_RE: NONCE_RE, newContactToken,
-  MAX_MINUTES, TAKE_MAX_MINUTES, LEASE_KINDS, SITE_RE, VALIDATORS, checkLease,
+  MAX_MINUTES, TAKE_MAX_MINUTES, LEASE_KINDS, TASK_ALLOWS, TASK_USD_MIN, TASK_USD_MAX, SITE_RE, VALIDATORS, checkLease,
   leaseHash, buildLeaseRequest, buildLeaseStatus, buildLeaseView, buildLeaseListing, isEnrolledDevice, offLeaseListing,
   verifyLeaseGrant, verifyLeaseRevoke, verifyLeaseWatch, verifyLeaseView, verifyLeaseListing, effectiveExpiry
 };

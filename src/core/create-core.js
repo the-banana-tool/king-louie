@@ -2349,6 +2349,8 @@ function createCore(deps = {}) {
       // node's own (demo takes spec §7.2), handed on to this run's children.
       takePolicy: executorOptions.takePolicy || null,
       nodeLocalOrigin: executorOptions.nodeLocalOrigin !== false,
+      // A task's policy (tasks spec §4.6), handed on likewise.
+      taskPolicy: executorOptions.taskPolicy || null,
       // The turn's frozen models, handed on to this run's children (§6.6).
       turnModels: executorOptions.turnModels || null,
       // The run's egress policy (spec 2026-10-13 §7.1): the snapshot's, else
@@ -2481,6 +2483,21 @@ function createCore(deps = {}) {
 
     // Phone mode: tier decisions and executions go to the audit ledger.
     seam.attach(executor);
+
+    // What a task's manager watches of its own turn. A listener that throws
+    // changes nothing about the call.
+    const toolEvents = executorOptions.toolEvents;
+    if (toolEvents) {
+      const report = (name, payload) => {
+        try {
+          if (typeof toolEvents[name] === 'function') toolEvents[name](payload);
+        } catch (err) {
+          log.warn('tool event listener failed', { event: name, error: err?.message ?? String(err) });
+        }
+      };
+      executor.on('preExecute', (evt) => report('pre', evt));
+      executor.on('postExecute', (evt) => report('post', evt));
+    }
 
     if (event?.sender) {
       executor.on('approvalRequired', ({ toolName, parameters, resolve }) => {
@@ -2801,6 +2818,11 @@ function createCore(deps = {}) {
         // A delegate session's take holder and origin locality (demo takes §7.2).
         ...(runtimeOptions.takePolicy ? { takePolicy: runtimeOptions.takePolicy } : {}),
         ...(runtimeOptions.nodeLocalOrigin === false ? { nodeLocalOrigin: false } : {}),
+        // A task's policy (tasks spec §4.6) and its turn's tool events.
+        ...(runtimeOptions.taskPolicy ? { taskPolicy: runtimeOptions.taskPolicy } : {}),
+        ...(runtimeOptions.toolEvents ? { toolEvents: runtimeOptions.toolEvents } : {}),
+        // A task's run: no list, rule or quote lifts a prompt, whatever remoteApprovals says.
+        ...(runtimeOptions.denyAutoApproval === true ? { denyAutoApproval: true } : {}),
         // The run's models reach its own children in turn (§6.6).
         turnModels,
         // So does the top-level reply's sub-agent cost sink (§10).
@@ -3068,6 +3090,13 @@ function createCore(deps = {}) {
               || (options.executorOptions && options.executorOptions.takePolicy) || null,
             nodeLocalOrigin: !((options.approvalRequester && options.approvalRequester.nodeLocalOrigin === false)
               || (options.executorOptions && options.executorOptions.nodeLocalOrigin === false)),
+            // A task's policy, which a child is held to (tasks spec §4.6); the
+            // tool events are the turn's own, so a child does not report them.
+            taskPolicy: (options.approvalRequester && options.approvalRequester.taskPolicy)
+              || (options.executorOptions && options.executorOptions.taskPolicy) || null,
+            toolEvents: (options.executorOptions && options.executorOptions.toolEvents) || null,
+            denyAutoApproval: (options.approvalRequester && options.approvalRequester.denyAutoApproval === true)
+              || (options.executorOptions && options.executorOptions.denyAutoApproval === true),
             // A child of a chat turn runs on that turn's frozen models (§6.6),
             // carried on the rethreaded requester as chatId-like run state;
             // with no parent turn, the default profile applies (§12).
@@ -3076,7 +3105,8 @@ function createCore(deps = {}) {
             egress: (options.approvalRequester && options.approvalRequester.egress) ?? null,
             // A sub-agent's calls roll up into the turn's reply (spec §10);
             // a detached run (BackgroundTask) outlives the turn, so it never does.
-            onSubagentLlm: options.detached === true ? null : ((options.approvalRequester && options.approvalRequester.onSubagentLlm) || null)
+            onSubagentLlm: options.detached === true ? null : ((options.approvalRequester && options.approvalRequester.onSubagentLlm)
+              || (options.executorOptions && options.executorOptions.onSubagentLlm) || null)
           }
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {

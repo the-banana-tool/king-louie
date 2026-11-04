@@ -467,17 +467,17 @@ FCM data, every value a string:
 
 | Field | Value |
 |---|---|
-| `k` | `approval`, `question`, `lease`, `pairing`, `alert`; `session_ended`, `session_paused` (lease-v1 §4, `push.notify`); `test` (`king-louie-service relay push-test`) |
-| `rid` | the item's id: `request_id` (approval, lease), the question's token, the pairing or alert id, the `lease_id` (session kinds), a random id (test) |
+| `k` | `approval`, `question`, `lease`, `pairing`, `alert`; `session_ended`, `session_paused` (lease-v1 §4, `push.notify`); `task_ended` (a task ended, `push.notify`); `test` (`king-louie-service relay push-test`) |
+| `rid` | the item's id: `request_id` (approval, lease), the question's token, the pairing or alert id, the `lease_id` (session kinds), the `task_id` (`task_ended`), a random id (test) |
 | `n` | the node's name, control and format characters stripped, capped at 40; empty when unknown |
 | `c` | only on a coalesced push: how many items it stands for, `2` to `999` |
 
-Nothing else: no text of the action, no case, app, site or take name, no
+Nothing else: no text of the action, no case, app, site, task or take name, no
 reason code, no time left. `message.submit`'s `push` parameter still takes
-only the six kinds above; the session kinds come only from `push.notify`, and
+only the six kinds above; the session kinds and `task_ended` come only from `push.notify`, and
 `test` only from the command.
 
-- **Dedupe**, per device, by (node, kind, id): `session_ended` 24 hours,
+- **Dedupe**, per device, by (node, kind, id): `session_ended` and `task_ended` 24 hours,
   `session_paused` 2 minutes, every other kind 10 minutes; `test` never. At
   most 2,048 keys per relay, oldest out, in memory (a restart can repeat one
   push).
@@ -489,7 +489,7 @@ only the six kinds above; the session kinds come only from `push.notify`, and
   leaves; past that a push is dropped with one `warn` per device per hour.
 - **`android.ttl`**: the seconds to `expires_at` when the push has one (an
   approval, a paused lease's own expiry), else 3,600 s for `session_ended`
-  and 300 s for the rest. Priority `HIGH`.
+  and `task_ended` and 300 s for the rest. Priority `HIGH`.
 - **Dropped tokens**: FCM `404 UNREGISTERED` and `403 SENDER_ID_MISMATCH` (a
   token of another Firebase project) drop the device's token; a `400` never
   does. The app registers again at its next cold start or token rotation.

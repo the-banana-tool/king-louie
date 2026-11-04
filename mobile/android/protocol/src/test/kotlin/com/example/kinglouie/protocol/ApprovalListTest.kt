@@ -167,6 +167,59 @@ class ApprovalListTest {
         assertEquals(review, ApprovalList.build(input(leaseRequests = listOf(leaseRequest("c", 1000)), overflowing = setOf("lease-request:c"))).rows.single().buttons)
     }
 
+    private fun taskRequest(id: String, allows: List<String> = listOf("browser-act"), limits: List<String> = emptyList()) = ApprovalList.LeaseRequestItem(
+        LeaseRequest(
+            requestId = id, leaseId = "lease-$id", nodeId = gpu.id, nodeName = "signed-name", jobId = "chat:c-1", apps = emptyList(), maxMinutes = 20,
+            reason = "Find a dentist", resumes = null, limits = limits, originClient = "claude.ai", leaseHash = "h", nonce = "n",
+            createdAt = "2027-01-15T08:00:00.000Z", expiresAt = "2027-01-15T08:05:00.000Z", kind = "task", name = "Find a dentist",
+            sites = listOf("*.example.com"), unattended = true, allows = allows, usd = 2
+        ),
+        nodeName = gpu.name, timeLeftMs = 1000
+    )
+
+    /** One press: the row is the whole card, on the pinned node's name, with Allow under what it signs. */
+    @Test
+    fun aTaskRequestRowIsTheWholeCard() {
+        val row = ApprovalList.build(input(leaseRequests = listOf(taskRequest("t")))).rows.single()
+        assertEquals(ApprovalList.Kind.LEASE_REQUEST, row.kind)
+        assertEquals("Task", row.label)
+        assertEquals("Find a dentist · 20 min · up to \$2", row.summary)
+        assertEquals(
+            listOf("Task: Find a dentist", "Sites: *.example.com", "May: click and type in your signed-in browser", "For: 20 minutes", "Spend up to \$2", "Node: gpu-box"),
+            row.cardLines
+        )
+        assertEquals(listOf(ApprovalList.Button.APPROVE, ApprovalList.Button.DENY), row.buttons)
+        val readOnly = ApprovalList.build(input(leaseRequests = listOf(taskRequest("r", allows = emptyList())))).rows.single()
+        assertTrue("May: read only" in readOnly.cardLines)
+        // Logins and a shell are on the card it signs, so they ask for no second screen; a limit's warning still does.
+        assertEquals(listOf(ApprovalList.Button.APPROVE, ApprovalList.Button.DENY), ApprovalList.build(input(leaseRequests = listOf(taskRequest("l", allows = listOf("logins", "shell"))))).rows.single().buttons)
+        assertEquals(listOf(ApprovalList.Button.REVIEW, ApprovalList.Button.DENY), ApprovalList.build(input(leaseRequests = listOf(taskRequest("w", limits = listOf("no_lock_detect"))))).rows.single().buttons)
+        // Every other kind has no card lines.
+        assertTrue(ApprovalList.build(input(leaseRequests = listOf(leaseRequest("a", 1000)))).rows.single().cardLines.isEmpty())
+    }
+
+    /** No live view: a task has no frames. The row says what runs, and its Stop is the lease's revoke. */
+    @Test
+    fun aRunningTaskRow() {
+        val row = ApprovalList.build(input(runningLeases = listOf(lease("l1", "active", kind = "task", unattended = true, name = "Find a dentist")))).rows.single()
+        assertEquals(ApprovalList.Kind.RUNNING_LEASE, row.kind)
+        assertEquals("Task", row.label)
+        assertEquals("Task on gpu-box: Find a dentist", row.summary)
+        assertEquals(listOf(ApprovalList.Button.STOP), row.buttons)
+        assertFalse(row.hasDetail)
+        val theirs = ApprovalList.build(input(runningLeases = listOf(lease("l2", "active", grantedBy = "d-other", kind = "task", unattended = true, name = "Find a dentist")))).rows.single()
+        assertEquals("Granted by another phone (d-other)", theirs.detail)
+        val waiting = ApprovalList.build(input(runningLeases = listOf(lease("l3", "pending", grantedBy = null, kind = "task", unattended = true, name = "Find a dentist")))).rows.single()
+        assertEquals(Leases.requestWaitingTitle("gpu-box"), waiting.summary)
+        assertEquals(Leases.TASK_REQUEST_WAITING_DETAIL, waiting.detail)
+        assertFalse(waiting.hasDetail)
+        assertEquals(listOf(ApprovalList.Button.STOP), waiting.buttons)
+        assertTrue(ApprovalList.build(input(runningLeases = listOf(lease("l4", "ended", kind = "task", unattended = true, name = "Find a dentist")))).rows.isEmpty())
+        // The other kinds keep their detail.
+        assertTrue(ApprovalList.build(input(runningLeases = listOf(lease("l5", "active")))).rows.single().hasDetail)
+        assertTrue(ApprovalList.build(input(runningLeases = listOf(lease("l6", "active", kind = "take", unattended = true, name = "Demo")))).rows.single().hasDetail)
+    }
+
     @Test
     fun clientConnectionRow() {
         val row = ApprovalList.build(input(clientConnections = listOf(grant(90_000)))).rows.single()

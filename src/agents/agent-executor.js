@@ -98,7 +98,8 @@ class AgentExecutor {
     const loop = new AgentLoop(this.provider, this.toolExecutor, {
       maxIterations: options.maxIterations || agent.maxIterations,
       usageTracker: this.usageTracker,
-      onUsageRecorded: this.onUsageRecorded,
+      // A run's own hook (the adapter hands one on: a task's spend), else the executor's.
+      onUsageRecorded: typeof options.onUsageRecorded === 'function' ? options.onUsageRecorded : this.onUsageRecorded,
       prompter: this.prompter || undefined,
       ...(this.failoverPolicy ? { failoverPolicy: this.failoverPolicy } : {}),
       // Fleet stage 4 §3.8: cancel_job aborts a delegate turn, tearing down

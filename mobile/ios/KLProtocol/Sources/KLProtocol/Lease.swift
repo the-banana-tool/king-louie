@@ -36,22 +36,27 @@ public struct LeaseRequest: Equatable, Identifiable {
     public let nonce: String
     public let createdAt: String
     public let expiresAt: String
-    /// Revised 2026-10-24 (agent-driven demo takes): `computer_use` or `take`.
+    /// Revised 2026-10-24 (agent-driven demo takes): `computer_use` or `take`; revised 2026-11-03: or `task`.
     public let kind: String
-    /// A take's name (one plain line, 1–60 characters); nil for computer_use.
+    /// A take's or a task's name (one plain line, 1–60 characters); nil for computer_use.
     public let name: String?
-    /// The hosts a take may visit; empty for computer_use.
+    /// The hosts a take may visit, or a task may act on (a task may have none); empty for computer_use.
     public let sites: [String]
     /// A take's browser allowance: nil when it is `true` (browser actions on
     /// its sites), else the browser actions it may use. nil for computer_use.
     public let browserActions: [String]?
     /// Whether a take may fill credentials from the vault; false for computer_use.
     public let credentials: Bool
-    /// Whether a take runs with no contact window; false for computer_use.
+    /// Whether a take runs with no contact window (a task always does); false for computer_use.
     public let unattended: Bool
+    /// Revised 2026-11-03 (tasks stage 1): what a task may do (`taskAllows`, sorted; empty on the card that raises a look-only task's spend). Empty for the other kinds.
+    public let allows: [String]
+    /// The most a task may spend, in whole dollars (2–500); 0 for the other kinds.
+    public let usd: Int
 
     public var isResume: Bool { resumes != nil }
     public var isTake: Bool { kind == "take" }
+    public var isTask: Bool { kind == "task" }
 
     /// nil unless `message` is a complete kl.lease.request whose lease_hash is the hash of its lease,
     /// and whose lease has exactly the keys of its kind (`Leases.isLease`).
@@ -64,13 +69,18 @@ public struct LeaseRequest: Equatable, Identifiable {
               let expiresAt = message["expires_at"]?.stringValue,
               Leases.isLease(lease), let kind = lease["kind"]?.stringValue, let jobId = lease["job_id"]?.stringValue,
               let maxMinutes = lease["max_minutes"]?.intValue,
-              let reason = lease["reason"]?.stringValue, let appList = lease["apps"]?.arrayValue, !appList.isEmpty,
+              let reason = lease["reason"]?.stringValue,
               Digest.sha256B64url(JCS.data(lease)) == leaseHash else { return nil }
+        // A task has no apps; every other kind has at least one.
+        let task = kind == "task"
         var apps: [LeaseApp] = []
-        for a in appList {
-            guard let id = a["id"]?.stringValue, let name = a["name"]?.stringValue, let path = a["path"]?.stringValue,
-                  let procs = a["processes"]?.arrayValue else { return nil }
-            apps.append(LeaseApp(id: id, name: name, path: path, processes: procs.compactMap { $0.stringValue }))
+        if !task {
+            guard let appList = lease["apps"]?.arrayValue, !appList.isEmpty else { return nil }
+            for a in appList {
+                guard let id = a["id"]?.stringValue, let name = a["name"]?.stringValue, let path = a["path"]?.stringValue,
+                      let procs = a["processes"]?.arrayValue else { return nil }
+                apps.append(LeaseApp(id: id, name: name, path: path, processes: procs.compactMap { $0.stringValue }))
+            }
         }
         self.requestId = requestId
         self.leaseId = leaseId
@@ -89,12 +99,14 @@ public struct LeaseRequest: Equatable, Identifiable {
         self.expiresAt = expiresAt
         self.kind = kind
         let take = kind == "take"
-        self.name = take ? lease["name"]?.stringValue : nil
-        self.sites = take ? (lease["sites"]?.arrayValue ?? []).compactMap { $0.stringValue } : []
+        self.name = take || task ? lease["name"]?.stringValue : nil
+        self.sites = take || task ? (lease["sites"]?.arrayValue ?? []).compactMap { $0.stringValue } : []
         let browserList: [JSONValue]? = take ? lease["browser"]?.arrayValue : nil
         self.browserActions = browserList.map { list in list.compactMap { $0.stringValue } }
         self.credentials = take && lease["credentials"]?.boolValue == true
-        self.unattended = take && lease["unattended"]?.boolValue == true
+        self.unattended = (take || task) && lease["unattended"]?.boolValue == true
+        self.allows = task ? (lease["allows"]?.arrayValue ?? []).compactMap { $0.stringValue } : []
+        self.usd = task ? (lease["usd"]?.intValue ?? 0) : 0
     }
 }
 
@@ -116,8 +128,8 @@ public struct LeaseStatus: Equatable {
     public let grantedByDevice: String?
     public let grantedByName: String?
     /// Revised 2026-10-24: the lease's kind, whether it runs unattended
-    /// (always false for computer_use), and a take's name (nil for
-    /// computer_use). A status without them, or whose three do not agree, is
+    /// (always false for computer_use), and a take's or a task's name (nil
+    /// for computer_use). A status without them, or whose three do not agree, is
     /// not read (the node's VALIDATORS['kl.lease.status']).
     public let kind: String
     public let unattended: Bool
@@ -128,8 +140,8 @@ public struct LeaseStatus: Equatable {
               let nodeId = message["node_id"]?.stringValue, let seq = message["seq"]?.intValue,
               let state = message["state"]?.stringValue, let locked = message["locked"]?.boolValue,
               let kind = message["kind"]?.stringValue, Leases.leaseKinds.contains(kind),
-              let unattended = message["unattended"]?.boolValue, kind == "take" || !unattended,
-              let nameValue = message["name"], (kind == "take" ? Leases.isTakeName(nameValue) : nameValue.isNull) else { return nil }
+              let unattended = message["unattended"]?.boolValue, kind != "computer_use" || !unattended,
+              let nameValue = message["name"], (kind == "computer_use" ? nameValue.isNull : Leases.isTakeName(nameValue)) else { return nil }
         self.kind = kind
         self.unattended = unattended
         self.name = nameValue.stringValue
@@ -237,12 +249,15 @@ public enum Leases {
     /// Under that row.
     public static let requestWaitingDetail = "Its computer says a request for computer use is waiting for a phone's answer. This phone does not remember allowing it. An Allow signed before this app was restarted, or on another phone, could still reach it. Stop cancels the request."
 
+    /// The same, for a task's lease.
+    public static let taskRequestWaitingDetail = "Its computer says a request for a task is waiting for a phone's answer. This phone does not remember allowing it. An Allow signed before this app was restarted, or on another phone, could still reach it. Stop cancels the request."
+
     /// What the row of a pending lease is called, and what is said under it.
     public static func pendingTitle(nodeName: String, signedGrant: Bool) -> String {
         signedGrant ? mayStillStartTitle(nodeName: nodeName) : requestWaitingTitle(nodeName: nodeName)
     }
 
-    public static func pendingDetail(signedGrant: Bool) -> String { signedGrant ? mayStillStartDetail : requestWaitingDetail }
+    public static func pendingDetail(signedGrant: Bool, task: Bool = false) -> String { signedGrant ? mayStillStartDetail : (task ? taskRequestWaitingDetail : requestWaitingDetail) }
 
     /// Whether a lease that an accepted listing names gets a banner row
     /// for being pending. Nothing this phone remembers decides it: a
@@ -291,14 +306,21 @@ public enum Leases {
 
     // MARK: the lease, by kind (revised 2026-10-24; checkLease in src/gui/lease-protocol.js)
 
-    /// The most minutes a computer_use lease asks for (MAX_MINUTES), and a take (TAKE_MAX_MINUTES).
+    /// The most minutes a computer_use lease asks for (MAX_MINUTES), and a take or a task (TAKE_MAX_MINUTES).
     public static let maxMinutes = 60
     public static let takeMaxMinutes = 240
-    static let leaseKinds = ["computer_use", "take"]
+    static let leaseKinds = ["computer_use", "take", "task"]
+
+    /// Revised 2026-11-03 (tasks stage 1): what a task may do, and what it may spend in whole dollars.
+    public static let taskAllows = ["browser-act", "files-write", "logins", "shell"]
+    public static let taskUsdMin = 2
+    public static let taskUsdMax = 500
+
     /// A lease has exactly the keys of its kind (LEASE_KEYS).
     static let leaseKeys: [String: [String]] = [
         "computer_use": ["kind", "job_id", "apps", "max_minutes", "reason", "resumes", "limits"],
-        "take": ["kind", "job_id", "name", "sites", "apps", "browser", "credentials", "max_minutes", "unattended", "reason", "resumes", "limits"]
+        "take": ["kind", "job_id", "name", "sites", "apps", "browser", "credentials", "max_minutes", "unattended", "reason", "resumes", "limits"],
+        "task": ["kind", "job_id", "name", "sites", "allows", "max_minutes", "usd", "unattended", "reason", "resumes", "limits"]
     ]
     static let leaseLimits = ["no_lock_detect", "no_human_yield"]
 
@@ -349,7 +371,7 @@ public enum Leases {
         return true
     }
 
-    /// A take's name: 1–60 characters, one plain line.
+    /// A take's or a task's name: 1–60 characters, one plain line (checkLeaseName).
     static func isTakeName(_ v: JSONValue?) -> Bool {
         guard let s = v?.stringValue, !s.isEmpty, Rules.withinLength(v, 60) else { return false }
         return isPlainLine(s)
@@ -372,38 +394,108 @@ public enum Leases {
         return !browser.isEmpty
     }
 
-    /// checkLease: exactly the keys of its kind; a job; 1–8 apps, each once;
-    /// max_minutes 1–60 (1–240 for a take); a reason; resumes null or a
-    /// lease id; the limits known, sorted, each once; and a take's own fields.
+    /// The fields only a task has beside its name (checkTaskFields): the
+    /// hosts it may act on (none for a shell-only grant), what it may do,
+    /// sorted, each once (empty only on the card that raises a look-only
+    /// task's spend), the most it may spend. Always unattended, and it never
+    /// resumes.
+    static func isTaskFields(_ l: [String: JSONValue]) -> Bool {
+        guard isTakeName(l["name"]), isStringList(l["sites"], 32, isSite),
+              // A class with no words on the card is not read: Allow signs what the card shows.
+              isStringList(l["allows"], taskAllows.count, { taskAllows.contains($0) && taskMayWords($0) != nil }),
+              let allows = l["allows"]?.arrayValue?.compactMap({ $0.stringValue }),
+              let usd = l["usd"], Rules.isInteger(usd), let dollars = usd.intValue, (taskUsdMin...taskUsdMax).contains(dollars),
+              l["unattended"]?.boolValue == true, l["resumes"]?.isNull == true else { return false }
+        for i in allows.indices.dropFirst() where !(allows[i - 1] < allows[i]) { return false }
+        return true
+    }
+
+    /// 1–8 apps, each once (checkApps).
+    static func isApps(_ v: JSONValue?) -> Bool {
+        guard let apps = v?.arrayValue, (1...8).contains(apps.count), apps.allSatisfy(isApp) else { return false }
+        return Set(apps.compactMap { $0["id"]?.stringValue }).count == apps.count
+    }
+
+    /// checkLease: exactly the keys of its kind; a job; 1–8 apps, each once
+    /// (a task has none); max_minutes 1–60 (1–240 for a take or a task); a
+    /// reason; resumes null or a lease id; the limits known, sorted, each
+    /// once; and a take's or a task's own fields.
     public static func isLease(_ v: JSONValue?) -> Bool {
         guard let l = v?.objectValue, let kind = l["kind"]?.stringValue, let keys = leaseKeys[kind], Rules.hasExactKeys(l, keys) else { return false }
         let take = kind == "take"
+        let task = kind == "task"
         guard let jobId = l["job_id"]?.stringValue, !jobId.isEmpty, Rules.withinLength(l["job_id"], 200),
-              let apps = l["apps"]?.arrayValue, (1...8).contains(apps.count), apps.allSatisfy(isApp),
-              Set(apps.compactMap { $0["id"]?.stringValue }).count == apps.count,
+              task || isApps(l["apps"]),
               let mm = l["max_minutes"], Rules.isInteger(mm), let minutes = mm.intValue,
-              (1...(take ? takeMaxMinutes : maxMinutes)).contains(minutes),
+              (1...(kind == "computer_use" ? maxMinutes : takeMaxMinutes)).contains(minutes),
               let reason = l["reason"]?.stringValue, !reason.isEmpty, Rules.withinLength(l["reason"], 280),
               l["resumes"]?.isNull == true || Rules.isUuidV4(l["resumes"]),
               isStringList(l["limits"], leaseLimits.count, { leaseLimits.contains($0) }),
               let limits = l["limits"]?.arrayValue?.compactMap({ $0.stringValue }) else { return false }
         for i in limits.indices.dropFirst() where !(limits[i - 1] < limits[i]) { return false }
-        return !take || isTakeFields(l)
+        return (!take || isTakeFields(l)) && (!task || isTaskFields(l))
     }
 
     /// The request's own apps, in its order, kept only if the owner left them on.
     /// The minutes are at most the request's, and never past the kind's cap
-    /// (60, or 240 for a take); the admin's own caps are the node's to check.
+    /// (60, or 240 for a take or a task); the admin's own caps are the node's
+    /// to check. A task's card has no apps and no choice of minutes, and Allow
+    /// signs what it shows: no apps, and exactly its max_minutes.
     public static func grant(to request: LeaseRequest, apps: [String], minutes: Int, deviceId: String, signedAt: String) throws -> JSONValue {
         let chosen = Set(apps)
-        guard !chosen.isEmpty, chosen.isSubset(of: Set(request.apps.map { $0.id })) else { throw ProtocolError.malformed("pick at least one of the requested apps") }
-        let cap = min(request.maxMinutes, request.isTake ? takeMaxMinutes : maxMinutes)
+        if request.isTask {
+            guard chosen.isEmpty else { throw ProtocolError.malformed("a task's grant names no apps") }
+            guard minutes == request.maxMinutes else { throw ProtocolError.malformed("a task's grant is for the minutes its card shows") }
+        } else {
+            guard !chosen.isEmpty, chosen.isSubset(of: Set(request.apps.map { $0.id })) else { throw ProtocolError.malformed("pick at least one of the requested apps") }
+        }
+        let cap = min(request.maxMinutes, request.kind == "computer_use" ? maxMinutes : takeMaxMinutes)
         guard cap >= 1, (1...cap).contains(minutes) else { throw ProtocolError.malformed("minutes must be 1–\(cap)") }
         let ordered = request.apps.map { $0.id }.filter { chosen.contains($0) }
         return decision(request, decision: "grant",
                         grant: .object(["apps": .array(ordered.map { JSONValue.string($0) }), "minutes": .number(String(minutes))]),
                         deviceId: deviceId, signedAt: signedAt)
     }
+
+    /// What a task may do, in the card's words and order (tasks stage 1 spec §4.6).
+    static let taskMay: [(allow: String, words: String)] = [
+        (allow: "browser-act", words: "click and type in your signed-in browser"),
+        (allow: "logins", words: "sign in with saved logins"),
+        (allow: "shell", words: "run shell commands"),
+        (allow: "files-write", words: "write files")
+    ]
+
+    /// A class's words on the card; nil for one that has none, which `isLease` refuses.
+    static func taskMayWords(_ allow: String) -> String? { taskMay.first(where: { $0.allow == allow })?.words }
+
+    /// A task's card (spec §4.6): the host's lines, in this order, from what
+    /// the pinned node signed. Allow signs exactly this, so nothing is cut:
+    /// every site is shown. `nodeName` is the pinned name when the screen has
+    /// it; the node's own word for itself otherwise.
+    public static func taskLines(_ request: LeaseRequest, nodeName: String? = nil) -> [String] {
+        var lines: [String] = []
+        lines.append("Task: " + Display.escape(request.name ?? ""))
+        if !request.sites.isEmpty { lines.append("Sites: " + request.sites.map { Display.escape($0) }.joined(separator: ", ")) }
+        let may = taskMay.filter { request.allows.contains($0.allow) }.map { $0.words }
+        lines.append(may.isEmpty ? "May: read only" : "May: " + may.joined(separator: ", "))
+        lines.append(request.maxMinutes == 1 ? "For: 1 minute" : "For: \(request.maxMinutes) minutes")
+        lines.append("Spend up to $\(request.usd)")
+        lines.append("Node: " + Display.escape(nodeName ?? request.nodeName))
+        return lines
+    }
+
+    /// Whether a status message its pinned node signed says it is a task's.
+    /// Read from the message, so a task whose name cannot be read is still a task.
+    public static func isTaskStatus(_ message: JSONValue?) -> Bool { message?["kind"]?.stringValue == "task" }
+
+    /// The name Stop's prompt may say: only one that passes the plain-line check, else nil.
+    public static func taskStopName(_ message: JSONValue?) -> String? {
+        guard let name = message?["name"], isTakeName(name) else { return nil }
+        return name.stringValue
+    }
+
+    /// A running task's row, with its Stop.
+    public static func taskTitle(nodeName: String, name: String) -> String { "Task on \(Display.escape(nodeName)): \(Display.escape(name))" }
 
     public static func deny(_ request: LeaseRequest, deviceId: String, signedAt: String) -> JSONValue {
         decision(request, decision: "deny", grant: .null, deviceId: deviceId, signedAt: signedAt)

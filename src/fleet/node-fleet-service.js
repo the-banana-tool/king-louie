@@ -26,7 +26,12 @@ const FLEET_METHODS = Object.freeze({
   'fleet.send_to_job': 'send_to_job',
   'fleet.get_job': 'get_job',
   'fleet.get_job_logs': 'get_job_logs',
-  'fleet.cancel_job': 'cancel_job'
+  'fleet.cancel_job': 'cancel_job',
+  'fleet.run_task': 'run_task',
+  'fleet.get_task': 'get_task',
+  'fleet.send_to_task': 'send_to_task',
+  'fleet.cancel_task': 'cancel_task',
+  'fleet.list_tasks': 'list_tasks'
 });
 
 const jsonBytes = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
@@ -81,6 +86,45 @@ function tailWithin(lines, maxBytes) {
     used += size;
   }
   return { logs: out, truncated: out.length < lines.length };
+}
+
+// A wrapped line, shorter by `over` bytes.
+function shortenWrapped(wrapped, over) {
+  const line = wrapped.lines[0];
+  return untrustedOutput([cutLine(line, Math.max(256, jsonBytes(line) - over))]);
+}
+
+// A task too big for the page is cut like a log line, its answer first, so
+// get_task never refuses a task for good because its answer is large.
+function fitTaskView(view, maxBytes) {
+  const limit = maxBytes - RESERVE_BYTES;
+  let out = view;
+  if (out.answer && jsonBytes(out) > limit) out = { ...out, answer: { ...out.answer, text: shortenWrapped(out.answer.text, jsonBytes(out) - limit) } };
+  if (out.text && jsonBytes(out) > limit) out = { ...out, text: shortenWrapped(out.text, jsonBytes(out) - limit) };
+  return out;
+}
+
+const withoutWords = (view) => ({ ...view, text: null, answer: view.answer ? { ...view.answer, text: null } : null });
+
+// A list that does not fit the page: each row gets its share, then no row
+// keeps its words, then the oldest rows go (the list is newest first).
+// `left_out` says which of the last two happened, so a short list never reads
+// as all there is. The empty list with its marker always fits a page.
+function fitTaskList(list, maxBytes) {
+  const limit = maxBytes - RESERVE_BYTES;
+  if (jsonBytes(list) <= limit) return list;
+  const share = Math.floor(limit / list.tasks.length);
+  const shared = { ...list, tasks: list.tasks.map((view) => fitTaskView(view, share + RESERVE_BYTES)) };
+  if (jsonBytes(shared) <= limit) return shared;
+  const tasks = list.tasks.map(withoutWords);
+  const reply = (rows) => ({
+    ...list,
+    tasks: rows,
+    left_out: { words: true, tasks: tasks.length - rows.length, note: 'text and answer were left out of this page, and any tasks counted here. get_task reads one whole.' }
+  });
+  let rows = tasks;
+  while (rows.length > 0 && jsonBytes(reply(rows)) > limit) rows = rows.slice(0, -1);
+  return reply(rows);
 }
 
 const refusal = (code, message, extra = {}) => ({ ok: false, error: { code, message, ...extra } });
@@ -177,7 +221,7 @@ class NodeFleetService {
       node_id: this.nodeConfig.nodeId || null,
       name: this.nodeConfig.name,
       profile: this.nodeConfig.profile,
-      capabilities: this.nodeConfig.capabilities || [],
+      capabilities: this.handler.capabilitiesWith(this.handler.guiBlock()),
       catalog_digest: this.catalogDigest(),
       boot_id: this.bootId,
       version: this.version
@@ -316,6 +360,11 @@ class NodeFleetService {
       case 'delegate': return this.handler.call(tool, { machine, task: params.task, cwd: params.cwd === undefined ? null : params.cwd, request_id: params.request_id }, { origin });
       case 'send_to_job': return this.handler.call(tool, { job_id: params.job_id, message: params.message }, { origin });
       case 'cancel_job': return this.handler.call(tool, { job_id: params.job_id }, { origin });
+      case 'run_task': return fitTaskView(await this.handler.call(tool, { task: params.task, wait_ms: params.wait_ms, placement: params.placement }, { origin }), maxBytes);
+      case 'get_task': return fitTaskView(await this.handler.call(tool, { task_id: params.task_id, seen_seq: params.seen_seq, wait_ms: params.wait_ms }, { origin }), maxBytes);
+      case 'send_to_task': return fitTaskView(await this.handler.call(tool, { task_id: params.task_id, message: params.message, wait_ms: params.wait_ms }, { origin }), maxBytes);
+      case 'cancel_task': return fitTaskView(await this.handler.call(tool, { task_id: params.task_id }, { origin }), maxBytes);
+      case 'list_tasks': return fitTaskList(await this.handler.call(tool, { state: params.state }, { origin }), maxBytes);
       default: throw new Error(`no fleet tool ${tool}`);
     }
   }
@@ -348,4 +397,4 @@ class NodeFleetService {
   }
 }
 
-module.exports = { NodeFleetService, FLEET_METHODS, MAX_BYTES_DEFAULT, GET_JOB_LOG_TAIL_BYTES, pageLines, cutLine };
+module.exports = { NodeFleetService, FLEET_METHODS, MAX_BYTES_DEFAULT, GET_JOB_LOG_TAIL_BYTES, pageLines, cutLine, fitTaskView, fitTaskList };

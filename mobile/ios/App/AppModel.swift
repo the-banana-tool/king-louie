@@ -424,11 +424,13 @@ final class AppModel: ObservableObject {
             if grant {
                 let message = try Leases.grant(to: item.request, apps: Array(apps), minutes: minutes, deviceId: key.deviceId, signedAt: signedAt)
                 let names = item.request.apps.filter { apps.contains($0.id) }.map { Self.promptText($0.name, 30) }.joined(separator: ", ")
-                envelope = try await key.signEnvelope(message, reason: "Allow computer use of \(names) on \(Self.promptText(item.nodeName, 30)) for \(minutes) min")
+                let what = item.request.isTask ? "this task: \(Self.promptText(item.request.name ?? "", 40))" : "computer use of \(names)"
+                let spend = item.request.isTask ? ", up to $\(item.request.usd)" : ""
+                envelope = try await key.signEnvelope(message, reason: "Allow \(what) on \(Self.promptText(item.nodeName, 30)) for \(minutes) min\(spend)")
                 // Signed: from here on the lease may start, whatever the relay answers.
                 signedLeaseGrants[item.request.leaseId] = Timestamps.date(item.request.expiresAt) ?? Date.distantFuture
             } else {
-                envelope = try await key.signEnvelope(Leases.deny(item.request, deviceId: key.deviceId, signedAt: signedAt), reason: "Deny computer use on \(Self.promptText(item.nodeName, 30))")
+                envelope = try await key.signEnvelope(Leases.deny(item.request, deviceId: key.deviceId, signedAt: signedAt), reason: "\(item.request.isTask ? "Deny this task" : "Deny computer use") on \(Self.promptText(item.nodeName, 30))")
             }
             let result = try await client.leaseDecision("grant", leaseId: item.request.leaseId, envelope: envelope)
             let state = result?["state"]?.stringValue
@@ -443,7 +445,10 @@ final class AppModel: ObservableObject {
             }
             decidedLeaseRequests.insert(item.id)
             leaseRequests.removeAll { $0.id == item.id }
-            if grant, state == "active" {
+            if grant, item.request.isTask {
+                // A task has no live view: its banner row comes from the status its node signed for this answer.
+                noteListedLease(.object(["node_id": .string(item.request.nodeId), "status": result?["status"] ?? .null]), deviceId: key.deviceId)
+            } else if grant, state == "active" {
                 openLiveLease(nodeId: item.request.nodeId, leaseId: item.request.leaseId)
                 // The node's answer carries the status it signed for it, and with
                 // that the first contact token: the first watch can echo it.
@@ -754,14 +759,24 @@ final class AppModel: ObservableObject {
     func unattendedTake(_ lease: RunningLease) -> (name: String, ends: Date)? {
         guard lease.state != "pending", let signed = lease.status, let pin = state.nodes.first(where: { $0.id == lease.nodeId }),
               let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message),
-              status.leaseId == lease.leaseId, status.unattended, let name = status.name,
+              status.leaseId == lease.leaseId, status.kind == "take", status.unattended, let name = status.name,
               let ends = status.expiresAt.flatMap({ Timestamps.date($0) }) else { return nil }
         return (name: name, ends: ends)
     }
 
+    /// Revised 2026-11-03: a task's name, from the row's status, verified
+    /// again against the pinned node; nil for any other lease. A task has no
+    /// live view (no frames), so its row has no way to one.
+    func runningTask(_ lease: RunningLease) -> String? {
+        guard let signed = lease.status, let pin = state.nodes.first(where: { $0.id == lease.nodeId }),
+              let message = Leases.verifiedMessage(signed, pin: pin), let status = LeaseStatus(message: message),
+              status.leaseId == lease.leaseId, status.kind == "task" else { return nil }
+        return status.name
+    }
+
     /// Under the row of a pending lease: which of the two this phone knows.
     func pendingDetail(_ lease: RunningLease) -> String {
-        Leases.pendingDetail(signedGrant: signedLeaseGrants[lease.leaseId] != nil)
+        Leases.pendingDetail(signedGrant: signedLeaseGrants[lease.leaseId] != nil, task: runningTask(lease) != nil)
     }
 
     /// Beside Stop, for a lease another phone granted (R-F5-18); nil for this phone's own.
@@ -824,7 +839,16 @@ final class AppModel: ObservableObject {
         let leaseId = live.leaseId
         do {
             let message = Leases.revoke(nodeId: live.nodeId, leaseId: leaseId, deviceId: key.deviceId, nonce: Messages.randomNonce(), signedAt: Timestamps.string(client.now()))
-            let envelope = try await key.signEnvelope(message, reason: "Stop computer use on \(Self.promptText(live.nodeName, 30)) now")
+            // What it stops, from the status its node signed: a task by its checked name.
+            let signedStatus = live.lastStatus.flatMap { envelope in state.nodes.first(where: { $0.id == live.nodeId }).flatMap { Leases.verifiedMessage(envelope, pin: $0) } }
+            let node = Self.promptText(live.nodeName, 30)
+            let reason: String
+            if Leases.isTaskStatus(signedStatus) {
+                reason = Leases.taskStopName(signedStatus).map { "Stop this task: \(Self.promptText($0, 40)) on \(node)" } ?? "Stop this task on \(node)"
+            } else {
+                reason = "Stop computer use on \(node) now"
+            }
+            let envelope = try await key.signEnvelope(message, reason: reason)
             // Read again: the prompt took time.
             guard var current = liveLease, current.leaseId == leaseId, current.state != "ended", !current.revoking else { return }
             current.revoking = true
