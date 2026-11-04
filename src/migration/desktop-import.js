@@ -26,6 +26,8 @@ const MAX_BATCH_BYTES = 2 * 1024 * 1024;
 // goes alone in its own batch up to what a bridge frame or a CLI channel line can
 // carry. A message past this cannot be sent at all.
 const MAX_CHAT_PART_BYTES = LIMITS.frameBytes - 1024 * 1024;
+// What the node holds in memory for one chat while it assembles it.
+const MAX_CHAT_BYTES = 512 * 1024 * 1024;
 const IMPORTED_SETTINGS_KEYS = Object.freeze(['defaults', 'checkpoints', 'templateVariables', 'notifications', 'voice', 'cases']);
 // What a personal node takes besides (attach stage 2 spec C-9). It is the
 // owner's own machine and account, and the desktop has no core once it is
@@ -129,6 +131,7 @@ const PERSONAL_EXCLUDED = Object.freeze({
   workflows: 'Workflows do not move: they stay on this computer, and the node starts with none. Set them up again in Settings > Workflows on the node.',
   webhooks: 'Webhooks do not move: they stay on this computer. Set them up again in Settings > Webhooks on the node.'
 });
+const overCapNote = (c) => `chat "${String(c.title || c.id).slice(0, 80)}" is ${(c.overCapBytes / (1024 * 1024)).toFixed(1)} MB, over the ${MAX_CHAT_BYTES / (1024 * 1024)} MB a chat can move in. It does not move: it stays in this computer's copy and in the backup.`;
 const tooLargeNote = (c, exists) => `chat "${String(c.title || c.id).slice(0, 80)}" has a message of ${(c.tooLargeBytes / (1024 * 1024)).toFixed(1)} MB, too large to send to the node. ${exists ? 'The node already holds this chat, and it is left as it is.' : 'The chat moves without what that message holds, with a line saying so in its place.'} The whole message stays in this computer's copy and in the backup.`;
 
 class ImportError extends Error {
@@ -179,8 +182,9 @@ function settingsWouldMove(settings) {
   return importedSettingsKeys('personal').filter((key) => settings[key] !== undefined).some((key) => {
     if (key === 'cases') return stable(withoutRoot(merged.cases)) !== stable(withoutRoot(base.cases));
     if (key !== 'models') return stable(merged[key]) !== stable(base[key]);
-    const { profiles = [], defaultProfileId: _id, ...rest } = withoutLocalServers(merged.models);
-    const { profiles: _p, defaultProfileId: _d, ...plain } = withoutLocalServers(base.models);
+    // models.kingLouie is the suggester's, written with nobody choosing anything.
+    const { profiles = [], defaultProfileId: _id, kingLouie: _k, ...rest } = withoutLocalServers(merged.models);
+    const { profiles: _p, defaultProfileId: _d, kingLouie: _b, ...plain } = withoutLocalServers(base.models);
     return profiles.length > 1 || stable(rest) !== stable(plain);
   });
 }
@@ -548,8 +552,10 @@ class DesktopImporter {
     onPathWritten = () => {},
     cleanupStaging = true,
     writeGuard = null,
-    hosting = 'service'
+    hosting = 'service',
+    maxChatBytes = MAX_CHAT_BYTES
   }) {
+    this.maxChatBytes = maxChatBytes;
     this.context = context;
     this.personal = hosting === 'personal';
     this.settingsKeys = importedSettingsKeys(hosting);
@@ -757,6 +763,10 @@ class DesktopImporter {
       if (!c || typeof c.id !== 'string' || !c.id) continue;
       // Shown before the press, and landed as far as it can be. It is not a write
       // action, so nothing here counts it as moved and no check asks for it.
+      if (this.personal && Number.isFinite(c.overCapBytes)) {
+        add('chat', c.id, 'needs-attention', overCapNote(c));
+        continue;
+      }
       if (this.personal && Number.isFinite(c.tooLargeBytes)) {
         const held = chats.some((x) => x.id === c.id || x.id === done('chat', c.id)?.targetKey);
         add('chat', c.id, 'needs-attention', tooLargeNote(c, held));
@@ -817,7 +827,7 @@ class DesktopImporter {
       // has the live one, and the two are meant to differ. Only if it is that case.
       // Before the checks below: this is what their words tell him to do.
       } else if (this.personal && c.movedElsewhere === true && nodeCaseId(path.join(root, dir)) === c.caseId) {
-        add('case', dir, 'needs-attention', MOVED_OUT_NOTE);
+        add('case', dir, 'needs-attention', done('case', dir)?.incomplete ? `${MOVED_OUT_NOTE}; its earlier landing was incomplete` : MOVED_OUT_NOTE);
       } else if (done('case', dir)?.incomplete) {
         add('case', dir, 'needs-attention', landedIncomplete(dir, await whatTheNodeAdded(path.join(root, dir), done('case', dir).landedFrom?.head, c.head)));
         items[items.length - 1].incomplete = true;
@@ -1147,8 +1157,10 @@ class DesktopImporter {
     if (!Number.isInteger(index) || !Number.isInteger(total) || total < 1 || index < 0 || index >= total || !Array.isArray(value.messages)) {
       throw new ImportError('BAD_VALUE', 'the chat part does not say where it belongs');
     }
-    const held = index === 0 ? { next: 0, total, head: null, messages: [] } : plan.chatParts.get(item.key);
+    const held = index === 0 ? { next: 0, total, head: null, messages: [], bytes: 0 } : plan.chatParts.get(item.key);
     if (!held || held.next !== index || held.total !== total) throw new ImportError('BAD_OFFSET', 'a part of this chat arrived out of order');
+    held.bytes += Buffer.byteLength(JSON.stringify(value));
+    if (held.bytes > this.maxChatBytes) throw new ImportError('CHAT_TOO_LARGE', `this chat is larger than the ${this.maxChatBytes} bytes one chat can move in`);
     const { chatPart: _part, messages, ...rest } = value;
     if (index === 0) held.head = rest;
     for (const message of messages) held.messages.push(message);
@@ -1601,6 +1613,7 @@ module.exports = {
   PLAN_TTL_MS,
   MAX_BATCH_BYTES,
   MAX_CHAT_PART_BYTES,
+  MAX_CHAT_BYTES,
   INSTALL_ID_RE,
   CASE_DIR_RE,
   isSkippedCaseFile,

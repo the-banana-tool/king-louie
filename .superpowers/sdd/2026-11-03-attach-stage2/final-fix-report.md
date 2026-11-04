@@ -110,11 +110,21 @@ RED/GREEN: `a status that fails before any good read draws the failure screen…
 - **Undecryptable key.** `setAsideUnreadableSecrets` at the plan: every stored key is tried; one that fails comes out of the inventory, so no plan holds it and verification cannot miss it. Its name only goes in **Stays on this computer** and `leftBehind`. Secure storage unavailable, or more than half failing, refuses `MIGRATION_SOURCE` with nothing moved. Tests in `tests/migration-oversize.test.js` on a real bridge: one of three, two of three, one of two (exactly half goes on), storage unavailable. RED first: 3 of the 4 failed (exactly half already passed).
 - **`skill:update`** uses `execFile` for `git pull` and npm. RED first: 6 failed in `skill:update`. GREEN: the named files plus the boundary test, 440 pass, 0 fail, 5 skipped.
 - **Second ruling:** the over-half rule applies only with at least 3 keys, since 1 of 1 would have refused for good. With 1 or 2 stored, a bad key is named and the move goes on; secure storage unavailable still refuses at any count. Tests: 1 of 1 and 2 of 2, both RED first.
+- **Re-review's last fixes**, RED first (10 failing, `red-last.log`):
+  1. The source's message limit is `MAX_CHAT_PART_BYTES` less the chat's head and 4 KiB. Boundary test through source and importer with a real 63 MiB message, at the limit and one byte past.
+  2. `MAX_CHAT_BYTES` 512 MiB on the source (`overCapBytes`, `needs-attention`, not landed, stays behind, mark goes on) and on the node's assembly. The desktop's in-memory read is in the CLAUDE.md residuals.
+  3. An empty store is not found; `models.kingLouie` does not count as the owner's settings.
+  4. An action that does not match `TASK_CALL` gives no `runs`.
+  5. A line that does not parse gives a fixed sentence, not `JSON.parse`'s message, which can quote chat text.
+  6. `MOVED_OUT_NOTE` adds "its earlier landing was incomplete".
+  7. The room check keeps a 64 MB margin.
 - Run after this: the importer, verify, controller and skill-handler test files, not the full suite, as ruled.
 
 ## Suites
 
-Run on the finished tree, before the commits split it (only this report changed after).
+Last run, after the re-review's fixes: `npm test` 12142 tests, 12046 pass, 0 fail, 0 cancelled, 95 skipped; `npm run test:e2e`, with `ELECTRON_RUN_AS_NODE` removed, 344 pass, 0 fail, 0 skipped (`stage2-last-npm.log`, `stage2-last-e2e.log`).
+
+Earlier run, before the rulings under "After the report":
 
 - `npm test`: 12127 tests, 12031 pass, 0 fail, 0 cancelled, 95 skipped, 1 todo. Exit 0.
 - `npm run test:e2e`, with `ELECTRON_RUN_AS_NODE` removed: 344 tests, 344 pass, 0 fail, 0 skipped. Exit 0.

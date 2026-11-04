@@ -1137,6 +1137,47 @@ describe('final review: findings 8, 11 and minors 13, 16', () => {
     assert.strictEqual(fs.existsSync(dest), false);
   });
 
+  it('the room check keeps a 64 MB margin', async () => {
+    const { parent, root } = fresh();
+    write(root, 'cases/big/data.bin', Buffer.alloc(3 * 1024 * 1024));
+    const MIB = 1024 * 1024;
+    const fsImpl = (mb) => ({ statfs: async () => ({ bavail: mb * MIB, bsize: 1 }) });
+    const dest = path.join(parent, 'backup');
+    await assert.rejects(backupProfile({ userDataDir: root, dest, fsImpl: fsImpl(40) }), { code: 'BACKUP_FAILED' });
+    assert.strictEqual(fs.existsSync(dest), false, 'room for the files, not for the margin');
+    assert.ok((await backupProfile({ userDataDir: root, dest, fsImpl: fsImpl(100) })).files >= 1);
+  });
+
+  it('an empty store offers no move: a run that made it and nothing else', async () => {
+    const { root } = fresh();
+    HistoryStore.open(path.join(root, 'history.sqlite')).close();
+    write(root, 'chat-data.json', JSON.stringify({ settings: {} }));
+    assert.strictEqual((await detectOldProfile(root)).found, false);
+  });
+
+  it('what the suggester wrote under models.kingLouie is not the owner choosing anything', async () => {
+    const { root } = fresh();
+    write(root, 'chat-data.json', JSON.stringify({ settings: { models: { kingLouie: { autoAccept: true, dismissedProposalHash: 'abc' } } } }));
+    assert.strictEqual((await detectOldProfile(root)).found, false);
+  });
+
+  it('a line from the child that does not parse is a fixed sentence, not JSON.parse\'s words', async () => {
+    const spawn = () => {
+      const { EventEmitter } = require('events');
+      const child = new EventEmitter();
+      child.stdout = Object.assign(new EventEmitter(), { setEncoding() {} });
+      child.stderr = new EventEmitter();
+      setImmediate(() => {
+        child.stdout.emit('data', 'KL_HISTORY_CHAT {"secret-text-from-a-chat\n');
+        child.emit('close', 0);
+      });
+      return child;
+    };
+    const out = await readHistoryApart({ userDataDir: 'C:\\p', spawn });
+    assert.doesNotMatch(out.attention[0].note, /secret-text|JSON|position/);
+    assert.match(out.attention[0].note, /could not be read/);
+  });
+
   it('a disk that will not say does not stop the backup', async () => {
     const { parent, root } = fresh();
     write(root, 'chat-data.json', JSON.stringify({ settings: {} }));

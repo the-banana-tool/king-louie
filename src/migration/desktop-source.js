@@ -15,7 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const { parseCaseYaml } = require('../cases/case-store');
 const { BUILTIN_IDS } = require('../cases/executors/builtins');
-const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS, MAX_CHAT_PART_BYTES } = require('./desktop-import');
+const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, caseTreeCounted, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS, MAX_CHAT_PART_BYTES, MAX_CHAT_BYTES } = require('./desktop-import');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 // A desktop store file or a case file bigger than this is refused rather
@@ -25,8 +25,17 @@ const arr = (v) => (Array.isArray(v) ? v : []);
 // What takes a message's place on the node when it cannot be sent at all.
 const TOO_LARGE_TEXT = 'This message was too large to move to King Louie Node. The whole message is in the old profile on this computer and in the backup.';
 const jsonBytes = (value) => Buffer.byteLength(JSON.stringify(value));
+// The node measures the whole batch: the message, the entry around it, `chatPart`, and
+// part 0's chat head. What a message may be here leaves room for all of that, or a
+// message just under the limit is refused there and holds the mark back for good.
+const BATCH_WRAPPER_BYTES = 4096;
+function messageLimit(chat, maxMessageBytes) {
+  const { messages: _messages, ...head } = chat;
+  return maxMessageBytes - jsonBytes(head) - BATCH_WRAPPER_BYTES;
+}
 function withoutTooLarge(chat, maxMessageBytes) {
-  const messages = chat.messages.map((m) => (jsonBytes(m) <= maxMessageBytes ? m : {
+  const limit = messageLimit(chat, maxMessageBytes);
+  const messages = chat.messages.map((m) => (jsonBytes(m) <= limit ? m : {
     ...(m.id ? { id: m.id } : {}), sender: m.sender, ...(m.timestamp ? { timestamp: m.timestamp } : {}), text: TOO_LARGE_TEXT
   }));
   return { ...chat, messages };
@@ -180,7 +189,7 @@ function createSafeReader({ root, platform = process.platform, fsImpl = fs, maxF
 // with a custom root gets them moved (attach stage 2 §6.5): the setting cannot be
 // changed from a window with no core, and the desktop never writes this profile's
 // stores. The CLI does not pass it.
-function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null, customRootEmpty = false, maxMessageBytes = MAX_CHAT_PART_BYTES }) {
+function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decrypt ? 'included' : 'needs-desktop', history = null, customRootEmpty = false, maxMessageBytes = MAX_CHAT_PART_BYTES, maxChatBytes = MAX_CHAT_BYTES }) {
   const attention = [];
   const readJson = (rel) => {
     const r = reader.readFile(rel);
@@ -339,8 +348,11 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     sourceVersion: null,
     chats: chats.map((c) => {
       // Only past the limit, so every other chat's entry is as it always was.
-      const largest = arr(c.messages).reduce((most, m) => Math.max(most, jsonBytes(m)), 0);
-      return { id: c.id, updatedAt: c.updatedAt || null, title: String(c.title || ''), ...(largest > maxMessageBytes ? { tooLargeBytes: largest } : {}) };
+      const sizes = arr(c.messages).map(jsonBytes);
+      const whole = sizes.reduce((sum, n) => sum + n, 0);
+      const largest = sizes.reduce((most, n) => Math.max(most, n), 0);
+      const past = whole > maxChatBytes ? { overCapBytes: whole } : (largest > messageLimit(c, maxMessageBytes) ? { tooLargeBytes: largest } : {});
+      return { id: c.id, updatedAt: c.updatedAt || null, title: String(c.title || ''), ...past };
     }),
     settingsKeys: Object.keys(settings).filter((k) => !['allowedDirectories', 'webSearch', 'imageGeneration'].includes(k)),
     userProfile: Boolean(chatData.userProfile),

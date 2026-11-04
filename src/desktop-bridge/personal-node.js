@@ -213,7 +213,8 @@ function createPersonalNodeRunner(deps = {}) {
     if (!task.program) return {};
     const facts = {
       program: task.program,
-      runs: sameFile(task.program, execPath) ? 'app' : 'folder',
+      // Only a call we wrote says what runs: anything else may be either.
+      ...(task.entry ? { runs: sameFile(task.program, execPath) ? 'app' : 'folder' } : {}),
       ...(task.entry ? { entry: task.entry } : {})
     };
     for (const file of [task.program, task.entry]) {

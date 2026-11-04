@@ -341,6 +341,13 @@ describe('what the task runs (attach stage 2 §6.8; read, never run)', () => {
     }
   });
 
+  it('an action we did not write says nothing of what it runs', async () => {
+    const stdout = xml().replace(/<Arguments>[^<]*<\/Arguments>/, '<Arguments>-File C:\\mine\\start.ps1</Arguments>');
+    const out = await runnerOver(stdout, { statFile: async () => ({}) }).queryTask({ me: ME });
+    assert.strictEqual(out.state, 'registered');
+    assert.ok(!('runs' in out));
+  });
+
   it('another account\'s task is not read further', async () => {
     let stats = 0;
     const out = await runnerOver(xml().replace(ME, 'S-1-5-21-9-9-9-9'), { statFile: async () => { stats += 1; return {}; } }).queryTask({ me: ME });

@@ -118,8 +118,8 @@ function readHistoryApart({ userDataDir, env = process.env, spawn = spawnDefault
       try {
         if (text.startsWith(CHAT_MARK)) chats.push(JSON.parse(text.slice(CHAT_MARK.length)));
         else if (text.startsWith(END_MARK)) end = JSON.parse(text.slice(END_MARK.length));
-      } catch (err) {
-        broken = err.message;
+      } catch {
+        broken = 'a line from the reader did not parse';
       }
     };
     child.stdout.setEncoding('utf8');

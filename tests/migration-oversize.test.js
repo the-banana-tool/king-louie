@@ -13,7 +13,7 @@ const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { createDesktopScope } = require('../src/desktop-bridge/desktop-scope');
 const { checkPath } = require('../src/desktop-bridge/check-path');
-const { DesktopImporter, buildImportTargets } = require('../src/migration/desktop-import');
+const { DesktopImporter, buildImportTargets, MAX_CHAT_PART_BYTES } = require('../src/migration/desktop-import');
 const { planBatches, readDesktopSource, createSafeReader } = require('../src/migration/desktop-source');
 const { loadDesktopSource } = require('../src/ipc/desktop-export');
 const { HistoryStore } = require('../src/history');
@@ -151,6 +151,32 @@ describe('a big chat over a real bridge', () => {
       assert.ok(!chat.messages[1].attachments || chat.messages[1].attachments.length === 0);
       const manifest = JSON.parse(fs.readFileSync(path.join(dataDir, 'imports', fs.readdirSync(path.join(dataDir, 'imports'))[0]), 'utf8'));
       assert.strictEqual(manifest.items['chat:huge'].incomplete, true, 'it lands without being marked complete');
+    });
+  });
+});
+
+describe('a chat over the assembled cap', () => {
+  it('is named before the press, is not landed, stays behind, and the mark goes on', async () => {
+    await realBridge({
+      sourceOptions: { maxChatBytes: MIB },
+      seed: (store) => {
+        seedChat(store, { id: 'long', title: 'Survey archive', messages: [{ sender: 'user', text: 'one', attachments: [attachment(MIB)] }, { sender: 'user', text: 'two', attachments: [attachment(MIB)] }] });
+        seedChat(store, { id: 'small', title: 'Small', messages: [{ sender: 'user', text: 'hello' }] });
+      }
+    }, async ({ controller, core, state }) => {
+      const planned = await controller.migrationPlan();
+      assert.strictEqual(planned.ok, true, JSON.stringify(planned));
+      const item = planned.plan.items.find((i) => i.key === 'long');
+      assert.strictEqual(item.action, 'needs-attention');
+      assert.ok(!item.partial);
+      assert.match(item.note, /Survey archive/);
+      assert.match(item.note, /2\.7 MB/);
+      assert.match(planned.staysBehind.join('\n'), /Survey archive/);
+      const out = await controller.migrationApply({ confirmed: true });
+      assert.strictEqual(out.ok, true, JSON.stringify(out.verified || out));
+      assert.ok(state.migration);
+      assert.ok(!core.context.getChat('long'), 'not landed');
+      assert.ok(core.context.getChat('small'));
     });
   });
 });
@@ -328,6 +354,17 @@ describe('the importer assembles a chat', () => {
     }
   });
 
+  it('the node holds its own cap on what it assembles', async () => {
+    const { core, dataDir } = await service();
+    const importer = new DesktopImporter({ context: core.context, targets: await buildImportTargets({ context: core.context, dataDir }), dataDir, checkPath, scope: createDesktopScope({ dataDir, context: core.context }), hosting: 'personal', maxChatBytes: 1500 });
+    const c = chat();
+    const plan = await importer.plan({ installId: 'i-1', inventory: inventory(c) });
+    const answers = [];
+    for (const entry of entriesOf(plan, c)) answers.push(...(await importer.apply({ planId: plan.planId, batch: [entry] })).results);
+    assert.ok(answers.some((r) => r.ok === false && /larger than/.test(r.error)), JSON.stringify(answers));
+    assert.ok(!core.context.getChat('c1'));
+  });
+
   it('a fleet importer refuses parts, and a fleet send still skips an oversize chat', async () => {
     const { importer } = await service({ hosting: 'service' });
     const c = chat();
@@ -345,11 +382,61 @@ describe('the source says which chat has a message too large', () => {
     const root = tmp();
     fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ settings: {}, chats: [
       { id: 'ok', title: 'Fine', updatedAt: 'a', messages: [{ sender: 'user', text: 'x'.repeat(100) }] },
-      { id: 'big', title: 'Big', updatedAt: 'a', messages: [{ sender: 'user', text: 'x'.repeat(5000) }] }
+      { id: 'big', title: 'Big', updatedAt: 'a', messages: [{ sender: 'user', text: 'x'.repeat(10000) }] }
     ] }));
-    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), maxMessageBytes: 1000 });
+    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), maxMessageBytes: 8192 });
     const byId = Object.fromEntries(source.inventory.chats.map((c) => [c.id, c]));
     assert.ok(!('tooLargeBytes' in byId.ok), 'an ordinary chat is as it was');
-    assert.ok(byId.big.tooLargeBytes > 5000);
+    assert.ok(byId.big.tooLargeBytes > 10000);
+  });
+
+  it('a chat over the cap is named with its size and sent no part', () => {
+    const root = tmp();
+    fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ settings: {}, chats: [
+      { id: 'long', title: 'Long', updatedAt: 'a', messages: [{ sender: 'user', text: 'x'.repeat(3000) }, { sender: 'user', text: 'x'.repeat(3000) }] }
+    ] }));
+    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), maxChatBytes: 5000 });
+    assert.ok(source.inventory.chats[0].overCapBytes > 6000);
+  });
+
+  it('the limit takes the entry and the chat head off: at it the node takes the batch, past it the source says so', async () => {
+    const dataDir = tmp();
+    process.env.KL_CASES_ROOT = path.join(dataDir, 'cases');
+    const core = createCore({
+      paths: { dataDir },
+      store: new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: { chats: [], activeChatId: null, apiTokens: {}, apiStatus: {}, toolApprovals: { alwaysApproveTools: {} } } }),
+      vaultStore: new JsonFileStore({ dir: dataDir, name: 'config' }),
+      cipher: createAesGcmCipher(crypto.randomBytes(32)),
+      prompter: createHeadlessPrompter(),
+      builtinSkillsDir: path.join(__dirname, '..', 'skills'),
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false }
+    });
+    cores.push(core);
+    await core.start();
+    const importer = new DesktopImporter({ context: core.context, targets: await buildImportTargets({ context: core.context, dataDir }), dataDir, checkPath, scope: createDesktopScope({ dataDir, context: core.context }), hosting: 'personal' });
+    const head = { id: 'edge', title: 'T'.repeat(2000), createdAt: '2026-09-01T10:00:00.000Z', updatedAt: '2026-09-20T10:00:00.000Z' };
+    const limit = MAX_CHAT_PART_BYTES - Buffer.byteLength(JSON.stringify(head)) - 4096;
+    const bare = { id: 'm1', sender: 'user', text: '', timestamp: '2026-09-20T10:00:00.000Z', attachments: [{ name: 'a.png', mimeType: 'image/png', base64: '' }] };
+    const fill = limit - Buffer.byteLength(JSON.stringify(bare));
+    const message = (extra) => {
+      const b64 = 'A'.repeat((fill - (fill % 4)));
+      return { ...bare, text: 'x'.repeat(fill % 4 + extra), attachments: [{ ...bare.attachments[0], base64: b64 }] };
+    };
+    const profile = (extra) => {
+      const root = tmp();
+      fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ settings: {}, chats: [{ ...head, messages: [message(extra), { id: 'm2', sender: 'assistant', text: 'after', timestamp: bare.timestamp }] }] }));
+      return readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }) });
+    };
+    const past = profile(1);
+    assert.ok(Number.isFinite(past.inventory.chats[0].tooLargeBytes), 'one byte past it, the source names it');
+    const at = profile(0);
+    assert.ok(!('tooLargeBytes' in at.inventory.chats[0]), 'at it, the source sends it');
+    const plan = await importer.plan({ installId: 'i-edge', inventory: at.inventory });
+    const answers = [];
+    for (const batch of planBatches(plan.items, at, { chatParts: true })) answers.push(...(await importer.apply({ planId: plan.planId, batch })).results);
+    assert.ok(answers.length >= 2 && answers.every((r) => r.ok === true), JSON.stringify(answers.filter((r) => !r.ok)));
+    const report = await importer.finish({ planId: plan.planId });
+    assert.deepStrictEqual(report.failures, []);
+    assert.strictEqual(core.context.getChat('edge').messages.length, 2);
   });
 });

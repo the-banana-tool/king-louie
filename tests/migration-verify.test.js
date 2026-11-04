@@ -1634,6 +1634,7 @@ describe('fix round 2: a landing on record, and the node\'s sweep', () => {
     const retry = await move(n, s);
     assert.strictEqual('incomplete' in retry.item, false);
     assert.match(retry.item.note, /live one/);
+    assert.match(retry.item.note, /its earlier landing was incomplete/);
     assert.strictEqual(retry.verified.ok, true);
   });
 

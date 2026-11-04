@@ -282,6 +282,7 @@ async function snapshotStore({ userDataDir, dest, backup }) {
   return { history, file };
 }
 
+const ROOM_MARGIN_BYTES = 64 * 1024 * 1024;
 const asSize = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
 // Before anything is written: a full disk is otherwise found minutes in, with a
@@ -298,7 +299,7 @@ async function assertRoom({ root, dest, totalBytes, io }) {
   let store = 0;
   for (const name of STORE_FILES) store += await io.lstat(path.join(root, name)).then((s) => s.size, () => 0);
   const needs = totalBytes + store;
-  if (needs > free) throw new Refusal(`there is not enough room on the disk: the backup needs ${asSize(needs)} and ${asSize(free)} is free. Free some space and try again`);
+  if (needs + ROOM_MARGIN_BYTES > free) throw new Refusal(`there is not enough room on the disk: the backup needs ${asSize(needs)}, with ${asSize(ROOM_MARGIN_BYTES)} to spare, and ${asSize(free)} is free. Free some space and try again`);
 }
 
 // { dest, bytes, files (a count), history: { chats, messages }, customCasesRoot,
@@ -534,7 +535,7 @@ async function detectOldProfile(userDataDir, { readHistory = readHistoryChats, r
   }, 0);
   const keysOrSettings = holdsKeysOrSettings(safe);
   const found = Boolean(
-    history.found || schemaProblem || inventory.chats.length || inventory.cases.length
+    schemaProblem || inventory.chats.length || inventory.cases.length
     || settingRoot || (customCases !== 0 && !customCasesMissing) || attention.some((a) => a.category === 'case')
     || keysOrSettings
   );

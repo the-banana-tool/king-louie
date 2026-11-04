@@ -1007,7 +1007,7 @@ work while attached appends it to `PROXIED_DOMAINS`).
     `<parent of userData>\king-louie.backup-<timestamp>`, skipping `EXCLUDED_DIRS`
     at the top level and `BROWSER_CACHE_DIRS` under `browser-profiles/*` and
     `browser-profiles/*/*` (a browser profile's logins stay in), refusing up front when
-    `statfs` says the files will not fit, with the numbers, snapshotting
+    `statfs` says the files and a 64 MB margin will not fit, with the numbers, snapshotting
     `history.sqlite`, refusing a link or an
     existing `dest`, hashing every file into `backup.json`; a failure
     (`BACKUP_FAILED`) leaves the half-made directory named. `verifyMigration`
@@ -1041,7 +1041,11 @@ work while attached appends it to `PROXIED_DOMAINS`).
     `tooLargeBytes`, the plan says `needs-attention` with the chat and the size, and adds
     it to **Stays on this computer**. The item is `partial`: the chat lands with
     `TOO_LARGE_TEXT` in that message's place (order, `seq` and the count stay), is
-    `incomplete` in the manifest, and does not block the mark. A fleet plan has neither.
+    `incomplete` in the manifest, and does not block the mark. The source's limit is
+    `MAX_CHAT_PART_BYTES` less the chat's head and 4 KiB, since the node measures the whole
+    batch. A chat over `MAX_CHAT_BYTES` (512 MiB, also the node's own cap while assembling)
+    is `needs-attention` with its size (`overCapBytes`): not landed, in **Stays on this
+    computer**, not blocking the mark. A fleet plan has none of this.
   - A case on the node that differs (`caseOnNodeDiffers`, `landedIncomplete`) names the
     ways that keep both first. **Moved elsewhere** in the old standalone mode plans
     `MOVED_OUT_NOTE`, ahead of the incomplete check. A folder renamed on the desktop lands
@@ -1058,9 +1062,10 @@ work while attached appends it to `PROXIED_DOMAINS`).
     and the mark goes on. Secure storage unavailable, at any count, or more than half the
     keys failing with at least 3 stored, is a wrong environment: `MIGRATION_SOURCE`,
     nothing moved.
-  - `detectOldProfile` is also `found` for `apiTokens`, the Anthropic sign-in, search and
-    image keys, a vault key in `config.json`, or a carried setting that is not its default
-    (`settingsWouldMove`; `keysOrSettings` on the answer).
+  - `detectOldProfile` is `found` for chats, cases, `apiTokens`, the Anthropic sign-in,
+    search and image keys, a vault key in `config.json`, or a carried setting that is not
+    its default (`settingsWouldMove`; `keysOrSettings` on the answer; `models.kingLouie` is
+    the suggester's and does not count). An empty `history.sqlite` alone is not found.
   - Under personal the importer also carries `settings.models` (minus `localServers`),
     `settings.channels` with their tokens, `settings.hooks` and `settings.mcpServers`.
     The CLI `import --from` on a personal node keeps the fleet's exclusions and carries
@@ -1096,7 +1101,9 @@ work while attached appends it to `PROXIED_DOMAINS`).
   case-file path: a skill clone is a nested `.git` the importer refuses and whose
   `.git/config` it drops, a skill installed from a folder is a junction the reader
   refuses, and both stores load only at the node's start. Sizing messages for the plan
-  stringifies each one in the main process. Private
+  stringifies each one in the main process, and the desktop holds every chat of the old
+  profile in memory, in the main process, from the plan until the apply ends (the child
+  moved the read, not the holding). Private
   chats answer `PRIVATE_NO_LOCAL_MODEL` until a local server is in the admin block. No
   real install, migration or packaged run has been done.
 - **Pairing:** start from Settings > Local service, then run the command it shows
