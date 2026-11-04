@@ -259,3 +259,45 @@ describe('a branch with no secret in it is nothing', () => {
     assert.strictEqual(vault.get(COM), 'two');
   });
 });
+
+describe('a prototype part is no name to write', () => {
+  const { JsonFileStore } = require('../src/platform/json-file-store');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const cipher = { encryptString: (s) => `E:${s}`, decryptString: (s) => s.slice(2) };
+  const tmpDir = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-vault-'));
+    after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    return dir;
+  };
+  function setup() {
+    const dir = tmpDir();
+    const store = new JsonFileStore({ dir, name: 'config' });
+    const vault = createVault({ store, cipher });
+    const handlers = new Map();
+    require('../src/ipc/settings-handlers').registerSettingsHandlers({ handle: (c, fn) => handlers.set(c, fn) }, { vaultStore: store, encryptToken: cipher.encryptString, decryptToken: cipher.decryptString });
+    const call = async (channel, arg) => { const a = await handlers.get(channel)({}, arg); return a.data && a.ok !== false ? { ok: a.ok, ...a.data } : a; };
+    return { dir, store, vault, call };
+  }
+
+  const NAMES = ['a.__proto__.polluted', '__proto__.polluted', 'a.constructor.prototype.polluted'];
+
+  it('vault.set refuses it, and nothing is polluted', () => {
+    const { vault } = setup();
+    for (const name of NAMES) assert.throws(() => vault.set(name, 'x'), { code: 'VAULT_NAME_REFUSED' }, name);
+    assert.strictEqual({}.polluted, undefined);
+  });
+
+  it('the pane refuses it on Store, and on Update by value or by rename', async () => {
+    const { vault, call } = setup();
+    vault.set('plain', 'one');
+    for (const name of NAMES) {
+      assert.strictEqual((await call('settings:vaultStore', { key: name, value: 'x' })).ok, false, name);
+      assert.strictEqual((await call('settings:vaultUpdate', { oldKey: 'plain', newKey: name, value: 'x' })).ok, false, name);
+      assert.strictEqual((await call('settings:vaultUpdate', { oldKey: 'plain', newKey: name })).ok, false, name);
+    }
+    assert.strictEqual({}.polluted, undefined);
+    assert.strictEqual(vault.get('plain'), 'one');
+  });
+});

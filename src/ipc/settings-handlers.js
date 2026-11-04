@@ -5,7 +5,7 @@ const log = createLogger('settings');
 
 const { isContactVaultKey } = require('../cases/contact-settings');
 const { isLocalServerVaultKey } = require('../models/local-vault-keys');
-const { createVault, vaultNodeAt } = require('../platform/vault');
+const { createVault, vaultNodeAt, hasPrototypePart } = require('../platform/vault');
 
 function registerSettingsHandlers(ipcMain, context = {}) {
   const {
@@ -505,6 +505,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     if (!key || typeof key !== 'string') return { ok: false, error: 'Key is required.' };
     if (!value || typeof value !== 'string') return { ok: false, error: 'Value is required.' };
     if (!encryptToken) return { ok: false, error: 'Encryption unavailable.' };
+    if (hasPrototypePart(key.trim())) return { ok: false, error: `"${key.trim()}" cannot be used as a name.` };
     const blocker = paneVault().blockedBy(key.trim());
     if (blocker) return { ok: false, error: blockedText(key.trim(), blocker) };
     const encrypted = encryptToken(value);
@@ -526,6 +527,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     // Only a stored secret can be updated, and never onto a name a write would destroy.
     const vault = paneVault();
     if (!vault.holds(oldKey)) return { ok: false, error: `No secret found for "${oldKey}".` };
+    if (hasPrototypePart(newKey.trim())) return { ok: false, error: `"${newKey.trim()}" cannot be used as a name.` };
     const blocker = vault.blockedBy(newKey.trim());
     if (blocker) return { ok: false, error: blockedText(newKey.trim(), blocker) };
 

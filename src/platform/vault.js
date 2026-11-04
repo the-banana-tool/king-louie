@@ -68,6 +68,7 @@ function createVault({ store, cipher }) {
   };
   return {
     set(key, value) {
+      if (hasPrototypePart(key)) throw Object.assign(new Error(`"${key}" cannot be a vault name.`), { code: 'VAULT_NAME_REFUSED' });
       const blocker = blockedBy(key);
       if (blocker) throw Object.assign(new Error(vaultBlockedText(key, blocker)), { code: 'VAULT_NAME_BLOCKED' });
       store.set(storeKey(key), cipher.encryptString(value));
