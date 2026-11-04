@@ -13,7 +13,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, safeRelPath } = require('./desktop-import');
+const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, safeRelPath, CHANNEL_TOKEN_KEYS, CHANNEL_ALLOWLISTS_KEY, ALLOWLIST_CHANNELS } = require('./desktop-import');
 
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 // A desktop store file or a case file bigger than this is refused rather
@@ -202,6 +202,16 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     ...arr(chatData.chats).filter((c) => c && typeof c.id === 'string' && c.id && !historyIds.has(c.id))
   ];
   const tokens = chatData.apiTokens && typeof chatData.apiTokens === 'object' ? chatData.apiTokens : {};
+  // Ids only: a stored default never travels, and a list naming nobody is no
+  // list. Who may reach a bot, for a node that takes the bot.
+  const channelAllowlist = (channel) => {
+    const lists = chatData[CHANNEL_ALLOWLISTS_KEY];
+    const held = ALLOWLIST_CHANNELS.includes(channel) && lists && typeof lists === 'object' ? lists[channel] : null;
+    if (!held || typeof held !== 'object') return null;
+    const users = arr(held.users).map(String);
+    const groups = arr(held.groups).map(String);
+    return users.length || groups.length ? { users, groups } : null;
+  };
   const toolApprovals = chatData.toolApprovals && typeof chatData.toolApprovals === 'object' ? chatData.toolApprovals : {};
   const alwaysApprove = toolApprovals.alwaysApproveTools && typeof toolApprovals.alwaysApproveTools === 'object' ? toolApprovals.alwaysApproveTools : {};
   const oauth = chatData.anthropicOAuth && chatData.anthropicOAuth.accessToken ? chatData.anthropicOAuth : null;
@@ -273,6 +283,8 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     imageKeys: Object.keys(settings.imageGeneration || {}).filter((p) => settings.imageGeneration[p] && settings.imageGeneration[p].apiKey),
     vault: Object.keys(config).filter((k) => k.startsWith('__vault_') && config[k]).map((k) => k.slice('__vault_'.length)),
     anthropicOAuth: Boolean(oauth),
+    channelTokens: CHANNEL_TOKEN_KEYS.filter((k) => tokens[k]),
+    channelAllowlists: ALLOWLIST_CHANNELS.filter((c) => channelAllowlist(c)),
     memory: memoryEntries.map((e) => e.id),
     cron: cronJobs.map((j) => ({ id: j.id, name: String(j.name || '') })),
     cases,
@@ -304,6 +316,10 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
       case 'searchKey': return secret(settings.webSearch && settings.webSearch[key] && settings.webSearch[key].apiKey);
       case 'imageKey': return secret(settings.imageGeneration && settings.imageGeneration[key] && settings.imageGeneration[key].apiKey);
       case 'vault': return secret(config[`__vault_${key}`]);
+      // Only these names, whatever a plan asks for: the typesafe.ai key and a
+      // local server's key sit in the same object and never move.
+      case 'channelToken': return CHANNEL_TOKEN_KEYS.includes(key) ? secret(tokens[key]) : null;
+      case 'channelAllowlist': return channelAllowlist(key);
       case 'anthropicOAuth':
         if (!oauth) return null;
         return {

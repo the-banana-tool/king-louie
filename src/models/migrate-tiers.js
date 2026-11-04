@@ -7,6 +7,7 @@
 // Every mapping and every kept stale id is a note on the profile.
 const crypto = require('crypto');
 const { createLogger } = require('../logging');
+const { isDeepStrictEqual } = require('util');
 const R = require('./roles');
 const { stripDateSuffix } = require('./normalize');
 
@@ -236,6 +237,15 @@ function migrateTierSettings(raw, { catalog = null, accountModels = {}, freshMai
   };
 }
 
+// Whether a profile is still exactly the Default a fresh install's first start
+// made from `freshMain`: nobody has chosen anything in it.
+function isFreshProfile(profile, freshMain) {
+  if (!isPlainObject(profile) || profile.name !== 'Default' || profile.kind !== 'user') return false;
+  if (Object.keys(profile).sort().join() !== 'id,kind,name,roles') return false;
+  const main = dedupe((Array.isArray(freshMain) ? freshMain : []).map(R.normalizeTarget));
+  return isDeepStrictEqual(profile.roles, { main, worker: [], utility: [] });
+}
+
 // §13 step 6. The whole `inference` object goes: every key in it is listed.
 function stripLegacyKeys(raw) {
   const out = { ...(isPlainObject(raw) ? raw : {}) };
@@ -290,6 +300,7 @@ module.exports = {
   needsMigration,
   mapStaleTarget,
   migrateTierSettings,
+  isFreshProfile,
   stripLegacyKeys,
   runTierMigration
 };

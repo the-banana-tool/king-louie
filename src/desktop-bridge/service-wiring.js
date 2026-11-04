@@ -40,7 +40,8 @@ function createDesktopBridgeHost({
         dataDir,
         scope,
         checkPath,
-        cipher: servicePorts.cipher
+        cipher: servicePorts.cipher,
+        hosting: nodeConfig.hosting
       });
       const server = new DesktopBridgeServer({
         core,

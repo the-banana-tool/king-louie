@@ -20,8 +20,22 @@ const log = createLogger('desktop-import');
 const PLAN_TTL_MS = 30 * 60 * 1000;
 const MAX_BATCH_BYTES = 2 * 1024 * 1024;
 const IMPORTED_SETTINGS_KEYS = Object.freeze(['defaults', 'checkpoints', 'templateVariables', 'notifications', 'voice', 'cases']);
-const SECRET_CATEGORIES = new Set(['providerToken', 'searchKey', 'imageKey', 'vault', 'anthropicOAuth']);
-const CATEGORY_ORDER = Object.freeze(['settings', 'userProfile', 'permissionRule', 'alwaysApprove', 'allowedDirectory', 'chat', 'memory', 'cron', 'case', 'providerToken', 'searchKey', 'imageKey', 'vault', 'anthropicOAuth', 'excluded']);
+// What a personal node takes besides (attach stage 2 spec C-9). It is the
+// owner's own machine and account, and the desktop has no core once it is
+// attached, so EXCLUDED's reasons for these do not hold there. EXCLUDED stays
+// the fleet's list.
+const PERSONAL_SETTINGS_KEYS = Object.freeze(['models', 'channels', 'hooks', 'mcpServers']);
+const PERSONAL_CARRIED = new Set(['settings.models', 'settings.channels', 'settings.hooks', 'settings.mcpServers', 'channelTokens']);
+const importedSettingsKeys = (hosting) => (hosting === 'personal' ? [...IMPORTED_SETTINGS_KEYS, ...PERSONAL_SETTINGS_KEYS] : [...IMPORTED_SETTINGS_KEYS]);
+// The stored names, one by one: never a prefix, which would also take
+// __typesafe_api_key and a local server's __local_<id>.
+const CHANNEL_TOKEN_KEYS = Object.freeze(['__telegram_bot_token', '__discord_bot_token', '__slack_app_token', '__slack_bot_token']);
+// Who may reach a bot: AllowlistManager's store key, per channel. It denies by
+// default, so a bot moved without its list refuses everyone.
+const CHANNEL_ALLOWLISTS_KEY = 'channelAllowlists';
+const ALLOWLIST_CHANNELS = Object.freeze(['telegram', 'discord', 'slack']);
+const SECRET_CATEGORIES = new Set(['providerToken', 'searchKey', 'imageKey', 'vault', 'anthropicOAuth', 'channelToken']);
+const CATEGORY_ORDER = Object.freeze(['settings', 'userProfile', 'permissionRule', 'alwaysApprove', 'allowedDirectory', 'chat', 'memory', 'cron', 'case', 'providerToken', 'searchKey', 'imageKey', 'vault', 'anthropicOAuth', 'channelToken', 'channelAllowlist', 'excluded']);
 const ACTIONS = Object.freeze(['new', 'update', 'copy', 'skip-present', 'skip-excluded', 'needs-attention', 'needs-desktop']);
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 const INSTALL_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
@@ -74,9 +88,21 @@ const EXCLUDED = Object.freeze({
   // models.localServers, is not in IMPORTED_SETTINGS_KEYS. On a service a
   // local server comes only from the administrator's service.json, and the
   // core's setSettings keeps the stored models.localServers whatever an
-  // import passes.
+  // import passes. A personal node takes settings.models with the list
+  // removed (withoutLocalServers).
   'settings.models': 'model profiles are set up on the service; a local server comes only from the administrator\'s service.json'
 });
+
+// What the owner reads on a carried item: a move that looks complete in a
+// count can still leave something to do.
+const PERSONAL_NOTES = Object.freeze({
+  models: 'profiles, custom roles and King Louie settings; local servers stay behind, and a profile that names one skips it until it is in the node\'s service.json',
+  channels: 'the bots answer from the node once it next starts; on a node the owner ids for contact questions come only from the contact block of its service.json',
+  hooks: 'on and off choices only; hook folders are not copied',
+  mcpServers: 'each starts with the node, as you, in the node\'s working folder unless it names its own; a relative path or a command only your shell finds may need changing'
+});
+const ALREADY_ON_NODE = 'already set on this node; left as it is';
+const RESTART_NOTE = 'MCP servers, channel bots and hook choices that moved take effect when the node next starts.';
 
 class ImportError extends Error {
   constructor(code, message) {
@@ -97,6 +123,21 @@ const withoutRoot = (cases) => {
   const { root, ...rest } = cases || {};
   return rest;
 };
+const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+const withoutLocalServers = (models) => {
+  const { localServers, ...rest } = models || {};
+  return rest;
+};
+// Whether the node's models are what its own first start made: the defaults
+// and the one Default profile that start creates, which is not the owner
+// having chosen anything. A stored local server list says nothing about that.
+function modelsUntouched(current, dflt, isFreshProfile) {
+  const { profiles = [], defaultProfileId = null, ...rest } = withoutLocalServers(current);
+  const { profiles: _p, defaultProfileId: _d, ...base } = withoutLocalServers(dflt);
+  if (stable(rest) !== stable(base)) return false;
+  if (profiles.length === 0) return defaultProfileId === null;
+  return profiles.length === 1 && profiles[0].id === defaultProfileId && isFreshProfile(profiles[0]);
+}
 function countActions(items) {
   const counts = Object.fromEntries(ACTIONS.map((a) => [a, 0]));
   for (const item of items) counts[item.action] = (counts[item.action] || 0) + 1;
@@ -309,9 +350,12 @@ class DesktopImporter {
     randomId = () => crypto.randomBytes(8).toString('hex'),
     onPathWritten = () => {},
     cleanupStaging = true,
-    writeGuard = null
+    writeGuard = null,
+    hosting = 'service'
   }) {
     this.context = context;
+    this.personal = hosting === 'personal';
+    this.settingsKeys = importedSettingsKeys(hosting);
     this.targets = targets;
     this.dataDir = dataDir;
     this.scope = scope;
@@ -323,6 +367,14 @@ class DesktopImporter {
     this.writeGuard = writeGuard;
     this.plans = new Map();
     if (cleanupStaging) this.cleanupOrphanedStaging();
+  }
+
+  // Whether the node still holds its own default for a setting, so an import
+  // may fill it in.
+  settingUntouched(key, settings, defaults) {
+    if (key === 'models') return modelsUntouched(settings.models, defaults.models, this.context.isFreshModelProfile);
+    if (key === 'cases') return stable(withoutRoot(settings.cases)) === stable(withoutRoot(defaults.cases));
+    return stable(settings[key]) === stable(defaults[key]);
   }
 
   casesRoot() {
@@ -440,10 +492,10 @@ class DesktopImporter {
     const settings = this.context.getSettings();
     const defaults = mergeSettings(DEFAULT_SETTINGS);
     for (const key of arr(inventory.settingsKeys)) {
-      if (!IMPORTED_SETTINGS_KEYS.includes(key)) { add('settings', key, 'skip-excluded', EXCLUDED[`settings.${key}`] || 'this setting is managed on the service'); continue; }
-      const current = key === 'cases' ? withoutRoot(settings.cases) : settings[key];
-      const dflt = key === 'cases' ? withoutRoot(defaults.cases) : defaults[key];
-      add('settings', key, stable(current) === stable(dflt) ? 'new' : 'skip-present');
+      if (!this.settingsKeys.includes(key)) { add('settings', key, 'skip-excluded', EXCLUDED[`settings.${key}`] || 'this setting is managed on the service'); continue; }
+      const carried = PERSONAL_SETTINGS_KEYS.includes(key);
+      if (this.settingUntouched(key, settings, defaults)) add('settings', key, 'new', carried ? PERSONAL_NOTES[key] : null);
+      else add('settings', key, 'skip-present', carried ? ALREADY_ON_NODE : null);
     }
 
     if (inventory.userProfile) {
@@ -560,7 +612,25 @@ class DesktopImporter {
       const stored = this.context.getStore().get('anthropicOAuth');
       secret('anthropicOAuth', 'anthropicOAuth', Boolean(stored && stored.accessToken));
     }
-    for (const key of arr(inventory.excluded)) add('excluded', key, 'skip-excluded', EXCLUDED[key] || 'stays with the desktop');
+    for (const p of arr(inventory.channelTokens)) {
+      if (!this.personal) { add('channelToken', p, 'skip-excluded', EXCLUDED.channelTokens); continue; }
+      if (!CHANNEL_TOKEN_KEYS.includes(p)) { add('channelToken', p, 'skip-excluded', 'not a channel token this node uses'); continue; }
+      secret('channelToken', p, Boolean(tokens[p]));
+    }
+    // Not secret, and a fleet plan does not mention it: a fleet node's bots
+    // are set up there, as they always were.
+    if (this.personal) {
+      const lists = this.context.getStore().get(CHANNEL_ALLOWLISTS_KEY, {}) || {};
+      for (const channel of arr(inventory.channelAllowlists)) {
+        if (!ALLOWLIST_CHANNELS.includes(channel)) continue;
+        const held = lists[channel] || {};
+        add('channelAllowlist', channel, arr(held.users).length || arr(held.groups).length ? 'skip-present' : 'new', 'who may reach this bot');
+      }
+    }
+    for (const key of arr(inventory.excluded)) {
+      if (this.personal && PERSONAL_CARRIED.has(key)) continue;
+      add('excluded', key, 'skip-excluded', EXCLUDED[key] || 'stays with the desktop');
+    }
 
     items.sort((a, b) => CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category));
     const planId = this.randomId();
@@ -623,13 +693,17 @@ class DesktopImporter {
     switch (item.category) {
       case 'settings': {
         const s = ctx.getSettings();
-        const dflt = mergeSettings(DEFAULT_SETTINGS);
-        const current = item.key === 'cases' ? withoutRoot(s.cases) : s[item.key];
-        const base = item.key === 'cases' ? withoutRoot(dflt.cases) : dflt[item.key];
-        if (stable(current) !== stable(base)) return { note: 'already set on the service; left unchanged' };
-        const next = item.key === 'cases'
-          ? { ...withoutRoot(value), ...(s.cases && s.cases.root !== undefined ? { root: s.cases.root } : {}) }
-          : value;
+        if (!this.settingUntouched(item.key, s, mergeSettings(DEFAULT_SETTINGS))) return { note: 'already set on the service; left unchanged' };
+        if (PERSONAL_SETTINGS_KEYS.includes(item.key) && !isPlainObject(value)) throw new ImportError('BAD_VALUE', `settings.${item.key} is not an object`);
+        let next = value;
+        if (item.key === 'cases') next = { ...withoutRoot(value), ...(s.cases && s.cases.root !== undefined ? { root: s.cases.root } : {}) };
+        if (item.key === 'models') {
+          // setSettings keeps the stored local server list whatever it is
+          // given; off the value too, so nothing downstream ever holds the
+          // desktop's. A desktop with no profiles leaves the node its own.
+          next = withoutLocalServers(value);
+          if (!arr(next.profiles).length) next = { ...next, profiles: s.models.profiles, defaultProfileId: s.models.defaultProfileId };
+        }
         ctx.setSettings({ ...s, [item.key]: next });
         return {};
       }
@@ -745,6 +819,31 @@ class DesktopImporter {
           connectedAt: value.connectedAt ?? Date.now()
         });
         if (typeof value.clientId === 'string' && value.clientId) store.set('anthropicOAuthClientId', value.clientId);
+        return {};
+      }
+      case 'channelToken': {
+        this.requireCipher();
+        this.requireSecretString(value);
+        const tokens = { ...(ctx.getApiTokens() || {}) };
+        // Written only if still absent, like a provider token.
+        if (tokens[item.key]) {
+          return { note: 'a token for this channel was added to the node after the plan was made; not overwritten' };
+        }
+        tokens[item.key] = ctx.encryptToken(value);
+        ctx.setApiTokens(tokens);
+        return {};
+      }
+      case 'channelAllowlist': {
+        if (!isPlainObject(value)) throw new ImportError('BAD_VALUE', 'the allowlist does not match the plan');
+        const store = ctx.getStore();
+        const lists = store.get(CHANNEL_ALLOWLISTS_KEY, {}) || {};
+        const held = lists[item.key] || {};
+        if (arr(held.users).length || arr(held.groups).length) {
+          return { note: 'this bot\'s allowlist was set on the node after the plan was made; not overwritten' };
+        }
+        // Ids only, and always 'deny' for everyone else: a stored allow-all
+        // is something AllowlistManager itself refuses to honour.
+        store.set(CHANNEL_ALLOWLISTS_KEY, { ...lists, [item.key]: { default: 'deny', users: arr(value.users).map(String), groups: arr(value.groups).map(String) } });
         return {};
       }
       default:
@@ -1033,6 +1132,7 @@ class DesktopImporter {
     const attention = [];
     const secretsMissing = [];
     let cronDisabled = 0;
+    let needsRestart = false;
     for (const item of items) {
       const k = itemKey(item.category, item.key);
       if (item.action === 'needs-attention') attention.push({ category: item.category, key: item.key, note: item.note });
@@ -1054,6 +1154,7 @@ class DesktopImporter {
       }
       if (r.attention) attention.push({ category: item.category, key: item.key, note: r.note });
       if (item.category === 'cron') cronDisabled += 1;
+      if (this.personal && (item.category === 'channelToken' || (item.category === 'settings' && ['channels', 'hooks', 'mcpServers'].includes(item.key)))) needsRestart = true;
       manifest.items[k] = { at, result: 'ok', ...(r.record || {}) };
     }
     manifest.runs.push({ planId: plan.planId, at, source: plan.source });
@@ -1069,7 +1170,10 @@ class DesktopImporter {
       attention,
       secretsMissing,
       cronDisabled,
-      notes: cronDisabled ? [`${cronDisabled} cron job(s) were imported disabled; enable them in Settings > Scheduler.`] : []
+      notes: [
+        ...(cronDisabled ? [`${cronDisabled} cron job(s) were imported disabled; enable them in Settings > Scheduler.`] : []),
+        ...(needsRestart ? [RESTART_NOTE] : [])
+      ]
     };
   }
 }
@@ -1113,6 +1217,10 @@ module.exports = {
   ImportError,
   buildImportTargets,
   IMPORTED_SETTINGS_KEYS,
+  importedSettingsKeys,
+  CHANNEL_TOKEN_KEYS,
+  CHANNEL_ALLOWLISTS_KEY,
+  ALLOWLIST_CHANNELS,
   SECRET_CATEGORIES,
   CATEGORY_ORDER,
   EXCLUDED,

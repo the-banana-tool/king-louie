@@ -103,6 +103,62 @@ describe('readDesktopSource', () => {
   });
 });
 
+describe('readDesktopSource: what a channel moves with', () => {
+  const channelProfile = () => {
+    const root = userData();
+    const file = path.join(root, 'chat-data.json');
+    const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+    doc.apiTokens.__slack_bot_token = 'ENC-slack';
+    doc.apiTokens.__local_workstation = 'ENC-local';
+    doc.channelAllowlists = {
+      telegram: { default: 'allow', users: [1000, '1001'], groups: [] },
+      discord: { default: 'deny', users: [], groups: [] }
+    };
+    fs.writeFileSync(file, JSON.stringify(doc));
+    return root;
+  };
+
+  it('lists channel tokens by name, and only those', () => {
+    const root = channelProfile();
+    const { inventory } = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    assert.deepStrictEqual(inventory.channelTokens.sort(), ['__slack_bot_token', '__telegram_bot_token']);
+    assert.ok(!JSON.stringify(inventory).includes('ENC-'), 'no secret values in the inventory');
+    assert.ok(!inventory.providerTokens.includes('__telegram_bot_token'), 'not a provider token as well');
+  });
+
+  it('decrypts a channel token only with decrypt given', () => {
+    const root = channelProfile();
+    const locked = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    assert.throws(() => locked.getValue('channelToken', '__telegram_bot_token'), /only the desktop app/);
+    const open = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), decrypt: (enc) => enc.replace('ENC-', 'plain-'), secrets: 'included' });
+    assert.strictEqual(open.getValue('channelToken', '__telegram_bot_token'), 'plain-bot');
+  });
+
+  it('will not read the typesafe.ai key or a local server\'s key as a channel token', () => {
+    const root = channelProfile();
+    const open = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), decrypt: (enc) => enc.replace('ENC-', 'plain-'), secrets: 'included' });
+    assert.strictEqual(open.getValue('channelToken', '__typesafe_api_key'), null);
+    assert.strictEqual(open.getValue('channelToken', '__local_workstation'), null);
+    assert.strictEqual(open.getValue('channelToken', 'anthropic'), null);
+  });
+
+  it('lists an allowlist that names someone, without a stored allow-all', () => {
+    const root = channelProfile();
+    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    assert.deepStrictEqual(source.inventory.channelAllowlists, ['telegram']);
+    assert.deepStrictEqual(source.getValue('channelAllowlist', 'telegram'), { users: ['1000', '1001'], groups: [] });
+    assert.strictEqual(source.getValue('channelAllowlist', 'discord'), null);
+  });
+
+  it('a profile with none has empty lists', () => {
+    const root = userData();
+    fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ settings: {} }));
+    const { inventory } = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    assert.deepStrictEqual(inventory.channelTokens, []);
+    assert.deepStrictEqual(inventory.channelAllowlists, []);
+  });
+});
+
 describe('the R51 walker', () => {
   it('refuses a symlinked store file and never reads what it points at', (t) => {
     const root = userData();

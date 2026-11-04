@@ -138,8 +138,15 @@ async function removeDir(dir) {
 async function closeApp(ctx) {
   if (!ctx || ctx.closed) return;
   ctx.closed = true;
+  const proc = ctx.electronApp.process();
+  const gone = proc.exitCode !== null || proc.signalCode !== null
+    ? Promise.resolve()
+    : new Promise((r) => proc.once('exit', r));
   await Promise.race([ctx.electronApp.close().catch(() => {}), delay(5000)]);
-  try { ctx.electronApp.process().kill(); } catch { /* already gone */ }
+  try { proc.kill(); } catch { /* already gone */ }
+  // The single-instance lock goes with the process: a next launch on this
+  // profile before then would lose it and exit.
+  await Promise.race([gone, delay(10000)]);
   if (ctx.service) await ctx.service.stop().catch(() => {});
   for (const dir of [ctx.ownsDir ? ctx.userDataDir : null, ...ctx.extraDirs].filter(Boolean)) await removeDir(dir);
 }

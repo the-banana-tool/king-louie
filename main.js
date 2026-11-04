@@ -25,6 +25,7 @@ const { claimSingleInstance } = require('./src/ipc/single-instance');
 let mainWindow = null;
 const getWindow = () => mainWindow;
 if (!claimSingleInstance({ app, getWindow })) {
+  require('./src/logging').createLogger('main').info('King Louie is already running on this profile; its window was brought forward, and this launch stops here.');
   app.exit(0);
   return;
 }

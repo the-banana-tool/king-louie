@@ -187,6 +187,8 @@ describe('hosting in bridge.status', () => {
       const service = await client.connect();
       assert.strictEqual(service.hosting, 'personal');
       assert.strictEqual((await client.call('bridge.status')).hosting, 'personal');
+      const plan = await client.call('import.plan', { installId: 'install-0001', inventory: { settingsKeys: ['mcpServers'], channelTokens: ['__telegram_bot_token'] } });
+      assert.deepStrictEqual(plan.items.map((i) => [i.category, i.action]), [['settings', 'new'], ['channelToken', 'new']], 'the importer it builds carries the personal set');
     } finally {
       if (client) client.close();
       await host.stop();
