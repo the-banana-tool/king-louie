@@ -4,9 +4,28 @@ const childProcess = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const { isCommandAvailable, resetRuntimeEnvironmentCache } = require('../execution/runtime-environment');
+const { resolveProgram } = require('../cases/verify/check');
+const { localDesktopDeviceId } = require('../core/origin');
 const { createLogger } = require('../logging');
 
 const log = createLogger('skill');
+
+// No shell and never a blocking call: these run in the node's event loop, which
+// serves chat turns and the bridge. git by bare name, which execFile does not look
+// for in the working directory; npm as its own .cmd shim starts it (resolveProgram).
+function run(file, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    childProcess.execFile(file, args, { windowsHide: true, ...options }, (err, stdout, stderr) => {
+      if (err) {
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve(String(stdout));
+    });
+  });
+}
+const git = (cwd, args, timeout = 5000) => run('git', args, { cwd, timeout });
 
 function registerSkillHandlers(ipcMain, context = {}) {
   const {
@@ -103,7 +122,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
     return { ok: true, skillId, enabled: Boolean(enabled) };
   }));
 
-  ipcMain.handle(IPC.SKILL_INSTALL, wrapHandler(IPC.SKILL_INSTALL, async (_event, { url } = {}) => {
+  ipcMain.handle(IPC.SKILL_INSTALL, wrapHandler(IPC.SKILL_INSTALL, async (event, { url } = {}) => {
     if (!url || typeof url !== 'string') {
       return { ok: false, error: 'A GitHub URL or local directory path is required.' };
     }
@@ -120,6 +139,11 @@ function registerSkillHandlers(ipcMain, context = {}) {
     let skillDir; // The actual directory containing the skill files
 
     if (isLocalPath) {
+      // A window names a path on its own disk; relative to the node's working
+      // directory, which a model can write, it would name anything.
+      if (localDesktopDeviceId(event) && !path.isAbsolute(cleaned)) {
+        return { ok: false, code: 'RELATIVE_PATH', error: 'Give the skill\'s folder as a full path, such as C:\\skills\\my-skill.' };
+      }
       // Local directory — resolve and symlink into skills/
       const resolved = path.resolve(cleaned);
       if (!fs.existsSync(resolved)) {
@@ -157,10 +181,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
 
       try {
         const cloneUrl = cleaned.endsWith('.git') ? cleaned : `${strippedGit}.git`;
-        childProcess.execSync(`git clone "${cloneUrl}" "${targetDir}"`, {
-          timeout: 60000,
-          stdio: 'pipe'
-        });
+        await run('git', ['clone', '--', cloneUrl, targetDir], { timeout: 60000 });
       } catch (err) {
         try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch (cleanupErr) { log.warn(`cleanup after clone failure failed: ${cleanupErr.message}`); }
         return { ok: false, error: `Git clone failed: ${err.stderr?.toString().trim() || err.message}` };
@@ -174,11 +195,8 @@ function registerSkillHandlers(ipcMain, context = {}) {
       if (fs.existsSync(pkgPath)) {
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
         if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
-          childProcess.execSync('npm install --production', {
-            cwd: skillDir,
-            timeout: 120000,
-            stdio: 'pipe'
-          });
+          const npm = resolveProgram(['npm', 'install', '--production'], { cwd: skillDir });
+          await run(npm.file, npm.args, { cwd: skillDir, timeout: 120000 });
         }
       }
     } catch (err) {
@@ -446,7 +464,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
   }));
   // --- skill update checking ---
 
-  ipcMain.handle(IPC.SKILL_CHECK_UPDATES, wrapHandler(IPC.SKILL_CHECK_UPDATES, async () => {
+  ipcMain.handle(IPC.SKILL_CHECK_UPDATES, wrapHandler(IPC.SKILL_CHECK_UPDATES, async (_event, { fetch = false } = {}) => {
     const skills = Array.from(skillRegistry.skills?.values() || []);
     const results = {};
 
@@ -461,21 +479,22 @@ function registerSkillHandlers(ipcMain, context = {}) {
       const skillId = meta.id || path.basename(skillPath);
 
       try {
-        childProcess.execSync('git fetch', { cwd: skillPath, timeout: 30000, stdio: 'pipe' });
+        // The network only on a press: opening the pane compares with what is known.
+        if (fetch === true) await git(skillPath, ['fetch'], 30000);
 
-        const local = childProcess.execSync('git rev-parse HEAD', { cwd: skillPath, timeout: 5000, stdio: 'pipe' }).toString().trim();
-        const remote = childProcess.execSync('git rev-parse @{u}', { cwd: skillPath, timeout: 5000, stdio: 'pipe' }).toString().trim();
+        const local = (await git(skillPath, ['rev-parse', 'HEAD'])).trim();
+        const remote = (await git(skillPath, ['rev-parse', '@{u}'])).trim();
 
         if (local !== remote) {
           // Get the remote version from package.json on the remote branch
           let remoteVersion = null;
           try {
-            const remotePkg = childProcess.execSync('git show @{u}:package.json', { cwd: skillPath, timeout: 5000, stdio: 'pipe' }).toString();
+            const remotePkg = await git(skillPath, ['show', '@{u}:package.json']);
             const parsed = JSON.parse(remotePkg);
             remoteVersion = parsed.version || null;
           } catch (err) { log.debug(`remote package.json check failed: ${err.message}`); }
 
-          const behind = childProcess.execSync('git rev-list HEAD..@{u} --count', { cwd: skillPath, timeout: 5000, stdio: 'pipe' }).toString().trim();
+          const behind = (await git(skillPath, ['rev-list', 'HEAD..@{u}', '--count'])).trim();
 
           results[skillId] = {
             updateAvailable: true,
