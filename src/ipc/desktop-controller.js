@@ -65,6 +65,11 @@ function outputLines(...texts) {
   return lines;
 }
 
+// The CLI's own log lines (createLogger's `[subsystem] text`) are not what it
+// says to the owner, so a pane never shows them.
+const LOG_LINE = /^\[[A-Za-z][\w./-]*\]\s/;
+const withoutLogLines = (text) => String(text || '').split(/\r?\n/).filter((l) => !LOG_LINE.test(l)).join('\n');
+
 // nodeRunning's answer as the status's two fields.
 function runningFields(r) {
   const running = Boolean(r && r.running);
@@ -1112,9 +1117,11 @@ function createDesktopController({
   }
 
   function installResult(cli) {
-    const lines = outputLines(cli && cli.stdout, cli && cli.stderr);
+    const stdout = withoutLogLines(cli && cli.stdout);
+    const stderr = withoutLogLines(cli && cli.stderr);
+    const lines = outputLines(stdout, stderr);
     if (cli && cli.code === 0) return { ok: true, lines };
-    const message = firstLine(cli && cli.stderr) || firstLine(cli && cli.stdout)
+    const message = firstLine(stderr) || firstLine(stdout)
       || (cli && cli.timedOut ? 'the command did not finish in time' : shown((cli && cli.error) || 'the command failed', 400));
     return { ok: false, code: 'NODE_INSTALL_FAILED', message, lines };
   }

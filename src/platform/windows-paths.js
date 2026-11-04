@@ -11,5 +11,8 @@ function windowsSystemRoot(env = process.env) {
 const windowsPowerShellExe = (env) => path.win32.join(windowsSystemRoot(env), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const windowsSchtasksExe = (env) => path.win32.join(windowsSystemRoot(env), 'System32', 'schtasks.exe');
 const windowsIcaclsExe = (env) => path.win32.join(windowsSystemRoot(env), 'System32', 'icacls.exe');
+const windowsSystem32 = (env) => path.win32.join(windowsSystemRoot(env), 'System32');
+const windowsWhereExe = (env) => path.win32.join(windowsSystem32(env), 'where.exe');
+const windowsRegExe = (env) => path.win32.join(windowsSystem32(env), 'reg.exe');
 
-module.exports = { windowsSystemRoot, windowsPowerShellExe, windowsSchtasksExe, windowsIcaclsExe };
+module.exports = { windowsSystemRoot, windowsSystem32, windowsPowerShellExe, windowsSchtasksExe, windowsIcaclsExe, windowsWhereExe, windowsRegExe };

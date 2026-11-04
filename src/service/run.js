@@ -27,9 +27,10 @@ function assertEnabledListenersBound(core, features) {
   // The webhook one assigns its handle synchronously and is kicked off
   // fire-and-forget, so callers must await core.whenListenersSettled() first.
   if (features.gateway && !core.getGatewayServer()?.wss) missing.push('gateway');
-  // On a personal node's default, a listener with nothing to serve is not
-  // absent: it has not been asked for yet (webhooksOnDemand in create-core.js).
-  if (features.webhooks && !core.getWebhookServer()?.httpServer && !core.webhookListenerIdle?.()) missing.push('webhooks');
+  // A personal node's default (webhooksOnDemand in create-core.js) is not this
+  // rule's case: nothing was switched on by hand, it binds only when it has
+  // something to serve, and a failed bind is a warning the Webhooks pane shows.
+  if (features.webhooks && !core.getWebhookServer()?.httpServer && !core.webhookListenerOptional?.()) missing.push('webhooks');
   if (missing.length === 0) return;
   throw new Error(
     `refusing to run without ${missing.join(' and ')}: ${missing.length > 1 ? 'those listeners are' : 'that listener is'} `

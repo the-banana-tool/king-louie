@@ -71,6 +71,17 @@ function fleetLayoutMarkers({ env = process.env } = {}) {
   ];
 }
 
+// Whether a path is there, for a check that must not take "may not look" for
+// "nothing there" (fs.existsSync does): only a clear no is a no.
+function pathPresent(p, stat = fs.statSync) {
+  try {
+    stat(p);
+    return true;
+  } catch (err) {
+    return !(err && (err.code === 'ENOENT' || err.code === 'ENOTDIR'));
+  }
+}
+
 // The first fleet layout marker that exists, or null.
 function fleetLayoutExists({ env = process.env, exists = fs.existsSync } = {}) {
   return fleetLayoutMarkers({ env }).find((f) => exists(f)) || null;
@@ -293,6 +304,7 @@ module.exports = {
   fleetDataDir,
   fleetLayoutMarkers,
   fleetLayoutExists,
+  pathPresent,
   personalDataDir,
   desktopProfileDirs,
   adminConfigDir,

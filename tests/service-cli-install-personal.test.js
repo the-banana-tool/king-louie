@@ -154,6 +154,25 @@ describe('install --personal: startable with the desktop bridge on', () => {
     }
   });
 
+  it('startable reads the install\'s own data dir, not a sibling called data', async () => {
+    const s = setup();
+    const dataDir = path.join(path.dirname(s.dataDir), 'mine');
+    const flags = { dataDir };
+    await run('install', s, noStartableDep(s), flags);
+    fs.writeFileSync(path.join(s.configDir, 'service.json'), JSON.stringify({ features: { desktopBridge: true } }));
+    // A broken file beside the wrong path says nothing; beside the right one it does.
+    fs.mkdirSync(s.dataDir, { recursive: true });
+    fs.writeFileSync(path.join(s.dataDir, 'service.json'), '{ not json');
+    const ok = noStartableDep(s);
+    await run('install', s, ok, flags);
+    assert.ok(STARTED(ok));
+    fs.writeFileSync(path.join(dataDir, 'service.json'), '{ not json');
+    const bad = noStartableDep(s);
+    const { t } = await run('install', s, bad, flags);
+    assert.equal(STARTED(bad), false);
+    assert.match(t.text(), /service\.json does not load/);
+  });
+
   it('a service.json that does not load is not startable, with why', async () => {
     const s = setup();
     await prepare(s);

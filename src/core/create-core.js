@@ -278,8 +278,9 @@ function createCore(deps = {}) {
   // `features.webhooks` on and no webhook listener (src/service/run.js).
   let webhookListenerSettled = Promise.resolve();
   // A personal node's default (src/service/config.js): features.webhooks on,
-  // but nothing binds until a webhook or a contact relay needs the listener.
-  let webhookListenerIdle = false;
+  // but nothing binds until a webhook or a contact relay needs the listener,
+  // and a failed bind is a warning: the window shows nothing without a node.
+  const webhookListenerOptional = deps.webhooksOnDemand === true;
   let workflowEngine;
   let plannerExecutor;
   let agentExecutorAdapter;
@@ -3218,22 +3219,20 @@ function createCore(deps = {}) {
     // Electron host — but the promise is kept so a host that needs to know
     // can wait for it (core.whenListenersSettled).
     const startWebhookListener = () => {
-      webhookListenerSettled = webhookServer.start()
+      const started = webhookServer.start()
         .catch(err => log.warn(`Webhook server start failed: ${err.message}`));
+      // With another start in flight this one returns at once, so the wait is
+      // for both.
+      webhookListenerSettled = Promise.all([webhookListenerSettled, started]).then(() => {});
     };
     if (features.webhooks) {
-      const needed = deps.webhooksOnDemand !== true
+      const needed = !webhookListenerOptional
         || webhookRegistry.list().length > 0
         || Object.keys(deps.contactConfig?.relays || {}).length > 0;
-      if (needed) {
-        startWebhookListener();
-      } else {
-        webhookListenerIdle = true;
-        webhookRegistry.once('webhook:registered', () => {
-          webhookListenerIdle = false;
-          startWebhookListener();
-        });
-      }
+      if (needed) startWebhookListener();
+      // Every registration asks: start() returns early when it is up, and a
+      // bind that failed gets another try.
+      if (webhookListenerOptional) webhookRegistry.on('webhook:registered', startWebhookListener);
     }
 
     // Initialize mesh networking (peer-to-peer communication between king-louie instances)
@@ -4051,7 +4050,7 @@ function createCore(deps = {}) {
     // listener enabled, and the guard itself never ran.
     getGatewayServer: () => gatewayServer,
     getWebhookServer: () => webhookServer,
-    webhookListenerIdle: () => webhookListenerIdle,
+    webhookListenerOptional: () => webhookListenerOptional,
     whenListenersSettled: () => webhookListenerSettled
   };
 }

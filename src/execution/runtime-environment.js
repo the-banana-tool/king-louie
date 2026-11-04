@@ -1,7 +1,4 @@
-const { exec } = require('child_process');
-const { promisify } = require('util');
-
-const execAsync = promisify(exec);
+const { lookupCommand } = require('./command-lookup');
 
 const DEFAULT_COMMANDS = [
   'git',
@@ -40,22 +37,9 @@ async function isCommandAvailable(commandName) {
     return cache.get(normalized);
   }
 
-  const lookup = process.platform === 'win32'
-    ? `where ${normalized}`
-    : `command -v ${normalized}`;
-
-  try {
-    await execAsync(lookup, {
-      windowsHide: true,
-      timeout: 10000,
-      shell: true
-    });
-    cache.set(normalized, true);
-    return true;
-  } catch {
-    cache.set(normalized, false);
-    return false;
-  }
+  const available = Boolean(await lookupCommand(normalized, { timeout: 10000 }));
+  cache.set(normalized, available);
+  return available;
 }
 
 async function detectCommands(commands = DEFAULT_COMMANDS) {

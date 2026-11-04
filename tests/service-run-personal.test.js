@@ -279,7 +279,14 @@ describe('feature defaults by hosting (the real runService path)', { timeout: 12
     features: { ...OFF, webhooks: true, channels: true }, ports: { webhook: port }, webhooksOnDemand: true
   });
 
-  it('the first webhook binds on loopback; a stored one binds at the next start; a taken port then refuses', async () => {
+  // The webhook channels over a real core, as the pane reaches them.
+  function webhookIpc(core) {
+    const handlers = new Map();
+    require('../src/ipc/webhook-handlers').registerWebhookHandlers({ handle: (ch, fn) => handlers.set(ch, fn) }, core.context);
+    return { create: async (name) => (await handlers.get('webhook:create')({}, { name })).data, list: async () => (await handlers.get('webhook:list')({})).data };
+  }
+
+  it('the first webhook binds on loopback; a stored one binds at the next start; a taken port is a warning; the next registration retries', async () => {
     const l = layout(QUIET_YAML);
     const deps = () => personalDeps(l, { [l.dataDir]: ME, [l.configDir]: ME });
     const port = await freePort();
@@ -301,11 +308,49 @@ describe('feature defaults by hosting (the real runService path)', { timeout: 12
     }
     const squatter = net.createServer();
     await new Promise((resolve) => squatter.listen(port, '127.0.0.1', resolve));
+    let third;
+    let squatted = true;
     try {
-      await assert.rejects(onDemand(l, port, deps()), /refusing to run without webhooks/);
+      third = await onDemand(l, port, deps());
+      const ipc = webhookIpc(third.core);
+      assert.equal(third.core.getWebhookServer().httpServer, null);
+      const listed = await ipc.list();
+      assert.equal(listed[0].listening, false, 'the pane is told the listener is down');
+      const created = await ipc.create('second');
+      assert.equal(created.listening, false, 'the reply says so while the port is taken');
+      await new Promise((resolve) => squatter.close(resolve));
+      squatted = false;
+      const again = await ipc.create('third');
+      assert.equal(again.listening, true, 'a later registration tries again');
+      assert.equal(await listening(port), true);
+    } finally {
+      if (squatted) await new Promise((resolve) => squatter.close(resolve));
+      if (third) await third.stop();
+    }
+  });
+
+  it('webhooks set by hand on a personal node keep the rule: a taken port refuses the start', async () => {
+    const l = layout(QUIET_YAML);
+    const squatter = net.createServer();
+    await new Promise((resolve) => squatter.listen(0, '127.0.0.1', resolve));
+    try {
+      await assert.rejects(loadProfile('agent').start({
+        dataDir: l.dataDir, configDir: l.configDir, adminUid: EUID, workspace: l.workspace, audit: {},
+        deps: personalDeps(l, { [l.dataDir]: ME, [l.configDir]: ME }),
+        features: { ...OFF, webhooks: true }, ports: { webhook: squatter.address().port }
+      }), /refusing to run without webhooks/);
     } finally {
       await new Promise((resolve) => squatter.close(resolve));
     }
+  });
+
+  it('the renderer words a listener that is down, on create and in the list', () => {
+    const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    // The handlers answer { ok, data }: without the unwrap the pane listed nothing.
+    assert.match(renderer, /unwrapIpcResult\(await window\.electron\.webhook\.list\(\)/);
+    assert.match(renderer, /unwrapIpcResult\(await window\.electron\.webhook\.create\(payload\)/);
+    assert.match(renderer, /result\?\.listening === false/);
+    assert.match(renderer, /webhooks\.some\(\(wh\) => wh\.listening === false\)/);
   });
 
   it('a fleet start with webhooks on still binds at once, with none configured', async () => {

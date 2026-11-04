@@ -27,7 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile: execFileCallback, spawn: spawnDefault } = require('child_process');
 const { createLogger } = require('../logging');
-const { adminConfigDir, personalDataDir, fleetLayoutExists } = require('../platform/paths');
+const { adminConfigDir, personalDataDir, fleetLayoutExists, pathPresent } = require('../platform/paths');
 const { windowsSchtasksExe, windowsPowerShellExe, windowsSystemRoot } = require('../platform/windows-paths');
 const { shown } = require('../service/commands/io');
 const { isServiceCommandLine } = require('../service/commands/stop');
@@ -64,7 +64,8 @@ function createPersonalNodeRunner(deps = {}) {
   const isRunning = deps.isRunning || ((pid) => pidfile.isRunning(pid));
   const commandLineOf = deps.commandLineOf || ((pid) => defaultCommandLineOf(pid, { platform, env, execFile }));
   const whoAmI = deps.whoAmI || (() => defaultWhoAmI({ env, execFile }));
-  const exists = deps.exists || fs.existsSync;
+  // An ACL-locked file is there: the fresh check must not read it as absent.
+  const exists = deps.exists || ((p) => pathPresent(p, deps.stat || fs.statSync));
   const testOverride = env.KL_TEST_MODE === '1' && Boolean(env.KL_DESKTOP_BRIDGE_FILE);
   // The SID the last inspector call reported: queryTask compares the task's
   // principal with it.

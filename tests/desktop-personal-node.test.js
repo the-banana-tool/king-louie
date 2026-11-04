@@ -97,6 +97,20 @@ describe('detectPersonalNode: fresh', () => {
     assert.strictEqual(asked, 0);
   });
 
+  it('a marker the owner may not stat counts as present (an ACL-locked fleet layout)', async () => {
+    const denied = (code) => (p) => {
+      if (p === FLEET_MARKER) throw Object.assign(new Error(code), { code });
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    };
+    for (const code of ['EPERM', 'EACCES']) {
+      const { exists, ...rest } = { exists: null, stat: denied(code) };
+      const runner = createPersonalNodeRunner({ platform: 'win32', env, inspectOwners: recording(nobody), execFile: taskMissing, ...rest });
+      assert.strictEqual((await runner.detectPersonalNode()).fresh, false, code);
+    }
+    const none = createPersonalNodeRunner({ platform: 'win32', env, inspectOwners: recording(nobody), execFile: taskMissing, stat: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); } });
+    assert.strictEqual((await none.detectPersonalNode()).fresh, true);
+  });
+
   it('off Windows it is never fresh', async () => {
     const out = await runnerFor({ platform: 'linux' }).detectPersonalNode();
     assert.strictEqual(out.fresh, false);

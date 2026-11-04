@@ -1547,6 +1547,20 @@ describe('desktop controller: Install from the pane (§8)', () => {
     controller.dispose();
   });
 
+  it('the CLI\'s log lines do not reach the preview, or a failure\'s message', async () => {
+    const out = '[service/config] feature "desktopBridge" is ENABLED by C:\\x\\service.json\nwill set up\n';
+    const ok = fakeRunner({ personal: false, fresh: true, task: 'missing', cli: () => ({ code: 0, stdout: out, stderr: '', json: null }) });
+    const a = controllerFor({ extra: { nodeRunner: ok } });
+    assert.deepStrictEqual(await a.controller.nodeInstallPreview(), { ok: true, lines: ['will set up'] });
+    a.controller.dispose();
+    const failed = fakeRunner({ personal: false, fresh: true, task: 'missing', cli: () => ({ code: 2, stdout: '', stderr: '[service/config] noise\nrefused for a reason\n', json: null }) });
+    const b = controllerFor({ extra: { nodeRunner: failed } });
+    const refused = await b.controller.nodeInstallPreview();
+    assert.strictEqual(refused.message, 'refused for a reason');
+    assert.deepStrictEqual(refused.lines, ['refused for a reason']);
+    b.controller.dispose();
+  });
+
   it('a recorded pairing is never installed for by a fresh answer (C-7)', async () => {
     const runner = fakeRunner({ personal: false, fresh: true, task: 'missing' });
     const { controller, state } = controllerFor({ extra: { nodeRunner: runner } });

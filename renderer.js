@@ -13223,17 +13223,19 @@ async function loadPermissionRules() {
   }
 }
 
+const WEBHOOK_LISTENER_DOWN = 'The webhook listener is down, so these URLs do not answer: its port may be in use. See the node\'s log.';
+
 async function loadWebhookList() {
   if (!dom.webhookList) return;
   try {
-    const result = await window.electron.webhook.list();
+    const result = unwrapIpcResult(await window.electron.webhook.list(), 'Unable to list webhooks.');
     const webhooks = Array.isArray(result) ? result : (result?.webhooks || []);
     if (!webhooks.length) {
       dom.webhookList.innerHTML = '';
       if (dom.webhookListStatus) dom.webhookListStatus.textContent = 'No webhooks registered.';
       return;
     }
-    if (dom.webhookListStatus) dom.webhookListStatus.textContent = '';
+    if (dom.webhookListStatus) dom.webhookListStatus.textContent = webhooks.some((wh) => wh.listening === false) ? WEBHOOK_LISTENER_DOWN : '';
     dom.webhookList.innerHTML = '';
     webhooks.forEach(wh => {
       const row = document.createElement('div');
@@ -13261,8 +13263,8 @@ if (dom.webhookCreateBtn) {
     }
     try {
       const payload = { name, messageTemplate: dom.webhookTemplateInput?.value || undefined };
-      const result = await window.electron.webhook.create(payload);
-      if (dom.webhookStatus) dom.webhookStatus.textContent = `Created! URL: ${result?.url || result?.id}`;
+      const result = unwrapIpcResult(await window.electron.webhook.create(payload), 'Unable to create the webhook.');
+      if (dom.webhookStatus) dom.webhookStatus.textContent = `Created! URL: ${result?.url || result?.id}${result?.listening === false ? ` ${WEBHOOK_LISTENER_DOWN}` : ''}`;
       if (dom.webhookNameInput) dom.webhookNameInput.value = '';
       if (dom.webhookTemplateInput) dom.webhookTemplateInput.value = '';
       loadWebhookList();

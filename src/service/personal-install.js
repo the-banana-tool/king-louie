@@ -114,7 +114,9 @@ function taskExists(env, name) {
 // (paths.js fleetLayoutMarkers). → { task, marker: <path> | null }.
 function defaultFleetInstalled(env) {
   const task = taskExists(env, FLEET_TASK_NAME);
-  const marker = require('../platform/paths').fleetLayoutExists({ env });
+  const { fleetLayoutExists, pathPresent } = require('../platform/paths');
+  // A marker this account may not read is still a fleet node's.
+  const marker = fleetLayoutExists({ env, exists: pathPresent });
   return { task, marker };
 }
 
@@ -140,13 +142,13 @@ function readYaml(file) {
 // With no relay and no front door, whether the node's client is the window:
 // <configDir>/service.json loads with the desktop bridge on (attach stage 2
 // §6.4). → the same answer as defaultStartable.
-function bridgeStartable(configDir) {
+function bridgeStartable(configDir, dataDir) {
   const { loadServiceConfig, CONFIG_FILE } = require('./config');
   if (!fs.existsSync(path.join(configDir, CONFIG_FILE))) return { ok: false, why: NOTHING_PAIRED };
   const uid = typeof process.geteuid === 'function' ? process.geteuid() : -1;
   let features;
   try {
-    ({ features } = loadServiceConfig(path.join(path.dirname(configDir), 'data'), {}, { adminConfigDir: configDir, adminUid: uid }));
+    ({ features } = loadServiceConfig(dataDir, {}, { adminConfigDir: configDir, adminUid: uid }));
   } catch (err) {
     return { ok: false, why: `${CONFIG_FILE} does not load (${shown(err.message)})` };
   }
@@ -159,7 +161,7 @@ function bridgeStartable(configDir) {
 // (what the node links to: service-wiring.js prefers the pin), or the desktop
 // bridge on.
 // → { ok: true } or { ok: false, why } (one line).
-function defaultStartable(configDir) {
+function defaultStartable(configDir, dataDir) {
   let config;
   try {
     const uid = typeof process.geteuid === 'function' ? process.geteuid() : -1;
@@ -174,7 +176,7 @@ function defaultStartable(configDir) {
   try {
     st = fs.lstatSync(path.join(configDir, FRONT_DOOR_PIN));
   } catch (err) {
-    if (err.code === 'ENOENT') return bridgeStartable(configDir);
+    if (err.code === 'ENOENT') return bridgeStartable(configDir, dataDir);
     return { ok: false, why: `${FRONT_DOOR_PIN} cannot be read (${shown(err.message)})` };
   }
   if (st.isSymbolicLink()) return { ok: false, why: `${FRONT_DOOR_PIN} is a link, which the node refuses` };
@@ -349,7 +351,7 @@ async function install({ flags, io, c }) {
   const noBrowser = !chrome && !(existing && namesBrowser(existing.text));
   // The task is started only when the node.yaml it will run is one that
   // starts: a fresh one has no relay yet, and pair starts it.
-  const start = existing ? c.startable(configDir) : { ok: false, why: NOTHING_PAIRED };
+  const start = existing ? c.startable(configDir, dataDir) : { ok: false, why: NOTHING_PAIRED };
   const relay = start.ok;
   // A node already running on this data dir (one started by hand included)
   // is not started a second time (C-11).
