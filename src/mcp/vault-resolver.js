@@ -31,12 +31,13 @@ function createVaultEnvResolver({ vaultStore, decryptToken, onMissing, logger = 
         logger.warn(`not resolving ${match}: contact credentials and keys with a backslash are not available to MCP servers`);
         return match;
       }
-      const encrypted = vaultStore.get(`${VAULT_PREFIX}${key.trim()}`);
-      if (!encrypted) {
-        if (onMissing) onMissing(key);
-        return match; // leave unresolved so auth failure is visible
-      }
       try {
+        // Only a stored secret: a name can also walk onto a branch, or off one.
+        const encrypted = vaultStore.get(`${VAULT_PREFIX}${key.trim()}`);
+        if (typeof encrypted !== 'string' || !encrypted) {
+          if (onMissing) onMissing(key);
+          return match; // leave unresolved so auth failure is visible
+        }
         return decryptToken(encrypted);
       } catch (err) {
         if (onMissing) onMissing(key, err);
