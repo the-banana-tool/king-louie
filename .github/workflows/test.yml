@@ -12,7 +12,9 @@ jobs:
       matrix:
         # Not ubuntu-latest: package.json pins playwright exactly (its private
         # snapshot API), and that version refuses to install on Ubuntu 26.04.
-        os: [ubuntu-24.04, windows-latest, macos-latest]
+        # Windows runs only on main: each leg takes about 50 minutes, so a pull
+        # request relies on `npm test` run locally on Windows before the merge.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-24.04", "macos-latest"]') || fromJSON('["ubuntu-24.04", "windows-latest", "macos-latest"]') }}
         # 22 is the floor package.json engines promises (king-louie-service
         # runs on the system Node); 24 is what Electron 41 bundles, so it is
         # the runtime the desktop app actually ships on.

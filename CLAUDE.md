@@ -61,7 +61,8 @@ loads a `node.yaml` the test process owns, skips itself off Windows.
 
 The Windows legs run `--test-concurrency=2`, since the runner is slow enough
 under load to stall a process for a second or more: give a test that measures
-real time a margin of seconds.
+real time a margin of seconds. They run only on a push to `main`, not on a pull
+request (about 50 minutes each), so run `npm test` on Windows before merging.
 
 To reproduce the first two, run the suite from pwsh with `TEMP`/`TMP` pointed at the
 short name of a long-named folder (`cmd /c for %I in ("<dir>") do @echo %~sI`).
