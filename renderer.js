@@ -10560,7 +10560,11 @@ if (dom.chatMainSelect) {
 }
 
 async function loadChats() {
+  const activeWhenAsked = appState.activeChatId;
   const data = unwrapIpcResult(await window.electron.chat.load(), 'Unable to load chats.');
+  // A chat selected while the list was on its way reached the main process
+  // after this reply was read, so the reply's active chat is the one left.
+  const selectedSince = appState.activeChatId !== activeWhenAsked ? appState.activeChatId : null;
   appState.chats = data.chats || [];
   appState.historyStatus = data.history || null;
   const historyNotice = historyNoticeText(appState.historyStatus);
@@ -10568,7 +10572,7 @@ async function loadChats() {
     appState.historyNoticeShown = true;
     showNotice(historyNotice);
   }
-  appState.activeChatId = data.activeChatId || appState.chats[0]?.id || null;
+  appState.activeChatId = selectedSince || data.activeChatId || appState.chats[0]?.id || null;
   if (appState.activeChatId) {
     await ensureChatMessagesLoaded(appState.activeChatId);
   }
