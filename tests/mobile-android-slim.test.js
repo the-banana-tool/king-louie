@@ -240,9 +240,9 @@ describe('Android: the read key and the routes (android-slim §8.4, §12.1)', ()
     // No screen touches either key.
     for (const file of appFiles()) {
       const base = path.basename(file);
-      if (['AppModel.kt', 'ReadKey.kt', 'DeviceKey.kt', 'RelayApi.kt'].includes(base)) continue;
+      if (['AppModel.kt', 'ReadKey.kt', 'DeviceKey.kt', 'BoxKey.kt', 'RelayApi.kt'].includes(base)) continue;
       const src = read(file);
-      for (const w of [/\bReadKey\b/, /\bDeviceKey\b/, /\breadSigner\b/, /\bsignRead\(/]) assert.doesNotMatch(src, w, base);
+      for (const w of [/\bReadKey\b/, /\bDeviceKey\b/, /\bBoxKey\b/, /\breadSigner\b/, /\bsignRead\(/]) assert.doesNotMatch(src, w, base);
     }
   });
 });

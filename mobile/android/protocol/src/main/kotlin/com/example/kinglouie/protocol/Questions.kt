@@ -33,7 +33,9 @@ data class QuestionItem(
     val unreadable: String? = null,
     /** The opened ask's node box, which its answer is sealed to (R-SP-3). Null for a clear ask. */
     val nodeBox: JsonObject? = null,
-    val seal: SealState = SealState.CLEAR
+    val seal: SealState = SealState.CLEAR,
+    /** The ask's signed `expires_at`, which stays in clear (R-SP-4); null when it has none. */
+    val expiresAt: String? = null
 ) {
     companion object {
         const val TYPE = "kl.question.ask"
@@ -50,7 +52,7 @@ data class QuestionItem(
             val nodeId = received["node_id"].str() ?: return null
             fun unreadable(reason: String, state: SealState) = QuestionItem(
                 token, nodeId, nodeName, "", "", "", received["kind"].str() ?: "question", received["urgency"].str() ?: "normal", "", emptyList(),
-                unreadable = reason, seal = state
+                unreadable = reason, seal = state, expiresAt = received["expires_at"].str()
             )
             if (Seal.clearRefused(TYPE, received, sealedSeen)) return unreadable(Seal.CLEAR_AFTER_SEALED, SealState.CLEAR)
             if (received.containsKey("sealed") && !isSealedAsk(received)) return null
@@ -70,7 +72,7 @@ data class QuestionItem(
             return QuestionItem(
                 token, nodeId, nodeName, caseId, questionId, full["case_title"].str() ?: "",
                 full["kind"].str() ?: "question", full["urgency"].str() ?: "normal", text, options,
-                nodeBox = if (sealed) full["node_box"].obj() else null, seal = read.state
+                nodeBox = if (sealed) full["node_box"].obj() else null, seal = read.state, expiresAt = full["expires_at"].str()
             )
         }
 

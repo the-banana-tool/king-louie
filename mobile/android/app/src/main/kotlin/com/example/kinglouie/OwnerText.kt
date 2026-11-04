@@ -2,6 +2,7 @@ package com.example.kinglouie
 
 import com.example.kinglouie.protocol.Display
 import com.example.kinglouie.protocol.FrontDoorReply
+import com.example.kinglouie.protocol.Seal
 
 // The owner's words for what came back (split out of AppModel.kt; android-slim
 // review S8). Pure functions: every string a relay, node or front door sent is
@@ -12,7 +13,24 @@ internal fun friendlyReason(reason: String?): String = when (reason) {
     null, "" -> "no reason given"
     "action_changed" -> "the action changed before it ran"
     "expired" -> "too late — request expired"
+    Seal.CLEAR_AFTER_SEALED -> CLEAR_AFTER_SEALED_LINE
+    Seal.KEY_LOCKED -> KEY_LOCKED_LINE
+    "sealed_required" -> "this node takes only a sealed answer here"
     else -> Display.escape(reason)
+}
+
+private const val CLEAR_AFTER_SEALED_LINE = "This node seals its messages. This one was not sealed, so it may be old."
+private const val KEY_LOCKED_LINE = "Unlock to read"
+
+/**
+ * The one line of a row that offers no decision (R-SP-6, R-SP-15), for a reason
+ * in AppModel.UNREADABLE_REASONS: `not_recipient` and `open_failed` both mean
+ * the wrap is not for the box key this phone holds.
+ */
+internal fun unreadableLine(reason: String, nodeName: String): String = when (reason) {
+    Seal.CLEAR_AFTER_SEALED -> CLEAR_AFTER_SEALED_LINE
+    Seal.KEY_LOCKED -> KEY_LOCKED_LINE
+    else -> "Sealed for this node's other phones. Run device apply on ${Display.escape(nodeName)} for this phone."
 }
 
 /** At most `max` code points, then escaped (never cut through an escape). */

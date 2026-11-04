@@ -30,16 +30,42 @@ class ApprovalListTest {
         nodePairings: List<ApprovalList.NodePairing> = emptyList(),
         alerts: List<ApprovalList.Alert> = emptyList(),
         runningLeases: List<ApprovalList.RunningLease> = emptyList(),
+        sealedUnreadable: List<ApprovalList.SealedUnreadable> = emptyList(),
         nodes: List<NodePin> = listOf(gpu, web),
         nodeChecks: Map<String, ApprovalList.NodeCheck> = mapOf(gpu.id to ApprovalList.NodeCheck.Confirmed(now, 0, 0), web.id to ApprovalList.NodeCheck.Confirmed(now, 0, 0)),
         overflowing: Set<String> = emptySet(),
         pushOn: Boolean = false
     ) = ApprovalList.Input(
         toolApprovals = toolApprovals, questions = questions, leaseRequests = leaseRequests, clientConnections = clientConnections,
-        nodePairings = nodePairings, alerts = alerts, runningLeases = runningLeases, nodes = nodes, nodeChecks = nodeChecks,
+        nodePairings = nodePairings, alerts = alerts, runningLeases = runningLeases, sealedUnreadable = sealedUnreadable, nodes = nodes, nodeChecks = nodeChecks,
         thisDevice = me, relayNowMs = now, frontDoorName = "kl.example.com", overflowing = overflowing, pushOn = pushOn,
         formatTime = time, formatDateTime = time
     )
+
+    @Test
+    fun aMessageThatCannotBeReadHasNoDecisionAndNoDetail() {
+        val result = ApprovalList.build(
+            input(
+                toolApprovals = listOf(tool("t-late", "gpu-box", 200_000)),
+                sealedUnreadable = listOf(
+                    ApprovalList.SealedUnreadable("tool:t-sealed", web.id, "web\u202E-01", "Tool approval", "One line about web\u202E-01", 100_000),
+                    ApprovalList.SealedUnreadable("question:7QD4KM", web.id, "web-01", "Question", "Another line", null)
+                )
+            )
+        )
+        val row = result.rows.first { it.id == "sealed:tool:t-sealed" }
+        assertEquals(ApprovalList.Kind.UNREADABLE, row.kind)
+        assertEquals(emptyList<ApprovalList.Button>(), row.buttons)
+        assertFalse(row.enabled)
+        assertFalse(row.hasDetail)
+        assertEquals(100_000L, row.timeLeftMs)
+        // What a node named is escaped, in the row's name and in its line.
+        assertEquals("web‹U+202E›-01", row.nodeName)
+        assertEquals(listOf("One line about web‹U+202E›-01"), row.cardLines)
+        // Its place is its deadline's; one with no deadline comes last of the waiting ones, and the list is not empty.
+        assertEquals(listOf("sealed:tool:t-sealed", "tool:t-late", "sealed:question:7QD4KM"), result.rows.map { it.id })
+        assertNull(result.empty)
+    }
 
     private fun tool(id: String, node: String, leftMs: Long, kind: String = "tool", summary: String = "Bash(ls)", sending: Boolean = false, decided: ApprovalList.Decided? = null) =
         ApprovalList.ToolApproval(

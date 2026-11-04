@@ -305,11 +305,11 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     const live = section(android, '// ---- Leases (fleet stage 5) ----', '// ---- Leases: end ----');
     const note = section(live, 'private fun noteListedLease', '\n    }\n');
     assert.match(note, /if \(!isStatusOnly\(entry\)\) return\n\s+val pin = pins\.firstOrNull \{ it\.id == entry\["node_id"\]\.str\(\) \} \?: return/);
-    assert.match(note, /val status = Leases\.verifiedMessage\(signed, pin\)\?\.let \{ LeaseStatus\.from\(it\) \} \?: return/);
+    assert.match(note, /val status = readStatus\(signed, pin\) \?: return/);
     assert.match(note, /liveLease = applyLease\(signed, pin, live, deviceId \?: ""\)/);
     assert.match(note, /if \(!Leases\.acceptsStatus\(status, if \(known >= 0\) runningLeases\[known\]\.appliedSeq else 0\)\) return/);
     assert.match(note, /if \(!Leases\.isLive\(status\.state\) && !Leases\.mayStillStart\(status\.state, status\.leaseId in signedLeaseGrants\)\) \{\n\s+if \(status\.state == "ended"\) signedLeaseGrants\.remove\(status\.leaseId\)\n\s+return\n\s+\}/);
-    assert.ok(note.indexOf('Leases.verifiedMessage(') < note.indexOf('runningLeases.add('));
+    assert.ok(note.indexOf('readStatus(') >= 0 && note.indexOf('readStatus(') < note.indexOf('runningLeases.add('));
     const refreshAndroid = section(live, 'fun refreshLeases', 'private fun verifiedLeaseRequest');
     assert.match(refreshAndroid, /val listed = api\.leases\(nonce\)\n/, 'R-F5-20: the list request carries this request\'s nonce');
     assert.match(refreshAndroid, /for \(entry in listed\) noteListedLease\(entry, pins\)/);
@@ -679,7 +679,7 @@ describe('both phones enforce order and addressee (owner ruling R-F5-16)', () =>
     assert.equal(count(live, 'notePendingListed('), 2, 'declared, and called from that one place: refreshLeases');
     assert.equal(count(refreshAndroid, 'api.'), 1, 'still one request');
     const pendingKt = section(live, 'private fun notePendingListed', '\n    }\n');
-    assert.match(pendingKt, /if \(!check\.accepted\) return\n\s+for \(signed in check\.statuses\) \{\n\s+val status = Leases\.verifiedMessage\(signed, pin\)\?\.let \{ LeaseStatus\.from\(it\) \} \?: continue/);
+    assert.match(pendingKt, /if \(!check\.accepted\) return\n\s+for \(signed in check\.statuses\) \{\n\s+val status = readStatus\(signed, pin\) \?: continue/);
     assert.match(pendingKt, /if \(!Leases\.listedPendingGetsRow\(status\.state, status\.leaseId in shownAsRequest, status\.leaseId in signedLeaseGrants\)\) continue/);
     assert.match(pendingKt, /if \(!Leases\.acceptsStatus\(status, 0\)\) continue\n\s+runningLeases\.add\(RunningLease\(pin\.id, pin\.name, status\.leaseId, status\.state, status\.reason, status\.seq, status\.grantedByDevice, status\.grantedByName, signed\)\)/);
     none(pendingKt, ['api.', 'sendLease(', 'signEnvelope(', 'killSwitch(', 'scope.launch', 'delay(', 'while'], 'notePendingListed (Android)');
@@ -931,7 +931,7 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     // The one place a live lease's state is written from the network: applyLease, from verified messages.
     assert.equal(count(apply, 'state = status.state'), 1);
     assert.equal(count(apply, 'state = view.state'), 1);
-    assert.match(apply, /val status = Leases\.verifiedMessage\(envelope, pin\)\?\.let \{ LeaseStatus\.from\(it\) \}/);
+    assert.match(apply, /val status = readStatus\(envelope, pin\)/);
     const outside = live.replace(apply, '');
     none(outside, ['state = status.state', 'state = view.state', 'state = sent.', 'state = json', 'state = reply', 'state = "ended"'], 'the lease section outside applyLease');
     // The core says what a Stop's reply lets the screen say, and "ended" is not in any of it.
@@ -960,7 +960,7 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     const pushed = section(model, 'fun openPushed(kind: String, id: String, count: Int = 1)','\n    }\n');
     assert.match(pushed, /if \(!readyToRead\(\)\) return/);
     assert.match(pushed, /"lease", "session_paused", "session_ended" -> pushedLease\(api, kind, id\)/);
-    assert.match(pushed, /if \(found != null\) selected = found else if \(listNotice == null\) listNotice = NO_LONGER_WAITING/);
+    assert.match(pushed, /if \(found != null\) selected = found else if \(listNotice == null\) listNotice = unreadableNotice\(id\) \?: NO_LONGER_WAITING/);
     none(pushed, ['signEnvelope(', 'decide(', 'decideLease(', 'killSwitch(', 'answer(', 'noteLeasePush'], 'openPushed');
     const lease = section(model, 'private suspend fun pushedLease', '\n    }\n');
     assert.match(lease, /refreshLeases\(api\)/);
@@ -983,14 +983,15 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     // The app: requests come through the pin and the core, and nothing else opens an envelope.
     const verified = section(live, 'private fun verifiedLeaseRequest', '\n    }\n');
     assert.match(verified, /val pin = pins\.firstOrNull \{ it\.id == envelope\.kid \} \?: return null/);
-    assert.match(verified, /val request = Leases\.verifiedMessage\(envelope, pin\)\?\.let \{ LeaseRequest\.from\(it, sealedSeen = emptySet\(\)\) \} \?: return null/);
-    assert.match(verified, /return LeaseRequestItem\(request, pin\.name, status\)/);
+    assert.match(verified, /val message = Leases\.verifiedMessage\(envelope, pin\) \?: return null\n\s+\/\/ Listed under the node that signed it\.\n[^\n]*\n\s+val check = LeaseRequest\.check\(message, opener\(\), sealedSeen = sealedSeen\)/);
+    assert.match(verified, /return LeaseRequestItem\(request, pin\.name, status, seal = check\.seal\)/);
     const apply = section(live, 'private fun applyLease', '\n    }\n');
-    assert.match(apply, /Leases\.verifiedMessage\(envelope, pin\)\?\.let \{ LeaseStatus\.from\(it\) \}/);
+    assert.match(section(android().model, 'private fun readStatus', '\n    }\n'), /Leases\.verifiedMessage\(envelope, pin\)\?\.let \{ LeaseStatus\.from\(it, opener\(\)\) \}/);
+    assert.match(apply, /val status = readStatus\(envelope, pin\)/);
     assert.match(apply, /val view = check\.view\?\.takeIf \{ check\.accepted && it\.leaseId == live\.leaseId \} \?: return live/);
     none(live, ['.message()', 'payloadBytes', 'JsonText', '.payload'], 'the lease section (an envelope opened outside the core)');
     // The request detail draws the signed request, and the model keeps nothing else for it.
-    assert.match(live, /data class LeaseRequestItem\(val request: LeaseRequest, val nodeName: String, val status: LeaseStatus\?, val unconfirmed: String\? = null\)/);
+    assert.match(live, /data class LeaseRequestItem\(val request: LeaseRequest, val nodeName: String, val status: LeaseStatus\?, val unconfirmed: String\? = null, val seal: SealState = SealState\.CLEAR\)/);
     for (const shown of ['item.request.apps', 'app.name', 'app.path', 'app.processes', 'item.request.reason', "Agent's reason (unverified)",
       'item.request.originClient', 'item.request.jobId', 'item.request.maxMinutes', 'item.request.limits', 'item.nodeName']) {
       assert.ok(leaseScreens.includes(shown), `the request screen shows ${shown}`);
@@ -1008,7 +1009,7 @@ describe('Android: the loops, the read-key watch and the decisions (android-slim
     assert.match(live, /Leases\.revoke\(live\.nodeId, live\.leaseId, "kill_switch", k\.deviceId, Messages\.randomNonce\(\), Timestamps\.string\(api\.now\(\)\)\)/);
     none(live, ['Instant.now()'], 'the lease section (the phone clock in a signed message)');
     // A request is dropped once it is past its expiry on that clock.
-    assert.match(live, /\(Timestamps\.epochMillis\(request\.expiresAt\) \?: 0L\) <= api\.now\(\)\.toEpochMilli\(\)/);
+    assert.match(live, /if \(expiresAtMs <= api\.now\(\)\.toEpochMilli\(\)\) return null/);
   });
 
   it('Android: the read key\'s set-up (§8.7): two fingerprints, the statement kept and re-posted with the read key, an older relay named', () => {
@@ -1243,7 +1244,7 @@ describe('task leases on the phones', () => {
     const kt = section(read(ANDROID_MODEL), 'fun killSwitch() {', '\n    }\n');
     assert.ok(kt.includes('val signedStatus = live.lastStatus?.let { envelope -> storage.nodes.firstOrNull { it.id == live.nodeId }?.let { Leases.verifiedMessage(envelope, it) } }'));
     assert.ok(kt.includes('if (task) "Stop this task" else "Stop computer use now"'));
-    assert.ok(kt.includes('Leases.taskStopName(signedStatus)?.let { "${promptText(it, 40)} on $node" } ?: node'));
+    assert.ok(kt.includes('Leases.taskStopName(signedStatus))?.let { "${promptText(it, 40)} on $node" } ?: node'));
     assert.equal(count(kt, 'signEnvelope(k,'), 1);
     const swift = section(read(IOS_MODEL), 'func killSwitch() async {', '// Read again: the prompt took time.');
     assert.ok(swift.includes('let signedStatus = live.lastStatus.flatMap { envelope in state.nodes.first(where: { $0.id == live.nodeId }).flatMap { Leases.verifiedMessage(envelope, pin: $0) } }'));

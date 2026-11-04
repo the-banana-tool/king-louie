@@ -31,6 +31,17 @@ class QuestionTest {
         assertEquals("Lakeside lot", item.caseTitle)
         assertEquals("high", item.urgency)
         assertEquals(listOf(QuestionOption("a", "Yes"), QuestionOption("b", "No")), item.options)
+        assertNull(item.expiresAt)
+    }
+
+    @Test
+    fun anAskThatCannotBeReadKeepsItsExpiry() {
+        val dated = JsonText.parse(Jcs.serialize(question).replace("\"expires_at\":null", "\"expires_at\":\"2026-09-25T14:00:00Z\""))
+        val seen = setOf("kl-aaaaaaaaaaaaaaaa")
+        val item = QuestionItem.from(dated, "web-01", sealedSeen = seen)!!
+        assertEquals(Seal.CLEAR_AFTER_SEALED, item.unreadable)
+        assertEquals("2026-09-25T14:00:00Z", item.expiresAt)
+        assertEquals("2026-09-25T14:00:00Z", QuestionItem.from(dated, "web-01", sealedSeen = emptySet())!!.expiresAt)
     }
 
     @Test

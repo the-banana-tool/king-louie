@@ -19,7 +19,7 @@ import kotlinx.serialization.json.JsonElement
  * lease request), and for running leases the relay-corrected now.
  */
 object ApprovalList {
-    enum class Kind { TOOL_APPROVAL, QUESTION, LEASE_REQUEST, CLIENT_CONNECTION, NODE_PAIRING, ALERT, RUNNING_LEASE, NODE_CHECK }
+    enum class Kind { TOOL_APPROVAL, QUESTION, LEASE_REQUEST, CLIENT_CONNECTION, NODE_PAIRING, ALERT, RUNNING_LEASE, NODE_CHECK, UNREADABLE }
 
     /**
      * What a row offers (§7.2). APPROVE signs the row's decision with its
@@ -73,6 +73,14 @@ object ApprovalList {
         val unconfirmed: String? = null
     )
 
+    /**
+     * A message a pinned node signed that this phone cannot read or may not
+     * answer (R-SP-6, R-SP-15): only its verified clear facts, and [line], the
+     * app's words for why. It has no decision and no detail. [ref] is unique
+     * across kinds.
+     */
+    data class SealedUnreadable(val ref: String, val nodeId: String, val nodeName: String, val label: String, val line: String, val timeLeftMs: Long? = null)
+
     /** One pinned node's listing check; a node with none in [Input.nodeChecks] has not been asked yet. */
     sealed class NodeCheck {
         /** A listing this phone accepted at [atMs] (its own wall clock): [running] live leases, [waiting] requests not yet answered. */
@@ -90,6 +98,7 @@ object ApprovalList {
         val nodePairings: List<NodePairing> = emptyList(),
         val alerts: List<Alert> = emptyList(),
         val runningLeases: List<RunningLease> = emptyList(),
+        val sealedUnreadable: List<SealedUnreadable> = emptyList(),
         /** The pinned nodes, in the app's order. */
         val nodes: List<NodePin> = emptyList(),
         val nodeChecks: Map<String, NodeCheck> = emptyMap(),
@@ -176,6 +185,7 @@ object ApprovalList {
         input.leaseRequests.forEach { waiting.add(leaseRequestRow(it, input) to it.decided) }
         input.clientConnections.forEach { waiting.add(clientRow(it, input) to it.decided) }
         input.nodePairings.forEach { waiting.add(pairingRow(it, input) to it.decided) }
+        input.sealedUnreadable.forEach { waiting.add(sealedRow(it) to null) }
         val alerts = input.alerts.mapNotNull { a -> alertRow(a, input)?.let { Triple(it, a.decided, Timestamps.epochMillis(a.json["at"].str() ?: "")) } }
         val questions = input.questions.map { questionRow(it, input) to it.decided }
 
@@ -260,6 +270,13 @@ object ApprovalList {
             notConfirmed = if (sending) null else unconfirmed
         )
     }
+
+    /** R-SP-6, R-SP-15: the clear facts and one line, and nothing to press. */
+    private fun sealedRow(u: SealedUnreadable): Row = Row(
+        id = "sealed:${u.ref}", kind = Kind.UNREADABLE, ref = u.ref, nodeId = u.nodeId, nodeName = Display.escape(u.nodeName),
+        label = u.label, summary = "", cardLines = listOf(Display.escape(u.line)), timeLeftMs = u.timeLeftMs?.coerceAtLeast(0),
+        buttons = emptyList(), enabled = false, warning = true, hasDetail = false
+    )
 
     private fun toolRow(t: ToolApproval, input: Input): Row {
         val d = t.display

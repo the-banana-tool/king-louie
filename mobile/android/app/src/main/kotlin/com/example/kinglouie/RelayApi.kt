@@ -315,6 +315,13 @@ class RelayApi(
         val route = if (key == PhoneKey.DEVICE) DEVICE else ENVELOPE
         return request("POST", "/v1/devices/read-key", route, statement.json).second
     }
+
+    /**
+     * A device-key-signed `kl.device.box_key` statement (R-SP-10), first send and
+     * re-send alike: an envelope's request. `{ nodes: [{ node_id, state }] }`; a
+     * relay from before the box key answers 404.
+     */
+    suspend fun boxKey(statement: Envelope): JsonElement? = request("POST", "/v1/devices/box-key", ENVELOPE, statement.json).second
     suspend fun devices(): List<JsonElement> = request("GET", "/v1/devices", READ).second.arr() ?: emptyList()
 
     /** On the read key: re-sent with no prompt when the token rotates (spec 3 R5). */

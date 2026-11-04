@@ -70,6 +70,17 @@ class Storage(context: Context) {
             JsonObject(mapOf("id" to jsonString(it.id), "name" to jsonString(it.name), "key" to jsonString(it.key)))
         }))).apply()
 
+    /**
+     * The nodes this phone has opened a sealed message from, by node id
+     * (R-SP-15). Only a signature-verified open adds one (AppModel.noteSeal);
+     * Reset clears it with the rest, and nothing else takes one away.
+     */
+    var sealedSeen: Set<String>
+        get() = prefs.getString("sealedSeen", null)?.let { text ->
+            runCatching { JsonText.parse(text).arr()!!.map { it.str()!! }.toSet() }.getOrNull()
+        } ?: emptySet()
+        set(v) = prefs.edit().putString("sealedSeen", Jcs.serialize(JsonArray(v.sorted().map { jsonString(it) }))).apply()
+
     /** The signed `kl.device.read_key` statement (an envelope, JSON), kept until it expires to re-post it (§8.7). */
     var readKeyStatement: String?
         get() = prefs.getString("readKeyStatement", null)
@@ -86,6 +97,28 @@ class Storage(context: Context) {
     var readKeyUnknown: Boolean
         get() = prefs.getBoolean("readKeyUnknown", false)
         set(v) = prefs.edit().putBoolean("readKeyUnknown", v).apply()
+
+    /** The signed `kl.device.box_key` statement, kept until it expires to re-post it (R-SP-10). */
+    var boxKeyStatement: String?
+        get() = prefs.getString("boxKeyStatement", null)
+        set(v) = prefs.edit().putString("boxKeyStatement", v).apply()
+
+    /** What each node answered to that statement, by node id, in this app's words (BoxKeyNodes). */
+    var boxKeyNodes: Map<String, String>
+        get() = prefs.getString("boxKeyNodes", null)?.let { text ->
+            runCatching { JsonText.parse(text).obj()!!.mapValues { it.value.str()!! } }.getOrNull()
+        } ?: emptyMap()
+        set(v) = prefs.edit().putString("boxKeyNodes", Jcs.serialize(JsonObject(v.mapValues { jsonString(it.value) }))).apply()
+
+    /** An enrollment carried this box key, or a statement of it went out. */
+    var boxKeySent: Boolean
+        get() = prefs.getBoolean("boxKeySent", false)
+        set(v) = prefs.edit().putBoolean("boxKeySent", v).apply()
+
+    /** This phone's Keystore would not make a box key. */
+    var boxKeyRefused: Boolean
+        get() = prefs.getBoolean("boxKeyRefused", false)
+        set(v) = prefs.edit().putBoolean("boxKeyRefused", v).apply()
 
     /** The pairing state, to put back when a pairing does not finish. */
     data class Snapshot(val mode: AppMode, val relayUrl: String?, val relaySpki: String?, val nodes: List<NodePin>, val frontDoorId: String?)
@@ -110,7 +143,9 @@ class PendingItem(
     val fullText: Map<String, String>,
     val receivedAtMs: Long,
     val expiresInMs: Long,
-    initialStatus: String?
+    initialStatus: String?,
+    /** A sealed request: what it opened to, which `message` also is and the response is built from. Null for a clear one. */
+    val opened: JsonObject? = null
 ) {
     var status by mutableStateOf(initialStatus)
 
@@ -123,6 +158,14 @@ class PendingItem(
     /** From receipt, on the monotonic clock. */
     val timeLeftMs: Long get() = (expiresInMs - (SystemClock.elapsedRealtime() - receivedAtMs)).coerceAtLeast(0)
 }
+
+/**
+ * A message a pinned node signed that this phone cannot read or may not answer
+ * (R-SP-6, R-SP-15): its verified clear facts and why. Kept apart from the stores
+ * a press or a detail reads, so no decision can reach it. [ref] is unique across
+ * kinds: the kind's prefix and its own id.
+ */
+data class UnreadableItem(val ref: String, val nodeId: String, val nodeName: String, val label: String, val reason: String, val expiresAtMs: Long?)
 
 /** A node pairing waiting on the front door, with when this phone first saw it (its time left counts from there). */
 data class PairingItem(val request: PairingRequest, val receivedAtMs: Long) {

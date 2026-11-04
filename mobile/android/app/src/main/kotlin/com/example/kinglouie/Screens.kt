@@ -138,6 +138,15 @@ fun ApprovalsScreen(model: AppModel, openScanner: () -> Unit, openSettings: () -
                         }
                     }
                 }
+                // The box key's set-up (R-SP-10), for a phone enrolled before it.
+                if (model.boxKeySetupNeeded) {
+                    item {
+                        Button({ model.setUpBoxKey() }, Modifier.fillMaxWidth().height(DecisionHeight), enabled = !model.boxKeySetupBusy,
+                            shape = RoundedCornerShape(KlTokens.radiusMd), colors = approveColors()) {
+                            Text(AppModel.BOX_KEY_SETUP_TITLE, style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+                }
                 // At most one line about why the loop is not getting through (§6.2).
                 model.pollProblem?.let { problem -> item { Text(problem, color = statusColors.warning) } }
                 // A notification whose item is gone (§13), or a session its node no longer has (C-18).

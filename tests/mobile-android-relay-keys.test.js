@@ -106,6 +106,8 @@ describe('Android: two keys, and the key each relay route is signed with (androi
     assert.deepEqual(keyed.map((c) => `${c.method} ${c.path}`).sort(), ['POST /v1/devices/read-key', 'POST /v1/leases/${segment(leaseId)}/$action']);
     assert.match(api, /val route = if \(key == PhoneKey\.DEVICE\) DEVICE else ENVELOPE\n\s+return request\("POST", "\/v1\/devices\/read-key", route, statement\.json\)/);
     assert.match(api, /val route = if \(action == "watch"\) READ else ENVELOPE\n\s+return request\("POST", "\/v1\/leases\/\$\{segment\(leaseId\)\}\/\$action", route, envelope\.json\)/);
+    // The box key's statement (R-SP-10) is an envelope's request, first send and re-send alike.
+    assert.ok(found.some((c) => c.method === 'POST' && c.path === '/v1/devices/box-key' && c.key === 'ENVELOPE'));
     // ENVELOPE carries an envelope the device key signed, and only that: every such call's body is one.
     for (const m of api.matchAll(/\b(?:request|exchange)\("(?:POST|PUT)", [^\n]*?, ENVELOPE, ([a-z]+)\.json\)/g)) {
       assert.ok(['envelope', 'statement'].includes(m[1]), `an ENVELOPE request sends an envelope (${m[0]})`);
@@ -141,7 +143,7 @@ describe('Android: two keys, and the key each relay route is signed with (androi
   it('AppModel gives RelayApi the read key\'s signer, and the read key never prompts', () => {
     const model = read(...KT, 'AppModel.kt');
     assert.match(model, /RelayApi\(url, pin, k\.deviceId, \{ data -> sign\(k, data, "Check your relay", "Signs this phone's request to the relay"\) \}, readSigner\(\)\)/);
-    // The enrollment carries the read key when the phone has one (§8.2).
-    assert.match(model, /Messages\.device\(k\.deviceId, name, "android", k\.x, k\.y, readKey\?\.jwk\)/);
+    // The enrollment carries the read key when the phone has one (§8.2), and the box key (R-SP-10).
+    assert.match(model, /Messages\.device\(k\.deviceId, name, "android", k\.x, k\.y, readKey\?\.jwk, boxKey\?\.jwk\)/);
   });
 });
