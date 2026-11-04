@@ -154,6 +154,22 @@ describe('a value already there plans as already there', () => {
   });
 });
 
+describe('what the node rebuilds', () => {
+  it('search over old chats is said to fill in over time, with no counts', async () => {
+    const { importer } = await nodeService();
+    const note = itemOf(await planOf(importer, { excluded: Object.keys(EXCLUDED) }), 'excluded', 'embeddings').note;
+    assert.match(note, /fills in over time/);
+    assert.match(note, /first start/);
+    assert.doesNotMatch(note, /\d/);
+    assert.doesNotMatch(note, /are rebuilt/);
+  });
+
+  it('a fleet import keeps its line', async () => {
+    const { importer } = await nodeService({ hosting: 'service' });
+    assert.strictEqual(itemOf(await planOf(importer, { excluded: Object.keys(EXCLUDED) }), 'excluded', 'embeddings').note, EXCLUDED.embeddings);
+  });
+});
+
 describe('the words on a personal node', () => {
   const excluded = Object.keys(EXCLUDED);
   // The node's service.json and the Local service pane are their real names.

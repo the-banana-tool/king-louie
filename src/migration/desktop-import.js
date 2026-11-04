@@ -142,7 +142,8 @@ const PERSONAL_EXCLUDED = Object.freeze({
   skills: 'Skills, their pins and customizations do not move: they stay on this computer, and the node starts without them. Install them again in Settings > Skills on the node.',
   workflows: 'Workflows do not move: they stay on this computer, and the node starts with none. Set them up again in Settings > Workflows on the node.',
   webhooks: 'Webhooks do not move: they stay on this computer. Set them up again in Settings > Webhooks on the node.',
-  apiStatus: 'provider status is recomputed by the node'
+  apiStatus: 'provider status is recomputed by the node',
+  embeddings: 'Search over your old chats fills in over time after the node\'s first start: the search index and its model stay on this computer, so the node builds its own in the background, fetching the model if it needs one.'
 });
 const OLD_MODEL_KEYS = new Set(['settings.activeProvider', 'settings.providerModels', 'settings.inference']);
 const OLD_MODELS_REPLACED = 'The old model settings (active provider, provider models and tiers) do not move: your model profiles replaced them.';
