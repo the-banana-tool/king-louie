@@ -14,6 +14,7 @@ const ENROLL_TTL_MS = 10 * 60 * 1000;
 const DEVICE_HELP = `Usage: king-louie-service device list [--data-dir DIR]
        king-louie-service device revoke <device-id> [--data-dir DIR]
        king-louie-service device apply [--yes] [--data-dir DIR]
+       king-louie-service device unseal [--yes] [--data-dir DIR]
 `;
 
 function layout(dataDir, configDir, deps) {
@@ -381,10 +382,93 @@ function describeAge(createdAt, now) {
   return `${Math.round((now - at) / 60000)} min ago`;
 }
 
+// R-SP-5, the one way back from the latch: a node that has sealed goes back to
+// clear only here, at the console. Refused while a record not revoked by an
+// administrator holds a box key. That is stricter than the policy's set, which
+// also leaves out a device whose relayed revoke waits on the overlay: such a
+// revoke is `device apply`'s to make final, first.
+async function runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, storeOptions, admin }) {
+  const { ApproverStore } = require('../../approvals/approver-store');
+  const { readLatch, clearLatch, latchDirProblem, latchFile } = require('../../approvals/seal-policy');
+  const { getOrGenerateNodeIdentity } = require('../../mesh/node-identity');
+  // Off a terminal nobody can be asked, so only --yes goes on. Checked before
+  // anything is resolved or read.
+  const isTTY = deps.isTTY || (() => Boolean(io.stdin && io.stdin.isTTY));
+  if (!flags.yes && !isTTY()) {
+    io.stderr.write('Refusing to stop sealing without confirmation on a non-interactive terminal; pass --yes.\n');
+    return 2;
+  }
+  try {
+    admin.assertWritable();
+  } catch (err) {
+    io.stderr.write(`${err.message}\n`);
+    return 1;
+  }
+  // Why not, right now; asked again after the question, which can wait a while.
+  const blocked = async () => {
+    const store = new ApproverStore({ dir, stagedDir, ...storeOptions, serviceProbe: false });
+    const ready = await store.ready();
+    if (!ready.ok) return `The approver set cannot be trusted, so what holds a box key cannot be told: ${ready.problem}\n`;
+    const holders = store.list().filter((r) => r.box_key && store.isAdminApplied(r.device_id));
+    if (holders.length === 0) return null;
+    return `${holders.map((r) => shown(r.device_id)).join(', ')} still ${holders.length === 1 ? 'holds' : 'hold'} a box key. Revoke with "device revoke <device-id>"; a revoke sent from a phone waits for "device apply".\n`;
+  };
+  let why = await blocked();
+  if (why) {
+    io.stderr.write(`${why}Nothing changed.\n`);
+    return 1;
+  }
+  const problem = latchDirProblem(dataDir);
+  if (problem) {
+    io.stderr.write(`${problem} Nothing changed.\n`);
+    return 1;
+  }
+  if (!readLatch(dataDir).latched) {
+    io.stdout.write('This node is not latched: it has never sealed to a phone. Nothing to do.\n');
+    return 0;
+  }
+  const nodeCfg = loadNodeConfig({ dataDir, adminConfigDir: configDir, ...storeOptions });
+  io.stdout.write(`Node "${shown(nodeCfg.name, 64)}" has sealed what it sends to phones, and refuses to send anything now that no phone can read it.\n`);
+  io.stdout.write('  this clears the latch: until a phone next has a box key, what it sends goes in clear, and the relay can read it\n');
+  io.stdout.write('  the audit ledger records this\n');
+  if (!flags.yes) {
+    io.stdout.write('Send in clear again? [y/N] ');
+    if (!/^y(es)?$/i.test(String(await readLine(io.stdin)).trim())) {
+      io.stderr.write('Nothing changed.\n');
+      return 1;
+    }
+  }
+  why = await blocked();
+  if (why) {
+    io.stderr.write(`${why}Nothing changed.\n`);
+    return 1;
+  }
+  const written = [];
+  try {
+    const ports = buildServicePorts({ dataDir, onPathWritten: (p) => written.push(p) });
+    const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeCfg.name);
+    // Before the removal: a downgrade must never go unrecorded, and an entry for
+    // one that then failed is the smaller wrong, which the error below explains.
+    await auditLedger(dataDir, identity, written).append({ kind: 'device.unsealed', data: { by: 'console', envelope: null } });
+    try {
+      clearLatch(dataDir);
+    } catch (err) {
+      io.stderr.write(`Could not remove ${latchFile(dataDir)} (${err.code || err.message}), so the node stays latched. The audit ledger says device.unsealed all the same. Remove it by hand and run this again.\n`);
+      return 1;
+    }
+    io.stdout.write(`The latch is cleared. ${shown(nodeCfg.name, 64)} sends in clear until a phone next has a box key.\n`);
+    return 0;
+  } finally {
+    restoreDataDirOwnership(dataDir, written, io.ownership);
+  }
+}
+
 async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfigDir({ dataDir }), io, deps = {} }) {
   const { ApproverStore } = require('../../approvals/approver-store');
   const { fingerprintGroups } = require('../../approvals/envelope');
   const { dir, stagedDir, storeOptions, admin } = layout(dataDir, configDir, deps);
+
+  if (sub === 'unseal') return runUnseal({ flags, dataDir, configDir, io, deps, dir, stagedDir, storeOptions, admin });
 
   if (sub === 'list') {
     // serviceProbe: false — this store is built by the admin CLI, which on

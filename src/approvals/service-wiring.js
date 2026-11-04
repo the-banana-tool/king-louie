@@ -8,6 +8,7 @@ const { adminConfigDir } = require('../platform/paths');
 const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');
 const { AuditLedger } = require('../audit/audit-ledger');
 const { ApproverStore } = require('./approver-store');
+const { createSealPolicy } = require('./seal-policy');
 const { PhoneApprover } = require('./phone-approver');
 const { RelayClient } = require('./relay-client');
 const { readPin } = require('../fleet/front-door-pin');
@@ -173,6 +174,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
   // actually exists yet; `stop` (below) and the catch's teardown share this
   // one function so a failed start and a normal stop leave the same result.
   let approverStore = null;
+  let sealPolicy = null;
   let phoneApprover = null;
   let relayClient = null;
   let courierPump = null;
@@ -212,6 +214,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
       serviceProbe: true
     });
     await approverStore.ready();
+    sealPolicy = createSealPolicy({ approverStore, identity: nodeIdentity, dataDir });
 
     const approvers = nodeConfig.approvers || { relay: null, requestTtlS: 300 };
     // Fleet stage 4 (E7, §3.9): <configDir>/front-door.json, read with the
@@ -251,6 +254,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
       approverStore,
       link,
       auditLedger,
+      sealPolicy,
       ttlMs: (approvers.requestTtlS || 300) * 1000
     });
 
@@ -274,6 +278,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
     auditLedger,
     relayClient,
     approverStore,
+    sealPolicy,
     identity: nodeIdentity,
     courierPump,
     stop: teardown
@@ -296,6 +301,7 @@ async function startMcpApprovals({ dataDir, configDir = adminConfigDir({ dataDir
     serviceProbe: true
   });
   await approverStore.ready();
+  const sealPolicy = createSealPolicy({ approverStore, identity: nodeIdentity, dataDir });
   const courier = new FileCourier({ dataDir, identity: nodeIdentity, ...(pollMs ? { pollMs } : {}) }).start();
   const approvers = nodeConfig.approvers || { requestTtlS: 300 };
   const approver = new PhoneApprover({
@@ -304,6 +310,7 @@ async function startMcpApprovals({ dataDir, configDir = adminConfigDir({ dataDir
     approverStore,
     link: courier,
     auditLedger,
+    sealPolicy,
     ttlMs: (approvers.requestTtlS || 300) * 1000
   });
   courier.onMessage(async (method, params) => {
@@ -312,6 +319,7 @@ async function startMcpApprovals({ dataDir, configDir = adminConfigDir({ dataDir
   });
   return {
     approver,
+    sealPolicy,
     auditLedger,
     courier,
     identity: nodeIdentity,

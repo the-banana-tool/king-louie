@@ -136,7 +136,7 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
   }
   const getPolicy = () => nodeConfig.policy;
   const broker = new GuiBroker({ channel, guiConfig: gui, getPolicy, audit, dataDir, platform, hosting });
-  const leases = new LeaseManager({ approvals, guiConfig: gui, broker, audit, nodeName: nodeConfig.name, jobOpen, identityProbe });
+  const leases = new LeaseManager({ approvals, sealPolicy: approvals.sealPolicy, guiConfig: gui, broker, audit, nodeName: nodeConfig.name, jobOpen, identityProbe });
   broker.setLeases(leases);
   const relay = approvals.relayClient || null;
   const liveView = new LiveView({ leases, broker, identity: approvals.identity, relayClient: relay, guiConfig: gui });

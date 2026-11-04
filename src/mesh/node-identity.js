@@ -1,5 +1,6 @@
 const crypto = require('crypto');
-const { MeshIdentity, saveIdentity, loadIdentity } = require('./mesh-identity');
+const { MeshIdentity, saveIdentity, loadIdentity, saveBoxKey } = require('./mesh-identity');
+const { generateBoxKey, createBox } = require('../approvals/node-box-key');
 const { createLogger } = require('../logging');
 
 const log = createLogger('node-identity');
@@ -55,6 +56,8 @@ class NodeIdentity extends MeshIdentity {
     super(config);
     this.nodeName = config.nodeName || config.displayName || 'unnamed-node';
     this.nodeId = deriveNodeId(this.publicKey);
+    // { jwk, agree } (sealed phones, R-SP-3); null until a box key is stored.
+    this.box = this.boxKeyD ? createBox(this.boxKeyJwk, this.boxKeyD) : null;
   }
 
   getPublicIdentity() {
@@ -66,10 +69,28 @@ class NodeIdentity extends MeshIdentity {
   }
 }
 
+// An identity from before the box key gets one, and the record gains it. A key
+// that could not be stored is not used: the next start would have another, so
+// `box` stays null and the seal policy refuses (canSeal() false), and the
+// identity itself, which some hosts only read, goes on as it was.
+function fillBoxKey(identity, store, cipher) {
+  const { jwk, d } = generateBoxKey();
+  try {
+    saveBoxKey(store, cipher, jwk, d);
+  } catch (err) {
+    log.warn(`could not store a box key for node ${identity.nodeId}: ${err.message}`);
+    return;
+  }
+  identity.boxKeyJwk = jwk;
+  identity.boxKeyD = d;
+  identity.box = createBox(jwk, d);
+}
+
 function getOrGenerateNodeIdentity(store, cipher, nodeName = 'unnamed-node') {
   let identity = loadIdentity(store, cipher);
   if (!identity) {
-    identity = new NodeIdentity({ nodeName });
+    const { jwk, d } = generateBoxKey();
+    identity = new NodeIdentity({ nodeName, boxKeyJwk: jwk, boxKeyD: d });
     saveIdentity(store, identity, cipher);
     log.info(`Generated new Node Identity ${identity.nodeId} for node "${nodeName}"`);
   } else if (!(identity instanceof NodeIdentity)) {
@@ -81,8 +102,11 @@ function getOrGenerateNodeIdentity(store, cipher, nodeName = 'unnamed-node') {
       publicKey: identity.publicKey,
       privateKey: identity.privateKey,
       tlsCert: identity.tlsCert,
-      tlsKey: identity.tlsKey
+      tlsKey: identity.tlsKey,
+      boxKeyJwk: identity.boxKeyJwk,
+      boxKeyD: identity.boxKeyD
     });
+    if (!identity.box) fillBoxKey(identity, store, cipher);
   }
   return identity;
 }

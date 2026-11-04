@@ -848,6 +848,44 @@ describe('doctor', () => {
       assert.equal(without.detail, 'none');
     });
 
+    // R-SP-5: the latch. A node that has sealed and has nobody to seal to is not "off".
+    const latch = (n, text = '{"v":1,"latched_at":"2026-11-04T10:00:00.000Z"}') => {
+      fs.mkdirSync(path.join(n.dataDir, 'approvals'), { recursive: true });
+      fs.writeFileSync(path.join(n.dataDir, 'approvals', 'sealing.json'), text);
+    };
+
+    it('latched with no phone to seal to: on, but no phone can read it, and it fails the row', async () => {
+      const n = node();
+      latch(n);
+      put(n, { ...createFakePhone().approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' }), box_key: boxJwk() });
+      const { sealing } = await rows(n);
+      assert.deepEqual([sealing.ok, sealing.detail], [false, 'on, but no phone can read it: enroll or apply a box key']);
+    });
+
+    it('a latch that cannot be read says the same', async () => {
+      const n = node();
+      latch(n, 'not json');
+      const { sealing } = await rows(n);
+      assert.deepEqual([sealing.ok, sealing.detail], [false, 'on, but no phone can read it: enroll or apply a box key']);
+    });
+
+    it('latched with a phone to seal to is simply on', async () => {
+      const n = node();
+      latch(n);
+      put(n, { ...createFakePhone().approverRecord(), box_key: boxJwk() });
+      const { sealing } = await rows(n);
+      assert.deepEqual([sealing.ok, sealing.detail], [true, 'on (1 phone)']);
+    });
+
+    it('latched with an untrusted set: on, and nobody can read it', { skip: !POSIX }, async () => {
+      const n = node();
+      latch(n);
+      fs.chmodSync(path.join(n.configDir, 'approvers'), 0o777);
+      const results = await runDoctor({ dataDir: n.dataDir, platform: 'linux', adminUid: UID });
+      const sealing = results.find((r) => r.check === 'sealing to phones');
+      assert.deepEqual([sealing.ok, sealing.detail], [false, 'on, but no phone can read it: the set is not trusted']);
+    });
+
     // assertAdminOwned is a no-op on Windows, so only POSIX can make the set untrusted here.
     it('an untrusted set says so rather than that no phone has a box key', { skip: !POSIX }, async () => {
       const n = node();

@@ -58,6 +58,13 @@ class MeshIdentity {
       this.tlsKey = tls.key;
     }
     this.tlsFingerprint = MeshIdentity.getCertFingerprint(this.tlsCert);
+
+    // The node's box key (src/approvals/node-box-key.js), carried so that a
+    // load and a save here never drop it; only a node identity makes one.
+    if (config.boxKeyJwk && config.boxKeyD) {
+      this.boxKeyJwk = config.boxKeyJwk;
+      this.boxKeyD = config.boxKeyD;
+    }
   }
 
   _derivePeerId() {
@@ -106,7 +113,8 @@ class MeshIdentity {
       privateKey: this.privateKey.toString('hex'),
       tlsCert: this.tlsCert,
       tlsKey: this.tlsKey,
-      tlsFingerprint: this.tlsFingerprint
+      tlsFingerprint: this.tlsFingerprint,
+      ...(this.boxKeyD ? { boxKeyJwk: this.boxKeyJwk, boxKeyD: this.boxKeyD } : {})
     };
   }
 
@@ -117,7 +125,9 @@ class MeshIdentity {
       publicKey: data.publicKey,
       privateKey: data.privateKey,
       tlsCert: data.tlsCert,
-      tlsKey: data.tlsKey
+      tlsKey: data.tlsKey,
+      boxKeyJwk: data.boxKeyJwk,
+      boxKeyD: data.boxKeyD
     });
   }
 
@@ -298,8 +308,8 @@ class MeshIdentity {
 
 // --- Identity persistence ---
 //
-// The private halves of a mesh identity (the Ed25519 signing key and the TLS
-// server key) are encrypted under the host cipher before they go in the store;
+// The private halves of a mesh identity (the Ed25519 signing key, the TLS
+// server key and a node's box key) are encrypted under the host cipher before they go in the store;
 // only the public halves are written in the clear. An identity written by an
 // older build — plaintext keys, plus an orphan `mesh.encryptedPrivateKey` that
 // nothing read — is upgraded in place the first time it is loaded, keeping the
@@ -315,7 +325,7 @@ function cipherUsable(cipher) {
 }
 
 function serializeIdentity(identity, cipher) {
-  const record = identity.serialize();
+  const { boxKeyD, ...record } = identity.serialize();
   // No cipher, no write. This used to return the plaintext record with a
   // warning, which left the Ed25519 signing key and the TLS server key sitting
   // in config.json in the clear on exactly the hosts that cannot protect them
@@ -339,7 +349,8 @@ function serializeIdentity(identity, cipher) {
       tlsKey: null,
       keyEncryption: KEY_ENCRYPTION_MARKER,
       encryptedPrivateKey: cipher.encryptString(record.privateKey),
-      encryptedTlsKey: cipher.encryptString(record.tlsKey)
+      encryptedTlsKey: cipher.encryptString(record.tlsKey),
+      ...(boxKeyD ? { encryptedBoxKey: cipher.encryptString(boxKeyD) } : {})
     };
     return encrypted;
   } catch (err) {
@@ -367,14 +378,16 @@ function deserializeIdentity(record, cipher) {
 
   let privateKey;
   let tlsKey;
+  let boxKeyD;
   try {
     privateKey = cipher.decryptString(record.encryptedPrivateKey);
     tlsKey = record.encryptedTlsKey ? cipher.decryptString(record.encryptedTlsKey) : record.tlsKey;
+    if (record.boxKeyJwk && record.encryptedBoxKey) boxKeyD = cipher.decryptString(record.encryptedBoxKey);
   } catch (err) {
     throw new Error(`stored mesh private key could not be decrypted: ${err.message}`);
   }
 
-  return MeshIdentity.deserialize({ ...record, privateKey, tlsKey });
+  return MeshIdentity.deserialize({ ...record, privateKey, tlsKey, boxKeyD });
 }
 
 function deleteStoreKey(store, key) {
@@ -387,11 +400,30 @@ function deleteStoreKey(store, key) {
 
 function saveIdentity(store, identity, cipher) {
   const record = serializeIdentity(identity, cipher);
+  // A mesh identity loaded before the node's box key was made shares this store
+  // and saves too (a rename): it must not wipe the key from under the node.
+  if (!record.encryptedBoxKey) {
+    const stored = store.get(IDENTITY_STORE_KEY);
+    if (stored && stored.publicKey === record.publicKey && stored.boxKeyJwk && stored.encryptedBoxKey) {
+      record.boxKeyJwk = stored.boxKeyJwk;
+      record.encryptedBoxKey = stored.encryptedBoxKey;
+    }
+  }
   store.set(IDENTITY_STORE_KEY, record);
   if (record.keyEncryption === KEY_ENCRYPTION_MARKER && store.get(LEGACY_ENCRYPTED_KEY) !== undefined) {
     deleteStoreKey(store, LEGACY_ENCRYPTED_KEY);
   }
   return record;
+}
+
+// Adds a box key to the stored record and changes nothing else in it: the
+// Ed25519 and TLS ciphertexts stay as they were. Throws when it cannot, with the
+// record untouched: no cipher, or a record not yet under the cipher.
+function saveBoxKey(store, cipher, jwk, d) {
+  const record = store.get(IDENTITY_STORE_KEY);
+  if (!cipherUsable(cipher)) throw new Error('secure storage is unavailable on this host');
+  if (record?.keyEncryption !== KEY_ENCRYPTION_MARKER) throw new Error('the stored identity is not under the cipher yet');
+  store.set(IDENTITY_STORE_KEY, { ...record, boxKeyJwk: jwk, encryptedBoxKey: cipher.encryptString(d) });
 }
 
 function loadIdentity(store, cipher) {
@@ -452,6 +484,7 @@ module.exports = {
   derivePeerId,
   saveIdentity,
   loadIdentity,
+  saveBoxKey,
   serializeIdentity,
   deserializeIdentity,
   IDENTITY_STORE_KEY,

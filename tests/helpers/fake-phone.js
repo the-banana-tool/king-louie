@@ -8,10 +8,14 @@
 // are random. Every phone also has a read key (spec 2026-10-28 §8.1):
 // `readJwk`/`readSigner`, and `signApi(..., { key: 'read' })` for a
 // read-signed phone API call. It is keys.json's `<seed>_read` when the file
-// has one, else random.
+// has one, else random. `boxKey: true` adds a box key the same way (sealed
+// phones, R-SP-1): `boxJwk`, `open`, `boxStatement`, and `boxKey: true` on
+// `device` and `approverRecord`.
 const crypto = require('crypto');
 const path = require('path');
 const { seal, open, deviceIdFromJwk, nodeSigner } = require('../../src/approvals/envelope');
+const { openSealed } = require('../../src/approvals/seal');
+const { generateBoxKey, createBox } = require('../../src/approvals/node-box-key');
 const { deriveNodeId } = require('../../src/mesh/node-identity');
 const { enrollMac, phoneAuthString, randomNonce, iso } = require('../../src/approvals/messages');
 
@@ -26,7 +30,7 @@ function p256FromD(d) {
   return { jwk, privateKey: crypto.createPrivateKey({ key: { ...jwk, d }, format: 'jwk' }) };
 }
 
-function createFakePhone({ seed = null, name = 'Test phone', platform = 'android' } = {}) {
+function createFakePhone({ seed = null, name = 'Test phone', platform = 'android', boxKey = false } = {}) {
   let jwk;
   let privateKey;
   if (seed) {
@@ -55,6 +59,13 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
   // The read key has no id of its own: what it signs names the device.
   const readSigner = { alg: 'ES256', kid: deviceId, sign: (bytes) => crypto.sign('sha256', bytes, { key: readPrivateKey, dsaEncoding: 'ieee-p1363' }) };
 
+  let box = null;
+  if (boxKey) {
+    const fixedBox = seed ? KEYS.devices[`${seed}_box`] : null;
+    const { jwk: boxJwk, d } = fixedBox || generateBoxKey();
+    box = createBox(boxJwk, d);
+  }
+
   const phone = {
     deviceId,
     jwk,
@@ -63,13 +74,28 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
     signer,
     readJwk,
     readSigner,
+    boxJwk: box ? box.jwk : undefined,
     sign: (message) => seal(message, signer),
+
+    // Opens a sealed message sent to this phone, as the apps do with their box
+    // key: openSealed's { message: clear and content together, content }.
+    open(envelope, type) {
+      if (!box) throw new Error('this fake phone has no box key: createFakePhone({ boxKey: true })');
+      return openSealed({ type, message: open(envelope).message, recipientId: deviceId, agree: box.agree });
+    },
+
+    // boxKeyStatement for this phone's own box key.
+    boxStatement(options = {}) {
+      if (!box) throw new Error('this fake phone has no box key: createFakePhone({ boxKey: true })');
+      return phone.boxKeyStatement({ ...options, boxKey: box.jwk });
+    },
 
     // `readKey: true` adds the read key's public half (android-slim §8.2),
     // as an Android phone built from that change enrolls.
-    device({ readKey = false } = {}) {
+    device({ readKey = false, boxKey: withBox = false } = {}) {
       const d = { device_id: deviceId, name, platform, public_key: jwk };
       if (readKey) d.read_key = readJwk;
+      if (withBox) d.box_key = box.jwk;
       return d;
     },
 
@@ -109,12 +135,13 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
 
     // `readKey: true` adds this phone's read key to the record (android-slim
     // spec §8.2); without it the record is as before the read key.
-    approverRecord({ enrolledBy = 'console', enrolledAt = '2026-09-23T18:00:00.000Z', revokedAt = null, revokedBy = null, enrollment = null, readKey = false } = {}) {
+    approverRecord({ enrolledBy = 'console', enrolledAt = '2026-09-23T18:00:00.000Z', revokedAt = null, revokedBy = null, enrollment = null, readKey = false, boxKey: withBox = false } = {}) {
       const record = {
         v: 1, device_id: deviceId, name, platform, public_key: jwk,
         enrolled_at: enrolledAt, enrolled_by: enrolledBy, revoked_at: revokedAt, revoked_by: revokedBy, enrollment
       };
       if (readKey) record.read_key = readJwk;
+      if (withBox) record.box_key = box.jwk;
       return record;
     },
 
@@ -268,8 +295,9 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
 }
 
 // A node identity without a TLS certificate: { nodeId, nodeName, publicKey
-// (DER SPKI Buffer), sign(bytes) }. `key` names a node in keys.json.
-function testNodeIdentity({ key = null, nodeName = null } = {}) {
+// (DER SPKI Buffer), sign(bytes) }. `key` names a node in keys.json. `box: true`
+// adds its box key (R-SP-3): keys.json's when the node has one, else random.
+function testNodeIdentity({ key = null, nodeName = null, box = false } = {}) {
   let privateKey;
   if (key) {
     const fixed = KEYS.nodes[key];
@@ -286,6 +314,11 @@ function testNodeIdentity({ key = null, nodeName = null } = {}) {
     sign: (bytes) => crypto.sign(null, Buffer.from(bytes), privateKey)
   };
   identity.signer = nodeSigner(identity);
+  if (box) {
+    const fixedBox = key ? KEYS.nodes[key].box : null;
+    const { jwk, d } = fixedBox || generateBoxKey();
+    identity.box = createBox(jwk, d);
+  }
   return identity;
 }
 

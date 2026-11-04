@@ -353,9 +353,20 @@ async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = nul
     return store.list().filter((r) => store.isActive(r.device_id));
   };
   await attempt('sealing to phones', async () => {
-    if (problem) return { ok: true, detail: 'off: the set is not trusted' };
+    // A node that has sealed sends no content with no phone to seal to (the
+    // latch, R-SP-5): that is a fault, and never the same row as "off".
+    const { latched } = require('../approvals/seal-policy').readLatch(dataDir);
+    if (problem) {
+      return latched
+        ? { ok: false, detail: 'on, but no phone can read it: the set is not trusted' }
+        : { ok: true, detail: 'off: the set is not trusted' };
+    }
     const sealing = (await activeRecords()).filter((r) => r.box_key).length;
-    if (sealing === 0) return { ok: true, detail: 'off: no phone has a box key yet' };
+    if (sealing === 0) {
+      return latched
+        ? { ok: false, detail: 'on, but no phone can read it: enroll or apply a box key' }
+        : { ok: true, detail: 'off: no phone has a box key yet' };
+    }
     return { ok: true, detail: `on (${sealing} ${sealing === 1 ? 'phone' : 'phones'})` };
   });
   await attempt('phones without a box key', async () => {

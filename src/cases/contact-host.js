@@ -363,6 +363,7 @@ function createContactHost({
       const mobile = new MobileAppChannel({
         link: approvals.relayClient,
         approverStore: approvals.approverStore,
+        sealPolicy: approvals.sealPolicy,
         identity: approvals.identity,
         nonces: new NonceCache({}),
         getRouter: () => router,
