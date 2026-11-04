@@ -225,3 +225,16 @@ describe('applyImport robustness', () => {
     assert.deepStrictEqual(client.calls, ['import.finish']);
   });
 });
+
+describe('a malformed answer names the target', () => {
+  for (const [hosting, word] of [['personal', 'node'], [undefined, 'service']]) {
+    it(`says the ${word}`, async () => {
+      const client = { service: hosting ? { hosting } : {}, call: async (method) => (method === 'import.apply' ? {} : { planId: 'p', counts: {}, failures: [], attention: [], incomplete: [], secretsMissing: [], notes: [] }) };
+      const plan = { planId: 'p', items: [{ category: 'memory', key: 'm1', action: 'new' }], chatParts: false };
+      const source = { getValue: () => ({ id: 'm1' }), caseFiles: () => [] };
+      const report = await applyImport({ client, plan, source });
+      const said = JSON.stringify(report.sendFailures);
+      assert.match(said, new RegExp(`The ${word} sent no per-item results`));
+    });
+  }
+});

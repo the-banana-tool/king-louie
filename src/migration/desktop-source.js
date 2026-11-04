@@ -285,7 +285,7 @@ function readDesktopSource({ hosting = 'service', userDataDir, reader, decrypt =
       try {
         safeRelPath(f.relPath);
       } catch (err) {
-        return `has a file the service cannot store and cannot be imported (${err.message})`;
+        return `has a file the ${hosting === 'personal' ? 'node' : 'service'} cannot store and cannot be imported (${err.message})`;
       }
       try {
         isSkippedCaseFile(f.relPath);

@@ -266,6 +266,22 @@ describe('what a digest is sent for', () => {
   });
 });
 
+describe('a case the walker holds back names the target', () => {
+  for (const [hosting, word] of [['personal', 'node'], ['service', 'service']]) {
+    it(`says the ${word}`, () => {
+      const userDataDir = tmp();
+      fs.writeFileSync(path.join(userDataDir, 'chat-data.json'), JSON.stringify({ settings: {} }));
+      const dir = path.join(userDataDir, 'cases', 'lakeside-lot');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'case.yaml'), 'id: case-lot\nslug: lakeside-lot\ntitle: Lakeside lot\n');
+      fs.writeFileSync(path.join(dir, 'aux.txt'), 'x');
+      const { attention } = readDesktopSource({ userDataDir, reader: createSafeReader({ root: userDataDir }), decrypt: (s) => s, hosting });
+      const held = attention.find((a) => a.wholeCase === true);
+      assert.match(held.note, new RegExp(`file the ${word} cannot store`));
+    });
+  }
+});
+
 describe('the restart offer on a retry', () => {
   const MCP = { mcpServers: { files: { command: 'example-mcp' } } };
   async function nodeWith(bootId) {

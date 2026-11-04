@@ -95,7 +95,7 @@ async function applyImport({ client, plan, source, onProgress = () => {} }) {
       const response = await client.call('import.apply', { planId: plan.planId, batch });
       results = response && Array.isArray(response.results)
         ? response.results.filter((r) => r && typeof r === 'object')
-        : failuresFor(batch, 'The service sent no per-item results for this batch.', 'MALFORMED_RESPONSE');
+        : failuresFor(batch, `The ${client.service && client.service.hosting === 'personal' ? 'node' : 'service'} sent no per-item results for this batch.`, 'MALFORMED_RESPONSE');
     } catch (err) {
       const code = (err && err.code) || null;
       results = failuresFor(batch, (err && err.message) || String(err), code);
