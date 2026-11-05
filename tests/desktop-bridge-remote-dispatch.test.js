@@ -1227,6 +1227,60 @@ describe('a remote drop', () => {
   });
 });
 
+describe('frames and seams', () => {
+  it('a frame of an unknown type from a remote window does nothing and answers nothing', async () => {
+    let runs = 0;
+    const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'chat:delete': async () => { runs += 1; return { ok: true }; } } });
+    const a = connection();
+    use(a);
+    await dispatcher.handleFrame(a, { t: 'run', id: 1, channel: 'chat:delete', method: 'chat:delete', args: ['c-any'], params: {} });
+    assert.strictEqual(runs, 0);
+    assert.deepStrictEqual(phone.calls, []);
+    assert.deepStrictEqual(a.sent, []);
+  });
+
+  it('R-RW-21: a null gate changes nothing at the dispatcher or the seam', async () => {
+    const withGate = createBridgeDispatcher({
+      core, cipher, dataDir, approvals: { phoneApprover: fakePhone(() => false) }, hosting: 'personal', approvalGate: null,
+      getConnection: () => currentConnection(), getConnections: () => []
+    });
+    const a = connection();
+    await invoke(withGate, a, 1, 'chat:delete', 'c-any');
+    assert.strictEqual(resultFor(a, 1).value.code, 'PHONE_DENIED');
+
+    const { approvalSeam } = require('../src/approvals/executor-options');
+    const { markRemoteWindowEvent } = require('../src/core/origin');
+    const phone = fakePhone(() => false);
+    const seam = approvalSeam({ remoteApprovals: 'phone', event: markRemoteWindowEvent({}, { deviceId: deviceId('remotewindow') }), executorOptions: { chatId: 'c' }, phoneApprover: phone, approvalGate: null });
+    assert.strictEqual(await seam.toolExecutorOptions.approvalRequester('Bash', { command: 'ls' }, {}), false);
+    assert.strictEqual(phone.calls.length, 1);
+  });
+
+  it('R-RW-21: a gate that allows is asked first, by both, and the phone is not asked', async () => {
+    const asked_ = [];
+    const approvalGate = async ({ toolName, params }) => { asked_.push([toolName, params.channel ?? null]); return { allow: true, by: 'grant', grant_id: 'grant-1' }; };
+    const phone = fakePhone(() => false);
+    let seen = null;
+    const dispatcher = createBridgeDispatcher({
+      core, cipher, dataDir, approvals: { phoneApprover: phone }, hosting: 'personal', approvalGate,
+      getConnection: () => currentConnection(), getConnections: () => [],
+      listChannels: () => ({ handle: ['chat:delete'], on: [] }),
+      registerHandlers: (ipc) => { ipc.handle('chat:delete', async (event) => { seen = remoteWindowApproved(event); return { ok: true }; }); }
+    });
+    const a = connection();
+    await invoke(dispatcher, a, 1, 'chat:delete', 'c-any');
+    assert.strictEqual(seen, 'grant-1');
+    assert.deepStrictEqual(phone.calls, []);
+
+    const { approvalSeam } = require('../src/approvals/executor-options');
+    const { markRemoteWindowEvent } = require('../src/core/origin');
+    const seam = approvalSeam({ remoteApprovals: 'phone', event: markRemoteWindowEvent({}, { deviceId: deviceId('remotewindow') }), executorOptions: { chatId: 'c' }, phoneApprover: phone, approvalGate });
+    assert.strictEqual(await seam.toolExecutorOptions.approvalRequester('Bash', { command: 'ls' }, {}), true);
+    assert.deepStrictEqual(phone.calls, []);
+    assert.deepStrictEqual(asked_, [['Window', 'chat:delete'], ['Bash', null]]);
+  });
+});
+
 describe('at most 8 asks in flight per device (R-RW-32)', () => {
   it('the ninth is refused before anyone is asked; another device has its own; an answer frees one', async () => {
     const held = [];

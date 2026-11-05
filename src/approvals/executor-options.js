@@ -177,8 +177,11 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
 }
 
 // → { toolExecutorOptions, attach(executor), local, origin }
+// `approvalGate` is part C's seam (remote window plan R-RW-21), asked before the phone
+// on a remote run: ({ toolName, params, metadata }) → null | { allow: true, by, grant_id }.
+// Nothing passes one yet.
 function approvalSeam({ remoteApprovals, event = null, approvalRequester = null, executorOptions = {}, phoneApprover = null,
-  auditLedger = null, nodePolicy = null, helpers = originHelpers }) {
+  auditLedger = null, nodePolicy = null, helpers = originHelpers, approvalGate = null }) {
   // A remote window's run is never local and never auto-approved, in any mode
   // and whatever requester it was handed (remote window plan R-RW-9). A child
   // of one has no event; it carries the origin, which only the host sets.
@@ -209,6 +212,13 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
     const phone = phoneExecutorOptions({ phoneApprover, auditLedger, nodePolicy: policyForRun(nodePolicy, taskPolicy), origin, local, approvalRequester: localRequester, cardNoteFor });
     const toolExecutorOptions = { ...phone.options, denyAutoApproval, ...remoteOptions };
     if (remote) toolExecutorOptions.classifyCall = remoteClassifier(phone.options.classifyCall || null);
+    if (remote && approvalGate) {
+      const toPhone = toolExecutorOptions.approvalRequester;
+      toolExecutorOptions.approvalRequester = async (toolName, parameters, metadata = {}) => {
+        const granted = await approvalGate({ toolName, params: parameters, metadata });
+        return granted && granted.allow === true ? true : toPhone(toolName, parameters, metadata);
+      };
+    }
     if (refuseUnsafe) {
       toolExecutorOptions.classifyCall = refuseUnsafeClassifier(toolExecutorOptions.classifyCall || null);
       Object.assign(toolExecutorOptions, gate);

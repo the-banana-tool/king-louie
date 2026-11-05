@@ -127,6 +127,31 @@ describe('E2E: an attached window while a reply is held', { timeout: 240000 }, (
     await waitFor(ctx, `document.getElementById('stop-btn').hidden`, 30000);
   });
 
+  it('a send refused for any other reason gives back its attachments too', async () => {
+    await evaluate(ctx, `
+      appState.pendingImages = [{ name: 'lot.png', mimeType: 'image/png', base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', previewUrl: 'blob:lot' }];
+      appState.pendingDocuments = [{ name: 'deed.txt', mimeType: 'application/x-not-accepted', base64: 'TGFrZXNpZGUgbG90' }];
+      renderPendingImages();
+      true`);
+    await fill(ctx, '#user-input', 'with a bad document');
+    await pressEnter(ctx);
+    await waitFor(ctx, `document.getElementById('chat-messages').textContent.includes('Unsupported document format')`);
+    assert.strictEqual(await evaluate(ctx, `document.getElementById('user-input').value`), 'with a bad document');
+    assert.deepStrictEqual(await evaluate(ctx, `appState.pendingImages.map((i) => i.previewUrl)`), ['blob:lot']);
+    assert.deepStrictEqual(await evaluate(ctx, `appState.pendingDocuments.map((d) => d.name)`), ['deed.txt']);
+    await evaluate(ctx, `clearPendingImages(); document.getElementById('user-input').value = ''; true`);
+  });
+
+  it('a question waiting on another window is said in this one, for the open chat only', async () => {
+    const open = await evaluate(ctx, `appState.activeChatId`);
+    await evaluate(ctx, `document.querySelectorAll('.kl-notice').forEach((n) => n.remove()); true`);
+    await fromAnotherWindow(ctx, 'chat:questionWaiting', { chatId: 'some-other-chat', label: 'Field laptop' });
+    await pause(200);
+    assert.strictEqual(await evaluate(ctx, `document.querySelectorAll('.kl-notice').length`), 0);
+    await fromAnotherWindow(ctx, 'chat:questionWaiting', { chatId: open, label: 'Field laptop' });
+    await waitFor(ctx, `document.querySelector('.kl-notice')?.textContent === 'A question is waiting on Field laptop.'`);
+  });
+
   it('a window that comes to a chat part way through a turn shows it running and reads the rows when it ends', async () => {
     const before = await evaluate(ctx, `appState.activeChatId`);
     await click(ctx, '#new-chat-btn');

@@ -202,7 +202,9 @@ class ShadowGit {
     if (!alreadyInitialized) {
       await fs.promises.mkdir(this.storeDir, { recursive: true });
       // --bare: no worktree of its own. We supply GIT_WORK_TREE per call.
-      await this._run(['init', '--bare', '--quiet', this.storeDir]);
+      // The object format is pinned: a checkpoint id is 40 hex whatever the user's git
+      // defaults to (init.defaultObjectFormat).
+      await this._run(['init', '--bare', '--quiet', '--object-format=sha1', this.storeDir]);
     }
 
     await fs.promises.mkdir(this.indexesDir, { recursive: true });
@@ -385,6 +387,7 @@ class ShadowGit {
 }
 
 module.exports = {
+  assertCommitId,
   ShadowGit,
   projectKey,
   DEFAULT_EXCLUDES

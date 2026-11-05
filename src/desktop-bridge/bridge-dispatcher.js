@@ -93,7 +93,7 @@ function createBridgeDispatcher({
   core, cipher = null, dataDir, approvals = null, account = null, hosting = 'service',
   getServiceInfo = () => ({}), getConnection = () => null, getConnections = () => [],
   registerHandlers = defaultRegisterHandlers, listChannels = listIpcChannels,
-  checkPath = defaultCheckPath, createImporter = null
+  checkPath = defaultCheckPath, createImporter = null, approvalGate = null
 }) {
   const context = core.context;
   const handlers = new Map();
@@ -391,6 +391,11 @@ function createBridgeDispatcher({
     }
     const card = windowCard(name, JSON.parse(text), text);
     if (card.refusal) return remoteRefusal(card.refusal);
+    // Part C's seam (R-RW-21), asked before the phone; nothing passes one yet.
+    const granted = approvalGate ? await approvalGate({ toolName: WINDOW_TOOL, params: card.params, metadata: { origin: windowOrigin(conn) } }) : null;
+    if (granted && granted.allow === true && typeof granted.grant_id === 'string' && granted.grant_id) {
+      return { ok: true, request_id: granted.grant_id, args: JSON.parse(text) };
+    }
     if (!takePhoneSlot(conn.deviceId)) return remoteRefusal('PHONE_BUSY');
     const metadata = { origin: windowOrigin(conn), cardNote: windowSummary(name, conn.label) };
     let answer;

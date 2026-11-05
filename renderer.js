@@ -9848,6 +9848,7 @@ async function sendMessage() {
   renderPendingImages();
 
   let refused = false;
+  let gaveBack = false;
   try {
     const pinnedInfo = await window.electron.skill.getPinned({ chatId: appState.activeChatId });
     if (pinnedInfo?.pinned) {
@@ -9916,9 +9917,13 @@ async function sendMessage() {
     const lastUser = (appState.chats.find((c) => c.id === appState.activeChatId)?.messages || []).findLast((m) => m.sender === 'user');
     const storedRow = lastUser && lastUser.text === message && !String(lastUser.id).startsWith('temp-');
     if (!storedRow && !dom.userInput.value) dom.userInput.value = message;
+    if (!storedRow) {
+      giveBackAttachments(pendingImages, pendingDocuments);
+      gaveBack = true;
+    }
   } finally {
     if (!refused) {
-      for (const image of pendingImages) {
+      for (const image of gaveBack ? [] : pendingImages) {
         if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
       }
       setResponseActive(false, appState.activeChatId);
