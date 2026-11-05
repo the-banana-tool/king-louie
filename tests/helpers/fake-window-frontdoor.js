@@ -75,9 +75,11 @@ async function startFakeWindowFrontDoor({ nodes = [], tokens = {}, config = {}, 
       const ws = dial(node.identity, params.session_id);
       ws.on('error', () => {});
       if (node.server) {
-        const transport = wsTransport(ws);
-        if (node.tap) node.tap(transport);
-        ws.once('open', () => node.server.attachSealed({ sessionId: params.session_id, transport }).catch(() => {}));
+        ws.once('open', () => {
+          const transport = wsTransport(ws);
+          if (node.tap) node.tap(transport);
+          node.server.attachSealed({ sessionId: params.session_id, transport }).catch(() => {});
+        });
       } else if (node.onSocket) {
         node.onSocket(ws, params);
       }

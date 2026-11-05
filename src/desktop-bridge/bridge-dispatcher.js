@@ -96,6 +96,14 @@ function createBridgeDispatcher({
   checkPath = defaultCheckPath, createImporter = null, approvalGate = null
 }) {
   const context = core.context;
+  // Every card asked in a remote frame's async context goes with that window's revoke,
+  // whatever asked it: a tool:execute, a skill, a cron run, a workflow step (R-RW-31).
+  if (approvals && approvals.phoneApprover) {
+    approvals.phoneApprover.contextSignal = () => {
+      const conn = currentConnection();
+      return conn && conn.remote ? conn.revokeSignal : null;
+    };
+  }
   const handlers = new Map();
   const listeners = new Map();
   const virtualIpcMain = {
@@ -395,6 +403,7 @@ function createBridgeDispatcher({
     if (card.refusal) return remoteRefusal(card.refusal);
     // Part C's seam (R-RW-21), asked before the phone; nothing passes one yet.
     const granted = approvalGate ? await approvalGate({ toolName: WINDOW_TOOL, params: card.params, metadata: { origin: windowOrigin(conn) } }) : null;
+    if (conn.revoked) return remoteRefusal('PHONE_DENIED');
     if (granted && granted.allow === true && typeof granted.grant_id === 'string' && granted.grant_id) {
       return { ok: true, request_id: granted.grant_id, args: JSON.parse(text) };
     }
@@ -462,6 +471,7 @@ function createBridgeDispatcher({
     try {
       const value = await runInChat(chatId, () => handlers.get(channel)(event, ...args));
       noteImport(conn, channel, value);
+      if (conn.remote) noteWorkflow(conn, channel, args, value);
       // Begun for a desktop that left while the handler ran.
       if (!conn.live) dropImport(conn);
       conn.send({ t: 'result', id, value: value === undefined ? null : value });
@@ -533,8 +543,10 @@ function createBridgeDispatcher({
     return importerPromise;
   }
 
-  async function readableDirectory(target) {
+  // Approved, and revoked while the path was looked at: it does not act (R-RW-31).
+  async function readableDirectory(conn, target) {
     const check = await checkPath(target);
+    if (conn.revoked) throw fail('WINDOW_REVOKED', 'This window was revoked.');
     if (!check.readable || !check.isDirectory) throw fail('PATH_NOT_ACCESSIBLE', MESSAGES.PATH_NOT_ACCESSIBLE(account, target));
   }
 
@@ -545,10 +557,10 @@ function createBridgeDispatcher({
       case 'bridge.checkPath':
         return checkPath(params.path);
       case 'bridge.setWorkingDirectory':
-        await readableDirectory(params.path);
+        await readableDirectory(conn, params.path);
         return handlers.get('chat:setWorkingDirectory')(makeEvent(conn, approved), { chatId: params.chatId, workingDirectory: params.path });
       case 'bridge.addAllowedDirectory':
-        await readableDirectory(params.path);
+        await readableDirectory(conn, params.path);
         return { ok: true, allowedDirectories: scope.addDirectory(params.path) };
       case 'bridge.canvasJsResult':
         return resolveCanvas(conn, params);
@@ -662,20 +674,60 @@ function createBridgeDispatcher({
     conn.runs.clear();
   }
 
-  // A revoked device, where a drop stops nothing (R-RW-31): its runs stop, which withdraws
-  // the tool cards they hold. The cards of its calls go by conn.revokeSignal, and
-  // the server calls this for a connection already gone as well.
+  // The workflows a remote window started: they outlive their frames, and a revoke
+  // has to find them.
+  const windowWorkflows = new WeakMap(); // conn -> Set of workflow ids
+  const cancelWorkflow = (id) => {
+    try {
+      context.getWorkflowEngine?.()?.cancel(id);
+    } catch (err) {
+      log.warn(`cancelling a workflow failed: ${err.message}`);
+    }
+  };
+  function noteWorkflow(conn, channel, args, value) {
+    const id = channel === 'workflow:run' ? args[0]?.id : channel === 'workflow:planAndExecute' ? value?.workflow?.id : null;
+    if (typeof id !== 'string' || !id) return;
+    if (conn.revoked) {
+      cancelWorkflow(id);
+      return;
+    }
+    if (!windowWorkflows.has(conn)) windowWorkflows.set(conn, new Set());
+    windowWorkflows.get(conn).add(id);
+  }
+  const WORKFLOW_ENDED = new Set(['completed', 'failed', 'cancelled']);
+  // What the server keeps a gone connection for, besides its frames.
+  function stillWorking(conn) {
+    const ids = windowWorkflows.get(conn);
+    if (!ids) return false;
+    for (const id of [...ids]) {
+      let status = null;
+      try {
+        status = context.getWorkflowEngine?.()?.get(id)?.status || null;
+      } catch {
+        status = null;
+      }
+      if (status === null || WORKFLOW_ENDED.has(status)) ids.delete(id);
+    }
+    return ids.size > 0;
+  }
+
+  // A revoked device, where a drop stops nothing (R-RW-31, as amended): its chat runs and
+  // workflows stop. Every card asked in its frames goes by conn.revokeSignal, and the
+  // server calls this for a connection already gone as well. A cron run, a skill and a
+  // tool that was already approved have no handle: they end by themselves.
   function onRevoke(conn) {
+    const row = conn.revokeReason === 'unconfirmed' ? MESSAGES.WINDOW_UNCONFIRMED_RUN : MESSAGES.WINDOW_REVOKED_RUN;
     for (const [runEvent, chatId] of [...conn.runs]) {
       try {
         if (bridgeContext.stopRunForEvent?.(runEvent) !== true) continue;
-        context.appendMessageToChat(chatId, 'assistant', MESSAGES.WINDOW_REVOKED_RUN, {}, { returnChat: false });
+        context.appendMessageToChat(chatId, 'assistant', row, {}, { returnChat: false });
         broadcast('chat:updated', { chatId });
-        log.info(`stopped chat ${chatId}: its window was revoked`);
+        log.info(`stopped chat ${chatId}: ${conn.revokeReason === 'unconfirmed' ? 'its window could not be confirmed' : 'its window was revoked'}`);
       } catch (err) {
         log.warn(`stopping chat ${chatId} failed: ${err.message}`);
       }
     }
+    for (const id of windowWorkflows.get(conn) || []) cancelWorkflow(id);
   }
 
   // The core's own ui.send (chat:updated, backgroundTask:completed, case:changed):
@@ -695,7 +747,7 @@ function createBridgeDispatcher({
   }
 
   return {
-    served, providersConfigured, handleFrame, onDisconnect, onRevoke, forwardAmbient, bridgeContext, scope,
+    served, providersConfigured, handleFrame, onDisconnect, onRevoke, stillWorking, forwardAmbient, bridgeContext, scope,
     gatePhoneClass, replayPrompts, pendingAskUserByDevice
   };
 }

@@ -6,7 +6,10 @@ const { EventEmitter } = require('events');
 // backpressure. `data` carries isBinary, so attachSealed can refuse a text frame.
 // `raw` is each chunk off the TCP stream, counted before ready, so a peer that has
 // proved nothing is cut off while a message arrives and not after ws holds it.
+// Only for an open socket: before that ws has no TCP stream to count (`_socket` is
+// null), and a peer would be cut off only after ws had buffered a whole message.
 function wsTransport(ws) {
+  if (ws.readyState !== ws.OPEN) throw new Error('wsTransport needs an open socket');
   const transport = new EventEmitter();
   const onRaw = (chunk) => transport.emit('raw', chunk);
   const socket = ws._socket;

@@ -15,7 +15,7 @@ const {
   PROTOCOL, DEFAULT_DESKTOP_BRIDGE_PORT, LIMITS, CLOSE, DEVICE_ID_RE, NONCE_RE,
   newNonce, buildAuthS, buildAuthC, parseFrame, peekFrameId, truncateUtf8, BridgeError, MESSAGES
 } = require('./protocol');
-const { DEVICES_FILE, DEVICES_CONTROLS, parseDevices, findDevice } = require('./pairing');
+const { DEVICES_FILE, DEVICES_CONTROLS, parseDevices, findDevice, emptyDevices } = require('./pairing');
 const { fromB64url, toB64url, verifyWithRawKey } = require('./keys');
 const { WindowSeal, createFrameSender, startHeartbeat } = require('./window-seal');
 const { createConnection } = require('./connection');
@@ -29,6 +29,9 @@ const delay = (ms) => new Promise((resolve) => { const t = setTimeout(resolve, m
 // bounded, rather than leaving the process unable to exit.
 const DEFAULT_DISCONNECT_CLEANUP_MS = 5000;
 const NOT_SEALING = 'node_not_sealing';
+const RECORD_UNREADABLE = 'record_unreadable';
+const TOO_MANY_HELD = 'too many held windows';
+const CLOSE_GRACE_MS = 1000;
 const NOT_REMOTE = 'not_remote';
 const TOO_MANY = 'too_many_windows';
 const STOPPING = 'service_stopping';
@@ -73,9 +76,11 @@ class DesktopBridgeServer extends EventEmitter {
     this.connections = new Map();
     this.preAuth = [];
     this.sockets = new Set();
-    // Every sealed session from attachSealed until it is closed and no frame of its
-    // is still running: a device dropped with an approval pending can yet be revoked.
+    // Every open sealed session, from attachSealed until it ends.
     this.sealedSessions = new Set();
+    // The connections of ended sessions still at work: a device dropped with an
+    // approval pending can yet be revoked. Bounded at ready by maxHeldWindows.
+    this.heldConns = new Set();
     this.stopped = false;
     this.failures = new Map();
     this.lockouts = new Map();
@@ -179,7 +184,7 @@ class DesktopBridgeServer extends EventEmitter {
   async stop() {
     this.stopped = true;
     // A node with only features.remoteWindow never listened and still has sessions.
-    if (!this.wss && this.sealedSessions.size === 0 && !this.recheckTimer) return;
+    if (!this.wss && this.sealedSessions.size === 0 && this.heldConns.size === 0 && !this.recheckTimer) return;
     clearInterval(this.recheckTimer);
     this.recheckTimer = null;
     const conns = [...this.connections.values()];
@@ -214,6 +219,7 @@ class DesktopBridgeServer extends EventEmitter {
     if (wss) await new Promise((resolve) => wss.close(() => resolve()));
     this.connections.clear();
     this.sealedSessions.clear();
+    this.heldConns.clear();
   }
 
   _onConnection(ws) {
@@ -474,46 +480,75 @@ class DesktopBridgeServer extends EventEmitter {
     if (i !== -1) this.preAuth.splice(i, 1);
   }
 
-  _lookupDevice(deviceId) {
+  // → { doc }, with doc null when the file is there and cannot be trusted or read:
+  // that says nothing about any device, as a missing file or record does.
+  _readDevices() {
     const file = path.join(this.configDir, DEVICES_FILE);
     try {
-      if (!fs.existsSync(file)) return null;
+      if (!fs.existsSync(file)) return { doc: emptyDevices() };
       assertAdminOwned(file, this.geteuid, this.adminUid, DEVICES_CONTROLS);
-      return findDevice(parseDevices(fs.readFileSync(file, 'utf8')), deviceId);
+      return { doc: parseDevices(fs.readFileSync(file, 'utf8')) };
     } catch (err) {
       log.error(`refusing desktop handshakes: ${err.message}`);
-      return null;
+      return { doc: null };
     }
   }
 
-  // A record a connection may still stand on: remote for a remote one, not for a
-  // local one. An answer the read cannot give is no record: closed, and revoked.
-  _standsOn(conn) {
-    const device = this._lookupDevice(conn.deviceId);
-    if (!device) return false;
-    return conn.remote ? device.remote === true : device.remote !== true;
+  _lookupDevice(deviceId) {
+    const { doc } = this._readDevices();
+    return doc ? findDevice(doc, deviceId) : null;
   }
 
+  // 'stands' on a record of its own side, remote for a remote one and not for a local
+  // one; 'gone' with no such record; 'unreadable' when nobody can say.
+  _standing(doc, conn) {
+    if (!doc) return 'unreadable';
+    const device = findDevice(doc, conn.deviceId);
+    if (!device) return 'gone';
+    return (conn.remote ? device.remote === true : device.remote !== true) ? 'stands' : 'gone';
+  }
+
+  // One read of the file per pass, however many connections it judges.
   _recheckLive() {
+    if (this.connections.size > 0 || this.heldConns.size > 0) this._judgeConnections(this._readDevices().doc);
+    if (this.sealedSessions.size === 0 || !this._sealRefusal()) return;
+    for (const state of [...this.sealedSessions]) {
+      if (state.stage === 'ready') this._endSealed(state, CLOSE.NOT_SEALING, NOT_SEALING, { record: true });
+    }
+  }
+
+  _judgeConnections(doc) {
     for (const conn of [...this.connections.values()]) {
-      if (this._standsOn(conn)) continue;
+      const standing = this._standing(doc, conn);
+      if (standing === 'stands') continue;
+      // A remote window fails closed on a bad read, and is told it was not revoked.
+      if (conn.remote && standing === 'unreadable') {
+        log.warn(`window ${conn.deviceId}: the devices file cannot be read; closing it`);
+        this._revoke(conn, 'unconfirmed');
+        conn.close(CLOSE.RECORD_UNREADABLE, RECORD_UNREADABLE);
+        continue;
+      }
       log.info(`desktop ${conn.deviceId} is no longer paired; closing it`);
       if (conn.remote) this._revoke(conn);
       conn.close(CLOSE.UNKNOWN_DEVICE, 'unpaired');
     }
     // Gone from the map and still at work: a drop runs what was approved, unless the
     // device is revoked before the approval comes (R-RW-31).
-    for (const state of [...this.sealedSessions]) {
-      if (state.stage === 'closed' && state.conn && !state.conn.revoked && !this._standsOn(state.conn)) this._revoke(state.conn);
-    }
-    if (this.sealedSessions.size === 0 || !this._sealRefusal()) return;
-    for (const state of [...this.sealedSessions]) {
-      if (state.stage === 'ready') this._endSealed(state, CLOSE.NOT_REMOTE, NOT_SEALING, { record: true });
+    for (const conn of [...this.heldConns]) {
+      const standing = this._standing(doc, conn);
+      if (!conn.revoked && standing !== 'stands') this._revoke(conn, standing === 'unreadable' ? 'unconfirmed' : 'revoked');
+      this._holdOrRelease(conn);
     }
   }
 
-  _revoke(conn) {
-    conn.revoke();
+  // Kept while a frame of it runs or its window's work goes on without one.
+  _holdOrRelease(conn) {
+    if (conn.inFlight > 0 || this.dispatcher.stillWorking?.(conn) === true) this.heldConns.add(conn);
+    else this.heldConns.delete(conn);
+  }
+
+  _revoke(conn, reason = 'revoked') {
+    conn.revoke(reason);
     try {
       this.dispatcher.onRevoke?.(conn);
     } catch (err) {
@@ -550,9 +585,9 @@ class DesktopBridgeServer extends EventEmitter {
     return new Promise((resolve, reject) => {
       const state = {
         transport, stage: 'handshake', seal: null, sender: null, heartbeat: null, conn: null,
-        inFlight: 0, preReadyBytes: 0, resolve, reject
+        preReadyBytes: 0, rawSeen: false, resolve, reject
       };
-      const refusal = this.stopped ? [CLOSE.GOING_AWAY, STOPPING] : (this._sealRefusal() && [CLOSE.NOT_REMOTE, NOT_SEALING]);
+      const refusal = this.stopped ? [CLOSE.GOING_AWAY, STOPPING] : (this._sealRefusal() && [CLOSE.NOT_SEALING, NOT_SEALING]);
       if (refusal) {
         this._endSealed(state, refusal[0], refusal[1]);
         return;
@@ -595,7 +630,10 @@ class DesktopBridgeServer extends EventEmitter {
         this._endSealed(old, CLOSE.TRY_AGAIN, 'too many pending handshakes');
       }
       transport.on('data', (message, isBinary) => this._onSealedMessage(state, message, isBinary));
-      transport.on('raw', (chunk) => this._countPreReady(state, chunk.length));
+      transport.on('raw', (chunk) => {
+        state.rawSeen = true;
+        this._countPreReady(state, chunk.length);
+      });
       transport.on('close', () => this._endSealed(state, CLOSE.GOING_AWAY, 'closed', { transportGone: true }));
     });
   }
@@ -609,7 +647,8 @@ class DesktopBridgeServer extends EventEmitter {
       else this._endSealed(state, CLOSE.MALFORMED, 'record');
       return;
     }
-    if (Buffer.isBuffer(message)) this._countPreReady(state, message.length);
+    // A transport with raw bytes has counted these already.
+    if (!state.rawSeen && Buffer.isBuffer(message)) this._countPreReady(state, message.length);
     if (state.stage === 'closed') return;
     state.seal.next(message)
       .then((result) => this._onSealResult(state, result))
@@ -625,8 +664,9 @@ class DesktopBridgeServer extends EventEmitter {
     if (state.stage !== 'handshake') return;
     state.preReadyBytes += bytes;
     if (state.preReadyBytes <= this.limits.preAuthSocketBytes) return;
+    const { transport } = state;
     this._endSealed(state, CLOSE.BAD_SIGNATURE, 'handshake');
-    try { state.transport.terminate?.(); } catch { /* gone */ }
+    try { transport.terminate?.(); } catch { /* gone */ }
   }
 
   _onSealResult(state, { frames, close, ready, peer }) {
@@ -646,10 +686,13 @@ class DesktopBridgeServer extends EventEmitter {
   // under the seal.
   _onSealedReady(state, peer) {
     const refuse = (code, reason) => this._endSealed(state, code, reason, { record: true });
-    const device = this._lookupDevice(peer.deviceId);
+    const { doc } = this._readDevices();
+    if (!doc) return refuse(CLOSE.RECORD_UNREADABLE, RECORD_UNREADABLE);
+    const device = findDevice(doc, peer.deviceId);
     if (!device || device.publicKey !== toB64url(peer.publicKey)) return refuse(CLOSE.UNKNOWN_DEVICE, 'unknown device');
     if (device.remote !== true) return refuse(CLOSE.NOT_REMOTE, NOT_REMOTE);
-    if (this._sealRefusal()) return refuse(CLOSE.NOT_REMOTE, NOT_SEALING);
+    if (this._sealRefusal()) return refuse(CLOSE.NOT_SEALING, NOT_SEALING);
+    if (this.heldConns.size >= this.limits.maxHeldWindows) return refuse(CLOSE.TRY_AGAIN, TOO_MANY_HELD);
     // One connection per device: attaching again takes its own place.
     const old = this.connections.get(device.deviceId);
     if (!old && this.connections.size >= this.limits.maxDevices) return refuse(CLOSE.TOO_MANY_WINDOWS, TOO_MANY);
@@ -684,13 +727,14 @@ class DesktopBridgeServer extends EventEmitter {
 
   // The same checks as a loopback frame, because it is the same path.
   _onSealedFrame(state, frame) {
-    state.inFlight += 1;
+    const { conn } = state;
+    conn.inFlight += 1;
     Promise.resolve()
       .then(() => this._onReadyFrame(state, frame, false))
       .catch((err) => this._onFrameError(state, frame, false, err))
       .finally(() => {
-        state.inFlight -= 1;
-        this._retireSealed(state);
+        conn.inFlight -= 1;
+        if (!conn.live) this._holdOrRelease(conn);
       });
   }
 
@@ -722,27 +766,35 @@ class DesktopBridgeServer extends EventEmitter {
       log.debug(`no close record went: ${err.code || err.message}`);
     }
     state.seal?.destroy();
+    const { transport } = state;
     try {
-      if (!transportGone) state.transport.close(code, truncateUtf8(reason, 123));
+      if (!transportGone) transport.close(code, truncateUtf8(reason, 123));
     } catch { /* gone */ }
+    // As a loopback close: a peer that never answers the close frame is cut off.
+    if (!transportGone && typeof transport.terminate === 'function') {
+      const kill = setTimeout(() => { try { transport.terminate(); } catch { /* gone */ } }, this.limits.closeGraceMs ?? CLOSE_GRACE_MS);
+      kill.unref?.();
+    }
     const conn = state.conn;
+    this.sealedSessions.delete(state);
+    // The connection may outlive this; its keys and socket do not.
+    state.seal = null;
+    state.sender = null;
+    state.heartbeat = null;
+    state.transport = null;
     if (conn) {
       if (this.connections.get(conn.deviceId) === conn) this.connections.delete(conn.deviceId);
       conn.markGone();
       this._disconnectOnce(conn);
       log.info(`window "${conn.label}" disconnected (${code})`);
       this.emit('disconnected', { deviceId: conn.deviceId, label: conn.label, remote: true });
+      this._holdOrRelease(conn);
     }
     if (before === 'handshake') {
       const refused = new BridgeError(reason, MESSAGES.MALFORMED);
       refused.closeCode = code;
       state.reject(refused);
     }
-    this._retireSealed(state);
-  }
-
-  _retireSealed(state) {
-    if (state.stage === 'closed' && state.inFlight === 0) this.sealedSessions.delete(state);
   }
 
   _recordFailure(deviceId) {

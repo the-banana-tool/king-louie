@@ -193,6 +193,12 @@ The clear `hello_w`, `hello_n` and `auth_w`: both ephemeral public keys, the dev
 and node ids and keys, and the signatures. After them, record lengths, their timing,
 their direction and the counters. Not the plaintext, and not a key.
 
+A socket's close code is not authenticated: the front door can write any. So a code
+that reaches a side as a socket close (§7) is a reason to look, never proof: a node
+sends a close record before it closes, and only that record, under the seal, says what
+the node decided. No socket code clears a pin or an enrollment, and on the node every
+socket close is a drop.
+
 Padding hides small differences only: within one block, frames look alike, while a
 long reply still looks long. Sizes and timing remain visible, and this protocol does
 not try to hide them.
@@ -207,6 +213,18 @@ not try to hide them.
 | `4408` | `handshake` | Not ready in 10 s. |
 | `1001` | `silence` | 60 s with no record. |
 | `1001` | `write` | A write failed: the socket has gone. |
+| `4403` | `not_remote` | The node: a device that proved a key whose record is local. |
+| `4403` | `unknown device` | The node, at ready: the record went or its key changed during the handshake. |
+| `4403` | `unpaired` | The node's re-read: the record is gone or changed sides. The device is revoked. |
+| `4409` | `too_many_windows` | The node holds its eight windows. |
+| `4503` | `node_not_sealing` | The node cannot seal to a phone. Says nothing about this device. |
+| `4504` | `record_unreadable` | The node cannot read its devices file. Says nothing about this device, and it may attach again once the file reads. |
+| `1000` | `replaced by a new connection` | The same device attached again. |
+| `1001` | `service_stopping` | The node is stopping. |
+| `1001` | `send failed` | The sender failed for a reason other than a full queue. |
+| `1013` | `slow reader` | Past the sender's queue limit. |
+| `1013` | `too many pending handshakes` | Past the node's cap on seals not yet ready; the oldest goes. |
+| `1013` | `too many held windows` | The node holds `maxHeldWindows` gone windows whose calls still run. |
 | the sender's | `peer` | The peer's close record. |
 | the caller's | `local` | This side's own close record. |
 

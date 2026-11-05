@@ -15,9 +15,14 @@ function createConnection({ deviceId, label, send, close = () => {}, remote = fa
     cleaned: false,
     // A drop leaves what was approved to run; a revoke does not (R-RW-31). `revoked`
     // and `revokeSignal` are how the dispatcher tells them apart. Nothing is sent
-    // after a revoke, whatever was already under way.
+    // after a revoke, whatever was already under way. It is this connection's: a
+    // `revokeReason` of 'unconfirmed' is a devices file that could not be read, and the
+    // device may attach again once it can.
     revoked: false,
+    revokeReason: null,
     revokeSignal: revocation.signal,
+    // Sealed frames of this connection still running.
+    inFlight: 0,
     send: (...args) => (conn.revoked ? false : send(...args)),
     close,
     // The event of each chat:sendMessage this connection made that has not returned,
@@ -31,9 +36,10 @@ function createConnection({ deviceId, label, send, close = () => {}, remote = fa
       conn.live = false;
       resolveGone();
     },
-    revoke() {
+    revoke(reason = 'revoked') {
       if (conn.revoked) return;
       conn.revoked = true;
+      conn.revokeReason = reason;
       revocation.abort();
     }
   };

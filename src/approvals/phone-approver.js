@@ -34,6 +34,7 @@ class PhoneApprover {
     this.clearTimer = clearTimer;
     this.build = build;
     this.sealPolicy = sealPolicy;
+    this.contextSignal = null;
     this.pendingRequests = new PendingRequests({ now });
     this.stopped = false;
     this._onConnected = () => this._resubmitAll();
@@ -95,8 +96,12 @@ class PhoneApprover {
       .catch((err) => log.warn(`audit ${kind} failed: ${err.message}`));
   }
 
-  async requestAction(action, { origin = null, signal = null, currentAction } = {}) {
+  async requestAction(action, { origin = null, signal: given = null, currentAction } = {}) {
     if (typeof currentAction !== 'function') throw new TypeError('currentAction required');
+    // `contextSignal`, when a host sets one, withdraws what is asked in its current
+    // async context, whoever asks (the bridge dispatcher: a revoked window's frames).
+    const scoped = typeof this.contextSignal === 'function' ? this.contextSignal() : null;
+    const signal = scoped && given ? AbortSignal.any([given, scoped]) : (scoped || given);
     // Ahead of the availability checks: an untrusted store or a revoke that
     // left nobody is also "nobody to seal to", and it is denied as that.
     if (!this.stopped && this.sealRefusal()) return this._denyUnsealable();
