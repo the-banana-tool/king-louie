@@ -50,6 +50,8 @@ const RENDERER_EVENTS = new Set([
   'chat:toolUse', 'chat:toolResult', 'chat:toolProgress', 'chat:updated',
   // What the window that acted already drew, for the others (remote window plan, task 2).
   'chat:rowAdded', 'chat:listChanged',
+  // A remote run's question, for the windows it was not sent to (remote window plan, task 3).
+  'chat:questionWaiting',
   'chat:advisorStarted', 'chat:advisorCompleted',
   'canvas:render', 'canvas:close', 'canvas:executeJs',
   ...PROMPT_EVENTS,

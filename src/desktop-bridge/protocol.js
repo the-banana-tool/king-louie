@@ -40,6 +40,8 @@ const CLOSE = Object.freeze({
   MALFORMED: 4400,
   BAD_SIGNATURE: 4401,
   UNKNOWN_DEVICE: 4403,
+  // A device whose record is local, on the sealed path (R-RW-15), with its own reason.
+  NOT_REMOTE: 4403,
   TOO_MANY_WINDOWS: 4409,
   PROTOCOL_MISMATCH: 4426,
   LOCKED_OUT: 4429
@@ -143,6 +145,7 @@ const MESSAGES = Object.freeze({
   SERVICE_TOO_OLD: (version, channel) => `The local service (version ${version}) does not support ${channel}. Upgrade the service.`,
   SERVICE_RESTARTED: 'The local service restarted; the reply was lost.',
   DESKTOP_DISCONNECTED_RUN: 'The desktop disconnected; the run was stopped.',
+  WINDOW_REVOKED_RUN: 'The window that started this was revoked; the run was stopped.',
   NO_PROVIDER: 'The service has no provider key yet — import or add one in Providers.',
   SECURE_STORAGE_UNAVAILABLE: "This system has no secure storage; the desktop can't hold a pairing key.",
   RULE_NOT_DESKTOP: 'This rule was set on the service and can only be removed there.',
@@ -155,6 +158,7 @@ const MESSAGES = Object.freeze({
   REMOTE_PRESS: 'Answer on your phone.',
   NO_PHONE: 'No phone can approve this on the node. Nothing ran.',
   PHONE_DENIED: 'Not approved on the phone. Nothing ran.',
+  PHONE_BUSY: 'Too many requests are waiting on the phone. Answer those first. Nothing ran.',
   REMOTE_ARGS_INVALID: 'That request cannot be signed. Nothing ran.',
   REMOTE_ARGS_TOO_LARGE: 'That request is too large to show on the phone. Nothing ran.'
 });

@@ -508,7 +508,8 @@ contextBridge.exposeInMainWorld(
       onToolProgress: (callback) => registerOnce('chat:toolProgress', callback),
       onChatUpdated: (callback) => registerOnce('chat:updated', callback),
       onRowAdded: (callback) => registerOnce('chat:rowAdded', callback),
-      onListChanged: (callback) => registerOnce('chat:listChanged', callback)
+      onListChanged: (callback) => registerOnce('chat:listChanged', callback),
+      onQuestionWaiting: (callback) => registerOnce('chat:questionWaiting', callback)
     },
     tool: {
       list: () => ipcRenderer.invoke('tool:list'),

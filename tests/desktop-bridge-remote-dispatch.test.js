@@ -40,9 +40,18 @@ const PROBE = 'KlTestRemoteDispatchProbe';
 const STOPPED_ROW = MESSAGES.DESKTOP_DISCONNECTED_RUN;
 let probeRuns = 0;
 const realOpenAI = ProviderFactory._registry.get('openai');
+// What the next model calls answer; with nothing scripted, a plain reply.
+const script = [];
 class FakeProvider {
   async listModels() { return ['fake']; }
-  async sendMessageWithTools() { return { type: 'text', content: 'finished' }; }
+  async sendMessage() { return 'A title'; }
+  async sendMessageWithTools() { return script.shift() || { type: 'text', content: 'finished' }; }
+  buildToolMessages(response, toolResult, toolCallId) {
+    return [
+      { role: 'assistant', content: '', tool_calls: [{ id: toolCallId, type: 'function', function: { name: response.toolName, arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: toolCallId, content: JSON.stringify(toolResult) }
+    ];
+  }
 }
 const cipher = createAesGcmCipher(crypto.randomBytes(32));
 
@@ -1189,6 +1198,141 @@ describe('a remote drop', () => {
       await running;
       assert.deepStrictEqual(results, [false]);
     });
+  });
+});
+
+describe('at most 8 asks in flight per device (R-RW-32)', () => {
+  it('the ninth is refused before anyone is asked; another device has its own; an answer frees one', async () => {
+    const held = [];
+    const phone = fakePhone(() => new Promise((resolve) => { held.push(resolve); }));
+    let runs = 0;
+    const { dispatcher, use } = makeDispatcher({ phone, overrides: { 'chat:delete': async () => { runs += 1; return { ok: true }; } } });
+    const a = connection();
+    const other = connection({ device: 'otherwindow' });
+    use(a, other);
+    const going = [];
+    for (let id = 1; id <= 8; id += 1) going.push(invoke(dispatcher, a, id, 'chat:delete', `c-${id}`));
+    await waitFor(() => phone.calls.length === 8);
+    await invoke(dispatcher, a, 9, 'chat:delete', 'c-9');
+    assert.deepStrictEqual(resultFor(a, 9).value, { ok: false, code: 'PHONE_BUSY', error: MESSAGES.PHONE_BUSY });
+    assert.strictEqual(phone.calls.length, 8);
+
+    going.push(invoke(dispatcher, other, 1, 'chat:delete', 'c-other'));
+    await waitFor(() => phone.calls.length === 9);
+
+    held.shift()(false);
+    await going[0];
+    going.push(invoke(dispatcher, a, 10, 'chat:delete', 'c-10'));
+    await waitFor(() => phone.calls.length === 10);
+    for (const answer of held) answer(false);
+    await Promise.all(going);
+    assert.strictEqual(runs, 0);
+  });
+
+  it('a folder request takes a place too, and is false at the limit', async () => {
+    const held = [];
+    const phone = fakePhone(() => new Promise((resolve) => { held.push(resolve); }));
+    let ctxRef = null;
+    const results = [];
+    const { dispatcher, use } = makeDispatcher({
+      phone,
+      overrides: {
+        'chat:delete': async () => ({ ok: true }),
+        'chat:sendMessage': async () => { results.push(await ctxRef.prompter.requestDirectoryAccess({ directory: 'C:\\example\\lot', toolName: 'Read' })); return { ok: true }; }
+      },
+      patchContext: (ctx) => { ctxRef = ctx; }
+    });
+    const a = connection();
+    use(a);
+    const going = [];
+    for (let id = 1; id <= 8; id += 1) going.push(invoke(dispatcher, a, id, 'chat:delete', `c-${id}`));
+    await waitFor(() => phone.calls.length === 8);
+    await invoke(dispatcher, a, 9, 'chat:sendMessage', { chatId: 'c-dir-full', message: 'go' });
+    assert.deepStrictEqual(results, [false]);
+    assert.strictEqual(phone.calls.length, 8);
+    for (const answer of held) answer(false);
+    await Promise.all(going);
+  });
+});
+
+describe('Stop while a turn waits on a remote question (a real run)', () => {
+  const realRun = (id, message = 'go') => ({ t: 'invoke', id, channel: 'chat:sendMessage', args: [{ chatId: 'c-stop', message, agentMode: true }] });
+  const running = async (dispatcher, conn, id) => {
+    await invoke(dispatcher, conn, id, 'chat:running');
+    return resultFor(conn, id).value.chatIds;
+  };
+  const settledSoon = (promise) => Promise.race([promise, new Promise((_, reject) => { setTimeout(() => reject(new Error('the run did not end')), 5000); })]);
+
+  it('Stop ends a turn waiting on ask_user: the question is gone, the chat is idle, the next send runs', async () => {
+    const chatId = 'c-stop';
+    if (!core.context.getChat(chatId)) newChat(chatId);
+    const { dispatcher, use } = makeDispatcher();
+    const a = connection();
+    const other = connection({ device: 'otherwindow', label: 'Desk at home' });
+    use(a, other);
+    script.push({ type: 'tool_use', toolName: 'AskUser', toolUseId: 'call_ask', parameters: { question: 'Which lot?' } });
+    const first = dispatcher.handleFrame(a, realRun(1));
+    const shown = await waitFor(() => asked(a)[0]);
+    const line = other.sent.find((f) => f.channel === 'chat:questionWaiting');
+    assert.deepStrictEqual(line.payload, { chatId, label: 'Field laptop' }, 'other windows are told who holds the question');
+    assert.ok(!other.sent.some((f) => f.channel === 'agent:askUser'));
+    assert.ok(!a.sent.some((f) => f.channel === 'chat:questionWaiting'));
+
+    await invoke(dispatcher, a, 2, 'chat:stopResponse', { chatId });
+    await settledSoon(first);
+    assert.strictEqual(dispatcher.bridgeContext.pendingAskUserResolvers.has(shown.payload.requestId), false);
+    assert.strictEqual(dispatcher.pendingAskUserByDevice.has(a.deviceId), false);
+    assert.deepStrictEqual(await running(dispatcher, a, 3), []);
+
+    await dispatcher.handleFrame(a, realRun(4, 'again'));
+    assert.strictEqual(resultFor(a, 4).value.code, undefined);
+    assert.strictEqual(resultFor(a, 4).value.ok, true);
+  });
+
+  it('Stop withdraws a folder card: the signal reaches the phone, and the turn ends', async () => {
+    const chatId = 'c-stop';
+    if (!core.context.getChat(chatId)) newChat(chatId);
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-remote-outside-'));
+    const file = path.join(outside, 'a.txt');
+    fs.writeFileSync(file, 'x');
+    let withdrawn = false;
+    const phone = fakePhone((tool, _params, metadata) => (tool !== 'AllowDirectory' ? true : new Promise((resolve) => {
+      metadata.signal.addEventListener('abort', () => { withdrawn = true; resolve(false); }, { once: true });
+    })));
+    const { dispatcher, use } = makeDispatcher({ phone });
+    const a = connection();
+    use(a);
+    const allowedBefore = core.context.getSettings().allowedDirectories;
+    core.context.setSettings({ ...core.context.getSettings(), allowedDirectories: [dataDir] });
+    script.push({ type: 'tool_use', toolName: 'Read', toolUseId: 'call_read', parameters: { file_path: file } });
+    const first = dispatcher.handleFrame(a, { t: 'invoke', id: 1, channel: 'chat:sendMessage', args: [{ chatId, message: 'read it', agentMode: true }] });
+    await waitFor(() => phone.calls.some((c) => c.toolName === 'AllowDirectory'));
+    await invoke(dispatcher, a, 2, 'chat:stopResponse', { chatId });
+    await settledSoon(first);
+    assert.strictEqual(withdrawn, true);
+    core.context.setSettings({ ...core.context.getSettings(), allowedDirectories: allowedBefore });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+
+  it('the prompter takes a signal for the on-screen prompts too', async () => {
+    const { createElectronPrompter } = require('../src/platform/electron-prompter');
+    const asks = new Map();
+    const dirs = new Map();
+    const sent = [];
+    const win = { isDestroyed: () => false, webContents: { send: (c, p) => sent.push([c, p]) } };
+    const prompter = createElectronPrompter({ getWindow: () => win, pendingAskUserResolvers: asks, pendingDirectoryAccessResolvers: dirs });
+    const stop = new AbortController();
+    const ask = prompter.askUser({ question: 'Which?', signal: stop.signal });
+    const dir = prompter.requestDirectoryAccess({ directory: 'C:\\example', toolName: 'Read', signal: stop.signal });
+    assert.strictEqual(asks.size, 1);
+    stop.abort();
+    assert.deepStrictEqual(await ask, { ok: false, error: 'Stopped.' });
+    assert.strictEqual(await dir, false);
+    assert.strictEqual(asks.size, 0);
+    assert.strictEqual(dirs.size, 0);
+    assert.deepStrictEqual(await prompter.askUser({ question: 'Late?', signal: stop.signal }), { ok: false, error: 'Stopped.' });
+    assert.strictEqual(await prompter.requestDirectoryAccess({ directory: 'C:\\example', toolName: 'Read', signal: stop.signal }), false);
+    assert.strictEqual(sent.length, 2, 'an aborted run asks nothing more');
   });
 });
 

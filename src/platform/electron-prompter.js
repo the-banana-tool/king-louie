@@ -2,6 +2,7 @@
 // main.js, so this module never requires electron.
 const ASK_USER_TIMEOUT_MS = 5 * 60 * 1000;
 const DIRECTORY_ACCESS_TIMEOUT_MS = 2 * 60 * 1000;
+const STOPPED = 'Stopped.';
 
 const newRequestId = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
@@ -12,19 +13,29 @@ function createElectronPrompter({ getWindow, pendingAskUserResolvers, pendingDir
   };
 
   return {
-    askUser({ question }) {
+    // `signal` is the run's: Stop ends the wait, so no turn stays blocked behind it.
+    askUser({ question, signal = null }) {
+      if (signal?.aborted) return Promise.resolve({ ok: false, error: STOPPED });
       const win = liveWindow();
       if (!win) return Promise.resolve({ ok: false, error: 'No UI available to ask user.' });
       return new Promise((resolve) => {
         const requestId = newRequestId('ask');
+        const onAbort = () => {
+          clearTimeout(timeoutId);
+          pendingAskUserResolvers.delete(requestId);
+          resolve({ ok: false, error: STOPPED });
+        };
         const timeoutId = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort);
           pendingAskUserResolvers.delete(requestId);
           resolve({ ok: false, error: 'User did not respond within 5 minutes.' });
         }, ASK_USER_TIMEOUT_MS);
         timeoutId.unref?.();
+        signal?.addEventListener('abort', onAbort, { once: true });
         pendingAskUserResolvers.set(requestId, {
           resolve: (userResponse) => {
             clearTimeout(timeoutId);
+            signal?.removeEventListener('abort', onAbort);
             resolve({ ok: true, response: userResponse });
           }
         });
@@ -32,20 +43,29 @@ function createElectronPrompter({ getWindow, pendingAskUserResolvers, pendingDir
       });
     },
 
-    requestDirectoryAccess({ directory, toolName }) {
+    requestDirectoryAccess({ directory, toolName, signal = null }) {
+      if (signal?.aborted) return Promise.resolve(false);
       const win = liveWindow();
       if (!win) return Promise.resolve(false);
       return new Promise((resolve) => {
         const requestId = newRequestId('diraccess');
+        const onAbort = () => {
+          clearTimeout(timeoutId);
+          pendingDirectoryAccessResolvers.delete(requestId);
+          resolve(false);
+        };
         const timeoutId = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort);
           pendingDirectoryAccessResolvers.delete(requestId);
           resolve(false);
         }, DIRECTORY_ACCESS_TIMEOUT_MS);
         timeoutId.unref?.();
+        signal?.addEventListener('abort', onAbort, { once: true });
         pendingDirectoryAccessResolvers.set(requestId, {
           directory,
           resolve: (approved) => {
             clearTimeout(timeoutId);
+            signal?.removeEventListener('abort', onAbort);
             resolve(approved === true);
           }
         });

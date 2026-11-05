@@ -13378,6 +13378,11 @@ unsubscribeHandlers.push(window.electron.chat.onRowAdded(({ chatId, run, message
   updateEmptyState();
 }));
 
+// A remote window's run is waiting on its owner's answer there; nothing here can answer it.
+unsubscribeHandlers.push(window.electron.chat.onQuestionWaiting(({ chatId, label }) => {
+  if (chatId === appState.activeChatId) showNotice(`A question is waiting on ${label}.`);
+}));
+
 // Another window made, renamed or deleted a chat. The open chat deleted there: this
 // window says so and opens the node's next one for it (chat:load's answer), or none.
 unsubscribeHandlers.push(window.electron.chat.onListChanged(async ({ chatId, what }) => {

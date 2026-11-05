@@ -42,14 +42,17 @@ const PROMPT_RESPONSES = Object.freeze({
 const fail = (code, message) => Object.assign(new Error(message), { code });
 
 const WINDOW_SUMMARY_MAX = 120;
+// What a stolen laptop can have waiting on the phone at once (R-RW-32): enough that a
+// mis-tap is not the way out of a flood, and each ask is one more mirrored ledger entry.
+const PHONE_ASKS_PER_DEVICE = 8;
 
 const remoteRefusal = (code, error = MESSAGES[code]) => ({ ok: false, code, error });
 
 // The card's one line. A label is the window's own words, so one that is not one
 // plain line is not shown; the channel name comes from the class table.
+const windowName = (label) => (plainLineProblem(label) === null ? label : 'a window (name hidden)');
 function windowSummary(name, label) {
-  const line = `${name} from ${plainLineProblem(label) === null ? label : 'a window (name hidden)'}`;
-  return Array.from(line).slice(0, WINDOW_SUMMARY_MAX).join('');
+  return Array.from(`${name} from ${windowName(label)}`).slice(0, WINDOW_SUMMARY_MAX).join('');
 }
 
 // Settings > Local service "Approvals and relay" (spec §3.9), read from F3's
@@ -107,6 +110,19 @@ function createBridgeDispatcher({
   const pendingAskUserByDevice = new Map();
   // requestId -> { chatId, payload }, for every remote question not yet ended.
   const remoteAsks = new Map();
+  // deviceId -> how many of its asks the phone has not answered.
+  const phoneAsks = new Map();
+  const takePhoneSlot = (deviceId) => {
+    const held = phoneAsks.get(deviceId) || 0;
+    if (held >= PHONE_ASKS_PER_DEVICE) return false;
+    phoneAsks.set(deviceId, held + 1);
+    return true;
+  };
+  const freePhoneSlot = (deviceId) => {
+    const held = phoneAsks.get(deviceId) - 1;
+    if (held > 0) phoneAsks.set(deviceId, held);
+    else phoneAsks.delete(deviceId);
+  };
 
   const anyWindowLive = () => getConnections().some((c) => c.live);
 
@@ -212,6 +228,8 @@ function createBridgeDispatcher({
           const live = liveRemote(deviceId);
           if (live) pushEvent(live, channel, payload);
           else queueAsk(deviceId, row);
+          // The chat is held by a question the other windows cannot see.
+          broadcast('chat:questionWaiting', { chatId, label: windowName(conn.label) }, live);
         }
       }
     };
@@ -232,14 +250,17 @@ function createBridgeDispatcher({
 
   // A folder for a remote run is the phone's to allow: a remote window never sees the
   // dialog (R-RW-7). No phone, no folder.
-  async function allowDirectoryOnPhone(conn, { directory, toolName }) {
+  async function allowDirectoryOnPhone(conn, { directory, toolName, signal = null }) {
     const approver = approvals && approvals.phoneApprover;
-    if (!approver) return false;
+    if (!approver || !takePhoneSlot(conn.deviceId)) return false;
     try {
-      return (await approver.requestApproval('AllowDirectory', { directory, toolName }, { origin: windowOrigin(conn) })) === true;
+      // The signal withdraws the card when the run is stopped.
+      return (await approver.requestApproval('AllowDirectory', { directory, toolName }, { origin: windowOrigin(conn), ...(signal ? { signal } : {}) })) === true;
     } catch (err) {
       log.warn(`asking the phone for a folder failed: ${err.message}`);
       return false;
+    } finally {
+      freePhoneSlot(conn.deviceId);
     }
   }
 
@@ -370,6 +391,7 @@ function createBridgeDispatcher({
     }
     const card = windowCard(name, JSON.parse(text), text);
     if (card.refusal) return remoteRefusal(card.refusal);
+    if (!takePhoneSlot(conn.deviceId)) return remoteRefusal('PHONE_BUSY');
     const metadata = { origin: windowOrigin(conn), cardNote: windowSummary(name, conn.label) };
     let answer;
     try {
@@ -377,6 +399,8 @@ function createBridgeDispatcher({
     } catch (err) {
       log.warn(`asking the phone about ${name} failed: ${err.message}`);
       return remoteRefusal('NO_PHONE');
+    } finally {
+      freePhoneSlot(conn.deviceId);
     }
     if (answer === 'unavailable') return remoteRefusal('NO_PHONE', (metadata.refusal && metadata.refusal.error) || MESSAGES.NO_PHONE);
     // Only the exact true approves, and an approval has a request id to carry.
