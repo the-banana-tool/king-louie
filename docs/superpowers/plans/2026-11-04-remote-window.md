@@ -76,9 +76,13 @@ Each is the author's call; the owner may overrule. The plan builds on them as wr
 
 ---
 
-- **R-RW-22 (controller, after Task 3).** A remote window needs a node that can seal: `window.open` (Task 6) and enrollment (Task 9) refuse unless `sealPolicy.canSeal()`, with `node_not_sealing` and a plain line saying to apply a phone's box key. Otherwise phone-class arguments would cross the relay in clear. Secret-bearing channels (`settings:vaultStore`, `settings:vaultUpdate`, the provider and key channels, `settings:mcpSave`) always use the hash form with the key name shown and never the value, sealed or not.
+- **R-RW-30 (controller, after Task 3).** A remote window needs a node that can seal: `window.open` (Task 6) and enrollment (Task 9) refuse unless `sealPolicy.canSeal()`, with `node_not_sealing` and a plain line saying to apply a phone's box key. Otherwise phone-class arguments would cross the relay in clear. Secret-bearing channels (`settings:vaultStore`, `settings:vaultUpdate`, the provider and key channels, `settings:mcpSave`) always use the hash form with the key name shown and never the value, sealed or not.
 
-- **R-RW-23 (controller, after Task 3).** A revoked device's pending approval is withdrawn and its approved call does not run; a mere drop still runs what was approved. Task 5 gives the dispatcher the difference.
+- **R-RW-31 (controller, after Task 3).** A revoked device's pending approval is withdrawn and its approved call does not run; a mere drop still runs what was approved. Task 5 gives the dispatcher the difference.
+
+- **R-RW-32 (controller, after Task 3's review).** The hash form is allowed only for real bulk (`case:ingestFiles`, with host-read names and sizes on the card) and the table of channels whose arguments hold a stored value. Any other phone-class call over the limit is refused `REMOTE_ARGS_TOO_LARGE`, so nobody can pad a card until it hides what runs. Inline cards have a leaf-size cap. Each device has at most 8 phone asks outstanding.
+
+- **R-RW-33 (controller, after Task 3's review).** A phone card and the audit name the window that asked: `deviceId` is kept for a `remote-window` origin. Every phone-class call from a window has a client bound above `TTL_MAX_MS` (Task 10).
 
 ## File map
 
