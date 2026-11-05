@@ -1011,7 +1011,7 @@ describe('AgentLoop', () => {
       assert.strictEqual(toolNames.filter(n => n === 'ToolA').length, 1, 'ToolA should not be duplicated');
     });
 
-    it('tracks all parallel tool results for semantic compaction', async () => {
+    it('tracks all parallel tool results for compaction', async () => {
       const provider = multiToolProvider([
         {
           type: 'tool_use',
@@ -1036,9 +1036,7 @@ describe('AgentLoop', () => {
       await loop.run([], []);
 
       assert.strictEqual(loop._toolResultEntries.length, 3);
-      assert.ok(loop._toolResultEntries[0].text.startsWith('Read:'));
-      assert.ok(loop._toolResultEntries[1].text.startsWith('Read:'));
-      assert.ok(loop._toolResultEntries[2].text.startsWith('Bash:'));
+      assert.strictEqual(new Set(loop._toolResultEntries.map((e) => e.historyIndex)).size, 3, 'each by its own message');
       assert.strictEqual(loop._toolResultEntries[0].compacted, false);
     });
 
@@ -1214,5 +1212,80 @@ describe('AgentLoop', () => {
     await loop.run([{ role: 'user', content: 'hi' }], []);
     assert.deepStrictEqual(updates, ['anthropic', 'anthropic']);
     assert.ok(compacted >= 1, 'compacted once the answering provider was anthropic');
+  });
+});
+
+describe('AgentLoop: old tool results are shortened by age', () => {
+  const MARK = 'FULL-RESULT-TEXT';
+  const toolUse = (n, calls = 1) => ({
+    type: 'tool_use',
+    toolName: 'Read',
+    toolUseId: `call_${n}_0`,
+    parameters: {},
+    toolCalls: Array.from({ length: calls }, (_unused, i) => ({ toolName: 'Read', toolUseId: `call_${n}_${i}`, parameters: {} })),
+    messageContent: ''
+  });
+  const openAiMessages = (response, results) => [
+    { role: 'assistant', content: '', tool_calls: results.map((r) => ({ id: r.toolCallId, type: 'function', function: { name: r.toolName, arguments: '{}' } })) },
+    ...results.map((r) => ({ role: 'tool', tool_call_id: r.toolCallId, content: JSON.stringify(r.result) }))
+  ];
+  const anthropicMessages = (response, results) => [
+    { role: 'assistant', content: results.map((r) => ({ type: 'tool_use', id: r.toolCallId, name: r.toolName, input: {} })) },
+    { role: 'user', content: results.map((r) => ({ type: 'tool_result', tool_use_id: r.toolCallId, content: JSON.stringify(r.result) })) }
+  ];
+  // Plays the responses, keeping what each call was sent. Every result is numbered.
+  function run(responses, buildMultiToolMessages, options = {}) {
+    let i = 0;
+    const sent = [];
+    const provider = {
+      sendMessageWithTools: async (history) => { sent.push(JSON.parse(JSON.stringify(history))); return responses[i++]; },
+      buildMultiToolMessages,
+      buildToolMessages: (response, result, toolCallId) => buildMultiToolMessages(response, [{ toolName: response.toolName, toolCallId, result }])
+    };
+    let n = 0;
+    const executor = { execute: async () => { n += 1; return { ok: true, output: `${MARK} ${n}` }; } };
+    const loop = new AgentLoop(provider, executor, { compactEvery: 1, maxIterations: 40, ...options });
+    return loop.run([{ role: 'user', content: 'hi' }], []).then(() => ({ sent, loop }));
+  }
+  const whole = (history) => history.flatMap((m) => {
+    if (m.role === 'tool') return [m.content];
+    if (m.role === 'user' && Array.isArray(m.content)) return m.content.filter((b) => b.type === 'tool_result').map((b) => b.content);
+    return [];
+  });
+  const intact = (history) => whole(history).filter((text) => text.includes(MARK)).map((text) => Number(JSON.parse(text).output.split(' ').pop()));
+  const done = { type: 'text', content: 'done' };
+
+  it('takes no embedding provider, and never calls one it is handed', async () => {
+    const embed = async () => { throw new Error('must not be called'); };
+    const responses = [1, 2, 3, 4, 5, 6, 7].map((n) => toolUse(n));
+    const { loop } = await run([...responses, done], openAiMessages, { embeddingProvider: { embed } });
+    assert.strictEqual('embeddingProvider' in loop, false);
+    assert.strictEqual('_relevanceThreshold' in loop, false);
+    assert.strictEqual(typeof loop._semanticCompact, 'undefined');
+  });
+
+  it('keeps the newest results whole and shortens every older one', async () => {
+    const responses = [1, 2, 3, 4, 5, 6, 7].map((n) => toolUse(n));
+    const { sent } = await run([...responses, done], openAiMessages);
+    const last = sent.at(-1);
+    assert.strictEqual(whole(last).length, 7);
+    assert.deepStrictEqual(intact(last), [4, 5, 6, 7]);
+    assert.deepStrictEqual(JSON.parse(whole(last)[0]), { ok: true });
+  });
+
+  it('shortens each result of an old parallel batch, not only its last', async () => {
+    const { sent } = await run([toolUse(1, 3), toolUse(2, 3), toolUse(3, 1), done], openAiMessages);
+    assert.deepStrictEqual(intact(sent.at(-1)), [4, 5, 6, 7]);
+    assert.strictEqual(whole(sent.at(-1)).length, 7);
+  });
+
+  it('shortens results held in one user message, and waits while one of them is still recent', async () => {
+    const { sent } = await run([toolUse(1, 2), toolUse(2, 2), toolUse(3, 2), toolUse(4, 2), done], anthropicMessages);
+    assert.strictEqual(whole(sent.at(-1)).length, 8);
+    assert.deepStrictEqual(intact(sent.at(-1)), [5, 6, 7, 8]);
+    // Six results, in messages of 1-2, 3-4, 5-6: result 3 is past the newest
+    // four, but result 4 shares its message and is not.
+    const { sent: straddling } = await run([toolUse(1, 2), toolUse(2, 3), toolUse(3, 2), done], anthropicMessages);
+    assert.deepStrictEqual(intact(straddling.at(-1)), [3, 4, 5, 6, 7]);
   });
 });

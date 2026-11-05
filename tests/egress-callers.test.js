@@ -25,6 +25,8 @@ const IPC = require('../src/ipc/constants');
 const { registerChatHandlers } = require('../src/ipc/chat-handlers');
 const { registerWorkflowHandlers } = require('../src/ipc/workflow-handlers');
 const ToolExecutor = require('../src/execution/tool-executor');
+const { toolRegistry } = require('../src/tools');
+const { Tool } = require('../src/tools/tool-schema');
 const { PRIVATE_REFUSED_TOOLS, privateRefusal } = require('../src/tools/private-refusals');
 const { FLEET_CHAT_TOOL_NAMES, FLEET_READ_TOOLS } = require('../src/tools/builtin/fleet-chat-tools');
 const ImageGenerateTool = require('../src/tools/builtin/image-generate-tool');
@@ -346,31 +348,54 @@ describe('the callers that bypass the router, in a core', () => {
     }
   });
 
-  it('R-LI-8: compaction gets no embedding provider', async () => {
-    const seen = [];
-    const loops = [];
-    const Loop = class extends ctx.AgentLoop {
-      constructor(provider, executor, options) {
-        seen.push(options.embeddingProvider);
-        super(provider, executor, options);
-        loops.push(this);
-      }
+  it('R-LI-8: a long turn makes no embeddings POST, in a chat private or not, and old results go by age', async () => {
+    assert.ok(ctx.getContextAssembler().embeddingProvider, 'the saved OpenAI key is there');
+    const MARK = 'FULL-RESULT-TEXT';
+    const TOOL = 'KlTestLongTurnProbe';
+    let runs = 0;
+    toolRegistry.register(new Tool({
+      name: TOOL,
+      description: 'Test-only tool that returns a long result.',
+      parameters: { type: 'object', properties: {} },
+      execute: async () => { runs += 1; return { ok: true, output: `${MARK} ${runs} ${'x'.repeat(2000)}` }; }
+    }));
+    const ROUNDS = 8;
+    const longTurn = () => {
+      let calls = 0;
+      const sent = [];
+      return {
+        sent,
+        sendMessageWithTools: async (history) => {
+          sent.push(JSON.parse(JSON.stringify(history)));
+          calls += 1;
+          if (calls > ROUNDS) return { type: 'text', content: 'All read.' };
+          return { type: 'tool_use', toolName: TOOL, toolUseId: `call_${calls}`, parameters: {}, messageContent: '' };
+        },
+        buildToolMessages: (response, result, toolCallId) => [
+          { role: 'assistant', content: '', tool_calls: [{ id: toolCallId, type: 'function', function: { name: response.toolName, arguments: '{}' } }] },
+          { role: 'tool', tool_call_id: toolCallId, content: JSON.stringify(result) }
+        ]
+      };
     };
-    const { send } = chatHandlers({ AgentLoop: Loop });
-    await send(newChat({ marked: true, title: 'Fence' }), 'Check the fence line.');
-    await send(newChat({ title: 'Fence' }), 'Check the fence line.');
-    assert.strictEqual(seen.length, 2);
-    assert.strictEqual(seen[0], null);
-    assert.strictEqual(seen[1], ctx.getContextAssembler().embeddingProvider);
-    assert.deepStrictEqual(loops.map((loop) => loop.embeddingProvider), [null, seen[1]]);
-    assert.deepStrictEqual(embedded, []);
-    // The loop itself takes none under a policy, whoever builds it.
-    const hosted = { embed: async () => { throw new Error('must not be called'); } };
-    for (const egress of [PRIVATE, true]) {
-      assert.strictEqual(new ctx.AgentLoop({}, {}, { embeddingProvider: hosted, egress }).embeddingProvider, null);
+    try {
+      for (const marked of [false, true]) {
+        const provider = longTurn();
+        const { send } = chatHandlers({
+          routedProvider: (spec) => (spec.meta?.role === 'utility' ? ctx.routedProvider(spec) : provider)
+        });
+        const chatId = newChat({ marked, title: 'Fence' });
+        await send(chatId, 'Read everything along the fence line.');
+        assert.strictEqual(lastReply(chatId), 'All read.');
+        const results = provider.sent.at(-1).filter((m) => m.role === 'tool');
+        assert.strictEqual(results.length, ROUNDS, 'more than four tool results');
+        // Compaction ran at the seventh call, over six results: the two oldest went.
+        assert.deepStrictEqual(results.map((m) => m.content.includes(MARK)), [false, false, true, true, true, true, true, true]);
+      }
+      assert.deepStrictEqual(embedded, []);
+      assert.deepStrictEqual(fetched.filter((f) => f.method === 'POST' && f.url.endsWith('/embeddings')), []);
+    } finally {
+      toolRegistry.unregister(TOOL);
     }
-    assert.strictEqual(new ctx.AgentLoop({}, {}, { embeddingProvider: hosted }).embeddingProvider, hosted);
-    assert.strictEqual(new ctx.AgentLoop({}, {}, { embeddingProvider: hosted, egress: null }).embeddingProvider, hosted);
   });
 
   it('R-LI-22: a title is made on a local model', async () => {

@@ -1,5 +1,4 @@
 const path = require('path');
-const VectorStore = require('../memory/vector-store');
 const ResultPersistence = require('./result-persistence');
 const APICompaction = require('../context/api-compaction');
 const { FailoverPolicy } = require('../providers/failover-policy');
@@ -58,23 +57,11 @@ class AgentLoop {
     this.compactEvery = options.compactEvery ?? 6;
     this.keepRecentResults = options.keepRecentResults ?? 4;
 
-    // Semantic compaction: when an embeddingProvider is available, use
-    // semantic search to preserve relevant old results and only compact
-    // irrelevant ones. One cheap batch embedding call per compaction cycle.
-    // Under an egress policy (options.egress; local inference spec
-    // 2026-10-13 §7.5) the loop takes no embedding provider, whatever it is
-    // handed: the provider is a direct client of a hosted API, and the
-    // query and old tool results would be sent to it. Compaction then goes
-    // by recency.
-    this.embeddingProvider = (options.egress !== null && options.egress !== undefined)
-      ? null
-      : (options.embeddingProvider || null);
-    this._toolResultEntries = []; // { historyIndex, toolName, text, compacted }
-    this._relevanceThreshold = options.relevanceThreshold ?? 0.3;
+    this._toolResultEntries = []; // { historyIndex, compacted }
 
     // API-native compaction: clears old tool_result content blocks when
     // input tokens approach the limit. No embedding calls needed. Used
-    // for Anthropic provider; falls back to semantic compaction for others.
+    // for Anthropic provider; below that mark, and for others, old results go by age.
     this.apiCompaction = options.apiCompaction || new APICompaction({
       triggerTokens: options.compactionTriggerTokens || 150000,
       targetTokens: options.compactionTargetTokens || 40000,
@@ -232,7 +219,7 @@ class AgentLoop {
           log.info(`API compaction: cleared ${stats.cleared} tool results (~${stats.freedEstimate} tokens freed)`);
         }
       } else if (iterations > 1 && this.compactEvery > 0 && (iterations - 1) % this.compactEvery === 0) {
-        await this._compactToolResults(conversationHistory);
+        this._compactToolResults(conversationHistory);
       }
 
       // Retry transient upstream failures so a mid-loop hiccup doesn't
@@ -565,6 +552,7 @@ class AgentLoop {
         }
 
         // Build conversation history messages
+        const batchStart = conversationHistory.length;
         if (results.length > 1 && typeof this.provider.buildMultiToolMessages === 'function') {
           const providerMessages = this.provider.buildMultiToolMessages(response, results);
           conversationHistory.push(...providerMessages);
@@ -612,16 +600,17 @@ class AgentLoop {
         }
         imageTracker.retain();
 
-        // Track tool results for semantic compaction
-        for (const entry of results) {
-          const resultSnippet = entry.result != null ? JSON.stringify(entry.result).substring(0, 400) : '';
-          this._toolResultEntries.push({
-            historyIndex: conversationHistory.length - 1,
-            toolName: entry.toolName,
-            text: `${entry.toolName}: ${resultSnippet}`,
-            compacted: false
-          });
+        // Track tool results for compaction, each by the message that holds it:
+        // one message per result (OpenAI) or one for the whole batch (Anthropic).
+        const resultMessages = [];
+        for (let idx = batchStart; idx < conversationHistory.length; idx += 1) {
+          const msg = conversationHistory[idx];
+          if (msg.role === 'tool' || (msg.role === 'user' && Array.isArray(msg.content) && msg.content.some(b => b.type === 'tool_result'))) resultMessages.push(idx);
         }
+        results.forEach((_entry, i) => {
+          const historyIndex = resultMessages[Math.min(i, resultMessages.length - 1)];
+          if (historyIndex !== undefined) this._toolResultEntries.push({ historyIndex, compacted: false });
+        });
 
         // A `halt` verdict ends the turn. `block` deliberately does not — a
         // blocked call comes back as a tool result so the model can pivot,
@@ -717,17 +706,6 @@ class AgentLoop {
   }
 
   /**
-   * Compact old tool results to reduce context size.
-   *
-   * When an embeddingProvider is available, uses semantic search to
-   * preserve relevant old results (one cheap batch embedding call)
-   * and only compacts irrelevant ones. Falls back to recency-only
-   * compaction when embeddings are unavailable.
-   *
-   * Works with both OpenAI format (role='tool') and Anthropic format
-   * (role='user' with tool_result content blocks).
-   */
-  /**
    * Feed one tool result into the verification ledger.
    *
    * Two things are worth recording: a file mutation that actually landed
@@ -815,79 +793,25 @@ class AgentLoop {
     }
   }
 
-  async _compactToolResults(history) {
+  /**
+   * Shorten old tool results to reduce context size: all but the newest
+   * keepRecentResults, by age. A message holding several results (Anthropic)
+   * waits until none of them is recent. Nothing is sent anywhere for this.
+   *
+   * Works with both OpenAI format (role='tool') and Anthropic format
+   * (role='user' with tool_result content blocks).
+   */
+  _compactToolResults(history) {
     if (this._toolResultEntries.length <= this.keepRecentResults) return;
 
     const recentCutoff = this._toolResultEntries.length - this.keepRecentResults;
-    const oldEntries = this._toolResultEntries.slice(0, recentCutoff).filter(e => !e.compacted);
+    const recentMessages = new Set(this._toolResultEntries.slice(recentCutoff).map(e => e.historyIndex));
 
-    if (oldEntries.length === 0) return;
-
-    // Try semantic compaction first
-    if (this.embeddingProvider) {
-      const userQuery = this._extractUserQuery(history);
-      if (userQuery) {
-        try {
-          await this._semanticCompact(history, oldEntries, userQuery);
-          return;
-        } catch (err) {
-          log.warn(`Semantic compaction failed, using recency: ${err.message}`);
-        }
-      }
-    }
-
-    // Fallback: compact all old entries by recency only
-    for (const entry of oldEntries) {
+    for (const entry of this._toolResultEntries.slice(0, recentCutoff)) {
+      if (entry.compacted || recentMessages.has(entry.historyIndex)) continue;
       this._truncateAtIndex(history, entry.historyIndex);
       entry.compacted = true;
     }
-  }
-
-  /**
-   * Semantic compaction: batch-embed old tool results + user query in a
-   * single API call, then use cosine similarity to decide what to keep.
-   * Results above the relevance threshold are preserved intact; the rest
-   * are truncated to status-only summaries.
-   */
-  async _semanticCompact(history, oldEntries, userQuery) {
-    // Single batch embedding: [userQuery, ...toolResultTexts]
-    const texts = [userQuery, ...oldEntries.map(e => e.text)];
-    const embeddings = await this.embeddingProvider.embed(texts);
-
-    if (!embeddings || embeddings.length < 2) return;
-
-    const queryVector = embeddings[0];
-
-    for (let i = 0; i < oldEntries.length; i++) {
-      const resultVector = embeddings[i + 1];
-      if (!resultVector) continue;
-
-      const similarity = VectorStore.cosineSimilarity(queryVector, resultVector);
-      if (similarity < this._relevanceThreshold) {
-        this._truncateAtIndex(history, oldEntries[i].historyIndex);
-        oldEntries[i].compacted = true;
-      }
-    }
-  }
-
-  /**
-   * Extract the original user query from conversation history.
-   * Skips tool_result user messages (Anthropic format).
-   */
-  _extractUserQuery(history) {
-    for (const msg of history) {
-      if (msg.sender === 'user' && typeof msg.text === 'string') return msg.text;
-      if (msg.role === 'user') {
-        if (typeof msg.content === 'string') return msg.content;
-        // Skip Anthropic tool_result messages
-        if (Array.isArray(msg.content) && msg.content.some(b => b.type === 'tool_result')) continue;
-        if (Array.isArray(msg.content)) {
-          const textBlock = msg.content.find(b => b.type === 'text');
-          if (textBlock?.text) return textBlock.text;
-        }
-      }
-    }
-    return '';
   }
 
   /**

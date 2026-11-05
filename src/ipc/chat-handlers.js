@@ -842,16 +842,9 @@ function registerChatHandlers(ipcMain, context = {}) {
           log.warn(`Case tools could not be offered for case ${caseId}: ${reason}.`);
         }
         if (canUseAgentMode) {
-          // Semantic compaction embeds the query and old tool results through
-          // the same hosted client: under an egress policy the loop gets none
-          // and compacts by recency.
-          const embeddingProvider = turnEgress ? null : (contextAssembler?.embeddingProvider || null);
           const toolResultsDir = typeof getToolResultsDir === 'function' ? getToolResultsDir() : null;
           const loop = new AgentLoop(provider, executor, {
             maxIterations: 40,
-            embeddingProvider,
-            // The loop refuses an embedding provider under a policy too.
-            ...(turnEgress ? { egress: turnEgress } : {}),
             usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
             // The routed provider fails over itself (spec §6.7); the loop never retries.
             failoverPolicy: NO_RETRY,
