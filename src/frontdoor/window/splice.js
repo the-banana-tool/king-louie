@@ -18,7 +18,6 @@ const { peerCertFingerprint, timingSafeHexEqual } = require('../../mesh/mesh-tra
 const { NODE_ID_RE } = require('../../approvals/messages');
 const { requestHost } = require('../http-util');
 const { recordFrontDoorEvent } = require('../audit/own-ledger');
-const { GRANT_WRITE_LIMIT, GRANT_WRITE_WINDOW_MS } = require('../router/router');
 const { WindowSessions } = require('./sessions');
 const { WINDOW_SCOPE, WINDOW_TOOL, BEARER_RE, authorizationCount } = require('./scope');
 
@@ -32,10 +31,12 @@ const WS_KEY_RE = /^[A-Za-z0-9+/]{22}==$/;
 const NODE_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const SCOPE = WINDOW_SCOPE;
 const TOOL = WINDOW_TOOL;
-// Attempts by one grant, refused ones included. The router's limit on a grant's
-// writes: an attempt writes audit lines on the main thread and may make a node dial.
-const ATTACH_LIMIT = GRANT_WRITE_LIMIT;
-const ATTACH_WINDOW_MS = GRANT_WRITE_WINDOW_MS;
+// Attempts by one grant, refused ones included: an attempt writes audit lines on the
+// main thread and may make a node dial. A node takes 30 window.open calls a minute
+// (window-dialer.js), so this stays far enough under that for one grant not to use up
+// a node and shut out another grant's window.
+const ATTACH_LIMIT = 10;
+const ATTACH_WINDOW_MS = 60000;
 
 const RPC_TIMEOUT_MS = 10000;
 const DIAL_DEADLINE_MS = 30000;

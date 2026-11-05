@@ -273,7 +273,7 @@ A refusal comes on the window's socket after a `101`.
 | Code | Reason | When |
 |---|---|---|
 | `4401` | `invalid_token` | No token, or not one for this resource. |
-| `4429` | `rate_limited` | The grant has made 30 attempts in the last 60 s, whatever became of them. One audit line per window of refusals. |
+| `4429` | `rate_limited` | The grant has made 10 attempts in the last 60 s, whatever became of them. A node takes 30 `window.open` calls a minute, so one grant cannot use them all. One audit line per window of refusals. |
 | `4403` | `insufficient_scope`, `unknown_machine`, `grant_revoked` | What the grant allows. |
 | `4403` | `remote_window_off`, or the node's refusal | The node takes no window. |
 | `4404` | `node_offline` | The node is not linked; it was not asked, or its link failed. |

@@ -21,7 +21,7 @@ const keys = require('../src/desktop-bridge/keys');
 const pairing = require('../src/desktop-bridge/pairing');
 const splice = require('../src/frontdoor/window/splice');
 const { WindowSessions } = require('../src/frontdoor/window/sessions');
-const { GRANT_WRITE_LIMIT, GRANT_WRITE_WINDOW_MS } = require('../src/frontdoor/router/router');
+const { WINDOW_OPENS_PER_MINUTE } = require('../src/desktop-bridge/window-dialer');
 const { createMcpHttpServer } = require('../src/frontdoor/http');
 const { parseFrontDoorConfig, WINDOW_DEFAULTS, FRONTDOOR_KEYS } = require('../src/frontdoor/config');
 const { FRONT_DOOR_AUDIT_KINDS } = require('../src/frontdoor/audit/own-ledger');
@@ -689,48 +689,79 @@ const DEVICE = 'kld-abcdefghijklmnop';
 describe('how often a grant may ask', () => {
   const attempt = async (fake, token, nodeId = nodeA.nodeId) => closed(watch(windowSocket(fake, token, nodeId)));
 
-  it('reuses the router\'s 30 calls in 60 s', () => {
-    assert.equal(splice.ATTACH_LIMIT, GRANT_WRITE_LIMIT);
-    assert.equal(splice.ATTACH_WINDOW_MS, GRANT_WRITE_WINDOW_MS);
-    assert.equal(GRANT_WRITE_LIMIT, 30);
-    assert.equal(GRANT_WRITE_WINDOW_MS, 60000);
+  it('is 10 in 60 s, so two grants at it leave room in a node\'s budget', () => {
+    assert.equal(splice.ATTACH_LIMIT, 10);
+    assert.equal(splice.ATTACH_WINDOW_MS, 60000);
+    assert.ok(splice.ATTACH_LIMIT * 2 < WINDOW_OPENS_PER_MINUTE);
+  });
+
+  it('two grants at the limit leave a third grant\'s window room on the node', async () => {
+    let opens = 0;
+    const budgeted = async () => {
+      opens += 1;
+      return opens > WINDOW_OPENS_PER_MINUTE ? { ok: false, code: 'too_many_windows' } : { ok: true };
+    };
+    const fake = await frontDoor({
+      nodes: [{ identity: nodeA, open: budgeted }],
+      tokens: {
+        kla_one: { grant_id: 'g-one', client_id: 'c', scopes: ['window:attach'] },
+        kla_two: { grant_id: 'g-two', client_id: 'c', scopes: ['window:attach'] },
+        kla_three: { grant_id: 'g-three', client_id: 'c', scopes: ['window:attach'] }
+      }
+    });
+    for (const token of ['kla_one', 'kla_two']) {
+      for (let i = 0; i < 10; i += 1) {
+        const win = watch(windowSocket(fake, token));
+        await opened(win.ws);
+        win.ws.terminate();
+        await waitFor(() => fake.splice.sessions.size === 0, 'the drop');
+      }
+      assert.deepEqual(await attempt(fake, token), { code: 4429, reason: 'rate_limited' });
+    }
+    await waitFor(() => opens === 20, 'the two grants\' calls');
+    const third = watch(windowSocket(fake, 'kla_three'));
+    await opened(third.ws);
+    await waitFor(() => opens === 21, 'the third grant\'s call');
+    await delay(20);
+    assert.equal(third.close, null);
+    assert.equal(fake.splice.sessions.size, 1);
   });
 
   it('past it an upgrade is 4429 rate_limited with one audit line a window, whatever else is wrong with it', async () => {
     const time = clock();
     const fake = await frontDoor({ now: time.now });
     const refusedLines = () => reasons(fake, 'window.session.refused');
-    for (let i = 0; i < 30; i += 1) assert.equal((await attempt(fake, 'kla_fleet')).reason, 'insufficient_scope');
-    assert.equal(refusedLines().length, 30);
+    for (let i = 0; i < 10; i += 1) assert.equal((await attempt(fake, 'kla_fleet')).reason, 'insufficient_scope');
+    assert.equal(refusedLines().length, 10);
     for (let i = 0; i < 3; i += 1) assert.deepEqual(await attempt(fake, 'kla_fleet'), { code: 4429, reason: 'rate_limited' });
-    assert.equal(refusedLines().length, 31, 'three refusals, one line');
-    assert.deepEqual(refusedLines()[30], { grant_id: 'g-fleet', client_id: 'c-other', node_id: nodeA.nodeId, code: 'rate_limited' });
+    assert.equal(refusedLines().length, 11, 'three refusals, one line');
+    assert.deepEqual(refusedLines()[10], { grant_id: 'g-fleet', client_id: 'c-other', node_id: nodeA.nodeId, code: 'rate_limited' });
 
     time.advance(59999);
     assert.equal((await attempt(fake, 'kla_fleet')).reason, 'rate_limited');
-    assert.equal(refusedLines().length, 31);
+    assert.equal(refusedLines().length, 11);
     time.advance(1);
     assert.equal((await attempt(fake, 'kla_fleet')).reason, 'insufficient_scope', 'the window has passed');
-    assert.equal(refusedLines().length, 32);
-    for (let i = 0; i < 29; i += 1) await attempt(fake, 'kla_fleet');
+    assert.equal(refusedLines().length, 12);
+    for (let i = 0; i < 9; i += 1) await attempt(fake, 'kla_fleet');
     assert.equal((await attempt(fake, 'kla_fleet')).reason, 'rate_limited');
     assert.equal(refusedLines().filter((l) => l.code === 'rate_limited').length, 2, 'a new window gets its own line');
   });
 
-  it('an open-and-drop loop reaches the node 30 times, and no session opens past that', async () => {
+  it('an open-and-drop loop reaches the node 10 times, and no session opens past that', async () => {
     const fake = await frontDoor({ nodes: hands() });
-    for (let i = 0; i < 30; i += 1) {
+    for (let i = 0; i < 10; i += 1) {
       const win = watch(windowSocket(fake));
       await opened(win.ws);
       win.ws.terminate();
       await waitFor(() => fake.splice.sessions.size === 0, 'the drop');
     }
-    await waitFor(() => fake.rpcCalls.length === 30, 'the calls');
+    await waitFor(() => fake.rpcCalls.length === 10, 'the calls');
     const lines = () => fake.audit.length;
-    await waitFor(() => reasons(fake, 'window.session.closed').length === 30, 'the closed lines');
+    await waitFor(() => reasons(fake, 'window.session.closed').length === 10, 'the closed lines');
     const before = lines();
     assert.deepEqual(await attempt(fake, 'kla_all'), { code: 4429, reason: 'rate_limited' });
-    assert.equal(fake.rpcCalls.length, 30);
+    assert.equal(fake.rpcCalls.length, 10);
     assert.equal(fake.splice.sessions.size, 0);
     assert.equal(lines(), before + 1);
     assert.equal((await attempt(fake, 'kla_other', 'not-a-node-id')).reason, 'unknown_machine', 'another grant has its own window');

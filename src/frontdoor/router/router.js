@@ -915,4 +915,4 @@ class FleetRouter extends EventEmitter {
   }
 }
 
-module.exports = { FleetRouter, ROUTER_ORIGIN, wrapUntrusted, GRANT_WRITE_LIMIT, GRANT_WRITE_WINDOW_MS };
+module.exports = { FleetRouter, ROUTER_ORIGIN, wrapUntrusted };
