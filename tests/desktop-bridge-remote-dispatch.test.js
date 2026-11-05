@@ -17,7 +17,9 @@ const ProviderFactory = require('../src/providers/provider-factory');
 const { Tool } = require('../src/tools/tool-schema');
 const { toolRegistry } = require('../src/tools');
 const { registerHandlers } = require('../src/ipc/register');
-const { createBridgeDispatcher, WINDOW_ARGS_INLINE_MAX } = require('../src/desktop-bridge/bridge-dispatcher');
+const { createBridgeDispatcher } = require('../src/desktop-bridge/bridge-dispatcher');
+const { WINDOW_ARGS_INLINE_MAX, WINDOW_LEAF_MAX } = require('../src/desktop-bridge/window-cards');
+const { toolCardParams } = require('../src/approvals/hidden-card');
 const { createConnection } = require('../src/desktop-bridge/connection');
 const { currentConnection } = require('../src/desktop-bridge/run-context');
 const { REMOTE_CLASSES } = require('../src/desktop-bridge/remote-classes');
@@ -302,7 +304,6 @@ describe('the phone gate', () => {
     await invoke(dispatcher, a, 2, 'chat:delete', 'c-doomed');
     assert.deepStrictEqual(ran, [['c-doomed', 'req-1']]);
     assert.strictEqual(resultFor(a, 2).value.ok, true);
-    assert.strictEqual(dispatcher.pendingArgs.size, 0, 'an approved call\'s arguments are taken once');
   });
 
   it('every approved call asks again: an approval is for one call', async () => {
@@ -349,23 +350,23 @@ describe('the phone gate', () => {
   });
 
   it('the arguments are read once: what changes while the phone is asked does not reach the handler', async () => {
-    const frame = { t: 'invoke', id: 1, channel: 'settings:vaultStore', args: [{ key: 'a.key', value: 'original', nested: { n: 1 } }] };
+    const frame = { t: 'invoke', id: 1, channel: 'settings:saveUserProfile', args: [{ profile: { name: 'original', nested: { n: 1 } } }] };
     let received = null;
     const { dispatcher, use } = makeDispatcher({
       phone: fakePhone((_tool, parameters) => {
         // The frame's object and the approver's copy, both written to mid-approval.
-        frame.args[0].value = 'changed by the frame';
-        frame.args[0].nested.n = 2;
+        frame.args[0].profile.name = 'changed by the frame';
+        frame.args[0].profile.nested.n = 2;
         frame.args.push('one more');
-        parameters.args[0].value = 'changed by the approver';
+        parameters.args[0].profile.name = 'changed by the approver';
         return true;
       }),
-      overrides: { 'settings:vaultStore': async (_event, ...args) => { received = args; return { ok: true }; } }
+      overrides: { 'settings:saveUserProfile': async (_event, ...args) => { received = args; return { ok: true }; } }
     });
     const a = connection();
     use(a);
     await dispatcher.handleFrame(a, frame);
-    assert.deepStrictEqual(received, [{ key: 'a.key', value: 'original', nested: { n: 1 } }]);
+    assert.deepStrictEqual(received, [{ profile: { name: 'original', nested: { n: 1 } } }]);
   });
 
   it('a call method\'s parameters are read once too', async () => {
@@ -383,49 +384,242 @@ describe('the phone gate', () => {
     fs.rmSync(elsewhere, { recursive: true, force: true });
   });
 
-  it('args at the limit go inline; over it they are asked as { channel, args_sha256, bytes }; the handler gets the bytes that were hashed; a replay with other bytes asks again', async () => {
+  it('the bulk channel is asked as names, sizes and a keyed hash; the handler gets the bytes that were hashed; other bytes ask again', async () => {
     const received = [];
     const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'case:ingestFiles': async (_event, ...args) => { received.push(args); return { ok: true }; } } });
     const a = connection();
     use(a);
+    const files = (fill) => [{ caseId: 'case-1', files: [{ name: 'deed.pdf', mime: 'application/pdf', base64: fill.repeat(300 * 1024) }] }];
+    await invoke(dispatcher, a, 1, 'case:ingestFiles', ...files('AAAA'));
+    const card = phone.calls[0].parameters;
+    assert.strictEqual(card.channel, 'case:ingestFiles');
+    assert.strictEqual(card.caseId, 'case-1');
+    assert.deepStrictEqual(card.files, [{ name: 'deed.pdf', bytes: 900 * 1024 }], 'the size is read from the bytes');
+    assert.strictEqual(card.bytes, Buffer.byteLength(canonicalize(files('AAAA'))));
+    assert.match(card.args_sha256, /^[A-Za-z0-9_-]{43}$/);
+    assert.ok(!JSON.stringify(card).includes('AAAA'));
+    assert.deepStrictEqual(received[0], files('AAAA'));
+    await invoke(dispatcher, a, 2, 'case:ingestFiles', ...files('BBBB'));
+    assert.strictEqual(phone.calls.length, 2, 'asked again');
+    assert.deepStrictEqual(received[1], files('BBBB'));
     assert.strictEqual(WINDOW_ARGS_INLINE_MAX, 65536);
+  });
 
-    const sized = (bytes, fill = 'x') => {
-      const shell = canonicalize([{ data: '' }]);
-      return [{ data: fill.repeat(bytes - Buffer.byteLength(shell)) }];
-    };
-    const atLimit = sized(WINDOW_ARGS_INLINE_MAX);
-    assert.strictEqual(Buffer.byteLength(canonicalize(atLimit)), WINDOW_ARGS_INLINE_MAX);
-    await invoke(dispatcher, a, 1, 'case:ingestFiles', ...atLimit);
-    assert.deepStrictEqual(phone.calls[0].parameters, { channel: 'case:ingestFiles', args: atLimit });
+  it('a small upload takes the same card, and a size the window states is not an accepted key', async () => {
+    const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'case:ingestFiles': async () => ({ ok: true }) } });
+    const a = connection();
+    use(a);
+    await invoke(dispatcher, a, 1, 'case:ingestFiles', { caseId: 'case-1', files: [{ name: 'a.txt', base64: 'QUJD', bytes: 1 }] });
+    assert.deepStrictEqual(phone.calls[0].parameters.files, [{ name: 'a.txt', bytes: 3 }]);
+    await invoke(dispatcher, a, 2, 'case:ingestFiles', { caseId: 'case-1', files: [{ name: 'a.txt', base64: 'QUJD' }] });
+    assert.deepStrictEqual(phone.calls[1].parameters.files, [{ name: 'a.txt', bytes: 3 }]);
+  });
 
-    const large = sized(300 * 1024);
-    await invoke(dispatcher, a, 2, 'case:ingestFiles', ...large);
-    const text = canonicalize(large);
-    assert.deepStrictEqual(phone.calls[1].parameters, { channel: 'case:ingestFiles', args_sha256: sha256b64url(text), bytes: Buffer.byteLength(text) });
-    assert.deepStrictEqual(received[1], large);
+  it('the hash is keyed per call: the same short value never gives the same mark', async () => {
+    const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'settings:vaultStore': async () => ({ ok: true }) } });
+    const a = connection();
+    use(a);
+    await invoke(dispatcher, a, 1, 'settings:vaultStore', { key: 'a.key', value: '1234' });
+    await invoke(dispatcher, a, 2, 'settings:vaultStore', { key: 'a.key', value: '1234' });
+    const [one, two] = phone.calls.map((c) => c.parameters.args_sha256);
+    assert.notStrictEqual(one, two);
+    assert.notStrictEqual(one, sha256b64url(canonicalize([{ key: 'a.key', value: '1234' }])));
+  });
 
-    const other = sized(300 * 1024, 'y');
-    await invoke(dispatcher, a, 3, 'case:ingestFiles', ...other);
-    assert.strictEqual(phone.calls.length, 3, 'asked again');
-    assert.notStrictEqual(phone.calls[2].parameters.args_sha256, phone.calls[1].parameters.args_sha256);
-    assert.deepStrictEqual(received[2], other);
-    assert.strictEqual(received.length, 3);
+  describe('what a card may hide (R-RW-30, R-RW-32)', () => {
+    const SECRET = 'invented-secret-value';
+    const CASES = [
+      ['settings:vaultStore', { key: 'a.key', value: SECRET }, { key: 'a.key' }],
+      ['settings:vaultUpdate', { oldKey: 'a.key', newKey: 'b.key', value: SECRET }, { oldKey: 'a.key', newKey: 'b.key' }],
+      ['settings:saveProvider', { provider: 'openai', token: SECRET, clear: false }, { provider: 'openai', clear: false }],
+      ['settings:saveWebSearchKey', { provider: 'brave', apiKey: SECRET }, { provider: 'brave' }],
+      ['settings:saveImageGenKey', { provider: 'fal', apiKey: SECRET }, { provider: 'fal' }],
+      ['settings:saveElevenLabsKey', { apiKey: SECRET, clear: false }, { clear: false }],
+      ['history:jev.saveKey', { key: SECRET }, {}],
+      ['settings:mcpSave', { name: 'files', oldName: 'old', server: { command: 'npx', args: ['--token', SECRET], env: { API_TOKEN: SECRET }, cwd: 'C:\\example' } }, { name: 'files', oldName: 'old', command: 'npx', env_names: ['API_TOKEN'] }],
+      ['settings:runLlmCommand', { command: `/llm add openai ${SECRET}` }, { verb: 'add' }],
+      ['webhook:update', { id: 'wh-1', messageTemplate: SECRET, name: SECRET }, { id: 'wh-1', fields: ['messageTemplate', 'name'] }],
+      ['skill:saveSettings', { skillId: 'std', settings: { apiKey: SECRET, depth: 3 } }, { skillId: 'std', setting_names: ['apiKey', 'depth'] }],
+      ['settings:saveTemplateVariables', { templateVariables: { TOKEN: SECRET } }, { variable_names: ['TOKEN'] }],
+      ['settings:saveNotifications', { notifications: { enabled: true, ntfy: { server: 'https://ntfy.example.com', topic: SECRET } } }, { notifications: { enabled: true, ntfy: { server: 'https://ntfy.example.com' } } }],
+      ['tool:execute', { toolName: 'Vault', parameters: { action: 'store', key: 'a.key', value: SECRET } }, { tool: 'Vault', action: 'store', key: 'a.key' }]
+    ];
+    for (const [channel, payload, shown] of CASES) {
+      it(`${channel} shows what it shows and never the value; the handler gets the value`, async () => {
+        let received = null;
+        const { dispatcher, phone, use } = makeDispatcher({ overrides: { [channel]: async (_event, ...args) => { received = args; return { ok: true }; } } });
+        const a = connection();
+        use(a);
+        await invoke(dispatcher, a, 1, channel, payload);
+        const { args_sha256: mark, bytes, ...card } = phone.calls[0].parameters;
+        assert.deepStrictEqual(card, { channel, ...shown });
+        assert.match(mark, /^[A-Za-z0-9_-]{43}$/);
+        assert.strictEqual(bytes, Buffer.byteLength(canonicalize([payload])));
+        assert.ok(!JSON.stringify(phone.calls[0].parameters).includes(SECRET), 'the value is on no card');
+        assert.deepStrictEqual(received, [payload]);
+      });
+    }
+
+    it('on a fleet node a channel verb of /llm is refused before anyone is asked', async () => {
+      const { dispatcher, phone, use } = makeDispatcher({ hosting: 'service' });
+      const a = connection();
+      use(a);
+      await invoke(dispatcher, a, 1, 'settings:runLlmCommand', { command: `/llm telegram add ${SECRET}` });
+      assert.strictEqual(resultFor(a, 1).value.code, 'CHANNELS_NOT_PROXIED');
+      assert.deepStrictEqual(phone.calls, []);
+    });
+
+    it('tool:execute of any other tool stays inline', async () => {
+      const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'tool:execute': async () => ({ ok: true }) } });
+      const a = connection();
+      use(a);
+      await invoke(dispatcher, a, 1, 'tool:execute', { toolName: 'Read', parameters: { file_path: 'a.txt' } });
+      assert.deepStrictEqual(phone.calls[0].parameters, { channel: 'tool:execute', args: [{ toolName: 'Read', parameters: { file_path: 'a.txt' } }] });
+    });
+
+    it('the seam hides a Vault store the same way, and only that', () => {
+      const card = toolCardParams('Vault', { action: 'store', key: 'a.key', value: SECRET });
+      assert.deepStrictEqual(Object.keys(card).sort(), ['action', 'args_sha256', 'bytes', 'key']);
+      assert.ok(!JSON.stringify(card).includes(SECRET));
+      const read = { file_path: 'a.txt' };
+      assert.strictEqual(toolCardParams('Read', read), read);
+    });
+
+    it('a chat turn\'s Vault call reaches the phone with no value', async () => {
+      const seen = [];
+      const phone = { ttlMs: 1000, isAvailable: () => true, requestApproval: async (tool, parameters) => { seen.push([tool, parameters]); return false; } };
+      const { approvalSeam } = require('../src/approvals/executor-options');
+      const { markRemoteWindowEvent } = require('../src/core/origin');
+      const seam = approvalSeam({ remoteApprovals: 'phone', event: markRemoteWindowEvent({}, { deviceId: deviceId('remotewindow') }), executorOptions: { chatId: 'c' }, phoneApprover: phone });
+      await seam.toolExecutorOptions.approvalRequester('Vault', { action: 'store', key: 'a.key', value: SECRET }, {});
+      assert.strictEqual(seen[0][0], 'Vault');
+      assert.ok(!JSON.stringify(seen[0][1]).includes(SECRET));
+      assert.strictEqual(seen[0][1].key, 'a.key');
+    });
+
+    it('URL userinfo is stripped from the card, and the handler gets the URL as sent', async () => {
+      const URLS = [
+        ['models:setOllamaBaseUrl', { baseUrl: `http://me:${SECRET}@ollama.example.com:11434` }, 'http://ollama.example.com:11434'],
+        ['history:embedder.save', { embedder: { kind: 'ollama', ollama: { baseUrl: `http://me:${SECRET}@ollama.example.com` } } }, 'http://ollama.example.com'],
+        ['skill:install', { url: `https://me:${SECRET}@git.example.com/skill.git` }, 'https://git.example.com/skill.git'],
+        ['case:addPlaybook', { caseId: 'case-1', source: `https://${SECRET}@git.example.com/p.git` }, 'https://git.example.com/p.git'],
+        ['case:create', { title: 'Lakeside lot', playbooks: [{ source: `https://${SECRET}@git.example.com/p.git` }] }, 'https://git.example.com/p.git']
+      ];
+      for (const [channel, payload, clean] of URLS) {
+        let received = null;
+        const { dispatcher, phone, use } = makeDispatcher({ overrides: { [channel]: async (_event, ...args) => { received = args; return { ok: true }; } } });
+        const a = connection();
+        use(a);
+        await invoke(dispatcher, a, 1, channel, payload);
+        const card = JSON.stringify(phone.calls[0].parameters);
+        assert.ok(!card.includes(SECRET), channel);
+        assert.ok(card.includes(clean), channel);
+        assert.ok(phone.calls[0].parameters.args_sha256, `${channel}: what runs differs from what shows, so the hash says so`);
+        assert.deepStrictEqual(received, [payload], channel);
+      }
+    });
+
+    it('a URL with no userinfo is shown as it is, inline', async () => {
+      const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'skill:install': async () => ({ ok: true }) } });
+      const a = connection();
+      use(a);
+      await invoke(dispatcher, a, 1, 'skill:install', { url: 'https://git.example.com/skill.git' });
+      assert.deepStrictEqual(phone.calls[0].parameters, { channel: 'skill:install', args: [{ url: 'https://git.example.com/skill.git' }] });
+    });
+  });
+
+  describe('a card cannot be padded (R-RW-32)', () => {
+    const PAD = 'x'.repeat(70000);
+    const padded = [
+      ['settings:mcpSave', { name: 'files', server: { command: 'evil.exe' } }],
+      ['cron:add', { name: 'nightly', schedule: { kind: 'every', everyMs: 60000 }, payload: { kind: 'agentTurn', message: 'go' } }],
+      ['skill:install', { url: 'https://git.example.com/evil.git' }]
+    ];
+    for (const [channel, payload] of padded) {
+      it(`${channel} with a padding key is refused and nobody is asked`, async () => {
+        let runs = 0;
+        const { dispatcher, phone, use } = makeDispatcher({ overrides: { [channel]: async () => { runs += 1; return { ok: true }; } } });
+        const a = connection();
+        use(a);
+        await invoke(dispatcher, a, 1, channel, { ...payload, pad: PAD });
+        assert.strictEqual(resultFor(a, 1).value.ok, false);
+        assert.ok(['REMOTE_ARGS_TOO_LARGE', 'REMOTE_ARGS_INVALID'].includes(resultFor(a, 1).value.code), String(resultFor(a, 1).value.code));
+        assert.deepStrictEqual(phone.calls, []);
+        assert.strictEqual(runs, 0);
+      });
+
+      it(`${channel} with a small key that sorts first is refused too`, async () => {
+        const { dispatcher, phone, use } = makeDispatcher({ overrides: { [channel]: async () => ({ ok: true }) } });
+        const a = connection();
+        use(a);
+        await invoke(dispatcher, a, 1, channel, { ...payload, '!lead': 'y'.repeat(100) });
+        assert.strictEqual(resultFor(a, 1).value.code, 'REMOTE_ARGS_INVALID');
+        assert.deepStrictEqual(phone.calls, []);
+      });
+    }
+
+    it('any other phone channel over the limit is REMOTE_ARGS_TOO_LARGE, and at the limit goes inline', async () => {
+      const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'workflow:plan': async () => ({ ok: true }) } });
+      const a = connection();
+      use(a);
+      const leaves = (bytes) => {
+        const names = ['a', 'b', 'c', 'd', 'e'];
+        const left = bytes - Buffer.byteLength(canonicalize([Object.fromEntries(names.map((n) => [n, '']))]));
+        const each = Math.floor(left / names.length);
+        return Object.fromEntries(names.map((n, i) => [n, 'z'.repeat(i === 0 ? left - each * (names.length - 1) : each)]));
+      };
+      const atLimit = leaves(WINDOW_ARGS_INLINE_MAX);
+      assert.strictEqual(Buffer.byteLength(canonicalize([atLimit])), WINDOW_ARGS_INLINE_MAX);
+      await invoke(dispatcher, a, 1, 'workflow:plan', atLimit);
+      assert.deepStrictEqual(phone.calls[0].parameters, { channel: 'workflow:plan', args: [atLimit] });
+      await invoke(dispatcher, a, 2, 'workflow:plan', { ...atLimit, more: 'z' });
+      assert.strictEqual(resultFor(a, 2).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual(phone.calls.length, 1);
+    });
+
+    it('a leaf over the cap is refused, a value or a key, even in a shape nobody listed', async () => {
+      const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'workflow:plan': async () => ({ ok: true }) } });
+      const a = connection();
+      use(a);
+      await invoke(dispatcher, a, 1, 'workflow:plan', { goal: 'g'.repeat(WINDOW_LEAF_MAX + 1) });
+      await invoke(dispatcher, a, 2, 'workflow:plan', { ['g'.repeat(WINDOW_LEAF_MAX + 1)]: 'x' });
+      await invoke(dispatcher, a, 3, 'workflow:plan', { goal: 'g'.repeat(WINDOW_LEAF_MAX) });
+      assert.strictEqual(resultFor(a, 1).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual(resultFor(a, 2).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual(phone.calls.length, 1);
+    });
+
+    it('a second positional argument on a listed channel is refused', async () => {
+      const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'skill:install': async () => ({ ok: true }) } });
+      const a = connection();
+      use(a);
+      await invoke(dispatcher, a, 1, 'skill:install', { url: 'https://git.example.com/s.git' }, 'y'.repeat(100));
+      assert.strictEqual(resultFor(a, 1).value.code, 'REMOTE_ARGS_INVALID');
+      assert.deepStrictEqual(phone.calls, []);
+    });
+
+    it('a hidden channel\'s shown field cannot be the padding', async () => {
+      const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'settings:vaultStore': async () => ({ ok: true }) } });
+      const a = connection();
+      use(a);
+      await invoke(dispatcher, a, 1, 'settings:vaultStore', { key: 'k'.repeat(WINDOW_LEAF_MAX + 1), value: 'v' });
+      assert.strictEqual(resultFor(a, 1).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.deepStrictEqual(phone.calls, []);
+    });
   });
 
   it('large arguments are read once as well: the handler gets what was hashed, not the frame as it is now', async () => {
-    const data = 'z'.repeat(100000);
-    const frame = { t: 'invoke', id: 1, channel: 'case:ingestFiles', args: [{ data }] };
+    const base64 = 'QUJD'.repeat(40000);
+    const frame = { t: 'invoke', id: 1, channel: 'case:ingestFiles', args: [{ caseId: 'case-1', files: [{ name: 'a.txt', base64 }] }] };
     let received = null;
-    const { dispatcher, phone, use } = makeDispatcher({
-      phone: fakePhone(() => { frame.args[0].data = 'swapped'; return true; }),
+    const { dispatcher, use } = makeDispatcher({
+      phone: fakePhone(() => { frame.args[0].files[0].base64 = 'swapped'; return true; }),
       overrides: { 'case:ingestFiles': async (_event, ...args) => { received = args; return { ok: true }; } }
     });
     const a = connection();
     use(a);
     await dispatcher.handleFrame(a, frame);
-    assert.strictEqual(phone.calls[0].parameters.args_sha256, sha256b64url(canonicalize([{ data }])));
-    assert.deepStrictEqual(received, [{ data }]);
+    assert.deepStrictEqual(received, [{ caseId: 'case-1', files: [{ name: 'a.txt', base64 }] }]);
   });
 
   it('arguments that have no canonical form are refused before anyone is asked', async () => {

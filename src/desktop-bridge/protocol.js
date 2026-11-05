@@ -155,7 +155,8 @@ const MESSAGES = Object.freeze({
   REMOTE_PRESS: 'Answer on your phone.',
   NO_PHONE: 'No phone can approve this on the node. Nothing ran.',
   PHONE_DENIED: 'Not approved on the phone. Nothing ran.',
-  REMOTE_ARGS_INVALID: 'That request cannot be signed. Nothing ran.'
+  REMOTE_ARGS_INVALID: 'That request cannot be signed. Nothing ran.',
+  REMOTE_ARGS_TOO_LARGE: 'That request is too large to show on the phone. Nothing ran.'
 });
 
 module.exports = {

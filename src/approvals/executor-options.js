@@ -8,6 +8,7 @@
 // mode only ever get the phone.
 const { createLogger } = require('../logging');
 const { paramsHmac, auditOriginOf, auditError, errorByCode } = require('./audit-fields');
+const { toolCardParams } = require('./hidden-card');
 const originHelpers = require('../core/origin');
 const { outlivesRemoteTurn } = require('./outliving-tools');
 
@@ -116,7 +117,7 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
       metadata.origin = phoneOrigin;
       const cardNote = cardNoteFor ? cardNoteFor(toolName) : null;
       if (cardNote) metadata.cardNote = cardNote;
-      return phoneApprover.requestApproval(toolName, parameters, metadata);
+      return phoneApprover.requestApproval(toolName, toolCardParams(toolName, parameters), metadata);
     };
     // The phone's own expiry answers first ('timeout' from the approver).
     options.approvalTimeoutMs = phoneApprover.ttlMs + PHONE_GRACE_MS;

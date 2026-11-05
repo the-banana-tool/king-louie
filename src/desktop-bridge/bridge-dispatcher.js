@@ -13,8 +13,8 @@ const { registerHandlers: defaultRegisterHandlers } = require('../ipc/register')
 const { listIpcChannels } = require('../ipc/channel-inventory');
 const { createElectronPrompter } = require('../platform/electron-prompter');
 const { markLocalDesktopEvent, markRemoteWindowEvent } = require('../core/origin');
-const { canonicalize, sha256b64url } = require('../platform/jcs');
-const { WINDOW_TOOL, TTL_MAX_MS } = require('../approvals/messages');
+const { canonicalize } = require('../platform/jcs');
+const { WINDOW_TOOL } = require('../approvals/messages');
 const { plainLineProblem } = require('../cases/hidden-chars');
 const { llmCommandAction, LLM_CHANNEL_ACTIONS } = require('../core/llm-command');
 const { servedChannels, isRendererEvent, PROMPT_EVENTS } = require('./allowlist');
@@ -23,6 +23,7 @@ const { checkPath: defaultCheckPath } = require('./check-path');
 const { MESSAGES } = require('./protocol');
 const { runFor, currentConnection, runInChat, currentChatId } = require('./run-context');
 const { PRESS_CHANNELS_REMOTE, remotePayloadClass } = require('./remote-classes');
+const { windowCard } = require('./window-cards');
 
 const log = createLogger('desktop-bridge');
 
@@ -40,8 +41,6 @@ const PROMPT_RESPONSES = Object.freeze({
 
 const fail = (code, message) => Object.assign(new Error(message), { code });
 
-// Arguments up to this go on the card whole; past it, their hash and size.
-const WINDOW_ARGS_INLINE_MAX = 65536;
 const WINDOW_SUMMARY_MAX = 120;
 
 const remoteRefusal = (code, error = MESSAGES[code]) => ({ ok: false, code, error });
@@ -104,8 +103,6 @@ function createBridgeDispatcher({
   const pendingAskUserResolvers = new Map();
   const pendingDirectoryAccessResolvers = new Map();
   const scope = createDesktopScope({ dataDir, context });
-  // request_id -> the arguments an approval covers, as the node hashed them.
-  const pendingArgs = new Map();
   // deviceId -> [{ chatId, payload }]: questions waiting for that device to come back.
   const pendingAskUserByDevice = new Map();
   // requestId -> { chatId, payload }, for every remote question not yet ended.
@@ -359,9 +356,9 @@ function createBridgeDispatcher({
   };
 
   // One signed approval over the exact arguments (R-RW-12). The arguments are read
-  // once, here: the text is hashed or shown, and what runs is parsed from that text,
-  // so nothing that holds the frame or the approver's copy can change what runs.
-  // → { ok: true, request_id } | a refusal.
+  // once, here: the card is built from the text, and what runs is parsed from that text
+  // after the answer, so nothing that holds the frame or the approver's copy can change
+  // what runs. → { ok: true, request_id, args } | a refusal.
   async function gatePhoneClass(conn, name, args) {
     const approver = approvals && approvals.phoneApprover;
     if (!approver || typeof approver.requestApproval !== 'function') return remoteRefusal('NO_PHONE');
@@ -371,14 +368,12 @@ function createBridgeDispatcher({
     } catch {
       return remoteRefusal('REMOTE_ARGS_INVALID');
     }
-    const bytes = Buffer.byteLength(text);
-    const params = bytes <= WINDOW_ARGS_INLINE_MAX
-      ? { channel: name, args: JSON.parse(text) }
-      : { channel: name, args_sha256: sha256b64url(text), bytes };
+    const card = windowCard(name, JSON.parse(text), text);
+    if (card.refusal) return remoteRefusal(card.refusal);
     const metadata = { origin: windowOrigin(conn), cardNote: windowSummary(name, conn.label) };
     let answer;
     try {
-      answer = await approver.requestApproval(WINDOW_TOOL, params, metadata);
+      answer = await approver.requestApproval(WINDOW_TOOL, card.params, metadata);
     } catch (err) {
       log.warn(`asking the phone about ${name} failed: ${err.message}`);
       return remoteRefusal('NO_PHONE');
@@ -386,9 +381,7 @@ function createBridgeDispatcher({
     if (answer === 'unavailable') return remoteRefusal('NO_PHONE', (metadata.refusal && metadata.refusal.error) || MESSAGES.NO_PHONE);
     // Only the exact true approves, and an approval has a request id to carry.
     if (answer !== true || typeof metadata.request_id !== 'string' || !metadata.request_id) return remoteRefusal('PHONE_DENIED');
-    const ttlMs = Number.isFinite(approver.ttlMs) ? approver.ttlMs : TTL_MAX_MS;
-    pendingArgs.set(metadata.request_id, { name, args: JSON.parse(text), expiresAt: Date.now() + ttlMs });
-    return { ok: true, request_id: metadata.request_id };
+    return { ok: true, request_id: metadata.request_id, args: JSON.parse(text) };
   }
 
   // What a remote frame may do, after the served check. → { refusal } | { approved, args },
@@ -397,11 +390,14 @@ function createBridgeDispatcher({
     const cls = remotePayloadClass(name, args, context);
     if (cls === 'read' || cls === 'ordinary') return { approved: null, args };
     if (cls !== 'phone') return { refusal: remoteRefusal(PRESS_CHANNELS_REMOTE.includes(name) ? 'REMOTE_PRESS' : 'REMOTE_LOCAL_ONLY') };
+    // Refused by the handler's own check whatever the phone said, so nobody is asked.
+    if (name === 'settings:runLlmCommand' && hosting !== 'personal') {
+      const first = Array.isArray(args) ? args[0] : args;
+      if (LLM_CHANNEL_ACTIONS.includes(llmCommandAction(first && first.command))) return { refusal: remoteRefusal('CHANNELS_NOT_PROXIED') };
+    }
     const gate = await gatePhoneClass(conn, name, args);
     if (!gate.ok) return { refusal: gate };
-    const entry = pendingArgs.get(gate.request_id);
-    pendingArgs.delete(gate.request_id);
-    return { approved: gate.request_id, args: entry.args };
+    return { approved: gate.request_id, args: gate.args };
   }
 
   async function onInvoke(conn, frame) {
@@ -649,8 +645,8 @@ function createBridgeDispatcher({
 
   return {
     served, providersConfigured, handleFrame, onDisconnect, forwardAmbient, bridgeContext, scope,
-    gatePhoneClass, pendingArgs, replayPrompts, pendingAskUserByDevice
+    gatePhoneClass, replayPrompts, pendingAskUserByDevice
   };
 }
 
-module.exports = { createBridgeDispatcher, approvalsStatus, WINDOW_ARGS_INLINE_MAX };
+module.exports = { createBridgeDispatcher, approvalsStatus };
