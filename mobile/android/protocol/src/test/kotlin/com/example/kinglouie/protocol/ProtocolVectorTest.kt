@@ -69,7 +69,7 @@ class ProtocolVectorTest {
             .toSet()
         assertEquals(
             setOf("jcs", "device-id-p256", "device-id-ed25519", "request-valid", "request-bad-node-signature",
-                "request-unpinned-node", "request-malformed", "request-display", "request-display-edge",
+                "request-unpinned-node", "request-malformed", "request-display", "request-display-window", "request-display-edge",
                 "request-malformed-equivalent-keys", "enroll-console", "audit-slice", "phone-api-auth") + readKeyVectors + sealedVectors,
             names
         )
@@ -127,7 +127,7 @@ class ProtocolVectorTest {
     @Test
     fun requestVectors() {
         for (name in listOf("request-valid", "request-bad-node-signature", "request-unpinned-node", "request-malformed",
-            "request-display", "request-display-edge", "request-malformed-equivalent-keys")) {
+            "request-display", "request-display-window", "request-display-edge", "request-malformed-equivalent-keys")) {
             val v = vector(name)
             val pins = v["given"]["pinned_nodes"].arr()!!.map { NodePin(it["id"].str()!!, "", it["key"].str()!!) }
             assertEquals(name, v["expect"], Display.view(v["input"]!!, pins, sealedSeen = emptySet()).json)

@@ -170,6 +170,9 @@ function actionHash(action, { salt = null } = {}) {
   return sha256b64url(text);
 }
 
+// The clients whose origin names the device that asked (R-RW-33 for a remote window).
+const DEVICE_ORIGINS = Object.freeze(['desktop', 'remote-window']);
+
 function normalizeOrigin(origin) {
   const o = origin || {};
   const out = {
@@ -177,7 +180,7 @@ function normalizeOrigin(origin) {
     session: o.session === undefined || o.session === null ? null : String(o.session),
     job_id: o.job_id === undefined || o.job_id === null ? null : String(o.job_id)
   };
-  if (out.client === 'desktop') out.deviceId = o.deviceId === undefined || o.deviceId === null ? null : String(o.deviceId);
+  if (DEVICE_ORIGINS.includes(out.client)) out.deviceId = o.deviceId === undefined || o.deviceId === null ? null : String(o.deviceId);
   return out;
 }
 
@@ -341,7 +344,7 @@ function checkAction(action) {
 
 function checkOrigin(origin) {
   if (!isPlainObject(origin) || !isString(origin.client)) return false;
-  const keys = origin.client === 'desktop' ? ['client', 'session', 'job_id', 'deviceId'] : ['client', 'session', 'job_id'];
+  const keys = DEVICE_ORIGINS.includes(origin.client) ? ['client', 'session', 'job_id', 'deviceId'] : ['client', 'session', 'job_id'];
   return hasExactKeys(origin, keys) && Object.values(origin).every((v) => v === null || withinLength(v, ORIGIN_STRING_MAX));
 }
 

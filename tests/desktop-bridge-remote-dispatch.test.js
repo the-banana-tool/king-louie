@@ -719,6 +719,8 @@ describe('the phone gate', () => {
       assert.strictEqual(message.action.kind, 'tool');
       assert.strictEqual(message.action.cwd, null);
       assert.deepStrictEqual(message.action.params, { channel: 'chat:delete', args: ['c-real'] });
+      assert.deepStrictEqual(message.origin, { client: 'remote-window', session: null, job_id: null, deviceId: a.deviceId }, 'the card names the window that asked');
+      assert.ok(audit.entries.some((e) => e.kind === 'approval.request' && open(e.data.envelope).message.origin.deviceId === a.deviceId), 'and so does the audit');
       assert.strictEqual((await approver.handleResponse(device.respond(link.submitted[0], 'approve'))).accepted, true);
       await running;
       assert.deepStrictEqual(seen, [message.request_id]);
@@ -731,6 +733,30 @@ describe('the phone gate', () => {
       assert.strictEqual(seen.length, 1);
       await waitFor(() => audit.entries.some((e) => e.kind === 'approval.outcome' && e.data.state === 'denied'));
       approver.stop();
+    });
+
+    it('a folder card names the window, in its summary and its origin', async () => {
+      const device = createFakePhone({ name: 'Phone 1' });
+      const store = await approverStoreWith([device.approverRecord()]);
+      stores.push(store);
+      const link = fakeLink();
+      const approver = new PhoneApprover({ identity: testNodeIdentity(), approverStore: store, link, auditLedger: ledger(), ttlMs: 60000 });
+      let ctxRef = null;
+      const { dispatcher, use } = makeDispatcher({
+        phone: approver,
+        overrides: { 'chat:sendMessage': async () => { await ctxRef.prompter.requestDirectoryAccess({ directory: 'C:\\example\\lot', toolName: 'Read' }); return { ok: true }; } },
+        patchContext: (ctx) => { ctxRef = ctx; }
+      });
+      const a = connection({ label: 'Field laptop' });
+      use(a);
+      const running = invoke(dispatcher, a, 1, 'chat:sendMessage', { chatId: 'c-any', message: 'go' });
+      await waitFor(() => link.submitted.length === 1);
+      const { message } = open(link.submitted[0]);
+      assert.strictEqual(message.action.name, 'AllowDirectory');
+      assert.match(message.action.summary, /^From Field laptop: /);
+      assert.strictEqual(message.origin.deviceId, a.deviceId);
+      approver.stop();
+      await running;
     });
 
     it('a window whose label is not one plain line is not named on the card', async () => {

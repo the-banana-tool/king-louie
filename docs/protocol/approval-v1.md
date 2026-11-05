@@ -113,7 +113,8 @@ missing the `cwd` key at all is malformed, not defaulted); `envelope` actions
 have no `cwd` field at all, since they name a C3 executor and case, not a
 directory. Every action kind requires `summary`.
 
-`origin` is `{ client, session, job_id }`, plus `deviceId` when `client` is `desktop`.
+`origin` is `{ client, session, job_id }`, plus `deviceId` when `client` is `desktop`
+or `remote-window`, so a card names the window that asked.
 The request lives at most 300 seconds (`expires_at − created_at`, 30–300 s).
 
 ### 3.2 `kl.approval.response` (phone-signed)
@@ -1021,7 +1022,7 @@ their field. See `src/approvals/audit-fields.js`.
 
 ### Vectors
 
-Twenty more, 69 in all (`generate.js --check` says `69 vectors match`).
+Twenty more, and `request-display-window`: 70 in all (`generate.js --check` says `70 vectors match`).
 `keys.json` adds `A_box` and `B_box`. A vector's `given.box` is the recipient's id
 and key.
 

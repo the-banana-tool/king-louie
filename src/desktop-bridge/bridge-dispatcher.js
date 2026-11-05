@@ -255,7 +255,7 @@ function createBridgeDispatcher({
     if (!approver || !takePhoneSlot(conn.deviceId)) return false;
     try {
       // The signal withdraws the card when the run is stopped.
-      return (await approver.requestApproval('AllowDirectory', { directory, toolName }, { origin: windowOrigin(conn), ...(signal ? { signal } : {}) })) === true;
+      return (await approver.requestApproval('AllowDirectory', { directory, toolName }, { origin: windowOrigin(conn), cardNote: `From ${windowName(conn.label)}`, ...(signal ? { signal } : {}) })) === true;
     } catch (err) {
       log.warn(`asking the phone for a folder failed: ${err.message}`);
       return false;

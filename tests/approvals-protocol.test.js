@@ -47,7 +47,7 @@ const SEALED_APPROVAL = ['request-sealed-display', 'response-approve-sealed', 'r
 const SEALED_QUESTION = ['question-ask-sealed', 'question-answer-sealed'];
 const SEALED_PHONES = [...SEAL, ...SEALED_QUESTION, 'request-sealed-display', 'enroll-console-box-key', 'box-key-valid'];
 const EXPECTED = [
-  'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
+  'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display', 'request-display-window',
   'request-malformed', 'request-display-edge', 'request-malformed-equivalent-keys',
   'response-approve', 'response-deny',
   ...['malformed-noncanonical', 'unsupported-version', 'wrong-alg', 'kid-mismatch', 'unknown-device', 'demo-device', 'test-key', 'revoked-device',
@@ -128,8 +128,8 @@ describe('approval-v1 vectors', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
   });
 
-  it('69 vectors; the read-key ones name node and android only, android where the phone builds or signs; the sealed ones both phones where a phone builds or opens', () => {
-    assert.equal(EXPECTED.length, 69);
+  it('70 vectors; the read-key ones name node and android only, android where the phone builds or signs; the sealed ones both phones where a phone builds or opens', () => {
+    assert.equal(EXPECTED.length, 70);
     for (const name of [...SEAL, ...BOX_KEY, ...SEALED_APPROVAL, ...SEALED_QUESTION]) {
       assert.deepEqual(byName.get(name).consumers, SEALED_PHONES.includes(name) ? ['node', 'ios', 'android'] : ['node'], name);
     }
