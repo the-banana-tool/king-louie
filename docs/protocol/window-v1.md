@@ -1,9 +1,10 @@
 # window-v1: the seal between a window and a node
 
 A remote King Louie window reaches a node through a front door that splices
-bytes between two WebSocket legs. This protocol runs inside that splice, so the
-front door reads nothing past the clear first message and can change nothing
-without one side closing. The local tab's loopback handshake
+bytes between two WebSocket legs. This protocol runs inside that splice: the front
+door reads every frame's header, and the device id at its fixed place in the clear
+first message, and no record's plaintext, and it can change nothing without one side
+closing. The local tab's loopback handshake
 (`kl.desktop.hello.v1`) is a different protocol and is unchanged.
 
 The Node implementation is `src/desktop-bridge/window-seal.js`. The vectors are
@@ -196,6 +197,11 @@ The clear `hello_w`, `hello_n` and `auth_w`: both ephemeral public keys, the dev
 and node ids and keys, and the signatures. After them, record lengths, their timing,
 their direction and the counters. Not the plaintext, and not a key.
 
+It is the server of both legs, so it reads each frame's header to take the mask off
+and to hold the frame rules in §7, and it holds up to `PRE_READY_BYTES` of a window's
+bytes until the node dials. The `device_id` in its audit is what `hello_w` claims, and
+only the node verifies it.
+
 A socket's close code is not authenticated: the front door can write any. So a code
 that reaches a side as a socket close (§7) is a reason to look, never proof: a node
 sends a close record before it closes, and only that record, under the seal, says what
@@ -234,6 +240,28 @@ not try to hide them.
 
 A node gives one code and one reason for every failure before ready, so an
 unauthenticated peer learns only that it failed.
+
+**What the front door closes.** These are socket codes, unauthenticated like the rest.
+A refusal comes on the window's socket after a `101`.
+
+| Code | Reason | When |
+|---|---|---|
+| `4401` | `invalid_token` | No token, or not one for this resource. |
+| `4429` | `rate_limited` | The grant has made 30 attempts in the last 60 s, whatever became of them. One audit line per window of refusals. |
+| `4403` | `insufficient_scope`, `unknown_machine`, `grant_revoked` | What the grant allows. |
+| `4403` | `remote_window_off`, or the node's refusal | The node takes no window. |
+| `4404` | `node_offline` | The node is not linked; it was not asked, or its link failed. |
+| `4408` | `node_did_not_dial` | No dial-back in 30 s. |
+| `4429` | `session_limit` | Four sessions on this grant, or a third on this grant, device and node once `hello_w` is seen. The device is a claim, so a limit never counts another grant's sessions. |
+| `4429` | `byte_budget` | The session passed its bytes for the rolling hour. A record on its way to the window finishes first, past the budget by at most that record; one not finished in 2 s is cut, and the window sees `1006`. |
+| `1008` | `window_frame_*`, `node_frame_*` | A frame that is not binary or control, is compressed or fragmented, has no mask, or is longer than `RECORD_WIRE_MAX`. |
+| `1008` | `too_early` | Past `PRE_READY_BYTES` before the node dialled. |
+| `1001` | `idle` | Nothing for `idle_s`. |
+
+A window's ordinary reconnect backoff must stay well under the attempt limit, so a
+window that has dropped never reaches `rate_limited`: every tab and every reconnect
+of one grant counts. When a front door stops, its listener goes first, so both legs
+see `1006`; a window takes that as a drop and reconnects.
 
 Local errors, thrown to the caller and never sent: `SEAL_INVALID`, `SEAL_NOT_READY`,
 `SEAL_CLOSED`, `SEAL_BUSY`, `PAYLOAD_TOO_LARGE`, and from the sender

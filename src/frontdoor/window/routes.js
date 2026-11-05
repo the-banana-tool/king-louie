@@ -7,17 +7,9 @@
 const { createLogger } = require('../../logging');
 const { allows } = require('../../fleet/scope-rules');
 const { sendJson } = require('../http-util');
-const { WINDOW_SCOPE, WINDOW_TOOL } = require('./scope');
+const { WINDOW_SCOPE, WINDOW_TOOL, BEARER_RE, authorizationCount } = require('./scope');
 
 const log = createLogger('frontdoor/window/routes');
-const BEARER_RE = /^Bearer ([A-Za-z0-9._~+/-]+=*)$/i;
-
-function authorizationCount(req) {
-  let n = 0;
-  const raw = req.rawHeaders || [];
-  for (let i = 0; i < raw.length; i += 2) if (String(raw[i]).toLowerCase() === 'authorization') n += 1;
-  return n;
-}
 
 // `oauth` is read on every request: its URLs change once a port-0 listener binds.
 function createWindowRoutes({ oauth, tokens, grants, registry } = {}) {

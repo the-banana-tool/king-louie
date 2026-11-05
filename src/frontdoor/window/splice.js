@@ -4,11 +4,13 @@
 // end to end through it.
 //
 // Both legs are WebSocket clients, so each masks what it sends and refuses a masked
-// frame it receives (RFC 6455 §5.1). A raw pipe between them cannot work: this is
-// the server of both legs, and it takes a frame's mask off as it passes. The payload
-// goes through byte for byte, a chunk at a time, and only a frame's header is ever
-// held. That header is also where the socket rules of window-v1 §5 hold: binary and
-// control frames only, no compression, no fragments, at most RECORD_WIRE_MAX.
+// frame it receives (RFC 6455 §5.1). This is the server of both legs, and it takes a
+// frame's mask off as it passes. A raw pipe could be built through an undocumented ws
+// path; the forwarder was chosen because reading each frame's header is what keeps
+// the socket rules of window-v1 §5: binary and control frames only, no compression,
+// no fragments, at most RECORD_WIRE_MAX. The payload goes through byte for byte, a
+// chunk at a time. What is held is a frame's header and, until the node dials, up to
+// PRE_READY_BYTES of what the window sent.
 const crypto = require('crypto');
 const { createLogger } = require('../../logging');
 const { allows } = require('../../fleet/scope-rules');
@@ -16,7 +18,9 @@ const { peerCertFingerprint, timingSafeHexEqual } = require('../../mesh/mesh-tra
 const { NODE_ID_RE } = require('../../approvals/messages');
 const { requestHost } = require('../http-util');
 const { recordFrontDoorEvent } = require('../audit/own-ledger');
+const { GRANT_WRITE_LIMIT, GRANT_WRITE_WINDOW_MS } = require('../router/router');
 const { WindowSessions } = require('./sessions');
+const { WINDOW_SCOPE, WINDOW_TOOL, BEARER_RE, authorizationCount } = require('./scope');
 
 const log = createLogger('frontdoor/window');
 
@@ -25,10 +29,13 @@ const PROTOCOL = 'kl-window-v1';
 const WINDOW_PATH = '/window/v1';
 const MESH_PATH_RE = /^\/window\/v1\/([A-Za-z0-9_-]{43})$/;
 const WS_KEY_RE = /^[A-Za-z0-9+/]{22}==$/;
-const BEARER_RE = /^Bearer ([A-Za-z0-9_-]+)$/;
 const NODE_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
-const SCOPE = 'window:attach';
-const TOOL = 'attach_window';
+const SCOPE = WINDOW_SCOPE;
+const TOOL = WINDOW_TOOL;
+// Attempts by one grant, refused ones included. The router's limit on a grant's
+// writes: an attempt writes audit lines on the main thread and may make a node dial.
+const ATTACH_LIMIT = GRANT_WRITE_LIMIT;
+const ATTACH_WINDOW_MS = GRANT_WRITE_WINDOW_MS;
 
 const RPC_TIMEOUT_MS = 10000;
 const DIAL_DEADLINE_MS = 30000;
@@ -97,6 +104,7 @@ class FrameForwarder {
     this.peekLength = 0;
     this.stopped = false;
     this.flowing = true;
+    this.afterFrame = null;
   }
 
   // A close frame may not be put inside the frame now going out.
@@ -106,6 +114,11 @@ class FrameForwarder {
 
   stop() {
     this.stopped = true;
+  }
+
+  // Finish the frame now going out, carry nothing after it, then call `then`.
+  finishFrame(then) {
+    this.afterFrame = then;
   }
 
   _send(bytes) {
@@ -195,6 +208,11 @@ class FrameForwarder {
       this.onHelloShaped = null;
       report(peek);
     }
+    if (this.afterFrame && !this.stopped) {
+      this.stopped = true;
+      this.afterFrame();
+      return;
+    }
     if (this.opcode === OP_CLOSE && !this.stopped) {
       this.stopped = true;
       this.onClose();
@@ -255,7 +273,7 @@ function hostOf(url) {
   }
 }
 
-function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceUrl, windowEnabled = () => true, config, auditLedger = null, now = Date.now, random = crypto.randomBytes } = {}) {
+function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceUrl, windowEnabled = () => false, config, auditLedger = null, now = Date.now, random = crypto.randomBytes } = {}) {
   // A function when the front door's port is known only after it listens.
   const resourceUrl = () => (typeof windowResourceUrl === 'function' ? windowResourceUrl() : windowResourceUrl);
   const sessions = new WindowSessions({
@@ -265,6 +283,7 @@ function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceU
     now
   });
   const live = new Map();
+  const attempts = new Map();
   const idleMs = config.idleS * 1000;
   const audit = (kind, data) => { recordFrontDoorEvent(auditLedger, kind, data); };
 
@@ -313,11 +332,27 @@ function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceU
     }
   }
 
-  function counted(s, direction, bytes) {
+  // The close must reach the window, and a close frame cannot go inside a frame. So
+  // a record on its way to the window finishes first (past the budget by at most that
+  // record), under the grace; only then, or if it does not finish, the session closes.
+  function overBudget(s) {
+    if (s.draining) return;
+    const close = () => closeSession(s, 4429, 'byte_budget');
+    if (!s.fromNode.inFrame) {
+      close();
+      return;
+    }
+    s.draining = true;
+    s.fromWindow.stop();
+    s.fromNode.finishFrame(close);
+    clearTimeout(s.closeTimer);
+    s.closeTimer = setTimeout(close, CLOSE_GRACE_MS);
+    s.closeTimer.unref?.();
+  }
+
+  function count(s, direction, bytes) {
     s.lastActivity = now();
-    if (sessions.addBytes(s.id, direction, bytes)) return true;
-    closeSession(s, 4429, 'byte_budget');
-    return false;
+    if (!sessions.addBytes(s.id, direction, bytes)) overBudget(s);
   }
 
   function carry(s, source, forwarder, destination, chunk) {
@@ -328,7 +363,9 @@ function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceU
   }
 
   function fromWindowChunk(s, chunk) {
-    if (s.closed || !counted(s, 'in', chunk.length)) return;
+    if (s.closed) return;
+    count(s, 'in', chunk.length);
+    if (s.closed || s.draining) return;
     if (!s.node) {
       s.earlyBytes += chunk.length;
       if (s.earlyBytes > PRE_READY_BYTES) {
@@ -340,7 +377,9 @@ function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceU
   }
 
   function fromNodeChunk(s, chunk) {
-    if (s.closed || !counted(s, 'out', chunk.length)) return;
+    if (s.closed) return;
+    count(s, 'out', chunk.length);
+    if (s.closed) return;
     carry(s, s.node, s.fromNode, s.window, chunk);
   }
 
@@ -371,7 +410,7 @@ function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceU
     const record = sessions.add({ session_id: id, grant_id: rec.grant_id, client_id: rec.client_id, node_id: nodeId });
     const dialBy = now() + DIAL_DEADLINE_MS;
     const s = {
-      id, record, window: socket, node: null, early: [], earlyBytes: 0, closed: false, closeFrom: null, closeTimer: null,
+      id, record, window: socket, node: null, early: [], earlyBytes: 0, closed: false, draining: false, closeFrom: null, closeTimer: null,
       dialBy, lastActivity: now(), fromWindow: null, fromNode: null
     };
     s.fromWindow = new FrameForwarder({
@@ -408,7 +447,26 @@ function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceU
       .then((answer) => nodeAnswered(s, answer), (err) => nodeFailed(s, err));
   }
 
-  // R-RW-3's order: the token, the scope, the node, the limits.
+  // Takes a slot in the grant's window. → { limited, audit }: `audit` once per window
+  // of refusals, so the line that says so cannot be the flood. Empty ones go as met.
+  function takeAttempt(grantId) {
+    const t = now();
+    for (const [id, entry] of attempts) {
+      while (entry.times.length && entry.times[0] <= t - ATTACH_WINDOW_MS) entry.times.shift();
+      if (entry.times.length === 0 && entry.auditedUntil <= t) attempts.delete(id);
+    }
+    const entry = attempts.get(grantId) || { times: [], auditedUntil: 0 };
+    attempts.set(grantId, entry);
+    if (entry.times.length < ATTACH_LIMIT) {
+      entry.times.push(t);
+      return { limited: false, audit: false };
+    }
+    if (entry.auditedUntil > t) return { limited: true, audit: false };
+    entry.auditedUntil = t + ATTACH_WINDOW_MS;
+    return { limited: true, audit: true };
+  }
+
+  // R-RW-3's order: the token, the rate of asking, the scope, the node, the limits.
   function onMcpUpgrade(req, socket, head) {
     prepare(socket);
     const upgrade = checkUpgrade(req);
@@ -419,7 +477,7 @@ function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceU
       return;
     }
     const bearer = BEARER_RE.exec(String(req.headers.authorization || ''));
-    const rec = bearer && windowEnabled() ? tokens.authenticate(bearer[1], { aud: resourceUrl() }) : null;
+    const rec = bearer && authorizationCount(req) === 1 && windowEnabled() ? tokens.authenticate(bearer[1], { aud: resourceUrl() }) : null;
     // No audit line: no token was shown and anyone may ask, so one here would let
     // anyone grow the ledger.
     if (!rec) {
@@ -429,6 +487,11 @@ function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceU
     const asked = url.searchParams.getAll('node');
     const nodeId = asked.length === 1 && NODE_ID_RE.test(asked[0]) ? asked[0] : null;
     const who = { grant_id: rec.grant_id, client_id: rec.client_id, node_id: nodeId };
+    const attempt = takeAttempt(rec.grant_id);
+    if (attempt.limited) {
+      refuse(socket, upgrade, 4429, 'rate_limited', attempt.audit ? who : null);
+      return;
+    }
     const grant = grants.live(rec.grant_id);
     if (!grant) {
       refuse(socket, upgrade, 4403, 'grant_revoked', who);
@@ -533,4 +596,4 @@ function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceU
   return { onMcpUpgrade, onMeshUpgrade, closeForGrant, sweep, stop, sessions };
 }
 
-module.exports = { createWindowSplice, RECORD_WIRE_MAX, PRE_READY_BYTES };
+module.exports = { createWindowSplice, RECORD_WIRE_MAX, PRE_READY_BYTES, ATTACH_LIMIT, ATTACH_WINDOW_MS };

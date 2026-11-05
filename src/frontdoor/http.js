@@ -114,9 +114,9 @@ function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, p
 // A request cut before it has an answer gets 408 and the connection closes.
 // Upgrades: with `upgrades: 'keep'` (the mesh server, where
 // MeshTransport#attachServer authenticates the socket in the same 'upgrade'
-// event) an upgraded connection leaves every timer behind. Otherwise (the
-// mcp. server, which serves no upgrade) an upgrade request is destroyed at
-// once, so no client can park sockets outside every deadline.
+// event, and the mcp. server, given onUpgrade for /window/v1 alone) an upgraded
+// connection leaves every timer behind. Otherwise an upgrade request is destroyed
+// at once, so no client can park sockets outside every deadline.
 const END_GRACE_MS = 1000;
 
 function guardConnections(server, { headersTimeoutMs, requestTimeoutMs, idleTimeoutMs, upgrades = 'refuse' }) {

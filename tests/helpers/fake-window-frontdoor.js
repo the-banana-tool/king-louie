@@ -26,7 +26,7 @@ const listen = (server) => new Promise((resolve, reject) => {
   server.listen(0, '127.0.0.1', () => resolve(server.address().port));
 });
 
-async function startFakeWindowFrontDoor({ nodes = [], tokens = {}, config = {}, now = Date.now } = {}) {
+async function startFakeWindowFrontDoor({ nodes = [], tokens = {}, config = {}, now = Date.now, windowEnabled = () => true } = {}) {
   const identity = new NodeIdentity({ nodeName: 'frontdoor' });
   const mcpCert = selfSigned({ commonName: 'mcp.kl.example.com' });
   const nodeList = nodes.map((node) => ({ online: true, profile: 'agent', ...node, name: node.name || node.identity.nodeName }));
@@ -37,7 +37,7 @@ async function startFakeWindowFrontDoor({ nodes = [], tokens = {}, config = {}, 
   const machineIds = Object.fromEntries(nodeList.map((node) => [node.name, node.identity.nodeId]));
   const liveGrants = new Map();
   for (const rec of tokenTable.values()) {
-    liveGrants.set(rec.grant_id, { client_id: rec.client_id, scopes: normalizeScopes(rec.scopes), machine_ids: rec.machine_ids || machineIds });
+    liveGrants.set(rec.grant_id, { client_id: rec.client_id, scopes: normalizeScopes(rec.grant_scopes || rec.scopes), machine_ids: rec.machine_ids || machineIds });
   }
 
   let origin = null;
@@ -89,6 +89,7 @@ async function startFakeWindowFrontDoor({ nodes = [], tokens = {}, config = {}, 
 
   const splice = createWindowSplice({
     tokens: toolTokens, grants, registry, nodeHub, windowResourceUrl: resourceUrl,
+    ...(windowEnabled ? { windowEnabled } : {}),
     config: { ...WINDOW_DEFAULTS, ...config },
     auditLedger: { append: async (line) => { auditLines.push(line); } },
     now
@@ -128,6 +129,7 @@ async function startFakeWindowFrontDoor({ nodes = [], tokens = {}, config = {}, 
     audit: auditLines,
     rpcCalls,
     dial,
+    openSockets: () => sockets.size,
     setOnline(nodeId, online) { byId.get(nodeId).online = online; },
     removeNode(nodeId) { byId.delete(nodeId); },
     expireToken(token) { tokenTable.delete(token); },
@@ -136,10 +138,12 @@ async function startFakeWindowFrontDoor({ nodes = [], tokens = {}, config = {}, 
       liveGrants.delete(grantId);
       splice.closeForGrant(grantId);
     },
+    // The profile's order: the listener goes first and destroys what it holds, so
+    // both legs see 1006, and the splice's own stop finds nothing to tell.
     async stop() {
-      splice.stop();
       for (const socket of sockets) socket.destroy();
       await Promise.all([mcpListener, meshListener].map((server) => new Promise((resolve) => { server.close(resolve); })));
+      splice.stop();
     }
   };
 }

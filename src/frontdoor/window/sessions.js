@@ -1,6 +1,7 @@
 // What the front door keeps of a window (remote window plan, R-RW-4, R-RW-5): one
 // record per spliced session, ids and byte counts only, and the limits over them.
-// `device_id` is what the clear hello_w claims. Only the node verifies it.
+// `device_id` is what the clear hello_w claims. Only the node verifies it, so the
+// limit on it counts within one grant: another grant's claim takes nothing from this one.
 const MINUTE_MS = 60000;
 const MINUTES = 60;
 
@@ -41,14 +42,14 @@ class WindowSessions {
     this.#budgets.delete(sessionId);
   }
 
-  // → false when this session passes the limit for its device on its node.
+  // → false when this session passes the limit for its grant, device and node.
   setDevice(sessionId, deviceId) {
     const record = this.#records.get(sessionId);
     if (!record) return true;
     record.device_id = deviceId;
     let count = 0;
     for (const other of this.#records.values()) {
-      if (other.device_id === deviceId && other.node_id === record.node_id) count += 1;
+      if (other.grant_id === record.grant_id && other.device_id === deviceId && other.node_id === record.node_id) count += 1;
     }
     return count <= this.maxSessionsPerDeviceNode;
   }

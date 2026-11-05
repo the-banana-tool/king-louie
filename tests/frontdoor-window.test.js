@@ -9,6 +9,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const tls = require('tls');
 const WebSocket = require('ws');
 const { NodeIdentity } = require('../src/mesh/node-identity');
 const { DesktopBridgeServer } = require('../src/desktop-bridge/bridge-server');
@@ -20,6 +21,7 @@ const keys = require('../src/desktop-bridge/keys');
 const pairing = require('../src/desktop-bridge/pairing');
 const splice = require('../src/frontdoor/window/splice');
 const { WindowSessions } = require('../src/frontdoor/window/sessions');
+const { GRANT_WRITE_LIMIT, GRANT_WRITE_WINDOW_MS } = require('../src/frontdoor/router/router');
 const { createMcpHttpServer } = require('../src/frontdoor/http');
 const { parseFrontDoorConfig, WINDOW_DEFAULTS, FRONTDOOR_KEYS } = require('../src/frontdoor/config');
 const { FRONT_DOOR_AUDIT_KINDS } = require('../src/frontdoor/audit/own-ledger');
@@ -35,6 +37,8 @@ const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
 
 const TOKENS = {
   kla_all: { grant_id: 'g-all', client_id: 'c-window', scopes: ['window:attach'] },
+  kla_other: { grant_id: 'g-other', client_id: 'c-window', scopes: ['window:attach'] },
+  kla_narrowed: { grant_id: 'g-narrowed', client_id: 'c-window', scopes: ['window:attach;machines=web-02'], grant_scopes: ['window:attach'] },
   kla_web02: { grant_id: 'g-web02', client_id: 'c-window', scopes: ['window:attach;machines=web-02'] },
   kla_fleet: { grant_id: 'g-fleet', client_id: 'c-other', scopes: ['fleet:read'] },
   kla_mcp: { grant_id: 'g-mcp', client_id: 'c-mcp', scopes: ['window:attach'], aud: 'https://elsewhere.example.com/mcp' }
@@ -91,7 +95,7 @@ const opened = (ws) => new Promise((resolve, reject) => {
   ws.once('open', resolve);
   ws.once('error', reject);
 });
-const closed = (seen, what = 'the close') => waitFor(() => seen.close, what);
+const closed = (seen, what = 'the close', ms = 8000) => waitFor(() => seen.close, what, ms);
 
 // A window and a node end joined through the splice, neither of them sealing.
 async function joined(fake, token = 'kla_all', { nodeId = nodeA.nodeId } = {}) {
@@ -650,6 +654,361 @@ describe('frontdoor.window (R-RW-5)', () => {
     for (const [key, value] of [['max_sessions_per_grant', 0], ['max_sessions_per_device_node', 1.5], ['max_bytes_per_hour', -1], ['idle_s', '600'], ['idle_s', 59]]) {
       assert.throws(() => parse({ [key]: value }), new RegExp(`frontdoor\\.window\\.${key}`), `${key} ${value}`);
     }
+  });
+});
+
+// A hand-written upgrade on a TLS socket that stays half open unless told otherwise.
+function rawWindow(fake, { token = 'kla_all', nodeId = nodeA.nodeId, headers = null, after = Buffer.alloc(0) } = {}) {
+  const url = new URL(fake.origin);
+  const socket = tls.connect({ host: '127.0.0.1', port: Number(url.port), rejectUnauthorized: false, allowHalfOpen: true });
+  const seen = { socket, reply: Buffer.alloc(0), ended: false, closed: false };
+  socket.on('data', (chunk) => { seen.reply = Buffer.concat([seen.reply, chunk]); });
+  socket.on('end', () => { seen.ended = true; });
+  socket.on('close', () => { seen.closed = true; });
+  socket.on('error', () => {});
+  const lines = headers || [`Host: ${url.host}`, ...(token ? [`Authorization: Bearer ${token}`] : [])];
+  socket.once('secureConnect', () => {
+    socket.write(Buffer.concat([Buffer.from([
+      `GET /window/v1?node=${nodeId} HTTP/1.1`, ...lines, 'Connection: Upgrade', 'Upgrade: websocket',
+      'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Protocol: kl-window-v1', '', ''
+    ].join('\r\n')), after]));
+  });
+  cleanups.push(() => socket.destroy());
+  return seen;
+}
+
+function maskedFrame(payload) {
+  assert.ok(payload.length <= 125);
+  const mask = crypto.randomBytes(4);
+  return Buffer.concat([Buffer.from([0x82, 0x80 | payload.length]), mask, Buffer.from(payload.map((b, i) => b ^ mask[i % 4]))]);
+}
+
+const helloWith = (first, deviceId) => Buffer.concat([Buffer.from([first, 1]), Buffer.alloc(32), Buffer.from(deviceId), Buffer.alloc(32)]);
+const DEVICE = 'kld-abcdefghijklmnop';
+
+describe('how often a grant may ask', () => {
+  const attempt = async (fake, token, nodeId = nodeA.nodeId) => closed(watch(windowSocket(fake, token, nodeId)));
+
+  it('reuses the router\'s 30 calls in 60 s', () => {
+    assert.equal(splice.ATTACH_LIMIT, GRANT_WRITE_LIMIT);
+    assert.equal(splice.ATTACH_WINDOW_MS, GRANT_WRITE_WINDOW_MS);
+    assert.equal(GRANT_WRITE_LIMIT, 30);
+    assert.equal(GRANT_WRITE_WINDOW_MS, 60000);
+  });
+
+  it('past it an upgrade is 4429 rate_limited with one audit line a window, whatever else is wrong with it', async () => {
+    const time = clock();
+    const fake = await frontDoor({ now: time.now });
+    const refusedLines = () => reasons(fake, 'window.session.refused');
+    for (let i = 0; i < 30; i += 1) assert.equal((await attempt(fake, 'kla_fleet')).reason, 'insufficient_scope');
+    assert.equal(refusedLines().length, 30);
+    for (let i = 0; i < 3; i += 1) assert.deepEqual(await attempt(fake, 'kla_fleet'), { code: 4429, reason: 'rate_limited' });
+    assert.equal(refusedLines().length, 31, 'three refusals, one line');
+    assert.deepEqual(refusedLines()[30], { grant_id: 'g-fleet', client_id: 'c-other', node_id: nodeA.nodeId, code: 'rate_limited' });
+
+    time.advance(59999);
+    assert.equal((await attempt(fake, 'kla_fleet')).reason, 'rate_limited');
+    assert.equal(refusedLines().length, 31);
+    time.advance(1);
+    assert.equal((await attempt(fake, 'kla_fleet')).reason, 'insufficient_scope', 'the window has passed');
+    assert.equal(refusedLines().length, 32);
+    for (let i = 0; i < 29; i += 1) await attempt(fake, 'kla_fleet');
+    assert.equal((await attempt(fake, 'kla_fleet')).reason, 'rate_limited');
+    assert.equal(refusedLines().filter((l) => l.code === 'rate_limited').length, 2, 'a new window gets its own line');
+  });
+
+  it('an open-and-drop loop reaches the node 30 times, and no session opens past that', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    for (let i = 0; i < 30; i += 1) {
+      const win = watch(windowSocket(fake));
+      await opened(win.ws);
+      win.ws.terminate();
+      await waitFor(() => fake.splice.sessions.size === 0, 'the drop');
+    }
+    await waitFor(() => fake.rpcCalls.length === 30, 'the calls');
+    const lines = () => fake.audit.length;
+    await waitFor(() => reasons(fake, 'window.session.closed').length === 30, 'the closed lines');
+    const before = lines();
+    assert.deepEqual(await attempt(fake, 'kla_all'), { code: 4429, reason: 'rate_limited' });
+    assert.equal(fake.rpcCalls.length, 30);
+    assert.equal(fake.splice.sessions.size, 0);
+    assert.equal(lines(), before + 1);
+    assert.equal((await attempt(fake, 'kla_other', 'not-a-node-id')).reason, 'unknown_machine', 'another grant has its own window');
+  });
+
+  it('a stranger takes nothing from a grant\'s window', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    for (let i = 0; i < 40; i += 1) assert.equal((await attempt(fake, 'kla_unknown')).reason, 'invalid_token');
+    assert.equal(fake.audit.length, 0);
+    await opened(watch(windowSocket(fake)).ws);
+  });
+});
+
+describe('the byte budget reaches the window (R-RW-5)', () => {
+  const MIB = 1024 * 1024;
+
+  it('a record in flight finishes, and the window reads 4429', async () => {
+    const fake = await frontDoor({ nodes: hands(), config: { maxBytesPerHour: 1.5 * MIB } });
+    const { win, node } = await joined(fake);
+    const records = [crypto.randomBytes(MIB), crypto.randomBytes(MIB)];
+    for (const record of records) node.ws.send(record);
+    assert.deepEqual(await closed(win, 'the close', 20000), { code: 4429, reason: 'byte_budget' });
+    assert.equal(win.messages.length, 2);
+    assert.ok(win.messages[1].data.equals(records[1]), 'the record that crossed the budget came whole');
+    assert.equal(reasons(fake, 'window.session.closed')[0].reason, 'byte_budget');
+  });
+
+  it('nothing after that record is carried', async () => {
+    const fake = await frontDoor({ nodes: hands(), config: { maxBytesPerHour: 1.5 * MIB } });
+    const { win, node } = await joined(fake);
+    for (let i = 0; i < 4; i += 1) node.ws.send(crypto.randomBytes(MIB));
+    assert.equal((await closed(win, 'the close', 20000)).code, 4429);
+    assert.equal(win.messages.length, 2);
+  });
+
+  const startFrame = (total, first) => Buffer.concat([Buffer.from([0x82, 0xfe, total >> 8, total & 0xff, 0, 0, 0, 0]), first]);
+
+  it('crossed by the window while the node\'s frame is in flight, it still waits for that frame', async () => {
+    const fake = await frontDoor({ nodes: hands(), config: { maxBytesPerHour: 2000 } });
+    const { win, node } = await joined(fake);
+    const payload = crypto.randomBytes(1000);
+    node.ws._socket.write(startFrame(1000, payload.subarray(0, 10)));
+    await waitFor(() => fake.splice.sessions.list()[0].bytes_out > 0, 'the start of the frame');
+    win.ws.send(crypto.randomBytes(3000));
+    await delay(50);
+    assert.equal(win.close, null);
+    node.ws._socket.write(payload.subarray(10));
+    assert.deepEqual(await closed(win), { code: 4429, reason: 'byte_budget' });
+    assert.ok(win.messages[0].data.equals(payload));
+    assert.equal(node.messages.length, 0, 'the frame that crossed it is not carried');
+  });
+
+  it('a frame that never finishes is cut after the grace', async () => {
+    const fake = await frontDoor({ nodes: hands(), config: { maxBytesPerHour: 2000 } });
+    const { win, node } = await joined(fake);
+    node.ws._socket.write(startFrame(1000, Buffer.alloc(10)));
+    await waitFor(() => fake.splice.sessions.list()[0].bytes_out > 0, 'the start of the frame');
+    const start = Date.now();
+    win.ws.send(crypto.randomBytes(3000));
+    assert.equal((await closed(win, 'the cut', 6000)).code, 1006);
+    assert.ok(Date.now() - start >= 1500, 'not before the grace');
+    assert.equal(reasons(fake, 'window.session.closed')[0].reason, 'byte_budget');
+  });
+});
+
+describe('the bounds', () => {
+  const MIB = 1024 * 1024;
+  const FRAMES = 96;
+
+  for (const [side, slowEnd, fastEnd, counter] of [['window', 'win', 'node', 'bytes_out'], ['node', 'node', 'win', 'bytes_in']]) {
+    it(`a ${side} that stops reading stops the other side being read`, async () => {
+      const fake = await frontDoor({ nodes: hands() });
+      const legs = await joined(fake);
+      legs[slowEnd].ws._socket.pause();
+      const block = crypto.randomBytes(MIB);
+      for (let i = 0; i < FRAMES; i += 1) legs[fastEnd].ws.send(block);
+      let last = -1;
+      await waitFor(() => {
+        const now = fake.splice.sessions.list()[0][counter];
+        const still = now === last && now > 0;
+        last = now;
+        return still;
+      }, 'the read to stop', 20000);
+      await delay(200);
+      const held = fake.splice.sessions.list()[0][counter];
+      assert.ok(held < (FRAMES / 2) * MIB, `read ${held} bytes of ${FRAMES} MiB`);
+      legs[slowEnd].ws._socket.resume();
+      await waitFor(() => legs[slowEnd].messages.length === FRAMES, 'every frame after it reads again', 60000);
+      assert.ok(legs[slowEnd].messages[FRAMES - 1].data.equals(block));
+    });
+  }
+
+  const refusesFrame = async (bytes, reason) => {
+    const fake = await frontDoor({ nodes: hands() });
+    const { win, node } = await joined(fake);
+    win.ws._socket.write(bytes);
+    assert.equal((await closed(win)).code, 1008);
+    assert.equal((await closed(node)).code, 1008);
+    assert.equal(reasons(fake, 'window.session.closed')[0].reason, reason);
+    assert.equal(node.messages.length, 0);
+  };
+
+  it('a 64-bit length is read whole: bits over 32 count, and a huge one does not wrap', async () => {
+    for (const declared of [(2n ** 32n) + 5n, (2n ** 64n) - 1n]) {
+      const length = Buffer.alloc(8);
+      length.writeBigUInt64BE(declared);
+      await refusesFrame(Buffer.concat([Buffer.from([0x82, 0xff]), length, Buffer.from([1, 2, 3, 4])]), 'window_frame_too_long');
+    }
+  });
+
+  it('a control frame over 125 bytes is refused, and one at 125 passes', async () => {
+    await refusesFrame(Buffer.from([0x89, 0xfe, 0, 126, 1, 2, 3, 4]), 'window_frame_control_length');
+    const fake = await frontDoor({ nodes: hands() });
+    const { win } = await joined(fake);
+    const pong = new Promise((resolve) => { win.ws.once('pong', resolve); });
+    win.ws.ping(Buffer.alloc(125, 7));
+    assert.equal((await pong).length, 125);
+  });
+
+  it('a peer that never closes loses its socket after a refusal', async () => {
+    const fake = await frontDoor();
+    const peer = rawWindow(fake, { token: null });
+    await waitFor(() => peer.ended, 'the end of the refusal');
+    assert.ok(peer.reply.includes('invalid_token'));
+    assert.equal(peer.closed, false);
+    await waitFor(() => fake.openSockets() === 0, 'the socket to go', 4000);
+  });
+
+  it('a peer that never closes loses its socket after a session ends', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    const peer = rawWindow(fake);
+    await waitFor(() => fake.splice.sessions.size === 1, 'the session');
+    fake.revokeGrant('g-all');
+    await waitFor(() => peer.ended, 'the end of the session');
+    assert.ok(peer.reply.includes('grant_revoked'));
+    await waitFor(() => fake.openSockets() === 0, 'the socket to go', 4000);
+  });
+
+  it('a refused peer that does close frees its socket at once', async () => {
+    const fake = await frontDoor();
+    const win = watch(windowSocket(fake, null));
+    await closed(win);
+    await waitFor(() => fake.openSockets() === 0, 'the socket to go', 1500);
+  });
+
+  it('a leg paused by the other leg still sees its peer leave when the session ends', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    const { win, node } = await joined(fake);
+    win.ws._socket.pause();
+    const block = crypto.randomBytes(MIB);
+    for (let i = 0; i < FRAMES; i += 1) node.ws.send(block);
+    let last = -1;
+    await waitFor(() => {
+      const now = fake.splice.sessions.list()[0].bytes_out;
+      const still = now === last && now > 0;
+      last = now;
+      return still;
+    }, 'the read to stop', 20000);
+    await delay(200);
+    assert.equal(fake.openSockets(), 2);
+    fake.revokeGrant('g-all');
+    await waitFor(() => fake.openSockets() <= 1, 'the node\'s socket to go', 1500);
+  });
+
+  it('bytes that came with the upgrade are carried and counted', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    const payload = Buffer.from('sent with the request');
+    const frame = maskedFrame(payload);
+    const peer = rawWindow(fake, { after: frame });
+    await waitFor(() => fake.splice.sessions.size === 1, 'the session');
+    const [record] = fake.splice.sessions.list();
+    assert.equal(record.bytes_in, frame.length);
+    const node = watch(fake.dial(nodeA, record.session_id));
+    await waitFor(() => node.messages.length === 1, 'the frame');
+    assert.ok(node.messages[0].data.equals(payload));
+    assert.ok(peer.reply.includes('101'));
+  });
+
+  it('two Host headers are refused, even both right', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    const { host } = new URL(fake.origin);
+    const peer = rawWindow(fake, { headers: [`Host: ${host}`, `Host: ${host}`, 'Authorization: Bearer kla_all'] });
+    await waitFor(() => peer.ended || peer.closed, 'the refusal');
+    assert.equal(peer.reply.length, 0);
+    assert.equal(fake.splice.sessions.size, 0);
+  });
+
+  it('stop ends the sweep', async () => {
+    const time = clock();
+    const fake = await frontDoor({ nodes: hands(), now: time.now });
+    fake.splice.stop();
+    const win = watch(windowSocket(fake));
+    await opened(win.ws);
+    time.advance(31000);
+    await delay(1300);
+    assert.equal(win.close, null, 'no timer swept it');
+    fake.splice.sweep();
+    assert.equal((await closed(win)).code, 4408);
+  });
+
+  it('a device id that is no device id names no device', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    const { win, node } = await joined(fake);
+    win.ws.send(helloWith(1, 'KLD-ABCDEFGHIJKLMNOP'));
+    await waitFor(() => node.messages.length === 1, 'the frame');
+    assert.equal(fake.splice.sessions.list()[0].device_id, null);
+  });
+
+  it('a frame of hello_w\'s length with another first byte names no device', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    const { win, node } = await joined(fake);
+    win.ws.send(helloWith(2, DEVICE));
+    await waitFor(() => node.messages.length === 1, 'the frame');
+    assert.equal(fake.splice.sessions.list()[0].device_id, null);
+  });
+
+  it('a token narrower than its grant is held to the token', async () => {
+    const fake = await frontDoor();
+    assert.equal((await closed(watch(windowSocket(fake, 'kla_narrowed', nodeA.nodeId)))).reason, 'unknown_machine');
+  });
+
+  it('a token whose grant has gone is 4403 grant_revoked', async () => {
+    const fake = await frontDoor();
+    fake.dropGrant('g-all');
+    assert.deepEqual(await closed(watch(windowSocket(fake))), { code: 4403, reason: 'grant_revoked' });
+    assert.equal(fake.rpcCalls.length, 0);
+  });
+});
+
+describe('who a device limit counts (R-RW-5)', () => {
+  it('another grant claiming a device id takes nothing from this grant\'s windows', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    const hello = helloWith(1, DEVICE);
+    for (let i = 0; i < 2; i += 1) {
+      const { win, node } = await joined(fake, 'kla_other');
+      win.ws.send(hello);
+      await waitFor(() => node.messages.length === 1, 'the frame');
+    }
+    const mine = await joined(fake);
+    mine.win.ws.send(hello);
+    await waitFor(() => mine.node.messages.length === 1, 'the frame');
+    await delay(20);
+    assert.equal(mine.win.close, null);
+    assert.equal(fake.splice.sessions.list().filter((r) => r.device_id === DEVICE).length, 3);
+  });
+});
+
+describe('how the front door stops', () => {
+  it('in the profile\'s order the listener goes first, and both legs see 1006', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    const { win, node } = await joined(fake);
+    await fake.stop();
+    assert.equal((await closed(win)).code, 1006);
+    assert.equal((await closed(node)).code, 1006);
+    assert.equal(reasons(fake, 'window.session.closed').length, 1);
+  });
+});
+
+describe('the Bearer check and the feature', () => {
+  it('reads a Bearer as the nodes route does, any case', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    const win = watch(windowSocket(fake, null, nodeA.nodeId, { headers: { authorization: 'bearer kla_all' } }));
+    await opened(win.ws);
+    assert.ok(win.session);
+  });
+
+  it('two Authorization headers are invalid_token', async () => {
+    const fake = await frontDoor({ nodes: hands() });
+    const { host } = new URL(fake.origin);
+    const peer = rawWindow(fake, { headers: [`Host: ${host}`, 'Authorization: Bearer kla_all', 'Authorization: Bearer kla_other'] });
+    await waitFor(() => peer.ended, 'the refusal');
+    assert.ok(peer.reply.includes('invalid_token'));
+    assert.equal(fake.splice.sessions.size, 0);
+  });
+
+  it('with no windowEnabled the window is off', async () => {
+    const fake = await frontDoor({ nodes: hands(), windowEnabled: null });
+    assert.deepEqual(await closed(watch(windowSocket(fake))), { code: 4401, reason: 'invalid_token' });
   });
 });
 

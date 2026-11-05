@@ -30,6 +30,17 @@ describe('MeshTransport attachServer fallthrough', () => {
     assert.strictEqual(truthy.destroyed, 1);
   });
 
+  it('the transport\'s own path never reaches it, and keeps its pin check', () => {
+    const transport = new MeshTransport({ identity: new MeshIdentity({ displayName: 'Host' }), listen: false, useTls: true, requireClientCert: true, isPinned: () => false });
+    const server = new EventEmitter();
+    let calls = 0;
+    transport.attachServer(server, { fallthrough: () => { calls += 1; return true; } });
+    const plain = socket();
+    server.emit('upgrade', { url: '/mesh/v1', headers: {} }, plain, Buffer.alloc(0));
+    assert.strictEqual(calls, 0);
+    assert.strictEqual(plain.destroyed, 1);
+  });
+
   it('with none, or one that throws, the socket is destroyed', () => {
     const none = attach({});
     const plain = socket();
