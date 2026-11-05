@@ -301,11 +301,19 @@ describe('a running front door', () => {
     assert.equal(res.json.issuer, t.base);
   });
 
-  it('routes the window list, with the metadata URL on the bound port, and keeps the window resource off until enabled', async () => {
-    const res = await request(t.base, { path: '/window/v1/nodes', tls: t.tls });
-    assert.equal(res.status, 401);
-    assert.equal(res.headers['www-authenticate'], `Bearer error="invalid_token", resource_metadata="${t.base}/.well-known/oauth-protected-resource/window/v1"`);
+  it('keeps the window list and resource off until enabled; on, the list is routed with the metadata URL on the bound port', async () => {
+    const list = () => request(t.base, { path: '/window/v1/nodes', tls: t.tls });
+    assert.equal((await list()).status, 404);
     assert.equal((await request(t.base, { path: '/.well-known/oauth-protected-resource/window/v1', tls: t.tls })).status, 404);
+    const enabled = t.fd.oauth.scopesEnabled;
+    t.fd.oauth.scopesEnabled = [...enabled, 'window:attach'];
+    try {
+      const res = await list();
+      assert.equal(res.status, 401);
+      assert.equal(res.headers['www-authenticate'], `Bearer error="invalid_token", resource_metadata="${t.base}/.well-known/oauth-protected-resource/window/v1"`);
+    } finally {
+      t.fd.oauth.scopesEnabled = enabled;
+    }
   });
 
   it('pairs a node the phone approves; the node links with its pin; the mirror catches up; an MCP client runs a runbook', async () => {
@@ -465,9 +473,18 @@ describe('a running front door', () => {
     fd.tokens.authenticate = (token, opts) => (token === 'kla_window_test' ? { grant_id: 'g-window', client_id: 'c-window', scopes: ['window:attach'], aud: opts.aud } : real.authenticate.call(fd.tokens, token, opts));
     fd.grants.live = (id) => (id === 'g-window' ? { client_id: 'c-window', scopes: [{ scope: 'window:attach', machines: null }], machine_ids: {} } : real.live.call(fd.grants, id));
     fd.relay.nodeHub.rpc = async (nodeId, method, params) => { opens.push({ nodeId, method, params }); return { ok: true }; };
+    const enabled = fd.oauth.scopesEnabled;
     let win = null;
     let dial = null;
     try {
+      // Off, as it is by default: the same token is refused like a stranger's.
+      const off = await trickle({
+        port: t.port, servername: 'mcp.kl.example.com', ca: t.ca.cert,
+        text: `GET /window/v1?node=${node.nodeId} HTTP/1.1\r\nHost: mcp.kl.example.com\r\nAuthorization: Bearer kla_window_test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: kl-window-v1\r\n\r\n`
+      });
+      assert.ok(off.reply.includes('invalid_token'));
+      assert.equal(opens.length, 0);
+      fd.oauth.scopesEnabled = [...enabled, 'window:attach'];
       win = new WebSocket(`wss://mcp.kl.example.com:${t.port}/window/v1?node=${node.nodeId}`, 'kl-window-v1', {
         ca: t.ca.cert, lookup, headers: { authorization: 'Bearer kla_window_test' }, perMessageDeflate: false
       });
@@ -490,6 +507,7 @@ describe('a running front door', () => {
       fd.windowSplice.closeForGrant('g-window');
       assert.equal(await windowClosed, 4403);
     } finally {
+      fd.oauth.scopesEnabled = enabled;
       fd.tokens.authenticate = real.authenticate;
       fd.grants.live = real.live;
       fd.relay.nodeHub.rpc = real.rpc;

@@ -287,7 +287,7 @@ function pkceMatches(verifier, challenge) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function createTokenHandlers({ tokens, codes, grants, alerts = null, auditLedger = null, onGrantRevoked = () => {} } = {}) {
+function createTokenHandlers({ tokens, codes, grants, alerts = null, auditLedger = null, onGrantRevoked = () => {}, audienceOff = () => false } = {}) {
   tokens.attachGrants(grants);
 
   // The tokens and onGrantRevoked run whatever the grant store does: if
@@ -345,6 +345,9 @@ function createTokenHandlers({ tokens, codes, grants, alerts = null, auditLedger
       pair = tokens.issuePair({ grantId, clientId: grant.client_id, scopes: grants.scopeStrings(grant), aud: grant.resource });
     } else if (f.grant_type === 'refresh_token') {
       if (!f.refresh_token || !f.client_id) throw new OAuthError('invalid_request', 'refresh_token and client_id are required');
+      // Before anything rotates: the token and its grant are left as they were.
+      const held = tokens.find(f.refresh_token);
+      if (held && held.kind === 'refresh' && audienceOff(held.record.aud)) throw new OAuthError('invalid_grant', 'this resource is not enabled on this front door');
       const r = tokens.refresh({ token: f.refresh_token, clientId: f.client_id, scope: f.scope });
       if (r.reuse) {
         log.warn(`refresh token reuse on ${r.reuse}; revoking the grant`);

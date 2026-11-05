@@ -11,12 +11,12 @@ const path = require('path');
 const WebSocket = require('ws');
 const { startFrontDoorHttp, FLEET } = require('./helpers/frontdoor-harness');
 const { request, pkce, parseConsent, cookieOf } = require('./helpers/oauth-test-client');
-const { ClientRegistry } = require('../src/frontdoor/oauth/clients');
+const { ClientRegistry, validRedirectUri } = require('../src/frontdoor/oauth/clients');
 const { createFleetScopeRegistry } = require('../src/frontdoor/oauth/scopes');
 const { McpHttpEndpoint } = require('../src/frontdoor/mcp/http-endpoint');
 const { createWindowSplice } = require('../src/frontdoor/window/splice');
 const { createWindowRoutes } = require('../src/frontdoor/window/routes');
-const { registerWindowScope, WINDOW_SCOPE } = require('../src/frontdoor/window/scope');
+const { registerWindowScope, WINDOW_SCOPE, WINDOW_SCOPE_TEXT } = require('../src/frontdoor/window/scope');
 const TOOL_EXTENSIONS = require('../src/frontdoor/tool-extensions');
 
 const ORIGIN = 'https://mcp.kl.example.com';
@@ -49,6 +49,41 @@ const connectWindow = (h, { machines = null, ...rest } = {}) => h.connect({ redi
 const registerLoopback = async (h, uri = CALLBACK) => (await request(h.base, { method: 'POST', path: '/oauth/register', json: { client_name: 'King Louie window', redirect_uris: [uri], grant_types: ['authorization_code', 'refresh_token'], token_endpoint_auth_method: 'none' } })).json.client_id;
 const nodes = (h, token) => request(h.base, { path: '/window/v1/nodes', headers: token ? { authorization: `Bearer ${token}` } : {} });
 const mcpCall = (h, token) => request(h.base, { method: 'POST', path: '/mcp', headers: { authorization: `Bearer ${token}`, accept: 'application/json, text/event-stream' }, json: { jsonrpc: '2.0', id: 1, method: 'ping' } });
+
+// The routes alone, over stand-ins, for what the harness cannot set up.
+async function withRoutes(deps, fn) {
+  const routes = createWindowRoutes({ oauth: { windowResourceUrl: WINDOW_RESOURCE, issuer: ORIGIN, windowEnabled: () => true }, ...deps });
+  const server = http.createServer((req, res) => routes.handle(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await fn(`http://127.0.0.1:${server.address().port}`);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+// A window at the real splice: the refusal order is the splice's. A token it does
+// not take closes 4401, a machine the grant does not cover 4403, and one it covers
+// reaches the node check, 4404 here since nothing is online.
+async function dial(h, token, node) {
+  const splice = createWindowSplice({
+    tokens: h.tokens, grants: h.grants, registry: h.registry, nodeHub: { rpc: async () => ({ ok: true }) },
+    windowResourceUrl: () => h.oauth.windowResourceUrl, windowEnabled: () => h.oauth.windowEnabled(),
+    config: { maxSessionsPerGrant: 4, maxSessionsPerDeviceNode: 2, maxBytesPerHour: 1073741824, idleS: 600 }
+  });
+  const server = http.createServer();
+  server.on('upgrade', (req, socket, head) => splice.onMcpUpgrade(req, socket, head));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  running.push(async () => {
+    await splice.stop();
+    await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
+  });
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/window/v1?node=${encodeURIComponent(node.node_id)}`, 'kl-window-v1', { headers: { host: 'mcp.kl.example.com', authorization: `Bearer ${token}` } });
+    ws.on('close', (code, reason) => resolve({ code, reason: reason.toString() }));
+    ws.on('error', reject);
+  });
+}
 
 function authorizePath(clientId, redirectUri, extra = {}) {
   const params = { response_type: 'code', client_id: clientId, redirect_uri: redirectUri, code_challenge: pkce().challenge, code_challenge_method: 'S256', ...extra };
@@ -98,6 +133,17 @@ describe('redirectAllowed: loopback on any port (RFC 8252 §7.3)', () => {
   it('a stored entry that cannot be parsed matches nothing, and no client allows nothing', () => {
     assert.equal(registry.redirectAllowed(client('not a url', null), 'http://127.0.0.1:5/cb'), false);
     assert.equal(registry.redirectAllowed(null, 'http://127.0.0.1:5/cb'), false);
+  });
+
+  it('everything but the port must match: a stored entry with userinfo is not this redirect', () => {
+    assert.equal(registry.redirectAllowed(client('http://u@127.0.0.1/cb'), 'http://127.0.0.1:5/cb'), false);
+  });
+
+  it('port 0 is no port: refused on a redirect, even an exact one, and at registration', () => {
+    assert.equal(validRedirectUri('http://127.0.0.1:0/cb'), false);
+    assert.equal(validRedirectUri('https://client.example.com:0/cb'), false);
+    assert.equal(registry.redirectAllowed(client(CALLBACK), 'http://127.0.0.1:0/kl/window/callback'), false);
+    assert.equal(registry.redirectAllowed(client('http://127.0.0.1:0/cb'), 'http://127.0.0.1:0/cb'), false);
   });
 });
 
@@ -189,6 +235,15 @@ describe('what each resource may ask for', () => {
     assert.deepEqual(view.requested_scopes, ['window:attach']);
     // Android's one-tap Allow signs exactly these, and an approve of nothing is refused.
     assert.deepEqual(view.preselected, ['window:attach']);
+    assert.equal(view.notice, WINDOW_SCOPE_TEXT);
+  });
+
+  it('the consent page and the phone both say what the grant is worth', async () => {
+    assert.equal(WINDOW_SCOPE_TEXT, 'A King Louie window may attach to every node this grant covers, and each node still needs its own phone approval.');
+    const h = await start();
+    const clientId = await registerLoopback(h);
+    const consent = await request(h.base, { path: authorizePath(clientId, CALLBACK, { resource: WINDOW_RESOURCE }) });
+    assert.ok(consent.text.includes(WINDOW_SCOPE_TEXT));
   });
 
   it('with no scope asked, the MCP resource never asks for window:attach', async () => {
@@ -197,6 +252,8 @@ describe('what each resource may ask for', () => {
     assert.equal(view.resource, MCP_RESOURCE);
     assert.deepEqual(view.requested_scopes, [...FLEET].sort());
     assert.deepEqual(view.preselected, ['fleet:read']);
+    // Today's phones take exact keys: an MCP request's view does not change.
+    assert.ok(!('notice' in view));
   });
 
   it('a scope the resource cannot use is dropped from what the phone is asked', async () => {
@@ -215,6 +272,29 @@ describe('what each resource may ask for', () => {
       assert.equal(r.status, 400, JSON.stringify(extra));
       assert.match(r.text, /Invalid scope/);
     }
+  });
+
+  it('a remote web client cannot get the window resource, whatever it calls itself', async () => {
+    const h = await start();
+    const uri = 'https://evil.example.com/cb';
+    const clientId = (await request(h.base, { method: 'POST', path: '/oauth/register', json: { client_name: 'King Louie window', redirect_uris: [uri], token_endpoint_auth_method: 'none' } })).json.client_id;
+    assert.ok(clientId);
+    const before = h.pending.size();
+    const r = await request(h.base, { path: authorizePath(clientId, uri, { resource: WINDOW_RESOURCE, scope: 'window:attach' }) });
+    assert.equal(r.status, 400);
+    assert.match(r.text, /loopback/);
+    assert.equal(parseConsent(r.text).userCode, null);
+    assert.equal(h.pending.size(), before, 'no pending request was made');
+    assert.equal((await request(h.base, { path: authorizePath(clientId, uri, { scope: 'fleet:read' }) })).status, 200, 'the MCP resource still takes it');
+  });
+
+  it('a resource with no scope to ask for gets no consent page', async () => {
+    const h = await start({ scopesEnabled: ['window:attach'] });
+    const clientId = await registerLoopback(h);
+    const r = await request(h.base, { path: authorizePath(clientId, CALLBACK) });
+    assert.equal(r.status, 400);
+    assert.match(r.text, /Invalid scope/);
+    assert.equal(h.pending.size(), 0);
   });
 
   it('the phone cannot sign fleet scopes into a window grant', async () => {
@@ -262,6 +342,48 @@ describe('the metadata', () => {
   });
 });
 
+describe('off is off for a grant that already exists', () => {
+  // scopes_enabled is read at start; this stands in for a restart without the scope.
+  const turnOff = (h) => { h.oauth.scopesEnabled = FLEET; };
+
+  it('the list answers 404, to the grant\'s token and to anyone else', async () => {
+    const h = await start();
+    const win = await connectWindow(h);
+    assert.equal((await nodes(h, win.tokens.access_token)).status, 200);
+    turnOff(h);
+    assert.equal((await nodes(h, win.tokens.access_token)).status, 404);
+    assert.equal((await nodes(h, null)).status, 404);
+    assert.equal((await request(h.base, { method: 'POST', path: '/window/v1/nodes' })).status, 404);
+  });
+
+  it('a window refresh is refused, spends nothing and revokes nothing; an MCP refresh goes on', async () => {
+    const h = await start();
+    const win = await connectWindow(h);
+    const mcp = await h.connect({ scopes: [{ scope: 'fleet:read', machines: null }] });
+    turnOff(h);
+    const form = { grant_type: 'refresh_token', refresh_token: win.tokens.refresh_token, client_id: win.clientId };
+    const refused = await request(h.base, { method: 'POST', path: '/oauth/token', form });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.json.error, 'invalid_grant');
+    assert.equal((await request(h.base, { method: 'POST', path: '/oauth/token', form })).status, 400, 'a second try is not reuse');
+    assert.ok(h.grants.live(win.grantId), 'the grant stands');
+    assert.deepEqual(h.revokedGrants, []);
+    assert.equal((await request(h.base, { method: 'POST', path: '/oauth/token', form: { grant_type: 'refresh_token', refresh_token: mcp.tokens.refresh_token, client_id: mcp.clientId } })).status, 200);
+
+    h.oauth.scopesEnabled = WITH_WINDOW;
+    assert.equal((await request(h.base, { method: 'POST', path: '/oauth/token', form })).status, 200, 'the same token works once it is on again');
+  });
+
+  it('the splice refuses the token as it refuses a stranger', async () => {
+    const h = await start();
+    const win = await connectWindow(h, { machines: ['web-01'] });
+    const web = h.registry.byName('web-01');
+    assert.equal((await dial(h, win.tokens.access_token, web)).code, 4404);
+    turnOff(h);
+    assert.deepEqual(await dial(h, win.tokens.access_token, web), { code: 4401, reason: 'invalid_token' });
+  });
+});
+
 describe('GET /window/v1/nodes', () => {
   it('lists the nodes the grant covers, with what a window needs', async () => {
     const h = await start();
@@ -278,6 +400,21 @@ describe('GET /window/v1/nodes', () => {
     assert.deepEqual(byName['gpu-box'], { node_id: gpu.node_id, node_name: 'gpu-box', online: false, public_key: gpu.public_key });
   });
 
+  it('lists only agent nodes: a window can never attach to the others', () => {
+    const grant = { scopes: [{ scope: 'window:attach', machines: null }], machine_ids: {} };
+    return withRoutes({
+      tokens: { authenticate: () => ({ grant_id: 'g', scopes: ['window:attach'] }) },
+      grants: { live: () => grant, touch: () => {}, machineMatches: () => true },
+      registry: {
+        list: () => [{ node_id: 'a', node_name: 'agent-1', profile: 'agent', public_key: 'k' }, { node_id: 'b', node_name: 'books', profile: 'runbook', public_key: 'k' }, { node_id: 'c', node_name: 'none', public_key: 'k' }],
+        presence: () => null
+      }
+    }, async (base) => {
+      const r = await request(base, { path: '/window/v1/nodes', headers: { authorization: 'Bearer kla_x' } });
+      assert.deepEqual(r.json.nodes.map((n) => n.node_name), ['agent-1']);
+    });
+  });
+
   it('a machine limit narrows the list', async () => {
     const h = await start();
     const r = await connectWindow(h, { machines: ['web-01'] });
@@ -287,17 +424,14 @@ describe('GET /window/v1/nodes', () => {
   it('a name the grant holds, on a node with another id now, is not listed', async () => {
     const token = { grant_id: 'g', scopes: ['window:attach;machines=web-01'] };
     const grant = { scopes: [{ scope: 'window:attach', machines: ['web-01'] }], machine_ids: { 'web-01': 'old-id' } };
-    const routes = createWindowRoutes({
-      oauth: { windowResourceUrl: WINDOW_RESOURCE, issuer: ORIGIN },
+    await withRoutes({
       tokens: { authenticate: () => token },
       grants: { live: () => grant, touch: () => {}, machineMatches: (g, s, name, id) => g.machine_ids[name] === id },
-      registry: { list: () => [{ node_id: 'new-id', node_name: 'web-01', public_key: 'k' }], presence: () => null }
+      registry: { list: () => [{ node_id: 'new-id', node_name: 'web-01', profile: 'agent', public_key: 'k' }], presence: () => null }
+    }, async (base) => {
+      const r = await request(base, { path: '/window/v1/nodes', headers: { authorization: 'Bearer kla_x' } });
+      assert.deepEqual(r.json, { nodes: [] });
     });
-    const server = http.createServer((req, res) => routes.handle(req, res));
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    running.push(() => new Promise((resolve) => server.close(resolve)));
-    const r = await request(`http://127.0.0.1:${server.address().port}`, { path: '/window/v1/nodes', headers: { authorization: 'Bearer kla_x' } });
-    assert.deepEqual(r.json, { nodes: [] });
   });
 
   it('no token, a malformed one, an unknown one, a second header and another method are refused', async () => {
@@ -317,19 +451,16 @@ describe('GET /window/v1/nodes', () => {
 
   it('a window-resource token without the scope gets 403, and a revoked grant 401', async () => {
     const stored = { grant_id: 'g', scopes: ['fleet:read'] };
-    const routes = createWindowRoutes({
-      oauth: { windowResourceUrl: WINDOW_RESOURCE, issuer: ORIGIN },
+    await withRoutes({
       tokens: { authenticate: () => stored },
       grants: { live: () => ({ scopes: [] }), touch: () => {}, machineMatches: () => true },
       registry: { list: () => [], presence: () => null }
+    }, async (base) => {
+      const r = await request(base, { path: '/window/v1/nodes', headers: { authorization: 'Bearer kla_x' } });
+      assert.equal(r.status, 403);
+      assert.equal(r.json.error, 'insufficient_scope');
+      assert.match(r.headers['www-authenticate'], /error="insufficient_scope", scope="window:attach"/);
     });
-    const server = http.createServer((req, res) => routes.handle(req, res));
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    running.push(() => new Promise((resolve) => server.close(resolve)));
-    const r = await request(`http://127.0.0.1:${server.address().port}`, { path: '/window/v1/nodes', headers: { authorization: 'Bearer kla_x' } });
-    assert.equal(r.status, 403);
-    assert.equal(r.json.error, 'insufficient_scope');
-    assert.match(r.headers['www-authenticate'], /error="insufficient_scope", scope="window:attach"/);
 
     const h = await start();
     const win = await connectWindow(h);
@@ -352,7 +483,7 @@ describe('the scope', () => {
     const scopes = createFleetScopeRegistry();
     registerWindowScope(scopes);
     assert.equal(WINDOW_SCOPE, 'window:attach');
-    assert.deepEqual({ ...scopes.get(WINDOW_SCOPE) }, { name: 'window:attach', tools: ['attach_window'], description: 'Attach a King Louie window to a machine', requires: null });
+    assert.deepEqual({ ...scopes.get(WINDOW_SCOPE) }, { name: 'window:attach', tools: ['attach_window'], description: WINDOW_SCOPE_TEXT, requires: null });
     assert.equal(scopes.requiredScopeFor('attach_window'), 'window:attach');
 
     const extended = createFleetScopeRegistry();
@@ -364,28 +495,6 @@ describe('the scope', () => {
 });
 
 describe('a real token at the splice (Task 7 and Task 8 agree)', () => {
-  // The refusal order is the splice's: a token it does not take closes 4401, a
-  // machine the grant does not cover 4403, and one it covers reaches the node
-  // check, 4404 here since nothing is online.
-  async function dial(h, token, node) {
-    const splice = createWindowSplice({
-      tokens: h.tokens, grants: h.grants, registry: h.registry, nodeHub: { rpc: async () => ({ ok: true }) },
-      windowResourceUrl: () => h.oauth.windowResourceUrl, config: { maxSessionsPerGrant: 4, maxSessionsPerDeviceNode: 2, maxBytesPerHour: 1073741824, idleS: 600 }
-    });
-    const server = http.createServer();
-    server.on('upgrade', (req, socket, head) => splice.onMcpUpgrade(req, socket, head));
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    running.push(async () => {
-      await splice.stop();
-      await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
-    });
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/window/v1?node=${encodeURIComponent(node.node_id)}`, 'kl-window-v1', { headers: { host: 'mcp.kl.example.com', authorization: `Bearer ${token}` } });
-      ws.on('close', (code, reason) => resolve({ code, reason: reason.toString() }));
-      ws.on('error', reject);
-    });
-  }
-
   it('takes a window token, on the machines it covers, and no MCP token', async () => {
     const h = await start();
     const win = await connectWindow(h, { machines: ['web-01'] });

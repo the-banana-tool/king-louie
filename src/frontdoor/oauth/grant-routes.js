@@ -63,7 +63,10 @@ function registerGrantRoutes(phoneApi, { pending, grants, codes, clients, challe
           code_challenge: view.code_challenge,
           requested_scopes: view.requested_scopes,
           preselected: view.preselected,
-          expires_in_ms: Math.max(0, view.expires_at_ms - now())
+          expires_in_ms: Math.max(0, view.expires_at_ms - now()),
+          // Only on a window's request: today's phones refuse a view with a key
+          // they do not know, so an MCP request's view stays as it was (Task 15).
+          ...(view.notice ? { notice: view.notice } : {})
         }
       };
     }

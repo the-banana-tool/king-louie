@@ -255,7 +255,7 @@ function hostOf(url) {
   }
 }
 
-function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceUrl, config, auditLedger = null, now = Date.now, random = crypto.randomBytes } = {}) {
+function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceUrl, windowEnabled = () => true, config, auditLedger = null, now = Date.now, random = crypto.randomBytes } = {}) {
   // A function when the front door's port is known only after it listens.
   const resourceUrl = () => (typeof windowResourceUrl === 'function' ? windowResourceUrl() : windowResourceUrl);
   const sessions = new WindowSessions({
@@ -419,7 +419,7 @@ function createWindowSplice({ tokens, grants, registry, nodeHub, windowResourceU
       return;
     }
     const bearer = BEARER_RE.exec(String(req.headers.authorization || ''));
-    const rec = bearer ? tokens.authenticate(bearer[1], { aud: resourceUrl() }) : null;
+    const rec = bearer && windowEnabled() ? tokens.authenticate(bearer[1], { aud: resourceUrl() }) : null;
     // No audit line: no token was shown and anyone may ask, so one here would let
     // anyone grow the ledger.
     if (!rec) {

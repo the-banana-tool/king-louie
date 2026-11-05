@@ -1,7 +1,8 @@
-// GET /window/v1/nodes (R-RW-22): the nodes a window's grant may attach to. The
-// same three checks as the splice (the audience, the scope, the machine pinned
-// to its node id), so the list holds what the upgrade would let through, the
-// node's own answers aside. public_key is what the registry holds; a window
+// GET /window/v1/nodes (R-RW-22): the agent nodes a window's grant may attach to.
+// The same checks as the splice (the audience, the scope, the machine pinned to
+// its node id, the profile), so the list holds what the upgrade would let
+// through, the node's own answers aside. It answers 404 while window:attach is
+// not enabled, to a token issued before that too. public_key is what the registry holds; a window
 // still trusts a node key only after a code from the phone (R-RW-34).
 const { createLogger } = require('../../logging');
 const { allows } = require('../../fleet/scope-rules');
@@ -25,6 +26,10 @@ function createWindowRoutes({ oauth, tokens, grants, registry } = {}) {
   });
 
   async function handle(req, res) {
+    if (!oauth.windowEnabled()) {
+      sendJson(res, 404, { error: 'not_found' });
+      return;
+    }
     if (req.method !== 'GET') {
       sendJson(res, 405, { error: 'method_not_allowed' }, { allow: 'GET' });
       return;
@@ -51,7 +56,7 @@ function createWindowRoutes({ oauth, tokens, grants, registry } = {}) {
       log.warn(`recording use of grant ${token.grant_id} failed: ${err && err.message}`);
     }
     const nodes = registry.list()
-      .filter((r) => allows(token.scopes, WINDOW_TOOL, { required: WINDOW_SCOPE, machine: r.node_name }).ok
+      .filter((r) => r.profile === 'agent' && allows(token.scopes, WINDOW_TOOL, { required: WINDOW_SCOPE, machine: r.node_name }).ok
         && grants.machineMatches(grant, WINDOW_SCOPE, r.node_name, r.node_id))
       .map((r) => {
         const presence = registry.presence(r.node_id);

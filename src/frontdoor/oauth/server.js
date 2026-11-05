@@ -6,9 +6,9 @@
 const { createLogger } = require('../../logging');
 const { CODE_CHALLENGE_RE } = require('../protocol/messages');
 const { OAuthError } = require('./errors');
-const { clientHost } = require('./clients');
+const { clientHost, loopbackHttp } = require('./clients');
 const { SCOPE_RE } = require('./scopes');
-const { WINDOW_SCOPE } = require('../window/scope');
+const { WINDOW_SCOPE, WINDOW_SCOPE_TEXT } = require('../window/scope');
 const { CONSENT_HEADERS, CONSENT_CSS, consentPage, messagePage } = require('./pages');
 const { createTokenHandlers } = require('./tokens');
 const { readBody, sendJson, sendHtml, parseCookies, requestHost, clientIp } = require('../http-util');
@@ -71,7 +71,10 @@ class OAuthServer {
       }]
     ]);
     if (tokens && codes && grants) {
-      const handlers = createTokenHandlers({ tokens, codes, grants, alerts, auditLedger, onGrantRevoked });
+      const handlers = createTokenHandlers({
+        tokens, codes, grants, alerts, auditLedger, onGrantRevoked,
+        audienceOff: (aud) => aud === this.windowResourceUrl && !this.windowEnabled()
+      });
       this.routes.set('POST /oauth/token', (req, res) => handlers.token(req, res));
       this.routes.set('POST /oauth/revoke', (req, res) => handlers.revoke(req, res));
     }
@@ -227,6 +230,9 @@ class OAuthServer {
     if (resource !== this.resourceUrl && !forWindow) {
       return this.refuse(res, 400, 'Invalid request', `resource must be ${this.resourceUrl}${this.windowEnabled() ? ` or ${this.windowResourceUrl}` : ''}.`);
     }
+    // The window is a native app (R-RW-10). Its name is self-declared, so this is
+    // what keeps a web client from having window:attach preselected.
+    if (forWindow && !loopbackHttp(q.redirect_uri)) return this.refuse(res, 400, 'Invalid request', 'This resource takes only a loopback http redirect.');
     if (q.state !== undefined && q.state.length > STATE_MAX) return this.refuse(res, 400, 'Invalid request', `state is too long (at most ${STATE_MAX} characters).`);
     const supported = this.supportedScopes();
     const usable = this.scopesFor(resource);
@@ -241,14 +247,15 @@ class OAuthServer {
     // A client may copy the whole scopes_supported list, so what its resource
     // cannot use is dropped (RFC 6749 §3.3) and the phone is never asked for it.
     const requested = asked.filter((s) => usable.includes(s));
-    if (!requested.length && asked.length) return this.refuse(res, 400, 'Invalid scope', 'None of the requested scopes can be used with this resource.');
+    // An approval of nothing is refused, so no consent page is shown for one.
+    if (!requested.length) return this.refuse(res, 400, 'Invalid scope', 'This request asks for no scope that can be used with this resource.');
     const host = clientHost(client, q.redirect_uri);
     let created;
     try {
       created = this.pending.create({
         client, redirectUri: q.redirect_uri, codeChallenge: q.code_challenge, resource, requestedScopes: requested,
         // The window asks for one scope, and an approval of none is refused.
-        preselected: forWindow ? requested : this.preselect(host, requested), state: q.state === undefined ? null : q.state, ip, clientHost: host, ipCounted
+        preselected: forWindow ? requested : this.preselect(host, requested), notice: forWindow ? WINDOW_SCOPE_TEXT : null, state: q.state === undefined ? null : q.state, ip, clientHost: host, ipCounted
       });
     } catch (err) {
       if (err instanceof OAuthError) return this.refuse(res, err.status, 'Try again later', err.message);

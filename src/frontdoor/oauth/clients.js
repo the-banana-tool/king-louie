@@ -46,6 +46,8 @@ function validRedirectUri(uri) {
   // Canonical form only, so the stored string is the one every parser reads
   // the same way; no userinfo, which would hide the real host.
   if (u.hash || u.username || u.password || u.href !== uri) return false;
+  // Nothing can listen on port 0; it only ever means "any" to an OS.
+  if (u.port === '0') return false;
   if (u.protocol === 'https:') return Boolean(u.hostname);
   return u.protocol === 'http:' && LOOPBACK_HOSTS.has(u.hostname); // RFC 8252 §7.3
 }
@@ -59,6 +61,12 @@ function loopbackHttp(uri) {
     return null;
   }
   return u.protocol === 'http:' && LOOPBACK_HOSTS.has(u.hostname) ? u : null;
+}
+
+function withoutPort(u) {
+  const copy = new URL(u.href);
+  copy.port = '';
+  return copy.href;
 }
 
 // What the consent page and the phone call "client host": the CIMD URL's
@@ -267,9 +275,10 @@ class ClientRegistry {
     // loopback redirect matches a registered one on any port. https stays exact.
     const asked = loopbackHttp(uri);
     if (!asked) return false;
+    const wanted = withoutPort(asked);
     return client.redirect_uris.some((registered) => {
       const r = loopbackHttp(registered);
-      return Boolean(r) && r.protocol === asked.protocol && r.hostname === asked.hostname && r.pathname === asked.pathname && r.search === asked.search;
+      return Boolean(r) && withoutPort(r) === wanted;
     });
   }
 
@@ -312,4 +321,4 @@ class ClientRegistry {
   }
 }
 
-module.exports = { ClientRegistry, validRedirectUri, clientHost, rateKey, LIMITS };
+module.exports = { ClientRegistry, validRedirectUri, loopbackHttp, clientHost, rateKey, LIMITS };

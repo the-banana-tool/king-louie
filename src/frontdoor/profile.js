@@ -406,7 +406,7 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
       windowRoutes: createWindowRoutes({ oauth, tokens, grants, registry })
     });
     windowSplice = createWindowSplice({
-      tokens, grants, registry, nodeHub: relay.nodeHub, windowResourceUrl: () => oauth.windowResourceUrl, config: fdConfig.window, auditLedger: ownLedger
+      tokens, grants, registry, nodeHub: relay.nodeHub, windowResourceUrl: () => oauth.windowResourceUrl, windowEnabled: () => oauth.windowEnabled(), config: fdConfig.window, auditLedger: ownLedger
     });
     started('window splice', () => windowSplice.stop());
     const mcpServer = createMcpHttpServer(handler, deps.mcpServerLimits || {}, { onUpgrade: windowSplice.onMcpUpgrade });
