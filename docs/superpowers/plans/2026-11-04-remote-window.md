@@ -84,6 +84,12 @@ Each is the author's call; the owner may overrule. The plan builds on them as wr
 
 - **R-RW-33 (controller, after Task 3's review).** A phone card and the audit name the window that asked: `deviceId` is kept for a `remote-window` origin. Every phone-class call from a window has a client bound above `TTL_MAX_MS` (Task 10).
 
+- **R-RW-34 (controller, after Task 4's review).** A window trusts a node key only after a code from the phone. Without this, a window on first attach goes ready against any key the front door hands it, and that key can answer `window.enroll` and `window.enrollStatus` itself: nothing the phone decides reaches the window authenticated. So the QR gains `n`, 16 random bytes made after the handshake and never sent on any socket: `{ t: 'kl.window', h, n }`. `h` is unchanged. After Allow on a matching hash, the phone shows a 6-digit code, the decimal reduction of the first 8 bytes of SHA-256(`kl-window-confirm-v1\n` ‖ n ‖ raw_device_key ‖ raw_node_key (its own pin)). The owner types it into the window. The window computes the same over the key its handshake proved, and only on a match persists the pin, calling `onNodeKey` then rather than at the handshake, and leaves `enrolling`. Until then it holds the key unpersisted and sends only the two enroll methods, however `enrollStatus` answers. Five wrong codes end the attempt: a new key exchange, a new `n`, a new QR. Tasks 9, 10, 14, 15 and 16 carry this; `h`'s vectors stay and `window-enroll-code` joins them, with Kotlin and Swift computing it. Task 16 adds: a fake node with its own key answers `approved`, and the window stays `enrolling` and pins nothing.
+
+- **R-RW-35 (controller, after Task 4's review).** The seal owns one ordered writer, `write(bytes)` at construction: every record reaches it in the tick it was sealed. Task 5's `transport.send` returns a promise settled by `ws.send`'s callback, `conn.send` uses `createFrameSender` and never `wrap`, and a `SEND_QUEUE_FULL`, `SEND_STOPPED` or dropped socket closes the session with no rejection left unobserved. Sealed sockets use `maxPayload: RECORD_WIRE_MAX`, `perMessageDeflate: false`, refuse text frames and have a raw-byte cut before ready. Revocation and `_recheckLive` send a close record before the socket closes; no socket close code clears a pin or an enrollment.
+
+- **R-RW-36 (controller, after Task 4's review), Task 9's enroll-only seam.** Not a lookup that answers the claimed key, which gives the same `peer` as an enrolled device. A seal option, on only with `features.remoteWindow`: at `auth_w` verify `sig_dev` against `pub_dev` first; an unknown device with a good signature gets `peer: { deviceId, publicKey, enrolled: false }`; a stored key that differs is always `4401`; any failure stays the one `4401`; without the option the `handshake-unknown-device` vector holds. In that state the seal has `frameMax` 4096 and treats `more` as `4400`. `attachSealed` builds a separate enroll connection with no dispatcher reference, serving `t: 'call'` `window.enroll` and `window.enrollStatus` only and closing on anything else (a test sweeps every proxied channel). It does not count against `maxDevices`; it has its own small cap, one pending request per device, a rate limit per node per hour, and a deadline. Promotion only after a fresh read finds a `remote: true` record whose key equals `peer.publicKey`, and only then does it get the dispatcher and full limits. A local pairing's key stays `4403 not_remote`. Enrollment refuses the keys in `tests/vectors/window-v1/keys.json`. Every window sets `Task 6`'s cap on seals not yet ready, counted from `window.open`.
+
 ## File map
 
 Create:
@@ -172,7 +178,7 @@ it('chat:running lists the running chat; chat:readScreenshot serves only the scr
 - [ ] **Step 1: Write the failing tests**: each vector; a window and a node complete the handshake and exchange frames both ways; every tamper, replay and reorder closes with the vector's code and no later record opens; padding is to the rule; a frame of exactly `RECORD_MAX` is one record; `ping` after `PING_MS` of nothing and close after `SILENCE_MS` (fake clock); the source walk.
 - [ ] **Step 2: Run** `node --test tests/window-seal.test.js tests/window-vectors.test.js`; expected: FAIL.
 - [ ] **Step 3: Implement** `window-seal.js` and `generate.js` (deterministic ephemerals from `sha('window epk ' + label)`); write `docs/protocol/window-v1.md` (sections: canonical bytes, the handshake, keys, records and padding, heartbeat and close, what the front door sees, codes, vectors) so that every statement is checkable against the code.
-- [ ] **Step 4: Run** `node tests/vectors/window-v1/generate.js --check` (expected `10 vectors match`) and the two test files; expected `# fail 0`.
+- [ ] **Step 4: Run** `node tests/vectors/window-v1/generate.js --check` (expected every vector to match) and the two test files; expected `# fail 0`.
 - [ ] **Step 5: Commit** `feat(bridge): the window seal, window-v1 and its vectors`.
 
 ### Task 5: The bridge server takes a sealed connection
@@ -359,7 +365,7 @@ it('chat:running lists the running chat; chat:readScreenshot serves only the scr
 - Test: `tests/docs-driving.test.js`, `tests/docs-front-door.test.js` (keep green; add the `window` block to whatever table they pin); `npm test`.
 
 - [ ] **Step 1: Write the docs**; a reviewer reads `window-v1.md` beside `window-seal.js` and the vectors.
-- [ ] **Step 2: Run** `node tests/vectors/approval-v1/generate.js --check` (`75 vectors match`), `node tests/vectors/window-v1/generate.js --check` (`10 vectors match`), `node tests/vectors/lease-v1/generate.js --check` (`86 vectors match`), then `npm test`; expected `# fail 0`.
+- [ ] **Step 2: Run** `node tests/vectors/approval-v1/generate.js --check` (`75 vectors match`), `node tests/vectors/window-v1/generate.js --check` (every vector matches), `node tests/vectors/lease-v1/generate.js --check` (`86 vectors match`), then `npm test`; expected `# fail 0`.
 - [ ] **Step 3: Commit** `docs: the remote window in the protocols, the guide, the front door and CLAUDE.md`.
 
 ### After the last task

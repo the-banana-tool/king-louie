@@ -190,6 +190,11 @@ who may reach the splice. It proves nothing to the node.
    that swapped either key cannot make them match, and with a full hash it cannot
    search for a collision, as it could against a short code the owner compares by
    eye.
+   The QR also holds a random value that never goes over a socket. After Allow,
+   the phone shows a 6-digit code made from it, the device key and its pinned
+   node key, and the owner types the code into the window. The window trusts the
+   node key only on a match, since a fake node can answer the window's own
+   questions and say it was approved (my call, from the Task 4 review).
 4. The device-key signature reaches the node, which records the device as
    `remote: true` in `desktop-devices.json`. On a fleet node, where the service
    may not write that file, it is staged and an administrator applies it, as
