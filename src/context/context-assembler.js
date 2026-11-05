@@ -13,8 +13,9 @@ const log = createLogger('context-assembler');
  *    This stabilizes the prompt for caching and eliminates per-turn embedding cost.
  *
  * 2. **Semantic mode** (legacy, for non-Anthropic providers):
- *    Embeds each tool description once at startup, then on each user turn
- *    makes a single embedding call to retrieve only relevant tools.
+ *    Embeds each tool description once (at startup, or on the first turn after
+ *    a switch into this mode), then on each user turn makes a single embedding
+ *    call to retrieve only relevant tools.
  *
  * Both modes keep a core set of tools always available and support the full
  * system prompt section assembly.
@@ -142,8 +143,12 @@ class ContextAssembler {
   }
 
   /**
-   * Register all tool definitions and system prompt sections, then embed
-   * any that aren't already in the vector store.
+   * Register all tool definitions and system prompt sections. In semantic
+   * mode, also embed any that aren't already in the vector store. The vectors
+   * are read only there, and what they embed holds the working directory, git
+   * user, branch, file names, commit subjects, the CLI list and local apps, so
+   * no other mode sends it. A later switch into semantic mode embeds on its
+   * next turn (_assembleSemantic).
    *
    * @param {Array} toolDefinitions - from toolRegistry.getFunctionDefinitions()
    * @param {Array<{name: string, content: string}>} systemSections - named prompt sections
@@ -165,7 +170,27 @@ class ContextAssembler {
       return;
     }
 
-    // Collect items that need embedding (not yet in vector store)
+    if (this.mode === 'semantic') await this._embedMissing();
+
+    // Prune stale vectors whose tools/sections no longer exist
+    const validIds = new Set([
+      ...Array.from(this._tools.keys()).map(n => `tool:${n}`),
+      ...Array.from(this._sections.keys()).map(n => `section:${n}`),
+    ]);
+    for (const vid of Object.keys(this.vectorStore.vectors)) {
+      if ((vid.startsWith('tool:') || vid.startsWith('section:')) && !validIds.has(vid)) {
+        this.vectorStore.remove(vid);
+      }
+    }
+
+    this._indexed = true;
+  }
+
+  /**
+   * Embed the registered tools and sections that have no stored vector. A
+   * failure is logged and the items stay missing, so the next call tries again.
+   */
+  async _embedMissing() {
     const toEmbed = [];
     const ids = [];
 
@@ -185,31 +210,17 @@ class ContextAssembler {
       }
     }
 
-    if (toEmbed.length > 0) {
-      try {
-        const embeddings = await this.embeddingProvider.embed(toEmbed);
-        for (let i = 0; i < ids.length; i++) {
-          if (embeddings[i]) {
-            this.vectorStore.add(ids[i], embeddings[i]);
-          }
+    if (toEmbed.length === 0) return;
+    try {
+      const embeddings = await this.embeddingProvider.embed(toEmbed);
+      for (let i = 0; i < ids.length; i++) {
+        if (embeddings[i]) {
+          this.vectorStore.add(ids[i], embeddings[i]);
         }
-      } catch (err) {
-        log.warn(`Failed to embed during indexing: ${err.message}`);
       }
+    } catch (err) {
+      log.warn(`Failed to embed during indexing: ${err.message}`);
     }
-
-    // Prune stale vectors whose tools/sections no longer exist
-    const validIds = new Set([
-      ...Array.from(this._tools.keys()).map(n => `tool:${n}`),
-      ...Array.from(this._sections.keys()).map(n => `section:${n}`),
-    ]);
-    for (const vid of Object.keys(this.vectorStore.vectors)) {
-      if ((vid.startsWith('tool:') || vid.startsWith('section:')) && !validIds.has(vid)) {
-        this.vectorStore.remove(vid);
-      }
-    }
-
-    this._indexed = true;
   }
 
   /**
@@ -310,6 +321,10 @@ class ContextAssembler {
     if (options.embed === false || !this.embeddingProvider || !this._indexed) {
       return this._fallbackAll(memoryContext);
     }
+
+    // Indexed in another mode, nothing was embedded then. Below the embed:false
+    // check, so a turn under an egress policy never starts this.
+    await this._embedMissing();
 
     let queryVector;
     try {

@@ -77,7 +77,7 @@
     "label": "behind-gate",
     "gate": "src/ipc/chat-handlers.js",
     "check": "...(turnEgress ? { embed: false } : {})",
-    "why": "semantic tool selection embeds the owner's message through a direct OpenAI client; the chat send path passes assemble({ embed: false }) under a policy. index() embeds tool descriptions only"
+    "why": "semantic tool selection embeds the owner's message through a direct OpenAI client; the chat send path passes assemble({ embed: false }) under a policy. Only in semantic mode, which nothing in production turns on, it also embeds the tool descriptions and system sections (working directory, git user, branch, file names, commit subjects, CLI list, local apps): in index(), and on the first turn after a switch into it, never under embed: false. The default mode sends nothing"
   },
   "src/core/create-core.js": {
     "sites": {
@@ -151,9 +151,10 @@
     "why": "the service's loopback listener for a paired desktop (127.0.0.1 only); it carries IPC, and makes no model call"
   },
   "src/execution/agent-loop.js": {
-    "label": "gated",
-    "why": "semantic compaction embeds the query and old tool results through the embedding provider it was handed; given an egress policy the loop takes no provider, and the chat send path hands it none",
-    "check": "this.embeddingProvider = (options.egress !== null && options.egress !== undefined)"
+    "label": "behind-gate",
+    "gate": "src/providers/inference-router.js",
+    "check": "const verdict = targetAllowed(egress, target, this.isGuaranteeTarget);",
+    "why": "makes each model call on the provider it is handed, for the chat send path the routed provider, whose router refuses a hosted target under a policy; it holds no embedder and compacts by age, sending nothing for that"
   },
   "src/fleet/doctor-checks.js": {
     "label": "no-chat-text",
@@ -261,7 +262,7 @@
     "label": "behind-gate",
     "gate": "src/ipc/chat-handlers.js",
     "check": "...(turnEgress ? { embed: false } : {})",
-    "why": "the direct OpenAI embeddings client; only the context assembler builds one, and the send path tells it not to embed under a policy (the agent loop also drops its provider then)"
+    "why": "the direct OpenAI embeddings client; only the context assembler builds one, and the send path tells it not to embed under a policy"
   },
   "src/memory/memory-manager.js": {
     "label": "no-chat-text",

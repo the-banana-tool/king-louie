@@ -66,7 +66,7 @@ On first launch, the onboarding wizard walks you through selecting a provider an
 - **Git Context Injection** — Current branch, working tree status, and recent commits are automatically injected into the system prompt
 
 ### Context & Performance
-- **API-Native Context Compaction** — Clears old tool result content when approaching token limits (Anthropic provider), with embedding-based fallback for other providers
+- **API-Native Context Compaction** — Clears old tool result content when approaching token limits (Anthropic provider), shortening old results by age for the rest
 - **Semantic Context Assembly** — Dynamic per-turn tool and prompt section selection via embeddings, cutting token overhead by 30–60%
 - **Result Persistence** — Oversized tool results are persisted to disk with a preview marker; the model can Read the full file if needed
 
