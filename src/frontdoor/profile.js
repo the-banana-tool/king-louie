@@ -43,6 +43,7 @@ const { GrantStore, AuthCodes } = require('./oauth/grants');
 const { registerGrantRoutes } = require('./oauth/grant-routes');
 const { TokenStore } = require('./oauth/tokens');
 const { createWindowSplice } = require('./window/splice');
+const { createWindowRoutes } = require('./window/routes');
 const { McpHttpEndpoint } = require('./mcp/http-endpoint');
 const { PairingService } = require('./pairing/pairing-service');
 const { createPairHandler } = require('./pairing/pair-http');
@@ -401,10 +402,11 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
     const handler = createFrontDoorHandler({
       mcpHost: hosts.mcp, oauth, mcp, phoneApiHandler: relay.phoneApiHandler,
       pairHandler: createPairHandler({ pairing }),
-      probeHandler: createProbeHandler({ expects: (nonce) => Boolean(probe && probe.expects(nonce)) })
+      probeHandler: createProbeHandler({ expects: (nonce) => Boolean(probe && probe.expects(nonce)) }),
+      windowRoutes: createWindowRoutes({ oauth, tokens, grants, registry })
     });
     windowSplice = createWindowSplice({
-      tokens, grants, registry, nodeHub: relay.nodeHub, windowResourceUrl: () => `${publicUrl}/window/v1`, config: fdConfig.window, auditLedger: ownLedger
+      tokens, grants, registry, nodeHub: relay.nodeHub, windowResourceUrl: () => oauth.windowResourceUrl, config: fdConfig.window, auditLedger: ownLedger
     });
     started('window splice', () => windowSplice.stop());
     const mcpServer = createMcpHttpServer(handler, deps.mcpServerLimits || {}, { onUpgrade: windowSplice.onMcpUpgrade });

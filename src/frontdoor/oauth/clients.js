@@ -50,6 +50,17 @@ function validRedirectUri(uri) {
   return u.protocol === 'http:' && LOOPBACK_HOSTS.has(u.hostname); // RFC 8252 §7.3
 }
 
+// The URL when it is a loopback http: URL, else null.
+function loopbackHttp(uri) {
+  let u;
+  try {
+    u = new URL(uri);
+  } catch {
+    return null;
+  }
+  return u.protocol === 'http:' && LOOPBACK_HOSTS.has(u.hostname) ? u : null;
+}
+
 // What the consent page and the phone call "client host": the CIMD URL's
 // host, or the redirect's host for a dynamically registered client.
 function clientHost(client, redirectUri) {
@@ -250,7 +261,16 @@ class ClientRegistry {
   }
 
   redirectAllowed(client, uri) {
-    return Boolean(client) && validRedirectUri(uri) && client.redirect_uris.includes(uri);
+    if (!client || !validRedirectUri(uri)) return false;
+    if (client.redirect_uris.includes(uri)) return true;
+    // RFC 8252 §7.3: a native app listens on whatever port it was given, so a
+    // loopback redirect matches a registered one on any port. https stays exact.
+    const asked = loopbackHttp(uri);
+    if (!asked) return false;
+    return client.redirect_uris.some((registered) => {
+      const r = loopbackHttp(registered);
+      return Boolean(r) && r.protocol === asked.protocol && r.hostname === asked.hostname && r.pathname === asked.pathname && r.search === asked.search;
+    });
   }
 
   markGranted(clientId) {

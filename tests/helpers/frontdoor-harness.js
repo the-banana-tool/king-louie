@@ -18,6 +18,8 @@ const { GrantStore, AuthCodes } = require('../../src/frontdoor/oauth/grants');
 const { registerGrantRoutes } = require('../../src/frontdoor/oauth/grant-routes');
 const { TokenStore } = require('../../src/frontdoor/oauth/tokens');
 const { createFleetScopeRegistry } = require('../../src/frontdoor/oauth/scopes');
+const { registerWindowScope } = require('../../src/frontdoor/window/scope');
+const { createWindowRoutes } = require('../../src/frontdoor/window/routes');
 const { Challenges } = require('../../src/frontdoor/protocol/challenges');
 const { rawEd25519 } = require('../../src/frontdoor/protocol/messages');
 const { NodeRegistry } = require('../../src/frontdoor/router/node-registry');
@@ -60,6 +62,8 @@ async function startFrontDoorHttp({ mcp = null, fetchMetadata = null, clientDefa
   const registry = new NodeRegistry({ configDir, dataDir, approverStore: store, frontdoorId: fd.nodeId, alerts, adminUid: UID, geteuid: () => UID, now });
   registry.load();
   const scopeRegistry = createFleetScopeRegistry();
+  // As TOOL_EXTENSIONS does; it is advertised only when scopesEnabled lists it.
+  registerWindowScope(scopeRegistry);
   const clients = new ClientRegistry({ file: path.join(dir, 'clients.json'), now, ...(fetchMetadata ? { fetchMetadata } : {}) });
   // pendingPerIp: tests that run several flows from 127.0.0.1 raise R23's 3-per-IP cap.
   const pending = new PendingAuthorizations({ now, ...(pendingPerIp ? { perIp: pendingPerIp } : {}) });
@@ -87,7 +91,8 @@ async function startFrontDoorHttp({ mcp = null, fetchMetadata = null, clientDefa
     scopeRules: () => scopeRegistry.rules(scopesEnabled), auditLedger, onGrantRevoked, tokens, nodes: registry, now
   });
   mcpEndpoint = typeof mcp === 'function' ? mcp({ tokens, grants, registry, scopeRegistry, scopesEnabled, oauth }) : mcp;
-  const handler = createFrontDoorHandler({ mcpHost: 'mcp.kl.example.com', oauth, mcp: mcpEndpoint, phoneApiHandler: phoneApi.handler });
+  const windowRoutes = createWindowRoutes({ oauth, tokens, grants, registry });
+  const handler = createFrontDoorHandler({ mcpHost: 'mcp.kl.example.com', oauth, mcp: mcpEndpoint, phoneApiHandler: phoneApi.handler, windowRoutes });
   const server = http.createServer(handler);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -105,14 +110,14 @@ async function startFrontDoorHttp({ mcp = null, fetchMetadata = null, clientDefa
     store.refresh();
   };
 
-  async function connect({ scopes = null, redirectUri = 'https://client.example.com/cb', clientName = 'Example Client', state = 'xyz', clientId = null, scope = undefined } = {}) {
+  async function connect({ scopes = null, redirectUri = 'https://client.example.com/cb', clientName = 'Example Client', state = 'xyz', clientId = null, scope = undefined, resource = undefined } = {}) {
     let id = clientId;
     if (!id) {
       const reg = await request(base, { method: 'POST', path: '/oauth/register', json: { client_name: clientName, redirect_uris: [redirectUri], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' } });
       id = reg.json.client_id;
     }
     const { verifier, challenge } = pkce();
-    const params = { response_type: 'code', client_id: id, redirect_uri: redirectUri, code_challenge: challenge, code_challenge_method: 'S256', ...(state === null ? {} : { state }), ...(scope === undefined ? {} : { scope }) };
+    const params = { response_type: 'code', client_id: id, redirect_uri: redirectUri, code_challenge: challenge, code_challenge_method: 'S256', ...(state === null ? {} : { state }), ...(scope === undefined ? {} : { scope }), ...(resource === undefined ? {} : { resource }) };
     const consent = await request(base, { path: `/oauth/authorize?${new URLSearchParams(params)}` });
     const { userCode, grantId } = parseConsent(consent.text);
     const lookup = await phoneCall(phone, 'GET', `/v1/grants/pending?user_code=${userCode}`);

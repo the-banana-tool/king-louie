@@ -109,7 +109,7 @@ describe('connecting a client', () => {
 describe('the mcp. dispatcher', () => {
   it('answers only as mcp.<domain>: any other Host is 421 on every path', async () => {
     const h = await start();
-    for (const p of ['/v1/grants/pending?user_code=ABC-DEF', '/oauth/register', '/.well-known/oauth-authorization-server', '/mcp', '/pair/v1', '/nope']) {
+    for (const p of ['/v1/grants/pending?user_code=ABC-DEF', '/oauth/register', '/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/window/v1', '/mcp', '/window/v1/nodes', '/pair/v1', '/nope']) {
       for (const host of ['mesh.kl.example.com', 'kl.example.com', 'mcp.kl.example.com.evil.example.com', '127.0.0.1', '']) {
         const r = await request(h.base, { path: p, host });
         assert.equal(r.status, 421, `${host || '(empty)'} ${p}`);

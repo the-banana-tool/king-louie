@@ -26,7 +26,7 @@ function hostHeaderCount(req) {
 // `mcpHost` is the name the SNI listener routed this connection by
 // (mcp.<domain>), never the TLS socket's servername: a request whose Host
 // names anything else is misdirected (421), whatever its TLS name was.
-function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, pairHandler = null, probeHandler = null } = {}) {
+function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, pairHandler = null, probeHandler = null, windowRoutes = null } = {}) {
   if (typeof mcpHost !== 'string' || !mcpHost) throw new TypeError('createFrontDoorHandler needs mcpHost');
   const host = mcpHost.toLowerCase();
   const route = async (req, res) => {
@@ -79,6 +79,10 @@ function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, p
     if (await oauth.handle(req, res)) return;
     if (pathname === '/mcp' && mcp) {
       await mcp.handle(req, res);
+      return;
+    }
+    if (pathname === '/window/v1/nodes' && windowRoutes) {
+      await windowRoutes.handle(req, res);
       return;
     }
     sendJson(res, 404, { error: 'not_found' });

@@ -301,6 +301,13 @@ describe('a running front door', () => {
     assert.equal(res.json.issuer, t.base);
   });
 
+  it('routes the window list, with the metadata URL on the bound port, and keeps the window resource off until enabled', async () => {
+    const res = await request(t.base, { path: '/window/v1/nodes', tls: t.tls });
+    assert.equal(res.status, 401);
+    assert.equal(res.headers['www-authenticate'], `Bearer error="invalid_token", resource_metadata="${t.base}/.well-known/oauth-protected-resource/window/v1"`);
+    assert.equal((await request(t.base, { path: '/.well-known/oauth-protected-resource/window/v1', tls: t.tls })).status, 404);
+  });
+
   it('pairs a node the phone approves; the node links with its pin; the mirror catches up; an MCP client runs a runbook', async () => {
     const { fd } = t;
     // 1. The phone asks for a pairing code; the node proves it over /pair/v1.
