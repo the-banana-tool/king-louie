@@ -114,7 +114,9 @@ have no `cwd` field at all, since they name a C3 executor and case, not a
 directory. Every action kind requires `summary`.
 
 `origin` is `{ client, session, job_id }`, plus `deviceId` when `client` is `desktop`
-or `remote-window`, so a card names the window that asked.
+or `remote-window`, so a card names the window that asked. A phone without this
+change rejects a `remote-window` origin with `deviceId` as `malformed`, so phones
+upgrade before any node serves a remote window.
 The request lives at most 300 seconds (`expires_at − created_at`, 30–300 s).
 
 ### 3.2 `kl.approval.response` (phone-signed)

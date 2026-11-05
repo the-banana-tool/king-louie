@@ -204,7 +204,12 @@ class ShadowGit {
       // --bare: no worktree of its own. We supply GIT_WORK_TREE per call.
       // The object format is pinned: a checkpoint id is 40 hex whatever the user's git
       // defaults to (init.defaultObjectFormat).
-      await this._run(['init', '--bare', '--quiet', '--object-format=sha1', this.storeDir]);
+      await this._run(['init', '--bare', '--quiet', '--object-format=sha1', this.storeDir]).catch(async () => {
+        // Older than git 2.29, which has no such flag and may still make only sha1.
+        await this._run(['init', '--bare', '--quiet', this.storeDir]);
+        const format = (await this._run(['rev-parse', '--show-object-format']).catch(() => 'sha1')).trim();
+        if (format !== 'sha1') throw new Error(`The checkpoint store must be sha1, and git made ${format}.`);
+      });
     }
 
     await fs.promises.mkdir(this.indexesDir, { recursive: true });

@@ -59,6 +59,28 @@ describe('the checkpoint store', { skip }, () => {
     }
   });
 
+  it('on a git too old for the flag it inits plainly, then checks the format', async () => {
+    for (const [format, ok] of [['sha1', true], ['sha256', false]]) {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-checkpoint-oldgit-'));
+      const git = new ShadowGit({ rootDir: path.join(base, 'checkpoints') });
+      const ran = [];
+      const realRun = git._run.bind(git);
+      git._run = (args, opts) => {
+        ran.push(args);
+        if (args.includes('--object-format=sha1')) return Promise.reject(new Error('git init failed: unknown option'));
+        if (args[1] === '--show-object-format') return Promise.resolve(`${format}\n`);
+        return realRun(args, opts);
+      };
+      try {
+        if (ok) await git.init();
+        else await assert.rejects(git.init(), /sha256/);
+        assert.ok(ran.some((args) => args[0] === 'init' && !args.includes('--object-format=sha1')));
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('a restore with a bad id takes no safety snapshot', async () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-checkpoint-early-'));
     const project = path.join(base, 'project');
