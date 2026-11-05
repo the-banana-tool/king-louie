@@ -477,6 +477,7 @@ module.exports = {
   DEVICES_CONTROLS,
   ADMIN_OWNER_SIDS,
   PairingError,
+  validateLabel,
   defaultDeviceLabel,
   encodePairRequest,
   decodePairRequest,

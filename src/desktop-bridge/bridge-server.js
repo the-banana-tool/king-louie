@@ -17,7 +17,7 @@ const {
 } = require('./protocol');
 const { DEVICES_FILE, DEVICES_CONTROLS, parseDevices, findDevice, emptyDevices } = require('./pairing');
 const { fromB64url, toB64url, verifyWithRawKey } = require('./keys');
-const { WindowSeal, createFrameSender, startHeartbeat } = require('./window-seal');
+const { WindowSeal, createFrameSender, startHeartbeat, ENROLL_FRAME_MAX } = require('./window-seal');
 const { createConnection } = require('./connection');
 const { currentConnection } = require('./run-context');
 
@@ -31,6 +31,10 @@ const DEFAULT_DISCONNECT_CLEANUP_MS = 5000;
 const NOT_SEALING = 'node_not_sealing';
 const RECORD_UNREADABLE = 'record_unreadable';
 const TOO_MANY_HELD = 'too many held windows';
+const TOO_MANY_ENROLLING = 'too many enrolling windows';
+const NOT_ENROLLED = 'not_enrolled';
+const ENROLL_ONLY = 'enroll only';
+const ENROLL_METHODS = Object.freeze(['window.enroll', 'window.enrollStatus']);
 const CLOSE_GRACE_MS = 1000;
 const NOT_REMOTE = 'not_remote';
 const TOO_MANY = 'too_many_windows';
@@ -78,6 +82,9 @@ class DesktopBridgeServer extends EventEmitter {
     this.sockets = new Set();
     // Every open sealed session, from attachSealed until it ends.
     this.sealedSessions = new Set();
+    // deviceId -> its one enroll connection: a device with no record, waiting on a phone.
+    this.enrolling = new Map();
+    this.windowEnrollment = null;
     // The connections of ended sessions still at work: a device dropped with an
     // approval pending can yet be revoked. Bounded at ready by maxHeldPerDevice.
     this.heldConns = new Set();
@@ -110,6 +117,13 @@ class DesktopBridgeServer extends EventEmitter {
       // it goes to the oldest local window.
       getConnection: () => currentConnection() || this._oldestLocal()
     });
+  }
+
+  // Only with features.remoteWindow: until this is called a device with no record is the
+  // one 4401, and the window-v1 vector for it holds.
+  setWindowEnrollment(enrollment) {
+    this.windowEnrollment = enrollment;
+    enrollment.onChange(() => this._recheckLive());
   }
 
   get connected() {
@@ -505,15 +519,26 @@ class DesktopBridgeServer extends EventEmitter {
     if (!doc) return 'unreadable';
     const device = findDevice(doc, conn.deviceId);
     if (!device) return 'gone';
+    if (conn.remote && this._revokedRecord(device)) return 'gone';
     return (conn.remote ? device.remote === true : device.remote !== true) ? 'stands' : 'gone';
+  }
+
+  // A staged revoke over this record, on a fleet node, where the file waits for `device
+  // apply`. A staged approve is not read here: it counts when the file holds it.
+  _revokedRecord(device) {
+    return Boolean(this.windowEnrollment) && this.windowEnrollment.revokedRecord(device) === true;
   }
 
   // One read of the file per pass, however many connections it judges.
   _recheckLive() {
-    if (this.connections.size > 0 || this.heldConns.size > 0) this._judgeConnections(this._readDevices().doc);
+    if (this.connections.size > 0 || this.heldConns.size > 0 || this.enrolling.size > 0) {
+      const { doc } = this._readDevices();
+      this._judgeConnections(doc);
+      for (const state of [...this.enrolling.values()]) this._judgeEnrolling(state, doc);
+    }
     if (this.sealedSessions.size === 0 || !this._sealRefusal()) return;
     for (const state of [...this.sealedSessions]) {
-      if (state.stage === 'ready') this._endSealed(state, CLOSE.NOT_SEALING, NOT_SEALING, { record: true });
+      if (state.stage === 'ready' || state.stage === 'enrolling') this._endSealed(state, CLOSE.NOT_SEALING, NOT_SEALING, { record: true });
     }
   }
 
@@ -604,6 +629,7 @@ class DesktopBridgeServer extends EventEmitter {
           },
           // A local record's key too: the handshake proves the key, and the path is
           // judged at ready, so only the key's holder learns its record is local.
+          enrollUnknown: Boolean(this.windowEnrollment),
           lookupDevice: (deviceId) => {
             const { doc } = this._readDevices();
             if (!doc) state.lookupUnreadable = true;
@@ -678,6 +704,11 @@ class DesktopBridgeServer extends EventEmitter {
       return;
     }
     if (state.stage === 'handshake' && ready) this._onSealedReady(state, peer);
+    if (state.stage === 'enrolling') {
+      state.heartbeat.received();
+      for (const frame of frames) this._onEnrollFrame(state, frame);
+      return;
+    }
     if (state.stage !== 'ready') return;
     state.heartbeat.received();
     for (const frame of frames) this._onSealedFrame(state, frame);
@@ -687,11 +718,16 @@ class DesktopBridgeServer extends EventEmitter {
   // under the seal.
   _onSealedReady(state, peer) {
     const refuse = (code, reason) => this._endSealed(state, code, reason, { record: true });
+    // Unknown to a lookup that could not read is not unknown: an enrolled device must
+    // never land in the enroll state because the file was unreadable for one moment.
+    if (peer.enrolled === false && state.lookupUnreadable) return refuse(CLOSE.RECORD_UNREADABLE, RECORD_UNREADABLE);
     const { doc } = this._readDevices();
     if (!doc) return refuse(CLOSE.RECORD_UNREADABLE, RECORD_UNREADABLE);
     const device = findDevice(doc, peer.deviceId);
+    if (peer.enrolled === false && !device) return this._beginEnrolling(state, peer);
     if (!device || device.publicKey !== toB64url(peer.publicKey)) return refuse(CLOSE.UNKNOWN_DEVICE, 'unknown device');
     if (device.remote !== true) return refuse(CLOSE.NOT_REMOTE, NOT_REMOTE);
+    if (this._revokedRecord(device)) return refuse(CLOSE.UNKNOWN_DEVICE, 'unknown device');
     if (this._sealRefusal()) return refuse(CLOSE.NOT_SEALING, NOT_SEALING);
     if ([...this.heldConns].filter((c) => c.deviceId === device.deviceId).length >= this.limits.maxHeldPerDevice) return refuse(CLOSE.TRY_AGAIN, TOO_MANY_HELD);
     // One connection per device: attaching again takes its own place.
@@ -702,13 +738,9 @@ class DesktopBridgeServer extends EventEmitter {
       old.markGone();
       old.close(CLOSE.NORMAL, 'replaced by a new connection');
     }
-    const senderLimits = Number.isInteger(this.limits.sealedQueueBytes) ? { maxQueuedBytes: this.limits.sealedQueueBytes } : {};
-    state.sender = createFrameSender({ seal: state.seal, ...senderLimits });
-    state.heartbeat = startHeartbeat({
-      ...this.sealedDeps,
-      ping: () => state.seal.ping(),
-      onSilence: ({ code, reason }) => this._endSealed(state, code, reason)
-    });
+    this._leaveEnrolling(state);
+    state.seal.promote();
+    if (!state.sender) this._startSealedIo(state);
     state.stage = 'ready';
     const conn = createConnection({
       deviceId: device.deviceId,
@@ -726,6 +758,103 @@ class DesktopBridgeServer extends EventEmitter {
     return undefined;
   }
 
+  _startSealedIo(state) {
+    const senderLimits = Number.isInteger(this.limits.sealedQueueBytes) ? { maxQueuedBytes: this.limits.sealedQueueBytes } : {};
+    state.sender = createFrameSender({ seal: state.seal, ...senderLimits });
+    state.heartbeat = startHeartbeat({
+      ...this.sealedDeps,
+      ping: () => state.seal.ping(),
+      onSilence: ({ code, reason }) => this._endSealed(state, code, reason)
+    });
+  }
+
+  // R-RW-36: a device with no record, whose key has proved itself, and nothing else. It
+  // has no connection and no dispatcher, so nothing it sends can reach a handler, and it
+  // counts against no window's place.
+  _beginEnrolling(state, peer) {
+    const refuse = (code, reason) => this._endSealed(state, code, reason, { record: true });
+    if (!this.windowEnrollment) return refuse(CLOSE.UNKNOWN_DEVICE, 'unknown device');
+    if (this._sealRefusal()) return refuse(CLOSE.NOT_SEALING, NOT_SEALING);
+    const old = this.enrolling.get(peer.deviceId);
+    if (old) this._endSealed(old, CLOSE.NORMAL, 'replaced by a new connection', { record: true });
+    if (this.enrolling.size >= this.limits.maxEnrollWindows) return refuse(CLOSE.TRY_AGAIN, TOO_MANY_ENROLLING);
+    this._startSealedIo(state);
+    state.stage = 'enrolling';
+    state.peer = peer;
+    state.requestId = null;
+    state.enrollCalls = 0;
+    this.enrolling.set(peer.deviceId, state);
+    const setTimer = this.sealedDeps.setTimer || setTimeout;
+    state.enrollTimer = setTimer(() => this._endSealed(state, CLOSE.NOT_ENROLLED, NOT_ENROLLED, { record: true }), this.limits.enrollDeadlineMs);
+    state.enrollTimer?.unref?.();
+    this._sendSealed(state, { t: 'enrolling', protocol: PROTOCOL });
+    state.resolve({ enrolling: true, deviceId: peer.deviceId });
+    return undefined;
+  }
+
+  _leaveEnrolling(state) {
+    if (state.enrollTimer !== undefined) (this.sealedDeps.clearTimer || clearTimeout)(state.enrollTimer);
+    state.enrollTimer = undefined;
+    if (state.peer && this.enrolling.get(state.peer.deviceId) === state) this.enrolling.delete(state.peer.deviceId);
+  }
+
+  // The two methods, and a close on anything else, under the seal.
+  _onEnrollFrame(state, frame) {
+    const offEnroll = () => this._endSealed(state, CLOSE.MALFORMED, ENROLL_ONLY, { record: true });
+    const parsed = parseFrame(frame, ENROLL_FRAME_MAX);
+    if (parsed.error) return offEnroll();
+    const { t, id, method, params } = parsed.frame;
+    if (t !== 'call' || !Number.isSafeInteger(id) || !ENROLL_METHODS.includes(method)) return offEnroll();
+    state.enrollCalls += 1;
+    if (state.enrollCalls > this.limits.enrollCallsMax) return this._endSealed(state, CLOSE.TRY_AGAIN, SLOW_READER, { record: true });
+    Promise.resolve()
+      .then(() => (method === 'window.enroll' ? this._enrollRequest(state, params) : this._enrollStatus(state, params)))
+      .then(
+        (value) => this._sendSealed(state, { t: 'result', id, value }),
+        (err) => this._sendSealed(state, { t: 'result', id, error: err.message, code: err.code || 'CALL_FAILED' })
+      )
+      .then(() => this._judgeEnrolling(state, this._readDevices().doc))
+      .catch((err) => log.warn(`an enroll call failed: ${err.message}`));
+    return undefined;
+  }
+
+  // The device is the one the handshake proved, whatever the parameters say.
+  async _enrollRequest(state, params) {
+    const { deviceId, publicKey } = state.peer;
+    const answer = await this.windowEnrollment.request({ deviceId, publicKey: toB64url(publicKey), label: params ? params.label : undefined });
+    state.requestId = answer.request_id;
+    return answer;
+  }
+
+  _enrollStatus(state, params) {
+    const { deviceId, publicKey } = state.peer;
+    const { doc } = this._readDevices();
+    const device = doc ? findDevice(doc, deviceId) : null;
+    if (device && device.remote === true && device.publicKey === toB64url(publicKey) && !this._revokedRecord(device)) return { state: 'approved' };
+    const requestId = params ? params.request_id : undefined;
+    const answer = this.windowEnrollment.status(requestId, deviceId);
+    if (answer.state !== 'unknown') state.requestId = requestId;
+    return answer;
+  }
+
+  // On every re-read, every answer and every change. A record promotes it, through the
+  // same checks as any attach and a fresh read. Only its own request's outcome ends it:
+  // an old denial is no answer to a connection that has asked nothing. A file that cannot
+  // be read says nothing yet.
+  _judgeEnrolling(state, doc) {
+    if (state.stage !== 'enrolling' || !doc) return;
+    if (findDevice(doc, state.peer.deviceId)) {
+      this._onSealedReady(state, { deviceId: state.peer.deviceId, publicKey: state.peer.publicKey, enrolled: true });
+      return;
+    }
+    if (state.requestId === null) return;
+    const { state: outcome } = this.windowEnrollment.status(state.requestId, state.peer.deviceId);
+    if (outcome !== 'denied' && outcome !== 'expired') return;
+    // In a sealed frame, since a socket's code proves nothing; the code in a close record.
+    this._sendSealed(state, { t: 'enrollState', state: outcome });
+    this._endSealed(state, CLOSE.NOT_ENROLLED, NOT_ENROLLED, { record: true });
+  }
+
   // The same checks as a loopback frame, because it is the same path.
   _onSealedFrame(state, frame) {
     const { conn } = state;
@@ -740,7 +869,7 @@ class DesktopBridgeServer extends EventEmitter {
   }
 
   _sendSealed(state, obj) {
-    if (state.stage !== 'ready') return false;
+    if (state.stage !== 'ready' && state.stage !== 'enrolling') return false;
     const text = this._frameText(obj);
     if (text === null) return false;
     // A full queue, a stopped sender or a dropped socket: the session is over.
@@ -759,6 +888,7 @@ class DesktopBridgeServer extends EventEmitter {
     if (state.stage === 'closed') return;
     const before = state.stage;
     state.stage = 'closed';
+    this._leaveEnrolling(state);
     state.heartbeat?.stop();
     state.sender?.stop();
     try {

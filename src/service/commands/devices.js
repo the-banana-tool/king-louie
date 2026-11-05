@@ -372,6 +372,13 @@ function describeStagedItem(item, now, recordsById = null) {
       : ['box key', boxKeyText(item.message.box_key)];
     return `${word}  ${shown(item.deviceId)}  ${name}  ${text}  signed by the device itself  (${age})`;
   }
+  if (item.type === 'kl.window.revoke') return `revoke window  ${shown(item.deviceId)}  signed by ${shown(item.signer)}  (${age})`;
+  if (item.type === 'kl.window.enroll.response') {
+    // Opened from the node's own signed request, or said not to be.
+    const w = item.window;
+    const name = w ? `window ${shown(w.label)}  ${shown(w.device_id)}` : 'window (its request does not verify)';
+    return `${name}  allowed by ${shown(item.signer)}  (${describeAge(item.message.signed_at, now)})`;
+  }
   if (item.type === 'kl.device.revoke') return `revoke  ${shown(item.deviceId)}  signed by ${shown(item.signer)}  (${age})`;
   const device = item.message && item.message.device;
   const readKey = device && device.read_key ? `  with a read key ${readKeyText(device.read_key)}` : '';
@@ -549,6 +556,8 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
     const nodeCfg = loadNodeConfig({ dataDir, adminConfigDir: configDir, ...(deps.storeOptions || {}) });
     const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeCfg.name);
     const ledger = auditLedger(dataDir, identity, written);
+    const { createWindowDevices } = require('../../desktop-bridge/window-enrollment');
+    const windowDevices = createWindowDevices({ configDir, dataDir, identity });
 
     if (sub === 'revoke') {
       if (!arg) {
@@ -569,10 +578,15 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
     let results;
     try {
       results = await admin.applyStaged({
+        windowDevices,
         confirm: async (items) => {
           const nowMs = (deps.now || Date.now)();
           const recordsById = new Map();
           for (const i of items) {
+            if (i.type === 'kl.window.enroll.response') {
+              const opened = i.request ? windowDevices.openRequest(i.request) : { reason: 'no_request' };
+              i.window = opened.reason ? null : opened.content.window;
+            }
             if (i.type !== 'kl.device.read_key' && i.type !== 'kl.device.box_key') continue;
             const record = admin.read(i.deviceId);
             if (record) recordsById.set(i.deviceId, record);
@@ -599,7 +613,10 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
       // the various `rejected: …` reasons, including unsafe/unreadable
       // entries — all just displayed, since only enrolled/revoked write audit.
       // Unsafe and unreadable entries have no device id: name the file.
-      io.stdout.write(`${r.deviceId ? shown(r.deviceId) : r.file}: ${r.result}\n`);
+      if (r.result === 'window enrolled') io.stdout.write(`window ${shown(r.label)} (${shown(r.deviceId)}) enrolled\n`);
+      else io.stdout.write(`${r.deviceId ? shown(r.deviceId) : r.file}: ${r.result}\n`);
+      if (r.result === 'window enrolled') await ledger.append({ kind: 'window.enrolled', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
+      if (r.result === 'window revoked') await ledger.append({ kind: 'window.revoked', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'enrolled') await ledger.append({ kind: 'device.enrolled', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'revoked') await ledger.append({ kind: 'device.revoked', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'read key set') await ledger.append({ kind: 'device.read_key_set', data: { device_id: r.deviceId, by: r.signer, envelope: null } });

@@ -64,6 +64,8 @@ const SIG_BYTES = 64;
 const COUNTER_MAX = (1n << 64n) - 1n;
 // No frame, no key: the handshake's deadline, on both roles.
 const HANDSHAKE_TIMEOUT = 4408;
+// What a device with no record may send, whole, until it is promoted (R-RW-36).
+const ENROLL_FRAME_MAX = LIMITS.preAuthFrameBytes;
 // What a host sets on a sealed socket, and the raw bytes it takes before ready.
 const SOCKET_OPTIONS = Object.freeze({ maxPayload: RECORD_WIRE_MAX, perMessageDeflate: false });
 const PRE_READY_BYTES = LIMITS.preAuthSocketBytes;
@@ -227,6 +229,8 @@ class SealSession {
   // role 'node'
   #identity;
   #lookupDevice;
+  #enrollUnknown;
+  #enrolling = false;
   #claimed = null;
   #write;
   #onClose;
@@ -244,6 +248,7 @@ class SealSession {
     this.#pin = fields.pin;
     this.#identity = fields.identity;
     this.#lookupDevice = fields.lookupDevice;
+    this.#enrollUnknown = fields.enrollUnknown === true;
     this.#state = fields.role === 'window' ? STATE.start : STATE.helloW;
     this.#write = fields.write;
     this.#onClose = fields.onClose;
@@ -269,6 +274,12 @@ class SealSession {
     if (this.#state === STATE.helloN) return this.#onHelloN(bytes);
     if (this.#state === STATE.helloW) return this.#onHelloW(bytes);
     return this.#onAuthW(bytes);
+  }
+
+  // The host found the record a device with none has now: full limits from here on.
+  promote() {
+    this.#assertSendable();
+    this.#enrolling = false;
   }
 
   // Lazily, one record each step, so a slow socket holds back the encryption too:
@@ -486,10 +497,24 @@ class SealSession {
     const claimed = this.#claimed;
     const known = this.#lookup(claimed.deviceId);
     const signed = Buffer.concat([WINDOW_DOMAIN, this.#session, this.#helloW, this.#helloN]);
+    if (this.#enrollUnknown) return this.#onAuthEnrolling(claimed, known, signed, auth.subarray(1));
     // The signature is checked for an unknown device too, so its time says nothing.
     const verified = verifyWithRawKey(known || claimed.publicKey, signed, auth.subarray(1));
     if (!known || !known.equals(claimed.publicKey) || !verified) return this.#failHandshake();
     this.#peer = claimed;
+    this.#state = STATE.open;
+    this.#clearDeadline();
+    return this.#result();
+  }
+
+  // R-RW-36, a host's option: the key the window claimed proves itself first, and a
+  // device with no record is told apart from one with a record by `enrolled`, so nothing
+  // takes it for one. A stored key that differs is the one failure as ever.
+  #onAuthEnrolling(claimed, known, signed, signature) {
+    if (!verifyWithRawKey(claimed.publicKey, signed, signature)) return this.#failHandshake();
+    if (known && !known.equals(claimed.publicKey)) return this.#failHandshake();
+    this.#peer = { ...claimed, enrolled: Boolean(known) };
+    this.#enrolling = !known;
     this.#state = STATE.open;
     this.#clearDeadline();
     return this.#result();
@@ -559,6 +584,7 @@ class SealSession {
   // final one, so one frame has one encoding and a run past the limit is refused
   // before it is held.
   #paddingFor(kind, len) {
+    if (this.#enrolling && (kind === KIND.more || (kind === KIND.final && len > ENROLL_FRAME_MAX))) return 0;
     if (kind === KIND.more) {
       const held = this.#run ? this.#run.bytes : 0;
       return len === RECORD_MAX && held + len < FRAME_MAX ? PAD_LARGE : 0;
@@ -612,7 +638,7 @@ const WindowSeal = Object.freeze({
     });
   },
 
-  node({ sessionId, identity, lookupDevice, write, onClose, setTimer, clearTimer, ephemeral = null } = {}) {
+  node({ sessionId, identity, lookupDevice, enrollUnknown = false, write, onClose, setTimer, clearTimer, ephemeral = null } = {}) {
     if (!identity || typeof identity.sign !== 'function') throw sealError('SEAL_INVALID', 'a node signs');
     if (typeof lookupDevice !== 'function') throw sealError('SEAL_INVALID', 'a node looks devices up');
     const key = rawKey(identity.publicKey, 'a node key');
@@ -622,6 +648,7 @@ const WindowSeal = Object.freeze({
       session: sessionBytes(sessionId),
       identity: { nodeId: identity.nodeId, publicKey: key, sign: (bytes) => identity.sign(bytes) },
       lookupDevice,
+      enrollUnknown,
       ephemeral: newEphemeral(ephemeral),
       ...hostFields({ write, onClose, setTimer, clearTimer })
     });
@@ -791,6 +818,7 @@ module.exports = {
   PING_MS,
   SILENCE_MS,
   HANDSHAKE_TIMEOUT,
+  ENROLL_FRAME_MAX,
   PRE_READY_BYTES,
   SOCKET_OPTIONS,
   advanceCounter,

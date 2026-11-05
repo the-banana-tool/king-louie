@@ -13,7 +13,8 @@ const MAX_PUSH_ID = 128;
 // push.notify (and the relay's own push-test) sends (push spec §7.1).
 // The only fields push.notify defines; any other is refused, so no text can ride along.
 const PUSH_NOTIFY_KEYS = ['kind', 'id', 'to_device', 'except_device', 'expires_at'];
-const PUSH_KINDS = KINDS.filter((k) => !FCM_ONLY_KINDS.includes(k));
+// `window` is fcm only and goes with its message, so it stays here.
+const PUSH_KINDS = KINDS.filter((k) => !FCM_ONLY_KINDS.includes(k) || k === 'window');
 // The kinds push.notify may push (push spec §6.2): a lease's ending or
 // contact pause, keyed by its lease id (SESSION_KINDS, from push/text.js).
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

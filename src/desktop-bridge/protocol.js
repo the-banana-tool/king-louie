@@ -31,6 +31,11 @@ const LIMITS = Object.freeze({
   maxTrackedFailures: 1024,
   // Windows attached at once, local and remote together (spec 2026-11-04 §9).
   maxDevices: 8,
+  // Devices with no record waiting on a phone (R-RW-36). They count against nothing
+  // else, and each has a deadline and a bound on the calls it may make.
+  maxEnrollWindows: 4,
+  enrollDeadlineMs: 15 * 60 * 1000,
+  enrollCallsMax: 1200,
   // One device's gone windows whose calls still run, kept so a revoke can reach them.
   // Past this that device's new session is refused, never one forgotten. No bound
   // across devices is needed: each needs a record, and a record is the owner's.
@@ -44,6 +49,8 @@ const CLOSE = Object.freeze({
   MALFORMED: 4400,
   BAD_SIGNATURE: 4401,
   UNKNOWN_DEVICE: 4403,
+  // An enroll connection whose request was denied, lapsed or ran out of time.
+  NOT_ENROLLED: 4403,
   // A device whose record is local, on the sealed path (R-RW-15), with its own reason.
   NOT_REMOTE: 4403,
   // Neither says anything about the device, so a window must not read them as a revoke.

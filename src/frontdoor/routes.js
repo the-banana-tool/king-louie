@@ -387,6 +387,62 @@ function registerPhoneRoutes(relay) {
     }
   });
 
+  // A window asks to attach (R-RW-14). The relay holds no decision and no window: it
+  // files what a device signed with its device key, and asks each node for the rest. The
+  // node checks all of it again.
+  const windowEnvelope = (ctx, type, code) => {
+    const message = parseEnvelope(ctx.body, type);
+    if (message.device_id !== ctx.deviceId || ctx.body.kid !== ctx.deviceId || !verifyEs256(ctx.body, ctx.device.jwk)) {
+      throw new ApiError(400, code, 'the body must be signed by the calling device, with its device key');
+    }
+    if (!activeNodes(ctx.deviceId).includes(message.node_id)) throw new ApiError(403, 'forbidden', 'this device is not an approver on that node');
+    return message;
+  };
+  const windowAnswer = (result) => ({
+    state: result && typeof result.state === 'string' ? result.state : 'offline',
+    reason: result && typeof result.reason === 'string' ? result.reason : null,
+    pending_apply: Boolean(result && result.pending_apply === true)
+  });
+
+  phoneApi.registerRoute('POST', '/v1/windows/enroll', {
+    auth: 'device',
+    rate: { perMin: 30 },
+    handler: async (req, ctx) => {
+      const message = windowEnvelope(ctx, 'kl.window.enroll.response', 'bad_window_answer');
+      return { status: 202, body: windowAnswer(await toNode(message.node_id, 'window.enroll_response', { envelope: ctx.body })) };
+    }
+  });
+
+  phoneApi.registerRoute('POST', '/v1/windows/revoke', {
+    auth: 'device',
+    rate: { perMin: 30 },
+    handler: async (req, ctx) => {
+      const message = windowEnvelope(ctx, 'kl.window.revoke', 'bad_window_revoke');
+      return { status: 202, body: windowAnswer(await toNode(message.node_id, 'window.revoke', { envelope: ctx.body })) };
+    }
+  });
+
+  // Rows of { node_id, envelope | null }: what each node lists to this phone, sealed to
+  // it, and any request still in the mailbox (each told by its message's type).
+  phoneApi.registerRoute('GET', '/v1/windows', {
+    auth: 'read',
+    handler: async (req, ctx) => {
+      const nodeIds = activeNodes(ctx.deviceId);
+      const asking = relay.mailbox.list({ nodeIds, typePrefix: 'kl.window.enroll', toDevice: ctx.deviceId })
+        .map(({ node_id: nodeId, envelope, expires_at: expiresAt }) => ({ node_id: nodeId, envelope, expires_at: expiresAt }));
+      const lists = await Promise.all(nodeIds.map(async (nodeId) => {
+        try {
+          const result = await nodeHub.rpc(nodeId, 'window.list', { to_device: ctx.deviceId });
+          const envelope = result && result.envelope;
+          return { node_id: nodeId, envelope: envelope && typeof envelope === 'object' && !Array.isArray(envelope) ? envelope : null };
+        } catch {
+          return { node_id: nodeId, envelope: null };
+        }
+      }));
+      return { body: [...asking, ...lists] };
+    }
+  });
+
   phoneApi.registerRoute('GET', '/v1/devices', {
     auth: 'read',
     handler: async (req, ctx) => {

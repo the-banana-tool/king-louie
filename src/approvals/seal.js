@@ -61,6 +61,24 @@ const SEAL_TABLE = Object.freeze({
   'kl.question.answer': {
     content: ['case_id', 'question_id', 'answer'],
     clear: ['v', 'type', 'node_id', 'token', 'device_id', 'nonce', 'signed_at']
+  },
+  // A window's enrollment (remote window R-RW-14). The answer's decision and a revoke's
+  // reason are the phone's own words to the node.
+  'kl.window.enroll': {
+    content: ['window', 'node_key', 'salt'],
+    clear: ['v', 'type', 'request_id', 'node_id', 'node_name', 'enroll_hash', 'created_at', 'expires_at', 'nonce', 'node_box']
+  },
+  'kl.window.enroll.response': {
+    content: ['decision'],
+    clear: ['v', 'type', 'request_id', 'node_id', 'enroll_hash', 'nonce', 'device_id', 'expires_at', 'signed_at']
+  },
+  'kl.window.revoke': {
+    content: ['reason'],
+    clear: ['v', 'type', 'node_id', 'window_id', 'device_id', 'created_at', 'expires_at', 'nonce']
+  },
+  'kl.window.list': {
+    content: ['windows'],
+    clear: ['v', 'type', 'node_id', 'to_device', 'at', 'nonce', 'node_box']
   }
 });
 
@@ -68,8 +86,9 @@ const SEAL_TABLE = Object.freeze({
 const SEAL_SPLIT = Object.freeze(Object.fromEntries(Object.entries(SEAL_TABLE).map(([type, row]) => [type, Object.freeze(row.content)])));
 
 // Which clear key names the sender, the third line of the HKDF info. A phone
-// sends only the answer; a node sends the rest.
-const senderKey = (type) => (type === 'kl.question.answer' ? 'device_id' : 'node_id');
+// sends these; a node sends the rest.
+const PHONE_SENT = Object.freeze(['kl.question.answer', 'kl.window.enroll.response', 'kl.window.revoke']);
+const senderKey = (type) => (PHONE_SENT.includes(type) ? 'device_id' : 'node_id');
 
 const SEALED_KEYS = 'ct,epk,iv,keys,v';
 const RECIPIENT_ID_RE = /^(d|kl)-[a-z2-7]{16}$/;

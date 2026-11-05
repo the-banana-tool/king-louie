@@ -12,3 +12,6 @@ module.exports.push(require('./question-routes').registerQuestionRoutes);
 
 // Fleet stage 5 §4.7: computer-use leases (requests, grants, the kill switch and the live view).
 module.exports.push(require('../gui/relay-extension').registerLeaseRoutes);
+
+// Remote window R-RW-14: a window's request waits here for GET /v1/windows (routes.js).
+module.exports.push(({ mailbox }) => mailbox.registerType('kl.window.', { ttlMs: 10 * 60 * 1000 }));

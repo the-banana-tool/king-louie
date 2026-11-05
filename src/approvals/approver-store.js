@@ -23,7 +23,11 @@ const APPROVER_CONTROLS = {
 };
 const CACHE_MS = 1000;
 // What a phone may relay for staging (spec §4.6, android-slim §8.7).
-const STAGED_TYPES = ['kl.device.enroll', 'kl.device.revoke', 'kl.device.read_key', 'kl.device.box_key'];
+const STAGED_TYPES = ['kl.device.enroll', 'kl.device.revoke', 'kl.device.read_key', 'kl.device.box_key', 'kl.window.enroll.response', 'kl.window.revoke'];
+// A window's two (R-RW-15) come only from WindowEnrollment, which passes `window`, never
+// through a relay's device.* method.
+const WINDOW_RESPONSE = 'kl.window.enroll.response';
+const WINDOW_REVOKE = 'kl.window.revoke';
 // A staged message's own signed created_at may not be this far ahead of the
 // node's clock. Without this, a revoke dated far in the future would never
 // age out of MAX_STAGED_AGE_MS (age = now - created_at is negative), making
@@ -282,6 +286,9 @@ class ApproverStore {
     // must fail closed, the same as one that failed the check.
     this.untrusted = true;
     this.overlay = new Set();
+    // A window id -> when the newest verified revoke of it was signed (ms). Only removes
+    // trust, like the overlay; rebuilt from what is staged.
+    this.windowOverlay = new Map();
     this._files = new Map();
     this._scannedAt = -Infinity;
     this._logged = new Set();
@@ -529,8 +536,23 @@ class ApproverStore {
     return null;
   }
 
+  // A relayed revoke of a window, against the admin-applied set as a device's is.
+  _checkWindowRevoke(envelope, message) {
+    if (envelope.alg !== 'ES256' || envelope.kid !== message.device_id) return 'malformed';
+    if (!this.isAdminApplied(message.device_id)) return 'signer_not_active';
+    if (!verifyEs256(envelope, this.get(message.device_id).public_key)) return 'bad_signature';
+    return null;
+  }
+
+  _noteWindowRevoke(message) {
+    const at = Date.parse(message.created_at);
+    const known = this.windowOverlay.get(message.window_id);
+    if (known === undefined || at > known) this.windowOverlay.set(message.window_id, at);
+  }
+
   _rebuildOverlay() {
     this.overlay.clear();
+    this.windowOverlay.clear();
     if (!this.stagedDir) return;
     let names;
     try {
@@ -546,6 +568,7 @@ class ApproverStore {
       try {
         const { envelope } = JSON.parse(this.fs.readFileSync(path.join(this.stagedDir, name), 'utf8'));
         const { message } = open(envelope);
+        if (message.type === WINDOW_REVOKE && !validateMessage(WINDOW_REVOKE, message) && this._checkWindowRevoke(envelope, message) === null) this._noteWindowRevoke(message);
         if (message.type !== 'kl.device.revoke' || validateMessage('kl.device.revoke', message)) continue;
         if (this._checkRevoke(envelope, message) === null) this.overlay.add(message.device_id);
       } catch (err) {
@@ -554,7 +577,9 @@ class ApproverStore {
     }
   }
 
-  stage(envelope) {
+  // `window` only from WindowEnrollment: `{ request }` is the node's request envelope,
+  // kept with an approve for `device apply` to verify.
+  stage(envelope, { window = null } = {}) {
     const rejected = (reason) => ({ state: 'rejected', reason });
     if (!this.stagedDir) return rejected('no_staging_dir');
     let message;
@@ -565,6 +590,7 @@ class ApproverStore {
     }
     const type = message.type;
     if (!STAGED_TYPES.includes(type)) return rejected('malformed');
+    if ((type === WINDOW_RESPONSE || type === WINDOW_REVOKE) && !window) return rejected('malformed');
     // Validated before it is used as a file name.
     if (typeof message.nonce !== 'string' || !NONCE_RE.test(message.nonce)) return rejected('malformed');
     if (this._isKnownNonce(message.nonce)) {
@@ -578,8 +604,12 @@ class ApproverStore {
     // Checked before `expired`: a message dated far in the future would
     // otherwise pass expiry (its expires_at is future too) and, for a
     // revoke, defer forever instead of aging out within 7 days.
-    if (Date.parse(message.created_at) - this.now() > FUTURE_SKEW_MS) return rejected('from_the_future');
+    // A window's answer is dated signed_at; everything else, created_at.
+    if (Date.parse(message.created_at || message.signed_at) - this.now() > FUTURE_SKEW_MS) return rejected('from_the_future');
     if (this.now() > Date.parse(message.expires_at)) return rejected('expired');
+
+    if (type === WINDOW_RESPONSE) return this._stageWindowResponse(envelope, message, window);
+    if (type === WINDOW_REVOKE) return this._stageWindowRevoke(envelope, message);
 
     if (type === 'kl.device.enroll') {
       if (message.enrolled_by === null) return rejected('console_enrollment_is_not_relayed');
@@ -618,6 +648,26 @@ class ApproverStore {
     return { state: 'revoked-pending-apply' };
   }
 
+  // An approved window (R-RW-15): the pair goes to `device apply`, which verifies both
+  // again, since this directory is the service account's. It counts for nothing here.
+  _stageWindowResponse(envelope, message, { request }) {
+    const rejected = (reason) => ({ state: 'rejected', reason });
+    if (!request || envelope.alg !== 'ES256' || envelope.kid !== message.device_id) return rejected('malformed');
+    if (!this.isActive(message.device_id)) return rejected('signer_not_active');
+    if (!verifyEs256(envelope, this.get(message.device_id).public_key)) return rejected('bad_signature');
+    if (!this._writeStagedSafe(message.nonce, envelope, { request })) return rejected('staging_write_failed');
+    return { state: 'staged' };
+  }
+
+  // The overlay first, as for a device: the sessions close whether or not it can be kept.
+  _stageWindowRevoke(envelope, message) {
+    const fault = this._checkWindowRevoke(envelope, message);
+    if (fault) return { state: 'rejected', reason: fault };
+    this._noteWindowRevoke(message);
+    if (!this._writeStagedSafe(message.nonce, envelope)) return { state: 'rejected', reason: 'staging_write_failed' };
+    return { state: 'revoked-pending-apply' };
+  }
+
   // A device key's statement of its read key (android-slim spec §8.7) or box
   // key (sealed phones, R-SP-10), checked like a relayed revoke: the signer is
   // the device itself, an active approver whose device key (never the read
@@ -647,17 +697,17 @@ class ApproverStore {
     return verifyEs256(envelope, record.public_key) && KEY_STATEMENTS[message.type].judge(record, message, { allowTestKeys: this.allowTestKeys }) === 'applied';
   }
 
-  _writeStaged(nonce, envelope) {
+  _writeStaged(nonce, envelope, extra = {}) {
     this.fs.mkdirSync(this.stagedDir, { recursive: true, mode: 0o700 });
-    writeFileAtomic(this._stagedFile(nonce), `${JSON.stringify({ received_at: new Date(this.now()).toISOString(), envelope })}\n`);
+    writeFileAtomic(this._stagedFile(nonce), `${JSON.stringify({ received_at: new Date(this.now()).toISOString(), envelope, ...extra })}\n`);
   }
 
   // A gate refusal is a result, never a throw: if the staged dir cannot be
   // written (missing parent, a file where a dir should be, disk full, …),
   // stage() must report it, not crash whatever called it.
-  _writeStagedSafe(nonce, envelope) {
+  _writeStagedSafe(nonce, envelope, extra = {}) {
     try {
-      this._writeStaged(nonce, envelope);
+      this._writeStaged(nonce, envelope, extra);
       return true;
     } catch (err) {
       log.error(`failed to stage ${nonce}: ${err.message}`);

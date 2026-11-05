@@ -49,9 +49,22 @@ function isTestNodeKey(spkiHex) {
   return TEST_NODE_KEYS.includes(String(spkiHex).toLowerCase());
 }
 
+// The raw Ed25519 keys in tests/vectors/window-v1/keys.json, in hex (R-RW-36): never
+// enrolled as a window, whatever role the file gives them.
+const TEST_WINDOW_KEYS = Object.freeze([
+  '0143e4bbd5f309bad630dd7f5c12fb94e342d3cc7e607659be3afe5025bc49e7',
+  'edca9c0b4e6bad45904292f95fc4cef35ec31e747556bd09fb29e4d3dfebf542',
+  '5302f42ee870a81441294bb56c6942200398b2b3f78236778aabb2c04f47ade7',
+  '8d2672764884fd008e65ff07dde4993f90fe38e002c401c22ea4347862f1b3ae'
+]);
+
+function isTestWindowKey(raw) {
+  return TEST_WINDOW_KEYS.includes(Buffer.from(raw).toString('hex'));
+}
+
 // As isTestDeviceKey: raw x/y strings, so validate the JWK's shape first.
 function isTestNodeBoxKey(jwk) {
   return Boolean(jwk) && TEST_NODE_BOX_KEYS.some((k) => k.x === jwk.x && k.y === jwk.y);
 }
 
-module.exports = { TEST_DEVICE_KEYS, TEST_NODE_KEYS, TEST_NODE_BOX_KEYS, isTestDeviceKey, isTestNodeKey, isTestNodeBoxKey, hasTestKey };
+module.exports = { TEST_WINDOW_KEYS, isTestWindowKey, TEST_DEVICE_KEYS, TEST_NODE_KEYS, TEST_NODE_BOX_KEYS, isTestDeviceKey, isTestNodeKey, isTestNodeBoxKey, hasTestKey };

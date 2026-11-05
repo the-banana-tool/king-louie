@@ -309,7 +309,7 @@ async function fcmServer(respond = () => [200, '{}']) {
 
 describe('push text', () => {
   it('KINDS holds the three fcm-only kinds with their titles', () => {
-    assert.deepEqual(FCM_ONLY_KINDS, ['session_ended', 'session_paused', 'task_ended', 'test']);
+    assert.deepEqual(FCM_ONLY_KINDS, ['session_ended', 'session_paused', 'task_ended', 'window', 'test']);
     for (const k of FCM_ONLY_KINDS) assert.ok(KINDS.includes(k));
     assert.equal(alertText({ kind: 'session_ended', node_name: 'gpu-box' }), 'Session ended on gpu-box');
     assert.equal(alertText({ kind: 'session_paused' }), 'Session paused');

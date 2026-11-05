@@ -17,7 +17,8 @@ const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 
 // The six of R-SP-4. A new type a node and a phone exchange content in joins
 // this list and SEAL_SPLIT together.
-const CONTENT_TYPES = ['kl.approval.request', 'kl.lease.request', 'kl.lease.status', 'kl.lease.view', 'kl.question.ask', 'kl.question.answer'];
+const CONTENT_TYPES = ['kl.approval.request', 'kl.lease.request', 'kl.lease.status', 'kl.lease.view', 'kl.question.ask', 'kl.question.answer',
+  'kl.window.enroll', 'kl.window.enroll.response', 'kl.window.revoke', 'kl.window.list'];
 
 const node = testNodeIdentity({ box: true });
 const phone = createFakePhone({ boxKey: true });
@@ -52,13 +53,31 @@ const FULL = {
   'kl.question.answer': {
     v: 1, type: 'kl.question.answer', node_id: node.nodeId, token: 'ABCD23', device_id: phone.deviceId, nonce: NONCE, signed_at: NOW,
     case_id: 'case-1', question_id: 'q-0001', answer: { text: 'The first' }
+  },
+  'kl.window.enroll': {
+    v: 1, type: 'kl.window.enroll', request_id: UUID, node_id: node.nodeId, node_name: 'web-01', enroll_hash: HASH, created_at: NOW, expires_at: LATER, nonce: NONCE, node_box: node.box.jwk,
+    window: { device_id: 'kld-aaaaaaaaaaaaaaaa', public_key: 'k'.repeat(43), label: 'Road laptop', platform: 'windows' }, node_key: 'a'.repeat(88), salt: 's'.repeat(43)
+  },
+  'kl.window.enroll.response': {
+    v: 1, type: 'kl.window.enroll.response', request_id: UUID, node_id: node.nodeId, enroll_hash: HASH, nonce: NONCE, device_id: phone.deviceId, expires_at: LATER, signed_at: NOW,
+    decision: 'approve'
+  },
+  'kl.window.revoke': {
+    v: 1, type: 'kl.window.revoke', node_id: node.nodeId, window_id: 'kld-aaaaaaaaaaaaaaaa', device_id: phone.deviceId, created_at: NOW, expires_at: LATER, nonce: NONCE,
+    reason: 'Revoked from the phone'
+  },
+  'kl.window.list': {
+    v: 1, type: 'kl.window.list', node_id: node.nodeId, to_device: phone.deviceId, at: NOW, nonce: NONCE, node_box: node.box.jwk,
+    windows: [{ device_id: 'kld-aaaaaaaaaaaaaaaa', label: 'Road laptop', platform: 'windows', enrolled_at: NOW, attached: false }]
   }
 };
+// A phone sends these; a node, the rest.
+const PHONE_SENT = ['kl.question.answer', 'kl.window.enroll.response', 'kl.window.revoke'];
 
 function sealedForm(type) {
   const { clear, content } = splitMessage(type, FULL[type]);
-  const senderId = type === 'kl.question.answer' ? phone.deviceId : node.nodeId;
-  const recipientId = type === 'kl.question.answer' ? node.nodeId : phone.deviceId;
+  const senderId = PHONE_SENT.includes(type) ? phone.deviceId : node.nodeId;
+  const recipientId = PHONE_SENT.includes(type) ? node.nodeId : phone.deviceId;
   return sealContent({ type, senderId, clear, content, recipients: { [recipientId]: generateBoxKey().jwk } });
 }
 

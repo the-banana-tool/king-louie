@@ -1,0 +1,50 @@
+{
+  "name": "window-enroll-sealed",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    },
+    "type": "kl.window.enroll",
+    "node_public_key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423",
+    "pin_raw": "bxliVJqIWRjT2MV0VJkZTyAom9o-BB5DPk-hXhZVhCM"
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-c2ubd6jjqumalzt5",
+    "payload": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZW5yb2xsX2hhc2giOiJialI0bkszd2dTcTg3Tkk0U2ZCdEhScTQyMkhKYzI5OHBtTnJCREJ5ckJBIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MTQ6MTEuMjAxWiIsIm5vZGVfYm94Ijp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoidHNZRzZmZlVwYmpzOTBSendGUXlFRnFLX3hremJPMlhmQVUteTczTUpNdyIsInkiOiJxU2x3ZjhrbFJHUFVTcFNBd29HV3Z4RmhlT0dOS1ZrbTRheE9yWmVVSllRIn0sIm5vZGVfaWQiOiJrbC1jMnViZDZqanF1bWFsenQ1Iiwibm9kZV9uYW1lIjoid2ViLTAxIiwibm9uY2UiOiJEZ0x4RDdSaVg1YmdkVVNjRTZkSG10SUVVaUZtWDV2b2FDR3pUVk9RakJRIiwicmVxdWVzdF9pZCI6ImUzODlhZDEzLTJkZTUtNGZhZi04OTJlLTMxMWRlMjdlYTE0NyIsInNlYWxlZCI6eyJjdCI6IjJQaGJEaERqaXNOczBYT2dPREZNcTN2NWdmNVJKRVdnV3ZIa19JTklRdXF4VW0tcFlaMDdhcGU0TjNKVDhIOHJ2OW81a1pfWlg1ZUJiUEw0d0JvY1BEMWxsb3E1dXN6MVpYX2lFQTFQTF9zOWpqVTBTSWRxZ1k1VkVFUk5TN0V3aUtSdnQya3FYMlFEOTdKc0F6U3hBbTZOVVdidHJNQ3o0OGRtRnB4VTAwLXVVZ2JCczZteUxJdXpwMTNGZlFWSFJSVEpKNzM5MkFQbHZaYU5rX0t0UGxYa015anBOa19POVNpVldCeng2WjRtWUlsT1FIRk51OFdqcUczNzA4N0Rwc3ZvVjE2VEY3VjdqSDRWWW93UGttMW4zQi1MOGlmbThBcFQ3bzlkWjlsSEZUOHQxSDB5WE1WSXN4NVd4TWI5Q09XRHBaZnlDaDFDVnB1TFhjZjZhQjJRZm5iOUtYTzhXSnJRM0JnOU05M21rNkpxY0VFcVZocS03SlFnU0xqeUNlNVR5aXQxLS1WWl9nZkU0aWdTMHBnLWpsNFQxYWZWVGFxVllwVlVCNEZJYnR2OVcyREphckFiOXd6cjFraGFFWmxHODZaTFdRdEV2Ul9NYno5bXBhOHVKVEdGaGpNbFBGdUJuVnhVMkI5b3VCTUs0Z0F6SFhUb1JHLTktaExNVDlCOWU2ZUEtU3NNM2lBNDdZc1pYZTlrcURfVk1BUXYzb1dTMm5ud1lBR19zNmZNUzB6UVo1SkxrMlNKQzRUcFZ4aWpvaGZUYWI0QXlIMFBMbkNLZnhnY2dBMGFMMWdQSk4yYUxzSFNDelB2ZEVSZi1jV0dZLWZJVTZtQVZJZ2xpajF5SjhmTEY1Z2pNLUpUbTF2SUFwbnJMY3YtR09XSWMzVEc2em12ZXdqVlVSVExyMkxaeDBKeGFVWjIxVW4yIiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiNnA1MkRQcG01dWtqRTBGUFJvNllnOWl5aC1lWUtjRFhJYUlFWW01WEY2byIsInkiOiJIX3hKaTFTNUpvdlpZNEhnMHAwejJHdTNxXy1PUEdMYjc2SWdrRm1mc3FRIn0sIml2IjoicHdseG5zcWJyV09IRGRGVyIsImtleXMiOnsiZC0zdm13cmloaGRibml0NG9pIjoiSmJsNnNnZUZGcTlJeHFmLXpLX1F4Q0tRMVBCckdWUmxkUlZVN2c4Y01hSUoyRDZkSlZTLWJIc014WWpSVGd0cyIsImQtNnhkbGJ4Z2xobnZmYTNsdyI6IkY3VjU5dTdBREl5ZkE4ak9ZSWF0bEVQdm9ZQWZiOEoycExXRmE1OVZkUGpOUWRUWWh1Rkl2cDd1cmhFUVlBRk8iLCJrbC1jMnViZDZqanF1bWFsenQ1IjoiN1VleGtDU2EtUHphdG56LXJmbzFQZ3BYOTZQVkxaeWxLcWpDOEwybkxuZVB5NFk0dExteC1NcnJXUkwyczlORCJ9LCJ2IjoxfSwidHlwZSI6ImtsLndpbmRvdy5lbnJvbGwiLCJ2IjoxfQ",
+    "sig": "tvA_m6qooe-ffGDafWUHJNMAioLnchqs1KSZSwtaBt60vrKHU4mhlAxGXRK8sqCxCPAG9Bjyh7F0OX8djtfeBw"
+  },
+  "expect": {
+    "reason": null,
+    "message": {
+      "v": 1,
+      "type": "kl.window.enroll",
+      "request_id": "e389ad13-2de5-4faf-892e-311de27ea147",
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "node_name": "web-01",
+      "enroll_hash": "bjR4nK3wgSq87NI4SfBtHRq422HJc298pmNrBDByrBA",
+      "created_at": "2026-09-23T18:04:11.201Z",
+      "expires_at": "2026-09-23T18:14:11.201Z",
+      "nonce": "DgLxD7RiX5bgdUScE6dHmtIEUiFmX5voaCGzTVOQjBQ",
+      "node_box": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw",
+        "y": "qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ"
+      },
+      "window": {
+        "device_id": "kld-kxxgvjxu2fdtvh5s",
+        "public_key": "UwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec",
+        "label": "Road laptop",
+        "platform": "windows"
+      },
+      "node_key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423",
+      "salt": "PTcN5-k19MJYaF3sUGWbSdEG6s4DU3lnnkwm4zksLnE"
+    },
+    "qr_hash": "g71woTCnIWKB65NixIsUD7PiD87D6-CsUYoG7Jg_JCA"
+  }
+}

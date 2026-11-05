@@ -46,6 +46,85 @@ function assertRecordRefused(result) {
   assert.deepEqual(result.frames, []);
 }
 
+describe('the enroll-only option (R-RW-36)', () => {
+  const { WindowSeal: Seal } = require('../src/desktop-bridge/window-seal');
+  const fixture = require('./helpers/window-seal-fixture');
+  const pair = (lookup, enrollUnknown) => {
+    const sessionId = fixture.sessionIdOf('enroll-only');
+    const w = fixture.windowKey('A');
+    const n = fixture.nodeKey('web-01');
+    const window = fixture.sealed((host) => Seal.window({ sessionId, deviceId: w.deviceId, publicKey: w.publicKey, sign: w.sign, ...host }));
+    const node = fixture.sealed((host) => Seal.node({ sessionId, identity: n, lookupDevice: lookup, enrollUnknown, ...host }));
+    return { window, node };
+  };
+
+  it('off (the default): an unknown device is the one 4401', async () => {
+    const { window, node } = pair(fixture.lookupOf(), false);
+    const { nodeResult } = await fixture.runHandshake(window, node);
+    assert.equal(nodeResult.ready, false);
+    assert.equal(nodeResult.close.code, 4401);
+    assert.equal(nodeResult.peer, null);
+  });
+
+  it('on: an unknown device with a good signature is ready, marked enrolled: false', async () => {
+    const { window, node } = pair(fixture.lookupOf(), true);
+    const { nodeResult } = await fixture.runHandshake(window, node);
+    assert.equal(nodeResult.ready, true);
+    assert.equal(nodeResult.peer.enrolled, false);
+    assert.equal(nodeResult.peer.deviceId, fixture.windowKey('A').deviceId);
+  });
+
+  it('on: a known device is enrolled: true, with no limit', async () => {
+    const { window, node } = pair(fixture.lookupOf('A'), true);
+    const { nodeResult } = await fixture.runHandshake(window, node);
+    assert.equal(nodeResult.peer.enrolled, true);
+    const records = fixture.sealFrame(window, Buffer.alloc(8000, 0x20));
+    const opened = await fixture.drive(node, records[0]);
+    assert.equal(opened.frames.length, 1);
+  });
+
+  it('on: a stored key that differs is 4401, whatever the signature', async () => {
+    const other = fixture.windowKey('B').publicKey;
+    const { window, node } = pair(() => other, true);
+    const { nodeResult } = await fixture.runHandshake(window, node);
+    assert.equal(nodeResult.close.code, 4401);
+    assert.equal(nodeResult.peer, null);
+  });
+
+  it('on: a bad signature is 4401', async () => {
+    const sessionId = fixture.sessionIdOf('enroll-only');
+    const w = fixture.windowKey('A');
+    const window = fixture.sealed((host) => Seal.window({ sessionId, deviceId: w.deviceId, publicKey: w.publicKey, sign: () => Buffer.alloc(64, 1), ...host }));
+    const node = fixture.sealed((host) => Seal.node({ sessionId, identity: fixture.nodeKey('web-01'), lookupDevice: () => null, enrollUnknown: true, ...host }));
+    const { nodeResult } = await fixture.runHandshake(window, node);
+    assert.equal(nodeResult.close.code, 4401);
+  });
+
+  it('enrolling: 4096 bytes pass, 4097 are 4400, a fragment is 4400; promoted, neither limit holds', async () => {
+    const atLimit = pair(fixture.lookupOf(), true);
+    await fixture.runHandshake(atLimit.window, atLimit.node);
+    const fits = await fixture.drive(atLimit.node, fixture.sealFrame(atLimit.window, Buffer.alloc(4096, 0x20))[0]);
+    assert.equal(fits.frames[0].length, 4096);
+
+    const over = pair(fixture.lookupOf(), true);
+    await fixture.runHandshake(over.window, over.node);
+    const refused = await fixture.drive(over.node, fixture.sealFrame(over.window, Buffer.alloc(4097, 0x20))[0]);
+    assert.equal(refused.close.code, 4400);
+
+    const fragment = pair(fixture.lookupOf(), true);
+    await fixture.runHandshake(fragment.window, fragment.node);
+    const first = fixture.sealFrame(fragment.window, Buffer.alloc(1048577, 0x20))[0];
+    assert.equal((await fixture.drive(fragment.node, first)).close.code, 4400);
+
+    const promoted = pair(fixture.lookupOf(), true);
+    await fixture.runHandshake(promoted.window, promoted.node);
+    promoted.node.promote();
+    const big = fixture.sealFrame(promoted.window, Buffer.alloc(1048577, 0x20));
+    assert.equal((await fixture.drive(promoted.node, big[0])).close, null);
+    assert.equal((await fixture.drive(promoted.node, big[1])).frames[0].length, 1048577);
+  });
+});
+
 describe('the constants', () => {
   it('are the ones R-RW-1 and R-RW-2 name', () => {
     assert.equal(VERSION, 1);

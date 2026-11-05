@@ -223,11 +223,32 @@ function createWindowDialer({ identity, frontDoorPin, server, lookup = null, tim
   };
 }
 
-// The link methods this node answers while the feature is on and it has a front door
-// to dial. Task 9 adds the other three; a method with no row answers remote_window_off.
-function createWindowHandlers({ server, dialer, warn = defaultWarn, now = defaultNow }) {
-  const note = coalesced({ warn, now });
+// What a phone may do whatever the feature's state (ruling, Task 6's review): cut a
+// window off, and see what it would cut off. Otherwise a window revoked while the
+// feature is off comes back when it is turned on.
+function createWindowRecordHandlers(enrollment) {
   return {
+    'window.revoke': async ({ envelope } = {}) => enrollment.onRevoke(envelope),
+    'window.list': async ({ to_device: toDevice } = {}) => {
+      try {
+        return { envelope: enrollment.list(toDevice) };
+      } catch (err) {
+        return { ok: false, code: err.code || 'list_failed' };
+      }
+    }
+  };
+}
+
+// The link methods this node answers while the feature is on and it has a front door
+// to dial. A method with no row answers remote_window_off.
+function createWindowHandlers({ server, dialer, enrollment = null, warn = defaultWarn, now = defaultNow }) {
+  const note = coalesced({ warn, now });
+  const enrollRows = enrollment ? {
+    ...createWindowRecordHandlers(enrollment),
+    'window.enroll_response': async ({ envelope } = {}) => enrollment.onResponse(envelope)
+  } : {};
+  return {
+    ...enrollRows,
     'window.open': async (params) => {
       // R-RW-30: phone-class arguments would otherwise cross the relay in clear.
       if (server._sealRefusal()) {
@@ -239,4 +260,4 @@ function createWindowHandlers({ server, dialer, warn = defaultWarn, now = defaul
   };
 }
 
-module.exports = { createWindowDialer, createWindowHandlers, PENDING_SEALS_MAX, WINDOW_OPENS_PER_MINUTE, CLOSE_GRACE_MS };
+module.exports = { createWindowDialer, createWindowHandlers, createWindowRecordHandlers, PENDING_SEALS_MAX, WINDOW_OPENS_PER_MINUTE, CLOSE_GRACE_MS };
