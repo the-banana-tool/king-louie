@@ -52,6 +52,8 @@ const RENDERER_EVENTS = new Set([
   'chat:rowAdded', 'chat:listChanged',
   // A remote run's question, for the windows it was not sent to (remote window plan, task 3).
   'chat:questionWaiting',
+  // The run stopped: the question it asked is no longer open.
+  'agent:askEnded',
   'chat:advisorStarted', 'chat:advisorCompleted',
   'canvas:render', 'canvas:close', 'canvas:executeJs',
   ...PROMPT_EVENTS,

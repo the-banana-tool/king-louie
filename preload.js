@@ -555,6 +555,7 @@ contextBridge.exposeInMainWorld(
         return ipcRenderer.invoke('agent:executeWithDeps', payload);
       },
       onAskUser: (callback) => registerOnce('agent:askUser', callback),
+      onAskEnded: (callback) => registerOnce('agent:askEnded', callback),
       sendUserResponse: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.requestId, 'requestId');

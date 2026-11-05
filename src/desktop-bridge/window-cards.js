@@ -4,16 +4,55 @@
 //   - a channel whose arguments hold a stored value always shows its named fields and
 //     a keyed mark (HIDDEN_FIELDS);
 //   - the one bulk channel shows names and sizes it read itself, and a keyed mark;
-//   - every other call goes on the card whole, up to 64 KiB, each leaf capped, and past
-//     that it is refused, so no padding can push what runs out of sight;
+//   - every other call goes on the card whole, up to 64 KiB, and past that it is refused;
+//   - every form is held to the same size: 64 rows, depth 6, 8 KB of shown text, a leaf of
+//     2000 code points (the phone's collapse size). Only the fields in FREE_TEXT_FIELDS,
+//     whose text is what runs, may pass the leaf and shown limits, to 64 KiB in all;
+//   - a phone shows parameters in JCS key order, which is signed, so nothing can be moved
+//     up the list: the summary carries a host-built count and a "runs:" line instead.
 //   - a channel with a known shape refuses any other key (ARG_KEYS): JCS sorts keys, so
 //     an unknown one could otherwise sit on the card ahead of the real leaves.
 // What runs is always parsed from the one text, whatever the card shows.
 const { hiddenMark } = require('../approvals/hidden-card');
 const { llmCommandAction } = require('../core/llm-command');
+const { plainLineProblem } = require('../cases/hidden-chars');
 
 const WINDOW_ARGS_INLINE_MAX = 65536;
-const WINDOW_LEAF_MAX = 16384;
+const WINDOW_LEAF_MAX = 2000;
+const WINDOW_LEAVES_MAX = 64;
+const WINDOW_DEPTH_MAX = 6;
+const WINDOW_SHOWN_MAX = 8192;
+const INGEST_FILES_MAX = 64;
+
+// Where each channel's free text is, from its first argument. Each is what runs, read
+// by a model or a shell, so a long one is the point of the call and the owner reads it.
+const FREE_TEXT_FIELDS = Object.freeze({
+  'cron:add': [['payload', 'message']],
+  'cron:update': [['patch', 'payload', 'message']],
+  'memory:capture': [['content']],
+  'skill:handleMessage': [['message']],
+  'tool:execute': [['parameters', 'command'], ['parameters', 'content']],
+  'workflow:plan': [['goal']],
+  'workflow:planAndExecute': [['goal']]
+});
+
+// The field that says what a call runs, from the card's copy of its first argument.
+const RUNS_FIELDS = Object.freeze({
+  'bridge.addAllowedDirectory': ['path'],
+  'bridge.setWorkingDirectory': ['path'],
+  'case:addPlaybook': ['source'],
+  'chat:setWorkingDirectory': ['workingDirectory'],
+  'cron:add': ['payload', 'message'],
+  'cron:update': ['patch', 'payload', 'message'],
+  'memory:capture': ['content'],
+  'models:setOllamaBaseUrl': ['baseUrl'],
+  'skill:execute': ['command'],
+  'skill:handleMessage': ['message'],
+  'skill:install': ['url'],
+  'workflow:plan': ['goal'],
+  'workflow:planAndExecute': ['goal']
+});
+const TOOL_MAIN_FIELDS = Object.freeze(['command', 'file_path', 'path', 'url', 'selector', 'query', 'action']);
 
 const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const namesOf = (value) => (isObject(value) ? Object.keys(value).sort() : []);
@@ -113,7 +152,7 @@ const HIDDEN_FIELDS = Object.freeze({
   'history:jev.saveKey': () => ({}),
   'settings:mcpSave': (p) => {
     const server = isObject(p.server) ? p.server : {};
-    return { ...pick(p, ['name', 'oldName']), command: server.command ?? null, env_names: namesOf(server.env) };
+    return { ...pick(p, ['name', 'oldName']), command: server.command ?? null, args: server.args ?? [], cwd: server.cwd ?? null, env_names: namesOf(server.env) };
   },
   'settings:runLlmCommand': (p) => ({ verb: llmCommandAction(p.command) }),
   'webhook:update': (p) => ({ ...pick(p, ['id']), fields: namesOf(p).filter((k) => k !== 'id') }),
@@ -135,20 +174,49 @@ function ingestFields(p) {
   };
 }
 
-// A URL's user and password are no part of what the owner is deciding.
-const USERINFO = /^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i;
-const stripUserinfo = (value) => (typeof value === 'string' ? value.replace(USERINFO, '$1') : value);
+// A URL's user and password are no part of what the owner is deciding, but the card must
+// show the host that runs. An address the node itself fetches goes through the parser the
+// node uses, so the card shows what that parser read: the backslash in
+// http://a.example\@b.example ends the host, and a pattern for userinfo would show b.
+function fetchedUrlShown(value) {
+  if (typeof value !== 'string') return value;
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return value;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return value;
+  url.username = '';
+  url.password = '';
+  return url.href;
+}
+
+// A source git fetches is read by git and curl, not by this parser, and they differ on odd
+// forms. Only the plain form, where all of them agree, loses its userinfo.
+const PLAIN_USERINFO_URL = /^https?:\/\/[^\s\\@/?#]+@[^\s\\@/?#]+(?:[/?#][^\s\\@]*)?$/i;
+function gitUrlShown(value) {
+  if (typeof value !== 'string' || !PLAIN_USERINFO_URL.test(value)) return value;
+  try {
+    const url = new URL(value);
+    url.username = '';
+    url.password = '';
+    return url.href;
+  } catch {
+    return value;
+  }
+}
 
 // The card's copy of the arguments with userinfo gone from the fields that hold a URL.
 const URL_FIELDS = Object.freeze({
-  'models:setOllamaBaseUrl': (p) => ({ ...p, baseUrl: stripUserinfo(p.baseUrl) }),
-  'skill:install': (p) => ({ ...p, url: stripUserinfo(p.url) }),
-  'case:addPlaybook': (p) => ({ ...p, source: stripUserinfo(p.source) }),
+  'models:setOllamaBaseUrl': (p) => ({ ...p, baseUrl: fetchedUrlShown(p.baseUrl) }),
+  'skill:install': (p) => ({ ...p, url: gitUrlShown(p.url) }),
+  'case:addPlaybook': (p) => ({ ...p, source: gitUrlShown(p.source) }),
   'history:embedder.save': (p) => (isObject(p.embedder) && isObject(p.embedder.ollama)
-    ? { ...p, embedder: { ...p.embedder, ollama: { ...p.embedder.ollama, baseUrl: stripUserinfo(p.embedder.ollama.baseUrl) } } }
+    ? { ...p, embedder: { ...p.embedder, ollama: { ...p.embedder.ollama, baseUrl: fetchedUrlShown(p.embedder.ollama.baseUrl) } } }
     : p),
   'case:create': (p) => (Array.isArray(p.playbooks)
-    ? { ...p, playbooks: p.playbooks.map((entry) => (isObject(entry) ? { ...entry, source: stripUserinfo(entry.source) } : entry)) }
+    ? { ...p, playbooks: p.playbooks.map((entry) => (isObject(entry) ? { ...entry, source: gitUrlShown(entry.source) } : entry)) }
     : p)
 });
 
@@ -163,11 +231,65 @@ function badShape(name, args) {
   return Object.keys(payload).some((key) => !ARG_KEYS[name].includes(key));
 }
 
-function leafOver(value) {
-  if (typeof value === 'string') return Buffer.byteLength(value) > WINDOW_LEAF_MAX;
-  if (Array.isArray(value)) return value.some(leafOver);
-  if (!isObject(value)) return false;
-  return Object.entries(value).some(([key, leaf]) => Buffer.byteLength(key) > WINDOW_LEAF_MAX || leafOver(leaf));
+const overLeaf = (text) => Buffer.byteLength(text) > WINDOW_LEAF_MAX && Array.from(text).length > WINDOW_LEAF_MAX;
+// What the host puts on every card, and no caller chose.
+const HOST_FIELDS = new Set(['channel', 'args_sha256', 'bytes']);
+
+// Holds a built card to its limits. → how many rows it has, or null when it is over.
+function measure(params, name) {
+  const free = new Set((FREE_TEXT_FIELDS[name] || []).map((path) => JSON.stringify(['args', 0, ...path])));
+  const ingest = name === 'case:ingestFiles';
+  const leavesMax = ingest ? Infinity : WINDOW_LEAVES_MAX;
+  const shownMax = ingest ? WINDOW_ARGS_INLINE_MAX : WINDOW_SHOWN_MAX;
+  let leaves = 0;
+  let shown = 0;
+  let freeBytes = 0;
+  const walk = (value, path, depth) => {
+    if (Array.isArray(value) || isObject(value)) {
+      if (depth + 1 > WINDOW_DEPTH_MAX) return false;
+      const entries = Array.isArray(value) ? value.map((v, i) => [i, v]) : Object.entries(value);
+      if (entries.length === 0) leaves += 1; // a phone shows an empty one as a row
+      for (const [key, leaf] of entries) {
+        if (typeof key === 'string') {
+          if (overLeaf(key)) return false;
+          shown += Buffer.byteLength(key);
+        }
+        if (!walk(leaf, [...path, key], depth + 1)) return false;
+      }
+    } else {
+      leaves += 1;
+      const text = typeof value === 'string' ? value : JSON.stringify(value);
+      if (typeof value === 'string' && free.has(JSON.stringify(path))) freeBytes += Buffer.byteLength(text);
+      else if (overLeaf(text)) return false;
+      else shown += Buffer.byteLength(text);
+    }
+    return leaves <= leavesMax && shown <= shownMax && shown + freeBytes <= WINDOW_ARGS_INLINE_MAX;
+  };
+  const top = Object.entries(params).filter(([key]) => !HOST_FIELDS.has(key));
+  // The root is depth 1.
+  for (const [key, value] of top) {
+    if (!walk(value, [key], 1)) return null;
+  }
+  return leaves;
+}
+
+const at = (value, path) => path.reduce((v, key) => (isObject(v) ? v[key] : undefined), value);
+const oneLine = (text) => (plainLineProblem(text) === null ? text : '(not one plain line)');
+
+// What the call runs, in a line. Built from the card, so it shows what the card shows.
+function runsLine(name, params) {
+  if (name === 'settings:mcpSave') {
+    const argv = Array.isArray(params.args) ? params.args.map(String) : [];
+    return typeof params.command === 'string' ? oneLine([params.command, ...argv].join(' ')) : null;
+  }
+  const first = Array.isArray(params.args) ? params.args[0] : params.args;
+  if (name === 'tool:execute' && isObject(first)) {
+    const parameters = isObject(first.parameters) ? first.parameters : {};
+    const main = TOOL_MAIN_FIELDS.map((key) => parameters[key]).find((value) => typeof value === 'string');
+    return oneLine(main === undefined ? String(first.toolName) : `${first.toolName} ${main}`);
+  }
+  const value = Object.hasOwn(RUNS_FIELDS, name) ? at(first, RUNS_FIELDS[name]) : undefined;
+  return typeof value === 'string' ? oneLine(value) : null;
 }
 
 function hiddenFieldsFor(name, payload) {
@@ -186,6 +308,7 @@ function windowCard(name, args, text) {
   const object = isObject(payload) ? payload : {};
   const hidden = hiddenFieldsFor(name, object);
   let params;
+  if (name === 'case:ingestFiles' && Array.isArray(object.files) && object.files.length > INGEST_FILES_MAX) return { refusal: 'REMOTE_ARGS_TOO_LARGE' };
   if (hidden) {
     params = { channel: name, ...hidden, ...hiddenMark(text) };
   } else {
@@ -197,7 +320,12 @@ function windowCard(name, args, text) {
       ? { channel: name, args: Array.isArray(inline) ? [shown, ...inline.slice(1)] : shown, ...hiddenMark(text) }
       : { channel: name, args: inline };
   }
-  return leafOver(params) ? { refusal: 'REMOTE_ARGS_TOO_LARGE' } : { params };
+  const parameters = measure(params, name);
+  if (parameters === null) return { refusal: 'REMOTE_ARGS_TOO_LARGE' };
+  return { params, parameters, kb: Math.max(1, Math.ceil(Buffer.byteLength(text) / 1024)), runs: runsLine(name, params) };
 }
 
-module.exports = { windowCard, stripUserinfo, ARG_KEYS, HIDDEN_FIELDS, WINDOW_ARGS_INLINE_MAX, WINDOW_LEAF_MAX };
+module.exports = {
+  windowCard, fetchedUrlShown, gitUrlShown, ARG_KEYS, HIDDEN_FIELDS, FREE_TEXT_FIELDS,
+  WINDOW_ARGS_INLINE_MAX, WINDOW_LEAF_MAX, WINDOW_LEAVES_MAX, WINDOW_DEPTH_MAX, WINDOW_SHOWN_MAX, INGEST_FILES_MAX
+};

@@ -16,8 +16,8 @@
   "input": {
     "alg": "Ed25519",
     "kid": "kl-c2ubd6jjqumalzt5",
-    "payload": "eyJhY3Rpb24iOnsiY3dkIjpudWxsLCJraW5kIjoidG9vbCIsIm5hbWUiOiJXaW5kb3ciLCJwYXJhbXMiOnsiYXJncyI6WyJjaGF0LTEiXSwiY2hhbm5lbCI6ImNoYXQ6ZGVsZXRlIn0sInN1bW1hcnkiOiJjaGF0OmRlbGV0ZSBmcm9tIEZpZWxkIGxhcHRvcCJ9LCJhY3Rpb25faGFzaCI6InBfbDVlN2JrQ25QYUVPeFlLSW9yM0FtN3BVLURtUmY5Vml6NmVod0hfYkkiLCJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsIm5vZGVfaWQiOiJrbC1jMnViZDZqanF1bWFsenQ1Iiwibm9kZV9uYW1lIjoid2ViLTAxIiwibm9uY2UiOiJDUENnR0FEZEtEWjA2UTRUOF9ocUNfM0dXYTRuUFpjemtwb3VNVDU3aGxJIiwib3JpZ2luIjp7ImNsaWVudCI6InJlbW90ZS13aW5kb3ciLCJkZXZpY2VJZCI6ImtsZC1hYmNkZWZnaGlqa2xtbm9wIiwiam9iX2lkIjpudWxsLCJzZXNzaW9uIjpudWxsfSwicmVxdWVzdF9pZCI6IjI2NWMxNTA5LTYyMjMtNDRhNi04MTY3LWUyYWIxN2EwMDJhZiIsInR5cGUiOiJrbC5hcHByb3ZhbC5yZXF1ZXN0IiwidiI6MX0",
-    "sig": "31P872gTH7e4QhiOF3lT6A2ovt2bUwOAV75wjdx7ing_FRCb_M80WnvgNBq4k61rGf5leu76YRKd4i_HSzehAA"
+    "payload": "eyJhY3Rpb24iOnsiY3dkIjpudWxsLCJraW5kIjoidG9vbCIsIm5hbWUiOiJXaW5kb3ciLCJwYXJhbXMiOnsiYXJncyI6WyJjaGF0LTEiXSwiY2hhbm5lbCI6ImNoYXQ6ZGVsZXRlIn0sInN1bW1hcnkiOiJjaGF0OmRlbGV0ZSBmcm9tIEZpZWxkIGxhcHRvcCDCtyAxIHBhcmFtZXRlciwgMSBLQiJ9LCJhY3Rpb25faGFzaCI6IjRfZ1JfaFB6VnEyMDE2OGgycUNHMTJMS01rUXZQdWtNaVJad0R3eXFFSUEiLCJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MDk6MTEuMjAxWiIsIm5vZGVfaWQiOiJrbC1jMnViZDZqanF1bWFsenQ1Iiwibm9kZV9uYW1lIjoid2ViLTAxIiwibm9uY2UiOiJDUENnR0FEZEtEWjA2UTRUOF9ocUNfM0dXYTRuUFpjemtwb3VNVDU3aGxJIiwib3JpZ2luIjp7ImNsaWVudCI6InJlbW90ZS13aW5kb3ciLCJkZXZpY2VJZCI6ImtsZC1hYmNkZWZnaGlqa2xtbm9wIiwiam9iX2lkIjpudWxsLCJzZXNzaW9uIjpudWxsfSwicmVxdWVzdF9pZCI6IjI2NWMxNTA5LTYyMjMtNDRhNi04MTY3LWUyYWIxN2EwMDJhZiIsInR5cGUiOiJrbC5hcHByb3ZhbC5yZXF1ZXN0IiwidiI6MX0",
+    "sig": "u5ZB7LyIlCrts10lyPKnEdd09mkiliOCuu53Y8hWR_FmHFowtQ-fzARShSrDuVgBz2j5MVPFsn5ni6EFF6QmCw"
   },
   "expect": {
     "shown": true,
@@ -29,7 +29,7 @@
       },
       "kind": "tool",
       "name": "Window",
-      "summary": "chat:delete from Field laptop",
+      "summary": "chat:delete from Field laptop · 1 parameter, 1 KB",
       "cwd": null,
       "origin": {
         "client": "remote-window",

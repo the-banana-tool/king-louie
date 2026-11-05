@@ -42,17 +42,19 @@ const PROMPT_RESPONSES = Object.freeze({
 const fail = (code, message) => Object.assign(new Error(message), { code });
 
 const WINDOW_SUMMARY_MAX = 120;
-// What a stolen laptop can have waiting on the phone at once (R-RW-32): enough that a
-// mis-tap is not the way out of a flood, and each ask is one more mirrored ledger entry.
-const PHONE_ASKS_PER_DEVICE = 8;
 
 const remoteRefusal = (code, error = MESSAGES[code]) => ({ ok: false, code, error });
 
 // The card's one line. A label is the window's own words, so one that is not one
 // plain line is not shown; the channel name comes from the class table.
 const windowName = (label) => (plainLineProblem(label) === null ? label : 'a window (name hidden)');
-function windowSummary(name, label) {
-  return Array.from(`${name} from ${windowName(label)}`).slice(0, WINDOW_SUMMARY_MAX).join('');
+// Host-built, and in this order so the count and the head outlast any cut: a phone lists
+// parameters in signed key order, so this line is what says how long the list is and
+// what the call runs, whatever a caller put ahead of it there.
+function windowSummary(name, label, card) {
+  const head = Array.from(`${name} from ${windowName(label)}`).slice(0, WINDOW_SUMMARY_MAX).join('');
+  const count = `${card.parameters} parameter${card.parameters === 1 ? '' : 's'}, ${card.kb} KB`;
+  return [head, count, ...(card.runs ? [`runs: ${card.runs}`] : [])].join(' · ');
 }
 
 // Settings > Local service "Approvals and relay" (spec §3.9), read from F3's
@@ -118,19 +120,6 @@ function createBridgeDispatcher({
   const pendingAskUserByDevice = new Map();
   // requestId -> { chatId, payload }, for every remote question not yet ended.
   const remoteAsks = new Map();
-  // deviceId -> how many of its asks the phone has not answered.
-  const phoneAsks = new Map();
-  const takePhoneSlot = (deviceId) => {
-    const held = phoneAsks.get(deviceId) || 0;
-    if (held >= PHONE_ASKS_PER_DEVICE) return false;
-    phoneAsks.set(deviceId, held + 1);
-    return true;
-  };
-  const freePhoneSlot = (deviceId) => {
-    const held = phoneAsks.get(deviceId) - 1;
-    if (held > 0) phoneAsks.set(deviceId, held);
-    else phoneAsks.delete(deviceId);
-  };
 
   const anyWindowLive = () => getConnections().some((c) => c.live);
 
@@ -230,6 +219,10 @@ function createBridgeDispatcher({
       isDestroyed: () => false,
       webContents: {
         send: (channel, payload) => {
+          if (channel !== 'agent:askUser') {
+            broadcast(channel, payload);
+            return;
+          }
           requestId = payload.requestId;
           const row = { chatId, payload };
           remoteAsks.set(requestId, row);
@@ -260,7 +253,7 @@ function createBridgeDispatcher({
   // dialog (R-RW-7). No phone, no folder.
   async function allowDirectoryOnPhone(conn, { directory, toolName, signal = null }) {
     const approver = approvals && approvals.phoneApprover;
-    if (!approver || !takePhoneSlot(conn.deviceId)) return false;
+    if (!approver) return false;
     try {
       // The signal withdraws the card when the run is stopped.
       const either = signal ? AbortSignal.any([signal, conn.revokeSignal]) : conn.revokeSignal;
@@ -269,8 +262,6 @@ function createBridgeDispatcher({
     } catch (err) {
       log.warn(`asking the phone for a folder failed: ${err.message}`);
       return false;
-    } finally {
-      freePhoneSlot(conn.deviceId);
     }
   }
 
@@ -407,20 +398,20 @@ function createBridgeDispatcher({
     if (granted && granted.allow === true && typeof granted.grant_id === 'string' && granted.grant_id) {
       return { ok: true, request_id: granted.grant_id, args: JSON.parse(text) };
     }
-    if (!takePhoneSlot(conn.deviceId)) return remoteRefusal('PHONE_BUSY');
-    const metadata = { origin: windowOrigin(conn), cardNote: windowSummary(name, conn.label), signal: conn.revokeSignal };
+    const metadata = { origin: windowOrigin(conn), cardNote: windowSummary(name, conn.label, card), signal: conn.revokeSignal };
     let answer;
     try {
       answer = await approver.requestApproval(WINDOW_TOOL, card.params, metadata);
     } catch (err) {
       log.warn(`asking the phone about ${name} failed: ${err.message}`);
       return remoteRefusal('NO_PHONE');
-    } finally {
-      freePhoneSlot(conn.deviceId);
     }
     // A revoke takes back what the phone said, however the answer raced it (R-RW-31).
     if (conn.revoked) return remoteRefusal('PHONE_DENIED');
-    if (answer === 'unavailable') return remoteRefusal('NO_PHONE', (metadata.refusal && metadata.refusal.error) || MESSAGES.NO_PHONE);
+    if (answer === 'unavailable') {
+      const said = metadata.refusal || {};
+      return remoteRefusal(said.code || 'NO_PHONE', said.error || MESSAGES.NO_PHONE);
+    }
     // Only the exact true approves, and an approval has a request id to carry.
     if (answer !== true || typeof metadata.request_id !== 'string' || !metadata.request_id) return remoteRefusal('PHONE_DENIED');
     return { ok: true, request_id: metadata.request_id, args: JSON.parse(text) };

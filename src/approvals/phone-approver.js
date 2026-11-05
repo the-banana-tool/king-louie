@@ -8,6 +8,7 @@ const {
   buildRequest, buildStatus, toolAction, actionHash, normalizeOrigin, MessageError, TTL_MAX_MS, clampTtl
 } = require('./messages');
 const { verifyDeviceEnvelope, bytesSha256 } = require('./verify-device');
+const { auditOriginOf } = require('./audit-fields');
 const { PendingRequests } = require('./pending-store');
 
 const log = createLogger('approvals/phone-approver');
@@ -17,6 +18,10 @@ const UNSEALABLE = 'no phone can read a sealed approval';
 const SEALED_TOO_LARGE = 'A sealed approval holds about 130 KB of parameters. Write it in smaller pieces. Nothing ran.';
 const SHAPE_REFUSALS = ['malformed', 'bad_request'];
 const RELAY_TOO_OLD = 'relay_too_old';
+// What a stolen laptop can have waiting on the phone at once (remote window plan R-RW-32):
+// a flood is not to end in a mis-tap, and each card is one more mirrored ledger entry.
+const WINDOW_ASKS_MAX = 8;
+const WINDOW_BUSY = 'Too many requests are waiting on the phone. Answer those first. Nothing ran.';
 const RELAY_TOO_OLD_TEXT = 'Phone approval unavailable (relay_too_old): the relay or front door is older than this node and refuses what it seals. Upgrade it first. Nothing ran.';
 
 class PhoneApprover {
@@ -36,6 +41,8 @@ class PhoneApprover {
     this.sealPolicy = sealPolicy;
     this.contextSignal = null;
     this.pendingRequests = new PendingRequests({ now });
+    // A remote window's deviceId -> its cards the phone has not answered.
+    this.windowAsks = new Map();
     this.stopped = false;
     this._onConnected = () => this._resubmitAll();
     if (this.link && typeof this.link.on === 'function') this.link.on('connected', this._onConnected);
@@ -124,7 +131,10 @@ class PhoneApprover {
     const jobId = salt ? null : normalizeOrigin(origin).job_id;
     const ids = { request_id: message.request_id, action_hash: message.action_hash };
     try {
-      await this._audit('approval.request', { job_id: jobId, envelope });
+      // A sealed envelope hides its origin, so a window's entry says which one asked
+      // (R-RW-33): the bare id, which the front door has already seen in the clear.
+      const windowOrigin = origin && origin.client === 'remote-window' ? { origin: auditOriginOf(origin) } : {};
+      await this._audit('approval.request', { job_id: jobId, envelope, ...windowOrigin });
     } catch (err) {
       log.error(`approval.request not audited, so not sent: ${err.message}`);
       return this._outcome('error', { ...ids, reason: 'audit_unavailable' });
@@ -387,8 +397,8 @@ class PhoneApprover {
     // object.
     const hasMetadata = metadata !== null && typeof metadata === 'object';
     const meta = hasMetadata ? metadata : {};
-    const refuse = (deniedBy, error) => {
-      if (hasMetadata) metadata.refusal = { deniedBy, error };
+    const refuse = (deniedBy, error, code = null) => {
+      if (hasMetadata) metadata.refusal = { deniedBy, error, ...(code ? { code } : {}) };
       return 'unavailable';
     };
     let action;
@@ -398,14 +408,29 @@ class PhoneApprover {
       if (err instanceof MessageError) return refuse('unavailable', `Action cannot be shown on the phone (${err.reason}); nothing ran.`);
       throw err;
     }
-    const outcome = await this.requestAction(action, {
-      origin: meta.origin || null,
-      signal: meta.signal || null,
-      // Read live: metadata.workingDirectory at the moment a phone response
-      // is being checked against reality, not the value captured when the
-      // request was first signed.
-      currentAction: () => toolAction(toolName, parameters, meta.workingDirectory || null, meta.cardNote)
-    });
+    // Every card of a window counts here, where they are all made: a channel call, a
+    // folder and a tool in a turn. Not the owner's no, so not counted as one.
+    const windowKey = meta.origin && meta.origin.client === 'remote-window' ? String(meta.origin.deviceId) : null;
+    const held = windowKey === null ? 0 : (this.windowAsks.get(windowKey) || 0);
+    if (held >= WINDOW_ASKS_MAX) return refuse('unavailable', WINDOW_BUSY, 'PHONE_BUSY');
+    if (windowKey !== null) this.windowAsks.set(windowKey, held + 1);
+    let outcome;
+    try {
+      outcome = await this.requestAction(action, {
+        origin: meta.origin || null,
+        signal: meta.signal || null,
+        // Read live: metadata.workingDirectory at the moment a phone response
+        // is being checked against reality, not the value captured when the
+        // request was first signed.
+        currentAction: () => toolAction(toolName, parameters, meta.workingDirectory || null, meta.cardNote)
+      });
+    } finally {
+      if (windowKey !== null) {
+        const left = this.windowAsks.get(windowKey) - 1;
+        if (left > 0) this.windowAsks.set(windowKey, left);
+        else this.windowAsks.delete(windowKey);
+      }
+    }
     // A caller that must name the approval (the bridge's phone gate) reads it here.
     if (hasMetadata && outcome.request_id) metadata.request_id = outcome.request_id;
     switch (outcome.decision) {

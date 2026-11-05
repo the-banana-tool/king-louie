@@ -197,7 +197,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   phoneVector('request-display', request(web, 'display', runbookAction, { origin: { client: 'stdio-mcp', session: null, job_id: 'job-1' } }), pinnedWeb);
   // A remote window's channel call (remote window plan R-RW-12, R-RW-33): the card names
   // the window, by label in the summary and by device id in the origin.
-  const windowAction = { kind: 'tool', name: 'Window', params: { channel: 'chat:delete', args: ['chat-1'] }, cwd: null, summary: 'chat:delete from Field laptop' };
+  const windowAction = { kind: 'tool', name: 'Window', params: { channel: 'chat:delete', args: ['chat-1'] }, cwd: null, summary: 'chat:delete from Field laptop · 1 parameter, 1 KB' };
   phoneVector('request-display-window', request(web, 'display window', windowAction, { origin: { client: 'remote-window', deviceId: 'kld-abcdefghijklmnop', session: null, job_id: null } }), pinnedWeb);
 
   // A syntactically well-formed, canonical, correctly-signed envelope whose

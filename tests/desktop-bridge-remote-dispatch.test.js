@@ -18,7 +18,8 @@ const { Tool } = require('../src/tools/tool-schema');
 const { toolRegistry } = require('../src/tools');
 const { registerHandlers } = require('../src/ipc/register');
 const { createBridgeDispatcher } = require('../src/desktop-bridge/bridge-dispatcher');
-const { WINDOW_ARGS_INLINE_MAX, WINDOW_LEAF_MAX } = require('../src/desktop-bridge/window-cards');
+const { WINDOW_ARGS_INLINE_MAX, WINDOW_LEAF_MAX, FREE_TEXT_FIELDS } = require('../src/desktop-bridge/window-cards');
+const { isRendererEvent } = require('../src/desktop-bridge/allowlist');
 const { toolCardParams } = require('../src/approvals/hidden-card');
 const { createConnection } = require('../src/desktop-bridge/connection');
 const { currentConnection } = require('../src/desktop-bridge/run-context');
@@ -35,6 +36,9 @@ const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
 const { profileSettings, everyRole } = require('./helpers/profile-settings');
 const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
+
+process.env.KL_TEST_MODE = '1';
+globalThis.fetch = async (url) => { throw new Error(`this test has no network: ${url}`); };
 
 const PROBE = 'KlTestRemoteDispatchProbe';
 const STOPPED_ROW = MESSAGES.DESKTOP_DISCONNECTED_RUN;
@@ -445,7 +449,7 @@ describe('the phone gate', () => {
       ['settings:saveImageGenKey', { provider: 'fal', apiKey: SECRET }, { provider: 'fal' }],
       ['settings:saveElevenLabsKey', { apiKey: SECRET, clear: false }, { clear: false }],
       ['history:jev.saveKey', { key: SECRET }, {}],
-      ['settings:mcpSave', { name: 'files', oldName: 'old', server: { command: 'npx', args: ['--token', SECRET], env: { API_TOKEN: SECRET }, cwd: 'C:\\example' } }, { name: 'files', oldName: 'old', command: 'npx', env_names: ['API_TOKEN'] }],
+      ['settings:mcpSave', { name: 'files', oldName: 'old', server: { command: 'npx', args: ['--port', '1'], env: { API_TOKEN: SECRET }, cwd: 'C:\\example' } }, { name: 'files', oldName: 'old', command: 'npx', args: ['--port', '1'], cwd: 'C:\\example', env_names: ['API_TOKEN'] }],
       ['settings:runLlmCommand', { command: `/llm add openai ${SECRET}` }, { verb: 'add' }],
       ['webhook:update', { id: 'wh-1', messageTemplate: SECRET, name: SECRET }, { id: 'wh-1', fields: ['messageTemplate', 'name'] }],
       ['skill:saveSettings', { skillId: 'std', settings: { apiKey: SECRET, depth: 3 } }, { skillId: 'std', setting_names: ['apiKey', 'depth'] }],
@@ -571,17 +575,12 @@ describe('the phone gate', () => {
       const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'workflow:plan': async () => ({ ok: true }) } });
       const a = connection();
       use(a);
-      const leaves = (bytes) => {
-        const names = ['a', 'b', 'c', 'd', 'e'];
-        const left = bytes - Buffer.byteLength(canonicalize([Object.fromEntries(names.map((n) => [n, '']))]));
-        const each = Math.floor(left / names.length);
-        return Object.fromEntries(names.map((n, i) => [n, 'z'.repeat(i === 0 ? left - each * (names.length - 1) : each)]));
-      };
-      const atLimit = leaves(WINDOW_ARGS_INLINE_MAX);
+      const goal = (bytes) => ({ goal: 'z'.repeat(bytes - Buffer.byteLength(canonicalize([{ goal: '' }]))) });
+      const atLimit = goal(WINDOW_ARGS_INLINE_MAX);
       assert.strictEqual(Buffer.byteLength(canonicalize([atLimit])), WINDOW_ARGS_INLINE_MAX);
       await invoke(dispatcher, a, 1, 'workflow:plan', atLimit);
       assert.deepStrictEqual(phone.calls[0].parameters, { channel: 'workflow:plan', args: [atLimit] });
-      await invoke(dispatcher, a, 2, 'workflow:plan', { ...atLimit, more: 'z' });
+      await invoke(dispatcher, a, 2, 'workflow:plan', goal(WINDOW_ARGS_INLINE_MAX + 1));
       assert.strictEqual(resultFor(a, 2).value.code, 'REMOTE_ARGS_TOO_LARGE');
       assert.strictEqual(phone.calls.length, 1);
     });
@@ -590,9 +589,9 @@ describe('the phone gate', () => {
       const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'workflow:plan': async () => ({ ok: true }) } });
       const a = connection();
       use(a);
-      await invoke(dispatcher, a, 1, 'workflow:plan', { goal: 'g'.repeat(WINDOW_LEAF_MAX + 1) });
+      await invoke(dispatcher, a, 1, 'workflow:plan', { note: 'g'.repeat(WINDOW_LEAF_MAX + 1) });
       await invoke(dispatcher, a, 2, 'workflow:plan', { ['g'.repeat(WINDOW_LEAF_MAX + 1)]: 'x' });
-      await invoke(dispatcher, a, 3, 'workflow:plan', { goal: 'g'.repeat(WINDOW_LEAF_MAX) });
+      await invoke(dispatcher, a, 3, 'workflow:plan', { note: 'g'.repeat(WINDOW_LEAF_MAX) });
       assert.strictEqual(resultFor(a, 1).value.code, 'REMOTE_ARGS_TOO_LARGE');
       assert.strictEqual(resultFor(a, 2).value.code, 'REMOTE_ARGS_TOO_LARGE');
       assert.strictEqual(phone.calls.length, 1);
@@ -714,7 +713,7 @@ describe('the phone gate', () => {
       const running = invoke(dispatcher, a, 1, 'chat:delete', 'c-real');
       await waitFor(() => link.submitted.length === 1);
       const { message } = open(link.submitted[0]);
-      assert.strictEqual(message.action.summary, 'chat:delete from Field laptop');
+      assert.strictEqual(message.action.summary, 'chat:delete from Field laptop · 1 parameter, 1 KB');
       assert.strictEqual(message.action.name, 'Window');
       assert.strictEqual(message.action.kind, 'tool');
       assert.strictEqual(message.action.cwd, null);
@@ -770,7 +769,7 @@ describe('the phone gate', () => {
       use(a);
       const running = invoke(dispatcher, a, 1, 'chat:delete', 'c-real');
       await waitFor(() => link.submitted.length === 1);
-      assert.strictEqual(open(link.submitted[0]).message.action.summary, 'chat:delete from a window (name hidden)');
+      assert.strictEqual(open(link.submitted[0]).message.action.summary, 'chat:delete from a window (name hidden) · 1 parameter, 1 KB');
       approver.stop();
       await running;
     });
@@ -782,8 +781,8 @@ describe('the phone gate', () => {
       const a = connection({ label: 'x'.repeat(300) });
       use(a);
       await invoke(dispatcher, a, 1, 'chat:delete', 'c-real');
-      assert.strictEqual(Array.from(seen[0]).length, 120);
       assert.ok(seen[0].startsWith('chat:delete from xxx'));
+      assert.strictEqual(seen[0], `${`chat:delete from ${'x'.repeat(300)}`.slice(0, 120)} · 1 parameter, 1 KB`);
     });
 
     it('the note is the whole summary of a Window card, and any other tool keeps its pattern', () => {
@@ -1281,41 +1280,65 @@ describe('frames and seams', () => {
   });
 });
 
-describe('at most 8 asks in flight per device (R-RW-32)', () => {
-  it('the ninth is refused before anyone is asked; another device has its own; an answer frees one', async () => {
-    const held = [];
-    const phone = fakePhone(() => new Promise((resolve) => { held.push(resolve); }));
+describe('at most 8 asks in flight per device, channel, folder and tool cards alike (R-RW-32)', () => {
+  const stores = [];
+  after(() => { for (const s of stores) s.cleanup(); });
+  const realApprover = async () => {
+    const device = createFakePhone({ name: 'Phone 1' });
+    const store = await approverStoreWith([device.approverRecord()]);
+    stores.push(store);
+    const link = { submitted: [], on() {}, off() {}, isConnected: () => true, canDeliver: () => ({ ok: true }), status: async () => {}, submit: async (env) => { link.submitted.push(env); } };
+    const approver = new PhoneApprover({ identity: testNodeIdentity(), approverStore: store, link, auditLedger: { append: async (e) => e }, ttlMs: 60000 });
+    return { approver, link, device };
+  };
+
+  it('the ninth is refused before anyone is asked, and not as the owner\'s no; another device has its own; an answer frees one', async () => {
+    const { approver, link, device } = await realApprover();
     let runs = 0;
-    const { dispatcher, use } = makeDispatcher({ phone, overrides: { 'chat:delete': async () => { runs += 1; return { ok: true }; } } });
+    const { dispatcher, use } = makeDispatcher({ phone: approver, overrides: { 'chat:delete': async () => { runs += 1; return { ok: true }; } } });
     const a = connection();
     const other = connection({ device: 'otherwindow' });
     use(a, other);
     const going = [];
     for (let id = 1; id <= 8; id += 1) going.push(invoke(dispatcher, a, id, 'chat:delete', `c-${id}`));
-    await waitFor(() => phone.calls.length === 8);
+    await waitFor(() => link.submitted.length === 8);
     await invoke(dispatcher, a, 9, 'chat:delete', 'c-9');
-    assert.deepStrictEqual(resultFor(a, 9).value, { ok: false, code: 'PHONE_BUSY', error: MESSAGES.PHONE_BUSY });
-    assert.strictEqual(phone.calls.length, 8);
+    assert.strictEqual(resultFor(a, 9).value.code, 'PHONE_BUSY');
+    assert.match(resultFor(a, 9).value.error, /Nothing ran/);
+    assert.strictEqual(link.submitted.length, 8);
+
+    const metadata = { origin: { client: 'remote-window', deviceId: a.deviceId, session: null, job_id: null } };
+    assert.strictEqual(await approver.requestApproval('Read', { file_path: 'a.txt' }, metadata), 'unavailable', 'a tool card takes the same count');
+    assert.strictEqual(metadata.refusal.code, 'PHONE_BUSY');
+    assert.strictEqual(metadata.refusal.deniedBy, 'unavailable', 'the denial tracker does not count it');
 
     going.push(invoke(dispatcher, other, 1, 'chat:delete', 'c-other'));
-    await waitFor(() => phone.calls.length === 9);
+    await waitFor(() => link.submitted.length === 9);
 
-    held.shift()(false);
+    await approver.handleResponse(device.respond(link.submitted[0], 'deny'));
     await going[0];
     going.push(invoke(dispatcher, a, 10, 'chat:delete', 'c-10'));
-    await waitFor(() => phone.calls.length === 10);
-    for (const answer of held) answer(false);
+    await waitFor(() => link.submitted.length === 10);
+    approver.stop();
     await Promise.all(going);
     assert.strictEqual(runs, 0);
   });
 
+  it('a run that is not a window\'s is not counted', async () => {
+    const { approver, link } = await realApprover();
+    const going = [];
+    for (let i = 0; i < 12; i += 1) going.push(approver.requestApproval('Read', { file_path: 'a.txt' }, { origin: { client: 'stdio-mcp', session: null, job_id: 'job-1' } }));
+    await waitFor(() => link.submitted.length === 12);
+    approver.stop();
+    await Promise.all(going);
+  });
+
   it('a folder request takes a place too, and is false at the limit', async () => {
-    const held = [];
-    const phone = fakePhone(() => new Promise((resolve) => { held.push(resolve); }));
+    const { approver, link } = await realApprover();
     let ctxRef = null;
     const results = [];
     const { dispatcher, use } = makeDispatcher({
-      phone,
+      phone: approver,
       overrides: {
         'chat:delete': async () => ({ ok: true }),
         'chat:sendMessage': async () => { results.push(await ctxRef.prompter.requestDirectoryAccess({ directory: 'C:\\example\\lot', toolName: 'Read' })); return { ok: true }; }
@@ -1326,12 +1349,242 @@ describe('at most 8 asks in flight per device (R-RW-32)', () => {
     use(a);
     const going = [];
     for (let id = 1; id <= 8; id += 1) going.push(invoke(dispatcher, a, id, 'chat:delete', `c-${id}`));
-    await waitFor(() => phone.calls.length === 8);
+    await waitFor(() => link.submitted.length === 8);
     await invoke(dispatcher, a, 9, 'chat:sendMessage', { chatId: 'c-dir-full', message: 'go' });
     assert.deepStrictEqual(results, [false]);
-    assert.strictEqual(phone.calls.length, 8);
-    for (const answer of held) answer(false);
+    assert.strictEqual(link.submitted.length, 8);
+    approver.stop();
     await Promise.all(going);
+  });
+
+  it('the flood: 20 turns on 20 chats put no more than 8 tool cards in flight', async () => {
+    const { approver, link } = await realApprover();
+    const { core: flood, dataDir: floodDir } = makeCore({ remoteApprovals: 'phone', phoneApprover: approver });
+    await flood.start();
+    const { dispatcher, use } = makeDispatcher({ coreOverride: flood, phone: approver });
+    const a = connection();
+    use(a);
+    const N = 20;
+    for (let i = 0; i < N; i += 1) script.push({ type: 'tool_use', toolName: PROBE, toolUseId: `call_${i}`, parameters: {} });
+    const going = [];
+    for (let i = 0; i < N; i += 1) {
+      const id = `flood-${i}`;
+      flood.context.createChat({ id, title: id, createdAt: '2026-11-04T10:00:00Z', updatedAt: '2026-11-04T10:00:00Z', messages: [] });
+      going.push(dispatcher.handleFrame(a, { t: 'invoke', id: i + 1, channel: 'chat:sendMessage', args: [{ chatId: id, message: 'go', agentMode: true }] }));
+    }
+    await waitFor(() => link.submitted.length === 8);
+    await new Promise((r) => { setTimeout(r, 300); });
+    assert.strictEqual(link.submitted.length, 8);
+    approver.stop();
+    await Promise.all(going);
+    script.length = 0;
+    await flood.shutdown().catch(() => {});
+    fs.rmSync(floodDir, { recursive: true, force: true });
+  });
+});
+
+describe('what a card says of itself (second review)', () => {
+  const cardFor = async (channel, payload) => {
+    const { dispatcher, phone, use } = makeDispatcher({ overrides: { [channel]: async () => ({ ok: true }) } });
+    const a = connection();
+    use(a);
+    await invoke(dispatcher, a, 1, channel, payload);
+    return { phone, value: resultFor(a, 1).value, call: phone.calls[0] };
+  };
+  const summaryOf = (call) => toolAction('Window', call.parameters, null, call.metadata.cardNote).summary;
+  const flat = (n, size = 4) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${String(i).padStart(3, '0')}`, 'v'.repeat(size)]));
+
+  describe('the host a card shows is the host that runs', () => {
+    const BACKSLASH = 'http://evil.example\\@127.0.0.1:11434/';
+    const hostOf = (text) => new URL(text).hostname;
+
+    it('an address the node parses shows what the parser reads, on both channels', async () => {
+      for (const [channel, payload, runs] of [
+        ['models:setOllamaBaseUrl', { baseUrl: BACKSLASH }, (p) => p.baseUrl],
+        ['history:embedder.save', { embedder: { kind: 'ollama', ollama: { baseUrl: BACKSLASH } } }, (p) => p.embedder.ollama.baseUrl]
+      ]) {
+        const { call } = await cardFor(channel, payload);
+        const shown = runs(call.parameters.args[0]);
+        assert.strictEqual(hostOf(shown), hostOf(BACKSLASH), channel);
+        assert.strictEqual(hostOf(shown), 'evil.example', channel);
+        assert.ok(!JSON.stringify(call.parameters).includes('127.0.0.1:11434/"') || shown.includes('evil.example'), channel);
+      }
+    });
+
+    it('a git source the parsers could read differently is shown as sent', async () => {
+      const ODD = ['https://evil.example\\@git.example.com/p.git', 'https://a@b@git.example.com/p.git', 'https://me:pw@git.example.com /p.git', 'git@git.example.com:p.git', 'ssh://git@git.example.com/p.git', 'path:C:\\example\\p'];
+      for (const value of ODD) {
+        for (const [channel, payload, runs] of [
+          ['skill:install', { url: value }, (p) => p.url],
+          ['case:addPlaybook', { caseId: 'case-1', source: value }, (p) => p.source],
+          ['case:create', { title: 'Lakeside lot', playbooks: [{ source: value }] }, (p) => p.playbooks[0].source]
+        ]) {
+          const { call } = await cardFor(channel, payload);
+          assert.strictEqual(runs(call.parameters.args[0]), value, `${channel}: ${value}`);
+        }
+      }
+    });
+
+    it('an address that does not parse is shown as sent', async () => {
+      const { call } = await cardFor('models:setOllamaBaseUrl', { baseUrl: 'not a url' });
+      assert.strictEqual(call.parameters.args[0].baseUrl, 'not a url');
+    });
+  });
+
+  describe('small leaves cannot push what runs off the screen', () => {
+    it('65 leaves, nested or flat, are refused; 64 pass', async () => {
+      assert.strictEqual((await cardFor('workflow:plan', flat(65))).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('apps:add', flat(65))).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      const nested = await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { ...flat(65), message: 'go' } });
+      assert.strictEqual(nested.value.code, 'REMOTE_ARGS_TOO_LARGE');
+      const bash = await cardFor('tool:execute', { toolName: 'Bash', parameters: { ...flat(65), command: 'evil' } });
+      assert.strictEqual(bash.value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('workflow:plan', flat(64))).value.ok, true);
+    });
+
+    it('depth 7 is refused, 6 passes', async () => {
+      // The card is params > args > the payload: three more objects reach 6.
+      const six = { a: { b: { c: { d: 'x' } } } };
+      const seven = { a: { b: { c: { d: { e: 'x' } } } } };
+      assert.strictEqual((await cardFor('workflow:plan', six)).value.ok, true);
+      assert.strictEqual((await cardFor('workflow:plan', seven)).value.code, 'REMOTE_ARGS_TOO_LARGE');
+    });
+
+    it('more than 8 KB of shown text is refused, keys counted', async () => {
+      assert.strictEqual((await cardFor('workflow:plan', flat(5, 1900))).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('workflow:plan', flat(4, 1900))).value.ok, true);
+    });
+
+    it('a hidden form has the same caps', async () => {
+      const servers = flat(30003);
+      const { value, phone } = await cardFor('settings:saveNotifications', { notifications: { ntfy: { server: 'https://ntfy.example.com', ...servers } } });
+      assert.strictEqual(value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.deepStrictEqual(phone.calls, []);
+      assert.strictEqual((await cardFor('settings:saveTemplateVariables', { templateVariables: flat(64) })).value.ok, true);
+      assert.strictEqual((await cardFor('settings:saveTemplateVariables', { templateVariables: flat(65) })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+    });
+
+    it('the leaf cap is 2000 code points; a free-text field may pass it, up to 64 KiB in all', async () => {
+      assert.strictEqual(WINDOW_LEAF_MAX, 2000);
+      assert.strictEqual((await cardFor('workflow:plan', { note: 'n'.repeat(2001) })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('workflow:plan', { note: '\u{1F34C}'.repeat(2000) })).value.code, undefined, 'code points, not bytes... within 8 KB');
+      assert.strictEqual((await cardFor('workflow:plan', { goal: 'g'.repeat(40000) })).value.ok, true);
+      assert.strictEqual((await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'm'.repeat(40000) } })).value.ok, true);
+      assert.strictEqual((await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { 'x': 'm'.repeat(40000), message: 'go' } })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('tool:execute', { toolName: 'Bash', parameters: { command: 'c'.repeat(40000) } })).value.ok, true);
+      assert.strictEqual((await cardFor('tool:execute', { toolName: 'Bash', parameters: { other: 'c'.repeat(40000) } })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('workflow:plan', { 'args.0.goal': 'g'.repeat(40000) })).value.code, 'REMOTE_ARGS_TOO_LARGE', 'a key with dots is not the path');
+      assert.deepStrictEqual(Object.keys(FREE_TEXT_FIELDS).sort(), ['cron:add', 'cron:update', 'memory:capture', 'skill:handleMessage', 'tool:execute', 'workflow:plan', 'workflow:planAndExecute']);
+    });
+
+    it('case:ingestFiles takes at most 64 files', async () => {
+      const files = (n) => Array.from({ length: n }, (_, i) => ({ name: `f${i}.txt`, base64: 'QUJD' }));
+      assert.strictEqual((await cardFor('case:ingestFiles', { caseId: 'case-1', files: files(64) })).value.ok, true);
+      assert.strictEqual((await cardFor('case:ingestFiles', { caseId: 'case-1', files: files(65) })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('case:ingestFiles', { caseId: 'case-1', files: [{ name: 'n'.repeat(2001), base64: 'QUJD' }] })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+    });
+  });
+
+  describe('the summary', () => {
+    it('says how much, from the host', async () => {
+      const { call } = await cardFor('chat:delete', 'c-any');
+      assert.strictEqual(summaryOf(call), 'chat:delete from Field laptop · 1 parameter, 1 KB');
+      const many = await cardFor('workflow:plan', { goal: 'g'.repeat(3000), a: '1', b: '2' });
+      assert.match(summaryOf(many.call), / · 3 parameters, 3 KB · runs: g+/);
+    });
+
+    it('the hidden forms count what they show and size what runs', async () => {
+      const { call } = await cardFor('settings:vaultStore', { key: 'a.key', value: 'v'.repeat(3000) });
+      assert.strictEqual(summaryOf(call), 'settings:vaultStore from Field laptop · 1 parameter, 3 KB');
+    });
+
+    it('names what runs, ahead of anything a caller can add', async () => {
+      const line = async (channel, payload) => summaryOf((await cardFor(channel, payload)).call);
+      assert.match(await line('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'evil things', aaa: 'x' } }), / · runs: evil things$/);
+      assert.match(await line('tool:execute', { toolName: 'Bash', parameters: { command: 'rm -rf x', aaa: 'y' } }), / · runs: Bash rm -rf x$/);
+      assert.match(await line('tool:execute', { toolName: 'Read', parameters: { file_path: 'a.txt' } }), / · runs: Read a\.txt$/);
+      assert.match(await line('settings:mcpSave', { name: 'files', server: { command: 'npx', args: ['evil-package', '--yes'] } }), / · runs: npx evil-package --yes$/);
+      assert.match(await line('skill:install', { url: 'https://me:pw@git.example.com/s.git' }), / · runs: https:\/\/git\.example\.com\/s\.git$/);
+      assert.match(await line('skill:handleMessage', { chatId: 'c', message: 'hello there' }), / · runs: hello there$/);
+    });
+
+    it('a value that is not one plain line is not put in the line', async () => {
+      const { call } = await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'fine\nthen evil \u202E' } });
+      assert.match(summaryOf(call), / · runs: \(not one plain line\)$/);
+    });
+
+    it('the head and the count are never cut, whatever the value', async () => {
+      const { call } = await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'm'.repeat(3000) } });
+      const summary = summaryOf(call);
+      assert.match(summary, /^cron:add from Field laptop · 3 parameters, 3 KB · runs: m+…$/);
+      assert.strictEqual(Array.from(summary).length, 300);
+    });
+  });
+
+  describe('settings:mcpSave (the ruling)', () => {
+    it('shows command, args and cwd, with env names only', async () => {
+      const { call } = await cardFor('settings:mcpSave', { name: 'files', server: { command: 'npx', args: ['evil-package'], cwd: 'C:\\example', env: { API_TOKEN: 'hidden-value' } } });
+      const { args_sha256: _mark, bytes: _bytes, ...card } = call.parameters;
+      assert.deepStrictEqual(card, { channel: 'settings:mcpSave', name: 'files', command: 'npx', args: ['evil-package'], cwd: 'C:\\example', env_names: ['API_TOKEN'] });
+      assert.ok(!JSON.stringify(call.parameters).includes('hidden-value'));
+    });
+  });
+
+  describe('the audit names the window (R-RW-33, the ruling)', () => {
+    const { auditOriginOf } = require('../src/approvals/audit-fields');
+
+    it('the reduced origin keeps the bare device id, and nothing else of the run', () => {
+      assert.deepStrictEqual(auditOriginOf({ client: 'remote-window', deviceId: 'kld-abcdefghijklmnop', session: 'chat-1', job_id: null }), { kind: 'remote-window', deviceId: 'kld-abcdefghijklmnop' });
+      assert.deepStrictEqual(auditOriginOf({ client: 'remote-window', session: 'chat-1' }), { kind: 'remote-window', deviceId: null });
+    });
+
+    it('on a sealing node the approval.request entry names it, through the real path', async () => {
+      const { createSealPolicy } = require('../src/approvals/seal-policy');
+      const identity = testNodeIdentity({ box: true });
+      const phone = createFakePhone({ name: 'Box phone', boxKey: true });
+      const store = await approverStoreWith([phone.approverRecord({ boxKey: true })]);
+      const sealDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-seal-audit-'));
+      const entries = [];
+      const link = { submitted: [], on() {}, off() {}, isConnected: () => true, canDeliver: () => ({ ok: true }), status: async () => {}, submit: async (env) => { link.submitted.push(env); } };
+      const approver = new PhoneApprover({ identity, approverStore: store, link, auditLedger: { append: async (e) => { entries.push(e); return e; } }, ttlMs: 60000, sealPolicy: createSealPolicy({ approverStore: store, identity, dataDir: sealDir }) });
+      const { dispatcher, use } = makeDispatcher({ phone: approver, overrides: { 'chat:delete': async () => ({ ok: true }) } });
+      const a = connection();
+      use(a);
+      const running = invoke(dispatcher, a, 1, 'chat:delete', 'c-sealed');
+      await waitFor(() => link.submitted.length === 1);
+      const entry = entries.find((e) => e.kind === 'approval.request');
+      assert.deepStrictEqual(entry.data.origin, { kind: 'remote-window', deviceId: a.deviceId });
+      assert.ok(!JSON.stringify(entry.data.envelope).includes(a.deviceId), 'the envelope is sealed; this field is what names it');
+      approver.stop();
+      await running;
+      store.cleanup();
+      fs.rmSync(sealDir, { recursive: true, force: true });
+    });
+
+    it('any other origin\'s entry is unchanged', async () => {
+      const device = createFakePhone({ name: 'Phone 1' });
+      const store = await approverStoreWith([device.approverRecord()]);
+      const entries = [];
+      const link = { submitted: [], on() {}, off() {}, isConnected: () => true, canDeliver: () => ({ ok: true }), status: async () => {}, submit: async (env) => { link.submitted.push(env); } };
+      const approver = new PhoneApprover({ identity: testNodeIdentity(), approverStore: store, link, auditLedger: { append: async (e) => { entries.push(e); return e; } }, ttlMs: 60000 });
+      const going = approver.requestApproval('Read', { file_path: 'a.txt' }, { origin: { client: 'stdio-mcp', session: null, job_id: 'job-1' } });
+      await waitFor(() => link.submitted.length === 1);
+      assert.deepStrictEqual(Object.keys(entries.find((e) => e.kind === 'approval.request').data).sort(), ['envelope', 'job_id']);
+      approver.stop();
+      await going;
+      store.cleanup();
+    });
+  });
+
+  describe('a stale prompt after Stop', () => {
+    it('the renderer has the event and removes the row', () => {
+      const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+      const preload = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+      assert.match(preload, /onAskEnded: \(callback\) => registerOnce\('agent:askEnded', callback\)/);
+      assert.match(renderer, /messageDiv\.dataset\.askRequestId = requestId;/);
+      assert.match(renderer, /onAskEnded\(\(\{ requestId \}\) => \{/);
+      assert.ok(isRendererEvent('agent:askEnded'), 'it crosses the bridge');
+    });
   });
 });
 
@@ -1361,6 +1614,7 @@ describe('Stop while a turn waits on a remote question (a real run)', () => {
     await invoke(dispatcher, a, 2, 'chat:stopResponse', { chatId });
     await settledSoon(first);
     assert.strictEqual(dispatcher.bridgeContext.pendingAskUserResolvers.has(shown.payload.requestId), false);
+    for (const conn of [a, other]) assert.ok(conn.sent.some((f) => f.channel === 'agent:askEnded' && f.payload.requestId === shown.payload.requestId), 'the prompt row goes');
     assert.strictEqual(dispatcher.pendingAskUserByDevice.has(a.deviceId), false);
     assert.deepStrictEqual(await running(dispatcher, a, 3), []);
 
@@ -1412,7 +1666,7 @@ describe('Stop while a turn waits on a remote question (a real run)', () => {
     assert.strictEqual(dirs.size, 0);
     assert.deepStrictEqual(await prompter.askUser({ question: 'Late?', signal: stop.signal }), { ok: false, error: 'Stopped.' });
     assert.strictEqual(await prompter.requestDirectoryAccess({ directory: 'C:\\example', toolName: 'Read', signal: stop.signal }), false);
-    assert.strictEqual(sent.length, 2, 'an aborted run asks nothing more');
+    assert.deepStrictEqual(sent.map(([channel]) => channel), ['agent:askUser', 'tool:directoryAccessRequired', 'agent:askEnded'], 'the prompt is taken back, and an aborted run asks nothing more');
   });
 });
 

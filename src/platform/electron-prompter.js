@@ -23,6 +23,8 @@ function createElectronPrompter({ getWindow, pendingAskUserResolvers, pendingDir
         const onAbort = () => {
           clearTimeout(timeoutId);
           pendingAskUserResolvers.delete(requestId);
+          // Or the row stays on screen, and an answer typed there goes nowhere.
+          liveWindow()?.webContents.send('agent:askEnded', { requestId });
           resolve({ ok: false, error: STOPPED });
         };
         const timeoutId = setTimeout(() => {

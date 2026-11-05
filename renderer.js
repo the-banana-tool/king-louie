@@ -13300,9 +13300,17 @@ unsubscribeHandlers.push(window.electron.tool.onDirectoryAccessRequired(({ reque
   showDirectoryAccessDialog(requestId, directory, toolName);
 }));
 
+// The run that asked was stopped: nothing is waiting for an answer here any more.
+unsubscribeHandlers.push(window.electron.agent.onAskEnded(({ requestId }) => {
+  for (const row of dom.chatMessages.querySelectorAll('.prompt-message')) {
+    if (row.dataset.askRequestId === requestId) row.remove();
+  }
+}));
+
 unsubscribeHandlers.push(window.electron.agent.onAskUser(({ requestId, question }) => {
   const messageDiv = document.createElement('div');
   messageDiv.className = 'message assistant prompt-message';
+  messageDiv.dataset.askRequestId = requestId;
 
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
