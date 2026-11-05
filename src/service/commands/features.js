@@ -48,12 +48,18 @@ async function runFeaturesCommand({ sub, arg, arg2, dataDir, io, deps = {} }) {
   }
   const configDir = deps.configDir || adminConfigDir({ dataDir });
   // As `desktop pair`: an elevated run would leave a file the owner's node cannot trust.
-  if (readHosting({ dataDir, configDir, deps }).hosting === 'personal' && await (deps.isAdmin || defaultIsAdmin)()) {
-    io.stderr.write('features set on a personal node runs as you, not elevated: open a normal prompt.\n');
-    return 1;
-  }
   if (!fs.existsSync(configDir)) {
     io.stderr.write(`${configDir} does not exist: install the node first. Nothing was written.\n`);
+    return 1;
+  }
+  // A node.yaml that will not load cannot say this is not a personal node.
+  const { hosting, error: nodeConfigError } = readHosting({ dataDir, configDir, deps });
+  if (nodeConfigError) {
+    io.stderr.write(`node.yaml does not load, so this cannot tell how the node is hosted: ${nodeConfigError.message}. Nothing was written.\n`);
+    return 1;
+  }
+  if (hosting === 'personal' && await (deps.isAdmin || defaultIsAdmin)()) {
+    io.stderr.write('features set on a personal node runs as you, not elevated: open a normal prompt.\n');
     return 1;
   }
   const file = path.join(configDir, 'service.json');

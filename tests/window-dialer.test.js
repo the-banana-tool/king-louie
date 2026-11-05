@@ -118,7 +118,7 @@ function makeDevice(label) {
   return { deviceId: keys.deriveDeviceId(raw, 'kld-'), publicKey: keys.toB64url(raw), raw, label, privateKey };
 }
 
-function realServer({ devices = [], canSeal = () => true, sealedDeps = {} } = {}) {
+function realServer({ devices = [], canSeal = () => true, sealedDeps = {}, limits = {} } = {}) {
   const server = new DesktopBridgeServer({
     identity: nodeIdentity,
     configDir: tempConfig(devices),
@@ -128,6 +128,7 @@ function realServer({ devices = [], canSeal = () => true, sealedDeps = {} } = {}
     account: 'LOCAL SERVICE',
     approvals: { sealPolicy: { canSeal, whyNot: () => 'no active phone holds a box key' } },
     sealedDeps,
+    limits,
     createDispatcher: () => ({
       served: { handle: ['chat:load'], on: [] },
       providersConfigured: () => true,
@@ -397,22 +398,26 @@ describe('createWindowDialer: the seals not yet ready (R-RW-36)', () => {
     assert.ok(CLOSE_GRACE_MS >= 1000 && CLOSE_GRACE_MS <= 2000, 'a grace of 1 to 2 s');
     const peer = await silentPeer();
     const unlimited = { opensPerMinute: Number.MAX_SAFE_INTEGER };
-    const dialer = dialerFor(peer.port, realServer(), { ...unlimited, closeGraceMs: 300 });
+    // The server's own cut is pushed past the test, so only the dialer's grace can end
+    // these sockets, and a stalled runner cannot end it before the checks below.
+    const dialer = dialerFor(peer.port, realServer({ limits: { closeGraceMs: 60000 } }), { ...unlimited, closeGraceMs: 4000 });
     for (let i = 0; i < PENDING_SEALS_MAX; i += 1) await dialer.open({ session_id: newSessionId() });
     await waitFor(() => peer.open === PENDING_SEALS_MAX, 'every socket');
     await delay(100);
     assert.strictEqual(dialer.pending(), PENDING_SEALS_MAX, 'every seal has failed, and its socket is still open');
     assert.deepStrictEqual(await dialer.open({ session_id: newSessionId() }), { ok: false, code: 'too_many_windows' });
-    await waitFor(() => dialer.pending() === 0, 'the grace to end');
-    await waitFor(() => peer.open === 0, 'the sockets to go');
+    await waitFor(() => dialer.pending() === 0, 'the grace to end', 20000);
+    await waitFor(() => peer.open === 0, 'the sockets to go', 20000);
     assert.strictEqual(peer.total, PENDING_SEALS_MAX);
   });
 
   it('a front door hammering window.open never holds more sockets than the cap', async () => {
     const peer = await silentPeer();
     const dialer = dialerFor(peer.port, realServer(), { opensPerMinute: Number.MAX_SAFE_INTEGER, closeGraceMs: 50 });
-    const end = Date.now() + 800;
-    while (Date.now() < end) {
+    // Until the places have come back several times over, or a deadline a stalled
+    // runner will not reach.
+    const end = Date.now() + 8000;
+    while (Date.now() < end && peer.total < PENDING_SEALS_MAX * 3) {
       await dialer.open({ session_id: newSessionId() });
       await delay(1);
     }

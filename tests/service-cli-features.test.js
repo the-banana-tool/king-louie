@@ -147,6 +147,22 @@ describe('features set', () => {
     assert.strictEqual(fleet.code, 0);
   });
 
+  it('refuses a node.yaml that will not load: it cannot say the prompt may be elevated', async () => {
+    const text = '{"features":{}}';
+    const l = setup(text);
+    let asked = 0;
+    const deps = {
+      loadNodeConfig: () => { throw new Error('unknown key "bogus"'); },
+      isAdmin: async () => { asked += 1; return true; }
+    };
+    const { code, err } = await run(l, ['set', 'remoteWindow', 'on'], { deps });
+    assert.strictEqual(code, 1);
+    assert.match(err, /node\.yaml/);
+    assert.match(err, /unknown key "bogus"/);
+    assert.strictEqual(fs.readFileSync(l.file, 'utf8'), text);
+    assert.strictEqual(asked, 0);
+  });
+
   it('does not make a missing config dir', async () => {
     const l = setup();
     fs.rmSync(l.configDir, { recursive: true });
