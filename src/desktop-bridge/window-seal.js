@@ -16,11 +16,17 @@
 // fixed width, so the concatenations cannot be read two ways.
 //
 // One seal is one session on one message transport: `next` takes one WebSocket
-// message. A failure closes for good with one code per stage (4401 before ready,
-// 4400 after) and one reason, and sends nothing, so an unauthenticated peer learns
-// only that it failed. The window's `node_key_changed` is its own, for its tab; it
+// message, once each, in order. The seal owns the one ordered writer: every message
+// it makes reaches `write` in the tick it was made, so a counter's order is the
+// wire's, however the caller awaits. A failure closes for good with one code per
+// stage (4401 before ready, 4400 after) and one reason, and sends nothing, so an
+// unauthenticated peer learns only that it failed. The window's `node_key_changed` is its own, for its tab; it
 // says nothing the peer did not send. A record's `len` is read only after its tag
 // holds, and a wire length is checked before anything is opened.
+//
+// Only a close record is authenticated: a socket's close code is a drop, whatever it
+// says. A host builds a seal with `write` and `onClose`, sends frames only through
+// createFrameSender, and sets SOCKET_OPTIONS and PRE_READY_BYTES on the socket.
 //
 // An injected `ephemeral` is for vectors only (tests/window-seal.test.js walks src/).
 const crypto = require('crypto');
@@ -53,6 +59,11 @@ const DIR = Object.freeze({ w2n: 0x00, n2w: 0x01 });
 const KEY_BYTES = 32;
 const SIG_BYTES = 64;
 const COUNTER_MAX = (1n << 64n) - 1n;
+// No frame, no key: the handshake's deadline, on both roles.
+const HANDSHAKE_TIMEOUT = 4408;
+// What a host sets on a sealed socket, and the raw bytes it takes before ready.
+const SOCKET_OPTIONS = Object.freeze({ maxPayload: RECORD_WIRE_MAX, perMessageDeflate: false });
+const PRE_READY_BYTES = LIMITS.preAuthSocketBytes;
 
 const NODE_DOMAIN = Buffer.from('kl-window-v1\nnode\n', 'ascii');
 const WINDOW_DOMAIN = Buffer.from('kl-window-v1\nwindow\n', 'ascii');
@@ -64,6 +75,8 @@ function sealError(code, message) {
   err.code = code;
   return err;
 }
+
+const isThenable = (value) => value !== null && typeof value === 'object' && typeof value.then === 'function';
 
 const asBytes = (value) => {
   if (Buffer.isBuffer(value)) return value;
@@ -187,7 +200,7 @@ class RecordCipher {
   }
 }
 
-const REASON = Object.freeze({ handshake: 'handshake', record: 'record', peer: 'peer', local: 'local', keyChanged: 'node_key_changed' });
+const REASON = Object.freeze({ handshake: 'handshake', record: 'record', peer: 'peer', local: 'local', write: 'write', keyChanged: 'node_key_changed' });
 const STATE = Object.freeze({ start: 'start', helloN: 'await-hello-n', helloW: 'await-hello-w', authW: 'await-auth-w', open: 'open' });
 
 class SealSession {
@@ -212,6 +225,11 @@ class SealSession {
   #identity;
   #lookupDevice;
   #claimed = null;
+  #write;
+  #onClose;
+  #deadline;
+  #clearTimer;
+  #pongOut = false;
 
   constructor(fields) {
     this.#role = fields.role;
@@ -224,6 +242,10 @@ class SealSession {
     this.#identity = fields.identity;
     this.#lookupDevice = fields.lookupDevice;
     this.#state = fields.role === 'window' ? STATE.start : STATE.helloW;
+    this.#write = fields.write;
+    this.#onClose = fields.onClose;
+    this.#clearTimer = fields.clearTimer;
+    this.#deadline = fields.setTimer(() => this.#closeOutside(HANDSHAKE_TIMEOUT, REASON.handshake), LIMITS.handshakeMs);
   }
 
   get ready() {
@@ -246,8 +268,10 @@ class SealSession {
     return this.#onAuthW(bytes);
   }
 
-  // Lazily, one record each step, so a slow socket holds back the encryption too.
-  // A ping may be taken between two steps; another frame may not.
+  // Lazily, one record each step, so a slow socket holds back the encryption too:
+  // each step seals a record, hands it to `write`, and yields { size, written },
+  // `written` being what `write` returned. createFrameSender is the caller. A ping
+  // may be taken between two steps; another frame may not.
   records(frameBytes) {
     this.#assertSendable();
     if (this.#sending) throw sealError('SEAL_BUSY', 'a frame is still going');
@@ -258,24 +282,24 @@ class SealSession {
     return this.#produce(frame);
   }
 
-  wrap(frameBytes) {
-    return [...this.records(frameBytes)];
-  }
-
   ping() {
     this.#assertSendable();
-    return this.#sealOne(KIND.ping, Buffer.alloc(0), PAD_SMALL);
+    this.#sendOne(KIND.ping, Buffer.alloc(0), PAD_SMALL);
   }
 
   // Ends this side too: nothing goes or opens after it.
   closeRecord(code) {
     this.#assertSendable();
-    if (!isCloseCode(code)) throw sealError('SEAL_INVALID', 'a close code is an integer from 1000 to 4999');
+    if (!isCloseCode(code)) throw sealError('SEAL_INVALID', 'not a close code a socket can send');
     const body = Buffer.alloc(4);
     body.writeUInt32BE(code);
-    const record = this.#sealOne(KIND.close, body, PAD_SMALL);
+    this.#sendOne(KIND.close, body, PAD_SMALL);
     this.#end({ code, reason: REASON.local });
-    return record;
+  }
+
+  // The socket has gone: nothing goes or opens, no timer stays, and nobody is told.
+  destroy() {
+    if (!this.#close) this.#end({ code: CLOSE.GOING_AWAY, reason: REASON.local });
   }
 
   // A generator abandoned partway leaves #sending set: the peer holds half a
@@ -288,7 +312,7 @@ class SealSession {
       offset += piece.length;
       const more = offset < frame.length;
       if (!more) this.#sending = false;
-      yield this.#sealOne(more ? KIND.more : KIND.final, piece, multiple);
+      yield this.#sendOne(more ? KIND.more : KIND.final, piece, multiple);
     } while (offset < frame.length);
   }
 
@@ -297,21 +321,48 @@ class SealSession {
     if (this.#state !== STATE.open) throw sealError('SEAL_NOT_READY', 'the handshake has not finished');
   }
 
-  #sealOne(kind, bytes, multiple) {
+  // Sealed and written in one tick: nothing can take a counter between the two.
+  #sendOne(kind, bytes, multiple) {
     this.#assertSendable();
     const record = this.#records.seal(kind, bytes, multiple);
     if (record === null) {
       this.#end({ code: CLOSE.MALFORMED, reason: REASON.record });
       throw sealError('SEAL_CLOSED', 'this direction has no counter left');
     }
-    return record;
+    return { size: record.length, written: this.#emit(record) };
   }
 
-  #result({ out = [], frames = [] } = {}) {
-    return { out, frames, close: this.#close, ready: this.ready, peer: this.#peer };
+  // Every write's failure is observed here, whoever else watches it.
+  #emit(bytes) {
+    let written;
+    try {
+      written = this.#write(bytes);
+    } catch (err) {
+      written = Promise.reject(err);
+    }
+    if (isThenable(written)) written.then(null, () => this.#closeOutside(CLOSE.GOING_AWAY, REASON.write));
+    return written;
+  }
+
+  // A close no next() call is there to return.
+  #closeOutside(code, reason) {
+    if (this.#close || (reason === REASON.handshake && this.#state === STATE.open)) return;
+    this.#fail(code, reason);
+    this.#onClose(this.#close);
+  }
+
+  #result({ frames = [] } = {}) {
+    return { frames, close: this.#close, ready: this.ready, peer: this.#peer };
+  }
+
+  #clearDeadline() {
+    if (this.#deadline === null) return;
+    this.#clearTimer(this.#deadline);
+    this.#deadline = null;
   }
 
   #end(close) {
+    this.#clearDeadline();
     this.#close = close;
     this.#run = null;
     this.#ephemeral = null;
@@ -332,7 +383,8 @@ class SealSession {
     const eph = this.#ephemeral.publicRaw;
     this.#helloW = Buffer.concat([Buffer.from([HELLO_W.type, VERSION]), eph, Buffer.from(this.#deviceId, 'ascii'), this.#publicKey]);
     this.#state = STATE.helloN;
-    return this.#result({ out: [this.#helloW] });
+    this.#emit(this.#helloW);
+    return this.#result();
   }
 
   async #signed(signer, bytes) {
@@ -383,7 +435,9 @@ class SealSession {
     this.#openRecords(deriveKeys(secret, this.#session, this.#helloW, helloN));
     this.#peer = { nodeId, publicKey: Buffer.from(helloN.subarray(HELLO_N.key, HELLO_N.signed)) };
     this.#state = STATE.open;
-    return this.#result({ out: [Buffer.concat([Buffer.from([AUTH_W.type]), signature])] });
+    this.#clearDeadline();
+    this.#emit(Buffer.concat([Buffer.from([AUTH_W.type]), signature]));
+    return this.#result();
   }
 
   // The node answers every well-formed hello alike, known device or not: whether a
@@ -409,7 +463,8 @@ class SealSession {
     this.#openRecords(deriveKeys(secret, this.#session, helloW, this.#helloN));
     this.#claimed = { deviceId, publicKey: Buffer.from(helloW.subarray(HELLO_W.key, HELLO_W.bytes)) };
     this.#state = STATE.authW;
-    return this.#result({ out: [this.#helloN] });
+    this.#emit(this.#helloN);
+    return this.#result();
   }
 
   // Synchronous, so the window's first records, sent right behind auth_w, find
@@ -424,6 +479,7 @@ class SealSession {
     if (!known || !known.equals(claimed.publicKey) || !verified) return this.#failHandshake();
     this.#peer = claimed;
     this.#state = STATE.open;
+    this.#clearDeadline();
     return this.#result();
   }
 
@@ -461,18 +517,29 @@ class SealSession {
       this.#run = null;
       return this.#result({ frames: [frame] });
     }
-    if (kind === KIND.ping) {
-      try {
-        return this.#result({ out: [this.#sealOne(KIND.pong, Buffer.alloc(0), PAD_SMALL)] });
-      } catch {
-        return this.#fail(CLOSE.MALFORMED, REASON.record);
-      }
-    }
+    if (kind === KIND.ping) return this.#onPing();
     if (kind === KIND.pong) return this.#result();
     const code = bytes.readUInt32BE(0);
     if (!isCloseCode(code)) return this.#fail(CLOSE.MALFORMED, REASON.record);
     this.#end({ code, reason: REASON.peer });
     return this.#result();
+  }
+
+  // At most one pong the socket has not taken: pings from a peer that reads nothing
+  // cost no more than that.
+  #onPing() {
+    if (this.#pongOut) return this.#result();
+    try {
+      const { written } = this.#sendOne(KIND.pong, Buffer.alloc(0), PAD_SMALL);
+      if (isThenable(written)) {
+        this.#pongOut = true;
+        const taken = () => { this.#pongOut = false; };
+        written.then(taken, taken);
+      }
+      return this.#result();
+    } catch {
+      return this.#fail(CLOSE.MALFORMED, REASON.record);
+    }
   }
 
   // The multiple this kind and length pad to, or 0 for what no sender makes. A
@@ -495,8 +562,17 @@ class SealSession {
   }
 }
 
+// The codes a WebSocket may send: ws.close throws on any other, and a peer's code
+// reaches a socket's close.
 function isCloseCode(code) {
-  return Number.isInteger(code) && code >= 1000 && code <= 4999;
+  if (!Number.isInteger(code)) return false;
+  return (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) || (code >= 3000 && code <= 4999);
+}
+
+function hostFields({ write, onClose, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  if (typeof write !== 'function') throw sealError('SEAL_INVALID', 'a seal writes');
+  if (typeof onClose !== 'function') throw sealError('SEAL_INVALID', 'a seal says when it closes');
+  return { write, onClose, setTimer, clearTimer };
 }
 
 function hasExactPadding(plaintext, len, multiple) {
@@ -508,7 +584,7 @@ function hasExactPadding(plaintext, len, multiple) {
 }
 
 const WindowSeal = Object.freeze({
-  window({ sessionId, deviceId, publicKey, sign, pin = null, ephemeral = null } = {}) {
+  window({ sessionId, deviceId, publicKey, sign, pin = null, write, onClose, setTimer, clearTimer, ephemeral = null } = {}) {
     const key = rawKey(publicKey, 'a device key');
     if (deriveDeviceId(key, 'kld-') !== deviceId) throw sealError('SEAL_INVALID', 'the device id is not this key\'s');
     if (typeof sign !== 'function') throw sealError('SEAL_INVALID', 'a window signs');
@@ -519,11 +595,12 @@ const WindowSeal = Object.freeze({
       publicKey: key,
       sign,
       pin: pin === null ? null : rawKey(pin, 'a pin'),
-      ephemeral: newEphemeral(ephemeral)
+      ephemeral: newEphemeral(ephemeral),
+      ...hostFields({ write, onClose, setTimer, clearTimer })
     });
   },
 
-  node({ sessionId, identity, lookupDevice, ephemeral = null } = {}) {
+  node({ sessionId, identity, lookupDevice, write, onClose, setTimer, clearTimer, ephemeral = null } = {}) {
     if (!identity || typeof identity.sign !== 'function') throw sealError('SEAL_INVALID', 'a node signs');
     if (typeof lookupDevice !== 'function') throw sealError('SEAL_INVALID', 'a node looks devices up');
     const key = rawKey(identity.publicKey, 'a node key');
@@ -533,18 +610,21 @@ const WindowSeal = Object.freeze({
       session: sessionBytes(sessionId),
       identity: { nodeId: identity.nodeId, publicKey: key, sign: (bytes) => identity.sign(bytes) },
       lookupDevice,
-      ephemeral: newEphemeral(ephemeral)
+      ephemeral: newEphemeral(ephemeral),
+      ...hostFields({ write, onClose, setTimer, clearTimer })
     });
   }
 });
 
-// Sends whole frames through a seal with the socket's backpressure. `write(record)`
-// returns a promise that settles when the socket has taken that record (ws's send
-// callback). At most `highWater` bytes of records are out at once, and a record is
+// Sends whole frames through a seal with the socket's backpressure. The seal's
+// `write` must return a promise that settles when the socket has taken the record
+// (ws's send callback); one that returns anything else ends the sender
+// SEND_NO_BACKPRESSURE, since nothing could then hold it back. At most `highWater` bytes of records are out at once, and a record is
 // encrypted only when it may go, so a slow reader costs one frame's reference and
 // the high water. Frames held behind that are bounded too: past `maxQueuedBytes`
 // send refuses SEND_QUEUE_FULL, and the caller closes the session.
 function createFrameSender({ seal, write, highWater = 4 * RECORD_WIRE_MAX, maxQueuedBytes = 2 * FRAME_MAX }) {
+  if (write !== undefined) throw sealError('SEAL_INVALID', 'the seal holds the writer');
   const entries = [];
   // Every frame whose promise has not settled, written out or not.
   const unsettled = new Set();
@@ -573,16 +653,13 @@ function createFrameSender({ seal, write, highWater = 4 * RECORD_WIRE_MAX, maxQu
     entry.resolve();
   };
 
-  function writeOne(entry, record) {
-    const size = record.length;
+  function track(entry, { size, written }) {
+    if (!isThenable(written)) {
+      fail(sealError('SEND_NO_BACKPRESSURE', 'the writer gives no promise'));
+      return;
+    }
     entry.outstanding += 1;
     inFlight += size;
-    let written;
-    try {
-      written = Promise.resolve(write(record));
-    } catch (err) {
-      written = Promise.reject(err);
-    }
     written.then(() => {
       inFlight -= size;
       entry.outstanding -= 1;
@@ -596,12 +673,13 @@ function createFrameSender({ seal, write, highWater = 4 * RECORD_WIRE_MAX, maxQu
     try {
       while (entries.length > 0 && !failure) {
         const entry = entries[0];
-        for (const record of seal.records(entry.frame)) {
-          if (failure) break;
-          writeOne(entry, record);
+        for (const step of seal.records(entry.frame)) {
+          track(entry, step);
           while (inFlight >= highWater && !failure) {
             await new Promise((resolve) => { wake = resolve; });
           }
+          // Before the generator is asked again: its next step seals and writes.
+          if (failure) break;
         }
         if (failure) break;
         entries.shift();
@@ -642,7 +720,7 @@ function createFrameSender({ seal, write, highWater = 4 * RECORD_WIRE_MAX, maxQu
 // nothing. The caller tells it `sent()` and `received()`, for every record, and
 // `ping` must check the seal is ready. The timer is ref'd: a session that is
 // open keeps the process up until its host stops it.
-function startHeartbeat({ ping, onSilence, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+function startHeartbeat({ ping, onSilence, now = () => performance.now(), setTimer = setTimeout, clearTimer = clearTimeout }) {
   let lastSent = now();
   let lastReceived = now();
   let timer = null;
@@ -700,7 +778,11 @@ module.exports = {
   PAD_SPLIT,
   PING_MS,
   SILENCE_MS,
+  HANDSHAKE_TIMEOUT,
+  PRE_READY_BYTES,
+  SOCKET_OPTIONS,
   advanceCounter,
+  isCloseCode,
   createFrameSender,
   startHeartbeat
 };

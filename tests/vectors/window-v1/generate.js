@@ -12,7 +12,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { WindowSeal, RECORD_WIRE_MAX } = require('../../../src/desktop-bridge/window-seal');
-const { KEYS, sessionIdOf, ephemeralOf, windowKey, nodeKey, lookupOf, runHandshake } = require('../../helpers/window-seal-fixture');
+const { KEYS, sessionIdOf, ephemeralOf, windowKey, nodeKey, lookupOf, runHandshake, sealed, sealFrame, closeRecordOf } = require('../../helpers/window-seal-fixture');
 
 const DIR = __dirname;
 const b64 = (bytes) => Buffer.from(bytes).toString('base64url');
@@ -73,8 +73,8 @@ function plaintextOf(kind, bytes, multiple) {
   return p;
 }
 
-const windowSeal = ({ session = SESSION, eph = EPH_W, pin = nodeKey('web-01').publicKey } = {}) => WindowSeal.window({ sessionId: session, ...windowKey('A'), pin, ephemeral: eph });
-const nodeSeal = ({ session = SESSION, eph = EPH_N, lookup = lookupOf('A') } = {}) => WindowSeal.node({ sessionId: session, identity: nodeKey('web-01'), lookupDevice: lookup, ephemeral: eph });
+const windowSeal = ({ session = SESSION, eph = EPH_W, pin = nodeKey('web-01').publicKey } = {}) => sealed((host) => WindowSeal.window({ ...host, sessionId: session, ...windowKey('A'), pin, ephemeral: eph }));
+const nodeSeal = ({ session = SESSION, eph = EPH_N, lookup = lookupOf('A') } = {}) => sealed((host) => WindowSeal.node({ ...host, sessionId: session, identity: nodeKey('web-01'), lookupDevice: lookup, ephemeral: eph }));
 async function livePair() {
   const window = windowSeal();
   const node = nodeSeal();
@@ -155,16 +155,16 @@ async function buildVectors() {
   const { window: sender, node: nodeSender } = await livePair();
   const roundtrip = [{ bytes: 100, fill: 0x61, multiple: 256 }, { bytes: 70000, fill: 0x62, multiple: 4096 }, { bytes: 1572864, fill: 0x63, multiple: 4096 }];
   const frames = roundtrip.map((frame) => {
-    const records = sender.wrap(Buffer.alloc(frame.bytes, frame.fill));
+    const records = sealFrame(sender, Buffer.alloc(frame.bytes, frame.fill));
     return { ...frame, from: 'window', records: records.map((r) => ({ length: r.length, sha256: b64(sha256(r)) })) };
   });
-  const back = nodeSender.wrap(Buffer.alloc(100, 0x64));
+  const back = sealFrame(nodeSender, Buffer.alloc(100, 0x64));
   frames.push({ bytes: 100, fill: 0x64, multiple: 256, from: 'node', records: back.map((r) => ({ length: r.length, sha256: b64(sha256(r)) })) });
   add('record-roundtrip', {}, { frames: frames.map(({ bytes, fill, from }) => ({ bytes, fill, from })) }, { frames: frames.map(({ multiple, records }) => ({ multiple, records })) });
 
   const pair = await livePair();
-  const r0 = pair.window.wrap(Buffer.from('first frame'))[0];
-  const r1 = pair.window.wrap(Buffer.from('second frame'))[0];
+  const [r0] = sealFrame(pair.window, Buffer.from('first frame'));
+  const [r1] = sealFrame(pair.window, Buffer.from('second frame'));
   const tampered = Buffer.from(r0);
   tampered[20] ^= 0x01;
   add('record-tampered', {}, { tampered: b64(tampered), later: b64(r1) }, { close: RECORD_REFUSED, frames: [] });
@@ -192,8 +192,18 @@ async function buildVectors() {
     wire_bytes: RECORD_WIRE_MAX + 256
   }, { close: RECORD_REFUSED });
 
+  const closeBody = (code) => {
+    const body = Buffer.alloc(4);
+    body.writeUInt32BE(code);
+    return rawRecord(hs.kW2n, 0x00, 0, plaintextOf(0x30, body, 256));
+  };
+  add('record-bad-close-code', {}, {
+    cases: [1004, 1005, 1006, 1015, 2000, 2999].map((code) => ({ code, bytes: b64(closeBody(code)) })),
+    control: b64(closeBody(4403))
+  }, { close: RECORD_REFUSED, control_close: { code: 4403, reason: 'peer' } });
+
   const closing = await livePair();
-  const closeRecord = closing.window.closeRecord(1000);
+  const closeRecord = closeRecordOf(closing.window, 1000);
   add('close-record', {}, { record: b64(closeRecord), later: b64(rawRecord(hs.kW2n, 0x00, 1, small)) }, {
     plaintext: b64(plaintextOf(0x30, Buffer.from([0, 0, 3, 0xe8]), 256)),
     close: { code: 1000, reason: 'peer' },

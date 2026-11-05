@@ -11,8 +11,13 @@ The Node implementation is `src/desktop-bridge/window-seal.js`. The vectors are
 
 ## 1. Canonical bytes
 
-- Every message is one binary WebSocket message. A seal takes one message at a
-  time, and a handshake message has one exact length.
+- Every message is one binary WebSocket message, and a handshake message has one
+  exact length. A host calls `next` once per message, in the order they arrived.
+- A seal owns the one ordered writer: `write(bytes)`, given when it is built. Every
+  message it makes (handshake messages, frames' records, pings, pongs, a close
+  record) reaches `write` in the tick it was made, so the counters' order is the
+  wire's however a host awaits `next`. `next` returns only `{ frames, close, ready,
+  peer }`. `write` returns a promise settled when the socket has taken the bytes.
 - Integers are big-endian. `‖` is concatenation. Every field is fixed width, so
   no concatenation below can be read two ways.
 - `session` is the session id's 32 bytes. The front door mints the id as 32 random
@@ -45,10 +50,12 @@ sig_dev  = Ed25519(dev_sk,  "kl-window-v1\nwindow\n" ‖ session ‖ hello_w ‖
 `node_id` is `pub_node`'s id; `pub_node` equals the pin, if it holds one (else it
 closes with the reason `node_key_changed`); `eN` is not its own `eW`; `sig_node`
 verifies; X25519 gives a nonzero secret. Only then does it sign and send `auth_w`.
-It is ready once `auth_w` is out, and may send records right behind it.
+It is ready once `auth_w` is out. It holds its frames until the node's first record
+arrives, which also keeps a node's raw-byte cut (section 5) from counting them.
 
 A window with no pin takes the key the handshake proved and reports it as
-`peer.publicKey`. That key is bound by the QR at enrollment, not by anything here.
+`peer.publicKey`. Nothing here makes that key trusted; enrollment does, and a window
+holds it unpersisted until then.
 
 **The node, on `hello_w`**: exact length, first byte and version; `device_id` is
 `pub_dev`'s id; X25519 gives a nonzero secret. It then answers `hello_n` whether it
@@ -67,6 +74,13 @@ fail a signature or a check above, before any record.
 A message that arrives while a signature is pending closes: the other side is
 waiting for what is being signed, so nothing legitimate can arrive.
 
+**Ed25519.** A signature is exactly 64 bytes and a key exactly 32. A verifier must
+refuse S at or above the group order, so one signature has one encoding; OpenSSL's
+does, and a test pins it. It does not refuse a small-order public key, for which a
+crafted signature verifies over any message. Such a key is only ever its holder's own
+(an id is derived from its key), so the handshake gains nothing from refusing it, but
+enrollment must not store one.
+
 ## 3. Keys
 
 ```
@@ -77,8 +91,10 @@ k_n2w = HKDF-SHA256(ikm = ss, salt, info = "kl-window-v1 n2w", 32)
 ```
 
 Forward secrecy comes from the ephemeral keys: a seal drops its X25519 private key
-once the secret is agreed, zeroes the secret once the keys are derived, and zeroes
-the keys when it closes. There is no rekey; a session is reconnected instead.
+once the secret is agreed, overwrites its copy of the secret once the keys are
+derived, and overwrites its copies of the keys when it closes. These are the JS
+buffers only; what the runtime or OpenSSL copied is out of its reach. There is no
+rekey; a session is reconnected instead.
 
 ## 4. Records and padding
 
@@ -99,7 +115,7 @@ Keys are per session, so no nonce repeats across reconnects.
 | `0x01` | a piece of a frame, more follow | exactly `RECORD_MAX` | 4096 |
 | `0x20` | ping | 0 | 256 |
 | `0x21` | pong | 0 | 256 |
-| `0x30` | close; `bytes` is a 4-byte code from 1000 to 4999 | 4 | 256 |
+| `0x30` | close; `bytes` is a 4-byte code a socket can send: 1000 to 1003, 1007 to 1014, 3000 to 4999 | 4 | 256 |
 
 `RECORD_MAX` is 1048576 and bounds `bytes`, not the record. The longest record on
 the wire is 1052697 bytes; the shortest is 281, and every length is 25 plus a
@@ -111,17 +127,22 @@ than one record uses 4096, its last piece too. A receiver checks, under a good t
 that the plaintext is exactly the length the rule gives for this kind and `len`,
 and that every padding byte is zero. So each frame has one encoding.
 
+Records are alike in length only up to a block: every frame of 0 to 251 bytes gives a
+281-byte record, and a frame of 252 bytes gives a longer one.
+
 **Large frames.** A frame over `RECORD_MAX` goes as a run of `0x01` records and one
 `0x00`; a frame of exactly `RECORD_MAX` is one record. A frame may be at most 64 MiB
-(`LIMITS.frameBytes`). A sender refuses a larger one (`PAYLOAD_TOO_LARGE`) before a
-counter moves, and a receiver closes on a run that would pass it, before holding the
-piece. Pings, pongs and a close may fall between the pieces of a frame; another
+(`LIMITS.frameBytes`). Over that it is refused at the sender (`PAYLOAD_TOO_LARGE`)
+before a counter moves, and closes `4400` at a receiver, on the run that would pass
+it, before the piece is held. Pings, pongs and a close may fall between the pieces of a frame; another
 frame may not.
 
-**Backpressure.** `createFrameSender` encrypts a record only when it may be written,
-and keeps at most `highWater` bytes of records unconfirmed by the socket (default
-four of the longest). It refuses `SEND_QUEUE_FULL` once more than `maxQueuedBytes`
-(default 128 MiB) of frames wait behind that, and the caller closes the session.
+**Backpressure.** `createFrameSender` is the only way a frame is sent. It encrypts a
+record only when it may be written, and keeps at most `highWater` bytes of records
+unconfirmed by the socket (default four of the longest). A `write` that returns no
+promise ends it `SEND_NO_BACKPRESSURE`. It refuses `SEND_QUEUE_FULL` once more than
+`maxQueuedBytes` (default 128 MiB) of frames wait behind that, and the caller closes
+the session.
 
 **Before opening.** A record's length, first byte and counter are checked before any
 decryption, and `len` is read only after the tag holds.
@@ -129,12 +150,32 @@ decryption, and `len` is read only after the tag holds.
 ## 5. Heartbeat and close
 
 A side pings after 20 s (`PING_MS`) in which it sent nothing, and answers a ping with
-a pong. After 60 s (`SILENCE_MS`) in which it received no record it closes `1001`,
-reason `silence`, and the window reconnects. The timers are ref'd.
+a pong, keeping at most one pong the socket has not taken: further pings get none
+until it has. After 60 s (`SILENCE_MS`) in which it received no record it closes
+`1001`, reason `silence`, and the window reconnects. The timers are ref'd.
+
+A seal not ready `LIMITS.handshakeMs` (10 s) after it was built closes `4408`, on both
+roles, on a ref'd timer. A host must also cap the seals not yet ready, counted from
+`window.open`: the seal cannot see the others.
+
+A close that no `next` call is there to return (the deadline, a write that failed)
+goes to `onClose(close)`, given when the seal is built. `destroy()` is for a socket
+that has gone: it ends the seal and clears the timer, with nothing said.
 
 Failures send nothing: the caller closes the socket with the code. A close record is
 for a side that chooses to end a session in good order. After it, or after any
 failure, that seal sends and opens nothing more.
+
+**A socket close code is unauthenticated.** Only a close record is authenticated. Any
+socket close, whatever its code, is a drop: a front door can forge `4401` or `4403`,
+or cut a session short. A frame's tail can be dropped this way, and it looks like a
+socket drop, never like a frame. No socket code may clear a pin or an enrollment.
+
+**What a host sets on a sealed socket.** `SOCKET_OPTIONS`: `maxPayload` is
+`RECORD_WIRE_MAX` (1052697) and `perMessageDeflate` is false, since a record does not
+compress and inflating spends memory on a peer's say. Text frames are refused.
+Before ready, the socket is cut after `PRE_READY_BYTES` (8192) raw bytes, counted as they
+arrive, so an oversized message is never buffered to be refused.
 
 ## 6. What the front door sees
 
@@ -152,8 +193,10 @@ not try to hide them.
 |---|---|---|
 | `4401` | `handshake` | Any failure before ready, on either side: a length, a first byte, a version, an id that is not its key, a key that gives no secret, a signature, a different session id, an unknown device, a device whose stored key differs. |
 | `4401` | `node_key_changed` | The window only: `pub_node` differs from the pin. It tells the window's own tab, and says nothing the peer did not send. |
-| `4400` | `record` | Any failure after ready: a length, a first byte, a counter, a tag, an unknown kind, a `len` or padding off the rule, a close code out of range, a run over the limit. |
+| `4400` | `record` | Any failure after ready: a length, a first byte, a counter, a tag, an unknown kind, a `len` or padding off the rule, a close code a socket cannot send, a run over the limit. |
+| `4408` | `handshake` | Not ready in 10 s. |
 | `1001` | `silence` | 60 s with no record. |
+| `1001` | `write` | A write failed: the socket has gone. |
 | the sender's | `peer` | The peer's close record. |
 | the caller's | `local` | This side's own close record. |
 
@@ -162,12 +205,12 @@ unauthenticated peer learns only that it failed.
 
 Local errors, thrown to the caller and never sent: `SEAL_INVALID`, `SEAL_NOT_READY`,
 `SEAL_CLOSED`, `SEAL_BUSY`, `PAYLOAD_TOO_LARGE`, and from the sender
-`SEND_QUEUE_FULL` and `SEND_STOPPED`.
+`SEND_QUEUE_FULL`, `SEND_STOPPED` and `SEND_NO_BACKPRESSURE`.
 
 ## 8. Vectors
 
 `tests/vectors/window-v1/`, built from `keys.json` by `generate.js` (`--check` says
-`14 vectors match`), each `{ name, consumers, given, input, expect }`; byte fields are
+`15 vectors match`), each `{ name, consumers, given, input, expect }`; byte fields are
 base64url, and ephemerals are `sha('window epk ' + label)`. `generate.js` builds the
 handshake and keys from this document, apart from the seal, and fails if the seal
 differs.
@@ -187,4 +230,5 @@ differs.
 | `record-wrong-key` | The other direction's key, the other direction's aad, another session's key: `4400`; the right key opens. |
 | `record-unknown-kind` | A kind off the table, under a good tag: `4400`. |
 | `record-oversized` | A `len` past the plaintext under a good tag, and a wire length over the longest: `4400`. |
+| `record-bad-close-code` | 1004, 1005, 1006, 1015, 2000 and 2999 in a close record: `4400`; 4403 closes with that code. |
 | `close-record` | The bytes of a close record; the code arrives, and nothing opens after it. |

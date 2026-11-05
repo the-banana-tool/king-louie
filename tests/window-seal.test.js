@@ -3,26 +3,28 @@
 // The seal between a window and a node (R-RW-1, R-RW-2): the handshake, records,
 // padding, the heartbeat and what the sender holds back. The bytes themselves are
 // pinned in tests/window-vectors.test.js.
-const { describe, it } = require('node:test');
+const { describe, it, mock } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const {
-  WindowSeal, VERSION, RECORD_MAX, RECORD_WIRE_MAX, PAD_SMALL, PAD_LARGE, PING_MS, SILENCE_MS,
-  advanceCounter, startHeartbeat, createFrameSender
+  WindowSeal, VERSION, RECORD_MAX, RECORD_WIRE_MAX, PAD_SMALL, PAD_LARGE, PING_MS, SILENCE_MS, HANDSHAKE_TIMEOUT,
+  PRE_READY_BYTES, SOCKET_OPTIONS, advanceCounter, isCloseCode, startHeartbeat, createFrameSender
 } = require('../src/desktop-bridge/window-seal');
 const { LIMITS } = require('../src/desktop-bridge/protocol');
-const { sessionIdOf, windowKey, nodeKey, lookupOf, runHandshake } = require('./helpers/window-seal-fixture');
+const { sessionIdOf, windowKey, nodeKey, lookupOf, runHandshake, sealed, drive, sealFrame, pingRecord, closeRecordOf } = require('./helpers/window-seal-fixture');
 
 const SESSION = sessionIdOf('seal test');
 const MIB = 1024 * 1024;
+const W = (options) => sealed((host) => WindowSeal.window({ ...host, ...options }));
+const N = (options) => sealed((host) => WindowSeal.node({ ...host, ...options }));
 
 function makeWindow({ session = SESSION, name = 'A', pin = nodeKey().publicKey, ...rest } = {}) {
-  return WindowSeal.window({ sessionId: session, ...windowKey(name), pin, ...rest });
+  return W({ sessionId: session, ...windowKey(name), pin, ...rest });
 }
 function makeNode({ session = SESSION, name = 'web-01', lookup = lookupOf('A'), ...rest } = {}) {
-  return WindowSeal.node({ sessionId: session, identity: nodeKey(name), lookupDevice: lookup, ...rest });
+  return N({ sessionId: session, identity: nodeKey(name), lookupDevice: lookup, ...rest });
 }
 async function readyPair(options = {}) {
   const window = makeWindow(options.window);
@@ -63,10 +65,10 @@ describe('the handshake', () => {
     assert.equal(authW.length, 65);
     assert.deepEqual(windowResult.peer, { nodeId: nodeKey().nodeId, publicKey: nodeKey().publicKey });
     assert.deepEqual(nodeResult.peer, { deviceId: windowKey().deviceId, publicKey: windowKey().publicKey });
-    const [toNode] = window.wrap(Buffer.from('{"t":"call"}'));
-    assert.deepEqual((await node.next(toNode)).frames, [Buffer.from('{"t":"call"}')]);
-    const [toWindow] = node.wrap(Buffer.from('{"t":"ready"}'));
-    assert.deepEqual((await window.next(toWindow)).frames, [Buffer.from('{"t":"ready"}')]);
+    const [toNode] = sealFrame(window, Buffer.from('{"t":"call"}'));
+    assert.deepEqual((await drive(node, toNode)).frames, [Buffer.from('{"t":"call"}')]);
+    const [toWindow] = sealFrame(node, Buffer.from('{"t":"ready"}'));
+    assert.deepEqual((await drive(window, toWindow)).frames, [Buffer.from('{"t":"ready"}')]);
   });
 
   it('a null pin takes the key the handshake proved, and hands it over', async () => {
@@ -75,39 +77,39 @@ describe('the handshake', () => {
   });
 
   it('every session has fresh ephemeral keys', async () => {
-    const first = await makeWindow().next(null);
-    const second = await makeWindow().next(null);
+    const first = await drive(makeWindow(), null);
+    const second = await drive(makeWindow(), null);
     assert.notDeepEqual(first.out[0].subarray(2, 34), second.out[0].subarray(2, 34));
-    const a = await makeNode().next(first.out[0]);
-    const b = await makeNode().next(first.out[0]);
+    const a = await drive(makeNode(), first.out[0]);
+    const b = await drive(makeNode(), first.out[0]);
     assert.notDeepEqual(a.out[0].subarray(1, 33), b.out[0].subarray(1, 33));
   });
 
   it('a pin that differs fails before auth_w, and the tab can tell why', async () => {
     const window = makeWindow({ pin: nodeKey('gpu-box').publicKey });
     const node = makeNode();
-    const hello = await window.next(null);
-    const answer = await node.next(hello.out[0]);
-    assertHandshakeRefused(await window.next(answer.out[0]), 'node_key_changed');
-    assert.throws(() => window.wrap(Buffer.from('x')), { code: 'SEAL_CLOSED' });
+    const hello = await drive(window, null);
+    const answer = await drive(node, hello.out[0]);
+    assertHandshakeRefused(await drive(window, answer.out[0]), 'node_key_changed');
+    assert.throws(() => sealFrame(window, Buffer.from('x')), { code: 'SEAL_CLOSED' });
   });
 
   it('auth_w is never signed when the node is not the pinned one', async () => {
     let signed = 0;
     const key = windowKey();
-    const window = WindowSeal.window({ sessionId: SESSION, deviceId: key.deviceId, publicKey: key.publicKey, pin: nodeKey('gpu-box').publicKey, sign: async (b) => { signed += 1; return key.sign(b); } });
-    const hello = await window.next(null);
-    const answer = await makeNode().next(hello.out[0]);
-    await window.next(answer.out[0]);
+    const window = W({ sessionId: SESSION, deviceId: key.deviceId, publicKey: key.publicKey, pin: nodeKey('gpu-box').publicKey, sign: async (b) => { signed += 1; return key.sign(b); } });
+    const hello = await drive(window, null);
+    const answer = await drive(makeNode(), hello.out[0]);
+    await drive(window, answer.out[0]);
     assert.equal(signed, 0);
   });
 
   it('a node that signed another session id fails at the window', async () => {
     const window = makeWindow();
     const node = makeNode({ session: sessionIdOf('another') });
-    const hello = await window.next(null);
-    const answer = await node.next(hello.out[0]);
-    assertHandshakeRefused(await window.next(answer.out[0]));
+    const hello = await drive(window, null);
+    const answer = await drive(node, hello.out[0]);
+    assertHandshakeRefused(await drive(window, answer.out[0]));
   });
 
   it('a window that signed another session id fails at the node', async () => {
@@ -115,22 +117,22 @@ describe('the handshake', () => {
     const nodeA = makeNode({ ephemeral: eph });
     const nodeB = makeNode({ ephemeral: eph, session: sessionIdOf('another') });
     const window = makeWindow();
-    const hello = await window.next(null);
-    const forA = await nodeA.next(hello.out[0]);
-    await nodeB.next(hello.out[0]);
-    const auth = await window.next(forA.out[0]);
+    const hello = await drive(window, null);
+    const forA = await drive(nodeA, hello.out[0]);
+    await drive(nodeB, hello.out[0]);
+    const auth = await drive(window, forA.out[0]);
     assert.equal(auth.ready, true);
-    assertHandshakeRefused(await nodeB.next(auth.out[0]));
+    assertHandshakeRefused(await drive(nodeB, auth.out[0]));
   });
 
   it('an unknown device gets hello_n like a known one, then the one code', async () => {
     const window = makeWindow();
     const node = makeNode({ lookup: () => null });
-    const hello = await window.next(null);
-    const answer = await node.next(hello.out[0]);
+    const hello = await drive(window, null);
+    const answer = await drive(node, hello.out[0]);
     assert.equal(answer.out.length, 1);
-    const auth = await window.next(answer.out[0]);
-    const result = await node.next(auth.out[0]);
+    const auth = await drive(window, answer.out[0]);
+    const result = await drive(node, auth.out[0]);
     assertHandshakeRefused(result);
     assert.equal(result.peer, null);
   });
@@ -138,83 +140,95 @@ describe('the handshake', () => {
   it('a device whose stored key differs from the hello is refused the same way', async () => {
     const window = makeWindow();
     const node = makeNode({ lookup: () => windowKey('B').publicKey });
-    const hello = await window.next(null);
-    const answer = await node.next(hello.out[0]);
-    const auth = await window.next(answer.out[0]);
-    assertHandshakeRefused(await node.next(auth.out[0]));
+    const hello = await drive(window, null);
+    const answer = await drive(node, hello.out[0]);
+    const auth = await drive(window, answer.out[0]);
+    assertHandshakeRefused(await drive(node, auth.out[0]));
   });
 
   it('a lookup that throws or answers a promise fails closed', async () => {
     for (const lookup of [() => { throw new Error('unreadable'); }, async () => windowKey().publicKey]) {
       const window = makeWindow();
       const node = makeNode({ lookup });
-      const hello = await window.next(null);
-      const answer = await node.next(hello.out[0]);
-      const auth = await window.next(answer.out[0]);
-      assertHandshakeRefused(await node.next(auth.out[0]));
+      const hello = await drive(window, null);
+      const answer = await drive(node, hello.out[0]);
+      const auth = await drive(window, answer.out[0]);
+      assertHandshakeRefused(await drive(node, auth.out[0]));
     }
   });
 
   it('a hello_w whose device id is not its key refuses before the node signs', async () => {
-    const hello = Buffer.from((await makeWindow().next(null)).out[0]);
+    const hello = Buffer.from((await drive(makeWindow(), null)).out[0]);
     hello[34] ^= 0x01;
     let signed = 0;
     const key = nodeKey();
-    const node = WindowSeal.node({ sessionId: SESSION, identity: { ...key, sign: (b) => { signed += 1; return key.sign(b); } }, lookupDevice: lookupOf('A') });
-    assertHandshakeRefused(await node.next(hello));
+    const node = N({ sessionId: SESSION, identity: { ...key, sign: (b) => { signed += 1; return key.sign(b); } }, lookupDevice: lookupOf('A') });
+    assertHandshakeRefused(await drive(node, hello));
     assert.equal(signed, 0);
+  });
+
+  it('a key holder cannot sign for another node id', async () => {
+    const window = makeWindow({ pin: null });
+    const helloW = (await drive(window, null)).out[0];
+    const holder = nodeKey('gpu-box');
+    const head = Buffer.concat([Buffer.from([0x02]), crypto.randomBytes(32), Buffer.from(nodeKey().nodeId, 'ascii'), holder.publicKey]);
+    const sig = holder.sign(Buffer.concat([Buffer.from('kl-window-v1\nnode\n'), Buffer.from(SESSION, 'base64url'), helloW, head]));
+    const spy = mock.method(crypto, 'verify');
+    assertHandshakeRefused(await drive(window, Buffer.concat([head, sig])));
+    assert.equal(spy.mock.callCount(), 0, 'refused on the id, before any signature');
+    spy.mock.restore();
   });
 
   it('a hello_n whose node id is not its key refuses', async () => {
     const window = makeWindow({ pin: null });
-    const hello = await window.next(null);
-    const answer = Buffer.from((await makeNode().next(hello.out[0])).out[0]);
+    const hello = await drive(window, null);
+    const answer = Buffer.from((await drive(makeNode(), hello.out[0])).out[0]);
     answer[33] ^= 0x01;
-    assertHandshakeRefused(await window.next(answer));
+    assertHandshakeRefused(await drive(window, answer));
   });
 
   it('a version the node does not speak refuses', async () => {
-    const hello = Buffer.from((await makeWindow().next(null)).out[0]);
+    const hello = Buffer.from((await drive(makeWindow(), null)).out[0]);
     hello[1] = 2;
-    assertHandshakeRefused(await makeNode().next(hello));
+    assertHandshakeRefused(await drive(makeNode(), hello));
   });
 
   it('a low-order key refuses, on either side', async () => {
     const lowOrder = [Buffer.alloc(32), Buffer.concat([Buffer.from([1]), Buffer.alloc(31)])];
     for (const point of lowOrder) {
-      const hello = Buffer.from((await makeWindow().next(null)).out[0]);
+      const hello = Buffer.from((await drive(makeWindow(), null)).out[0]);
       point.copy(hello, 2);
-      assertHandshakeRefused(await makeNode().next(hello));
+      assertHandshakeRefused(await drive(makeNode(), hello));
     }
     // The node's key, signed by the real node: a signature does not make it usable.
     const window = makeWindow();
-    const helloW = (await window.next(null)).out[0];
+    const helloW = (await drive(window, null)).out[0];
     const key = nodeKey();
     const head = Buffer.concat([Buffer.from([0x02]), lowOrder[0], Buffer.from(key.nodeId, 'ascii'), key.publicKey]);
     const sig = key.sign(Buffer.concat([Buffer.from('kl-window-v1\nnode\n'), Buffer.from(SESSION, 'base64url'), helloW, head]));
-    assertHandshakeRefused(await window.next(Buffer.concat([head, sig])));
+    assertHandshakeRefused(await drive(window, Buffer.concat([head, sig])));
   });
 
   it('a reflected ephemeral key refuses even under the real signature', async () => {
     const window = makeWindow();
-    const helloW = (await window.next(null)).out[0];
+    const helloW = (await drive(window, null)).out[0];
     const key = nodeKey();
     const head = Buffer.concat([Buffer.from([0x02]), helloW.subarray(2, 34), Buffer.from(key.nodeId, 'ascii'), key.publicKey]);
     const sig = key.sign(Buffer.concat([Buffer.from('kl-window-v1\nnode\n'), Buffer.from(SESSION, 'base64url'), helloW, head]));
-    assertHandshakeRefused(await window.next(Buffer.concat([head, sig])));
+    assertHandshakeRefused(await drive(window, Buffer.concat([head, sig])));
   });
 
   it('a message that arrives while a signature is pending refuses, and the signature goes nowhere', async () => {
     let release;
     const key = nodeKey();
-    const node = WindowSeal.node({
+    const node = N({
       sessionId: SESSION,
       identity: { ...key, sign: (b) => new Promise((resolve) => { release = () => resolve(key.sign(b)); }) },
       lookupDevice: lookupOf('A')
     });
-    const hello = (await makeWindow().next(null)).out[0];
-    const pending = node.next(hello);
-    assertHandshakeRefused(await node.next(hello));
+    const hello = (await drive(makeWindow(), null)).out[0];
+    const pending = drive(node, hello);
+    assertHandshakeRefused(await drive(node, hello));
     release();
     assertHandshakeRefused(await pending);
   });
@@ -222,31 +236,31 @@ describe('the handshake', () => {
   it('a signer that fails or gives the wrong size refuses', async () => {
     const key = windowKey();
     for (const sign of [async () => { throw new Error('locked'); }, async () => Buffer.alloc(10)]) {
-      const window = WindowSeal.window({ sessionId: SESSION, deviceId: key.deviceId, publicKey: key.publicKey, pin: null, sign });
-      const hello = await window.next(null);
-      const answer = await makeNode().next(hello.out[0]);
-      assertHandshakeRefused(await window.next(answer.out[0]));
+      const window = W({ sessionId: SESSION, deviceId: key.deviceId, publicKey: key.publicKey, pin: null, sign });
+      const hello = await drive(window, null);
+      const answer = await drive(makeNode(), hello.out[0]);
+      assertHandshakeRefused(await drive(window, answer.out[0]));
     }
   });
 
   it('malformed input refuses before anything of it is read, whatever its size', async () => {
     const huge = Buffer.alloc(RECORD_WIRE_MAX + 1);
     for (const bytes of [Buffer.alloc(0), Buffer.alloc(85), Buffer.alloc(87), huge, 'text', { length: 86 }]) {
-      assertHandshakeRefused(await makeNode().next(bytes));
+      assertHandshakeRefused(await drive(makeNode(), bytes));
     }
     const window = makeWindow();
-    await window.next(null);
-    assertHandshakeRefused(await window.next(huge));
+    await drive(window, null);
+    assertHandshakeRefused(await drive(window, huge));
   });
 
   it('every handshake failure on the node reads the same', async () => {
     const seen = new Set();
-    const hello = (await makeWindow().next(null)).out[0];
+    const hello = (await drive(makeWindow(), null)).out[0];
     const cases = [
-      async () => makeNode().next(Buffer.alloc(10)),
-      async () => { const b = Buffer.from(hello); b[0] = 9; return makeNode().next(b); },
-      async () => { const n = makeNode(); await n.next(hello); return n.next(Buffer.alloc(65, 3)); },
-      async () => { const n = makeNode({ lookup: () => null }); await n.next(hello); return n.next(Buffer.alloc(65, 3)); }
+      async () => drive(makeNode(), Buffer.alloc(10)),
+      async () => { const b = Buffer.from(hello); b[0] = 9; return drive(makeNode(), b); },
+      async () => { const n = makeNode(); await drive(n, hello); return drive(n, Buffer.alloc(65, 3)); },
+      async () => { const n = makeNode({ lookup: () => null }); await drive(n, hello); return drive(n, Buffer.alloc(65, 3)); }
     ];
     for (const run of cases) seen.add(JSON.stringify((await run()).close));
     assert.equal(seen.size, 1);
@@ -254,10 +268,10 @@ describe('the handshake', () => {
 
   it('nothing can be sent before ready', async () => {
     const window = makeWindow();
-    await window.next(null);
-    assert.throws(() => window.wrap(Buffer.from('x')), { code: 'SEAL_NOT_READY' });
-    assert.throws(() => window.ping(), { code: 'SEAL_NOT_READY' });
-    assert.throws(() => window.closeRecord(1000), { code: 'SEAL_NOT_READY' });
+    await drive(window, null);
+    assert.throws(() => sealFrame(window, Buffer.from('x')), { code: 'SEAL_NOT_READY' });
+    assert.throws(() => pingRecord(window), { code: 'SEAL_NOT_READY' });
+    assert.throws(() => closeRecordOf(window, 1000), { code: 'SEAL_NOT_READY' });
   });
 
   it('a session id that is not 32 bytes of canonical base64url is a caller error', () => {
@@ -269,79 +283,255 @@ describe('the handshake', () => {
 
   it('keys that are not what the ids say are a caller error', () => {
     const key = windowKey();
-    assert.throws(() => WindowSeal.window({ sessionId: SESSION, deviceId: windowKey('B').deviceId, publicKey: key.publicKey, sign: key.sign, pin: null }), { code: 'SEAL_INVALID' });
-    assert.throws(() => WindowSeal.node({ sessionId: SESSION, identity: { ...nodeKey(), nodeId: nodeKey('gpu-box').nodeId }, lookupDevice: () => null }), { code: 'SEAL_INVALID' });
-    assert.throws(() => WindowSeal.window({ sessionId: SESSION, ...key, pin: Buffer.alloc(31) }), { code: 'SEAL_INVALID' });
-    assert.throws(() => WindowSeal.window({ sessionId: SESSION, ...key, pin: null, ephemeral: Buffer.alloc(16) }), { code: 'SEAL_INVALID' });
+    assert.throws(() => W({ sessionId: SESSION, deviceId: windowKey('B').deviceId, publicKey: key.publicKey, sign: key.sign, pin: null }), { code: 'SEAL_INVALID' });
+    assert.throws(() => N({ sessionId: SESSION, identity: { ...nodeKey(), nodeId: nodeKey('gpu-box').nodeId }, lookupDevice: () => null }), { code: 'SEAL_INVALID' });
+    assert.throws(() => W({ sessionId: SESSION, ...key, pin: Buffer.alloc(31) }), { code: 'SEAL_INVALID' });
+    assert.throws(() => W({ sessionId: SESSION, ...key, pin: null, ephemeral: Buffer.alloc(16) }), { code: 'SEAL_INVALID' });
+  });
+});
+
+describe('the writer', () => {
+  it('a seal without a writer or a close callback is a caller error', () => {
+    const key = windowKey();
+    const base = { sessionId: SESSION, deviceId: key.deviceId, publicKey: key.publicKey, sign: key.sign, pin: null };
+    assert.throws(() => WindowSeal.window({ ...base, onClose: () => {} }), { code: 'SEAL_INVALID' });
+    assert.throws(() => WindowSeal.window({ ...base, write: () => {} }), { code: 'SEAL_INVALID' });
+    assert.throws(() => WindowSeal.node({ sessionId: SESSION, identity: nodeKey(), lookupDevice: () => null, onClose: () => {} }), { code: 'SEAL_INVALID' });
+  });
+
+  it('every record reaches write in the tick it was sealed', async () => {
+    const { window } = await readyPair();
+    const iterator = window.records(Buffer.alloc(RECORD_MAX + 10));
+    iterator.next();
+    assert.equal(window.wire.length, 1);
+    window.ping();
+    assert.equal(window.wire.length, 2);
+    iterator.next();
+    assert.equal(window.wire.length, 3);
+    window.closeRecord(1000);
+    assert.equal(window.wire.length, 4);
+    assert.deepEqual(window.wire.map((r) => r.readBigUInt64BE(1)), [0n, 1n, 2n, 3n]);
+  });
+
+  it('a frame and a ping in one tick, with a handler awaiting each, stay in counter order', async () => {
+    const { window, node } = await readyPair();
+    const wire = [];
+    node.redirect((record) => { wire.push(record); return Promise.resolve(); });
+    const sender = createFrameSender({ seal: node });
+    const handler = async (message) => {
+      const result = await node.next(message);
+      assert.equal(result.close, null);
+      for (const frame of result.frames) await sender.send(Buffer.concat([Buffer.from('reply to '), frame]));
+    };
+    const [frame] = sealFrame(window, Buffer.from('first'));
+    const ping = pingRecord(window);
+    const [later] = sealFrame(window, Buffer.from('second'));
+    await Promise.all([handler(frame), handler(ping), handler(later)]);
+    assert.deepEqual(wire.map((r) => r.readBigUInt64BE(1)), [0n, 1n, 2n]);
+    for (const record of wire) assert.equal((await window.next(record)).close, null);
+  });
+
+  it('a write that fails closes the seal, says so once, and leaves no rejection', async () => {
+    for (const fail of [() => Promise.reject(new Error('socket gone')), () => { throw new Error('socket gone'); }]) {
+      const { window } = await readyPair();
+      window.redirect(fail);
+      window.ping();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(window.closes, [{ code: 1001, reason: 'write' }]);
+      assert.equal(window.ready, false);
+      assert.throws(() => window.ping(), { code: 'SEAL_CLOSED' });
+    }
+  });
+
+  it('a close a next() returns is not said twice', async () => {
+    const { node } = await readyPair();
+    assertRecordRefused(await drive(node, Buffer.alloc(9)));
+    assert.deepEqual(node.closes, []);
+  });
+
+  it('destroy ends the session with nothing said', async () => {
+    const { window } = await readyPair();
+    window.destroy();
+    assert.deepEqual(window.closes, []);
+    assert.throws(() => window.ping(), { code: 'SEAL_CLOSED' });
+  });
+
+  it('what a host sets on the socket is exported', () => {
+    assert.deepEqual({ ...SOCKET_OPTIONS }, { maxPayload: RECORD_WIRE_MAX, perMessageDeflate: false });
+    assert.equal(RECORD_WIRE_MAX, 1052697);
+    assert.ok(PRE_READY_BYTES >= 86 + 65 + 2 * 14);
+  });
+});
+
+describe('the handshake deadline', () => {
+  function timers() {
+    const live = new Map();
+    let id = 0;
+    return {
+      live,
+      setTimer: (fn, ms) => { id += 1; live.set(id, { fn, ms }); return id; },
+      clearTimer: (timer) => { live.delete(timer); },
+      fire() { for (const [key, { fn }] of [...live]) { live.delete(key); fn(); } }
+    };
+  }
+  const roles = {
+    window: (clock, sign = windowKey().sign) => W({ sessionId: SESSION, ...windowKey(), sign, pin: null, ...clock }),
+    node: (clock) => N({ sessionId: SESSION, identity: nodeKey(), lookupDevice: lookupOf('A'), ...clock })
+  };
+
+  for (const [role, build] of Object.entries(roles)) {
+    it(`closes a ${role} that is not ready in time`, () => {
+      const clock = timers();
+      const seal = build({ setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+      assert.equal([...clock.live.values()][0].ms, LIMITS.handshakeMs);
+      clock.fire();
+      assert.deepEqual(seal.closes, [{ code: HANDSHAKE_TIMEOUT, reason: 'handshake' }]);
+      assert.equal(HANDSHAKE_TIMEOUT, 4408);
+      assert.throws(() => seal.ping(), { code: 'SEAL_CLOSED' });
+    });
+
+    it(`a ${role} that fails or goes leaves no timer`, async () => {
+      const failed = timers();
+      assert.notEqual((await build({ setTimer: failed.setTimer, clearTimer: failed.clearTimer }).next(Buffer.alloc(1))).close, null);
+      assert.equal(failed.live.size, 0);
+      const gone = timers();
+      const seal = build({ setTimer: gone.setTimer, clearTimer: gone.clearTimer });
+      seal.destroy();
+      assert.equal(gone.live.size, 0);
+      assert.deepEqual(seal.closes, []);
+    });
+  }
+
+  it('is cleared on both sides at ready', async () => {
+    const onWindow = timers();
+    const onNode = timers();
+    const window = roles.window({ setTimer: onWindow.setTimer, clearTimer: onWindow.clearTimer });
+    const node = roles.node({ setTimer: onNode.setTimer, clearTimer: onNode.clearTimer });
+    await runHandshake(window, node);
+    assert.equal(onWindow.live.size, 0);
+    assert.equal(onNode.live.size, 0);
+  });
+
+  it('a signature that comes after it goes nowhere', async () => {
+    const clock = timers();
+    let release;
+    const key = windowKey();
+    const window = roles.window({ setTimer: clock.setTimer, clearTimer: clock.clearTimer }, (b) => new Promise((resolve) => { release = () => resolve(key.sign(b)); }));
+    const hello = await drive(window, null);
+    const answer = await drive(makeNode(), hello.out[0]);
+    const pending = drive(window, answer.out[0]);
+    clock.fire();
+    release();
+    const result = await pending;
+    assert.deepEqual(result.out, []);
+    assert.equal(result.ready, false);
+    assert.equal(window.closes.length, 1);
+  });
+});
+
+describe('Ed25519 strictness', () => {
+  const ORDER = (1n << 252n) + 27742317777372353535851937790883648493n;
+  // The same signature with S + L: the same point on the curve, other bytes.
+  function malleated(signature) {
+    let s = 0n;
+    for (let i = 31; i >= 0; i -= 1) s = (s << 8n) | BigInt(signature[32 + i]);
+    s += ORDER;
+    const out = Buffer.from(signature);
+    for (let i = 0; i < 32; i += 1) {
+      out[32 + i] = Number(s & 255n);
+      s >>= 8n;
+    }
+    return out;
+  }
+
+  it('a hello_n with S + L refuses', async () => {
+    const window = makeWindow();
+    const hello = await drive(window, null);
+    const answer = (await drive(makeNode(), hello.out[0])).out[0];
+    const bad = Buffer.concat([answer.subarray(0, 84), malleated(answer.subarray(84))]);
+    assertHandshakeRefused(await drive(window, bad));
+  });
+
+  it('an auth_w with S + L refuses', async () => {
+    const window = makeWindow();
+    const node = makeNode();
+    const hello = await drive(window, null);
+    const answer = await drive(node, hello.out[0]);
+    const auth = (await drive(window, answer.out[0])).out[0];
+    const bad = Buffer.concat([auth.subarray(0, 1), malleated(auth.subarray(1))]);
+    assertHandshakeRefused(await drive(node, bad));
   });
 });
 
 describe('records', () => {
   it('a tampered record closes the session and no later record opens', async () => {
     const { window, node } = await readyPair();
-    const [good] = window.wrap(Buffer.from('one'));
-    const [later] = window.wrap(Buffer.from('two'));
+    const [good] = sealFrame(window, Buffer.from('one'));
+    const [later] = sealFrame(window, Buffer.from('two'));
     for (const offset of [0, 1, 8, 9, 100, good.length - 1]) {
       const pair = await readyPair();
-      const [record] = pair.window.wrap(Buffer.from('one'));
+      const [record] = sealFrame(pair.window, Buffer.from('one'));
       const bad = Buffer.from(record);
       bad[offset] ^= 0x40;
-      assertRecordRefused(await pair.node.next(bad));
-      const [after] = pair.window.wrap(Buffer.from('two'));
-      const result = await pair.node.next(after);
+      assertRecordRefused(await drive(pair.node, bad));
+      const [after] = sealFrame(pair.window, Buffer.from('two'));
+      const result = await drive(pair.node, after);
       assert.deepEqual(result.close, { code: 4400, reason: 'record' });
       assert.deepEqual(result.frames, []);
     }
-    assert.deepEqual((await node.next(good)).frames, [Buffer.from('one')]);
-    assert.deepEqual((await node.next(later)).frames, [Buffer.from('two')]);
+    assert.deepEqual((await drive(node, good)).frames, [Buffer.from('one')]);
+    assert.deepEqual((await drive(node, later)).frames, [Buffer.from('two')]);
   });
 
   it('a replayed record closes', async () => {
     const { window, node } = await readyPair();
-    const [record] = window.wrap(Buffer.from('one'));
-    assert.deepEqual((await node.next(record)).frames, [Buffer.from('one')]);
-    assertRecordRefused(await node.next(record));
+    const [record] = sealFrame(window, Buffer.from('one'));
+    assert.deepEqual((await drive(node, record)).frames, [Buffer.from('one')]);
+    assertRecordRefused(await drive(node, record));
   });
 
   it('a reordered record closes', async () => {
     const { window, node } = await readyPair();
-    window.wrap(Buffer.from('one'));
-    const [second] = window.wrap(Buffer.from('two'));
-    assertRecordRefused(await node.next(second));
+    sealFrame(window, Buffer.from('one'));
+    const [second] = sealFrame(window, Buffer.from('two'));
+    assertRecordRefused(await drive(node, second));
   });
 
   it('a record reflected to its sender closes', async () => {
     const { window } = await readyPair();
-    const [record] = window.wrap(Buffer.from('one'));
-    assertRecordRefused(await window.next(record));
+    const [record] = sealFrame(window, Buffer.from('one'));
+    assertRecordRefused(await drive(window, record));
   });
 
   it('a record of one session does not open in another', async () => {
     const first = await readyPair();
     const second = await readyPair();
-    const [record] = first.window.wrap(Buffer.from('one'));
-    assertRecordRefused(await second.node.next(record));
+    const [record] = sealFrame(first.window, Buffer.from('one'));
+    assertRecordRefused(await drive(second.node, record));
   });
 
   it('the handshake cannot be replayed into a live session', async () => {
     const { node, helloW, authW } = await readyPair();
-    assertRecordRefused(await node.next(helloW));
+    assertRecordRefused(await drive(node, helloW));
     const other = await readyPair();
-    assertRecordRefused(await other.node.next(authW));
+    assertRecordRefused(await drive(other.node, authW));
   });
 
   it('a record before the handshake ends is a handshake failure', async () => {
     const { window } = await readyPair();
-    const [record] = window.wrap(Buffer.from('one'));
-    assertHandshakeRefused(await makeNode().next(record));
+    const [record] = sealFrame(window, Buffer.from('one'));
+    assertHandshakeRefused(await drive(makeNode(), record));
   });
 
-  it('a record that is too long, or of no possible length, closes before it is opened', async () => {
+  it('a record that is too long, or of no possible length, closes before it is opened', async (t) => {
     for (const size of [RECORD_WIRE_MAX + 256, 281 + 1, 280, 9, 0]) {
       const { node } = await readyPair();
       const bytes = Buffer.alloc(size);
       if (size > 0) bytes[0] = 0x10;
-      assertRecordRefused(await node.next(bytes));
+      const spy = t.mock.method(crypto, 'createDecipheriv');
+      assertRecordRefused(await drive(node, bytes));
+      assert.equal(spy.mock.callCount(), 0, `${size} bytes reached the cipher`);
+      spy.mock.restore();
     }
   });
 
@@ -355,15 +545,15 @@ describe('records', () => {
 describe('padding', () => {
   it('two different short frames of similar size give equal record lengths', async () => {
     const { window } = await readyPair();
-    const [a] = window.wrap(Buffer.from('{"t":"event","ch":"chat:messageChunk","d":"hi"}'));
-    const [b] = window.wrap(Buffer.from('{"t":"result","id":1,"ok":false,"code":"X"}'));
+    const [a] = sealFrame(window, Buffer.from('{"t":"event","ch":"chat:messageChunk","d":"hi"}'));
+    const [b] = sealFrame(window, Buffer.from('{"t":"result","id":1,"ok":false,"code":"X"}'));
     assert.equal(a.length, b.length);
     assert.equal(a.length, 9 + PAD_SMALL + 16);
   });
 
   it('is to the rule on either side of each edge', async () => {
     const { window } = await readyPair();
-    const size = async (bytes) => window.wrap(Buffer.alloc(bytes, 0x61))[0].length - 25;
+    const size = async (bytes) => sealFrame(window, Buffer.alloc(bytes, 0x61))[0].length - 25;
     assert.equal(await size(0), 256);
     assert.equal(await size(251), 256);
     assert.equal(await size(252), 512);
@@ -374,8 +564,8 @@ describe('padding', () => {
 
   it('a control record is one short block', async () => {
     const { window } = await readyPair();
-    assert.equal(window.ping().length, 281);
-    assert.equal(window.closeRecord(1000).length, 281);
+    assert.equal(pingRecord(window).length, 281);
+    assert.equal(closeRecordOf(window, 1000).length, 281);
   });
 
   it('the padding is checked: nonzero or too much closes, under a good tag', async () => {
@@ -385,13 +575,14 @@ describe('padding', () => {
       plain(0x00, Buffer.from('abc'), 512),                              // a block more than the rule
       plain(0x00, Buffer.alloc(70000, 0x61), 256),                       // a large frame on the small rule
       plain(0x01, Buffer.alloc(100, 0x61), 256),                         // a fragment shorter than a record
+      plain(0x01, Buffer.alloc(100, 0x61), PAD_LARGE),                   // the same, on the padding a fragment has
       plain(0x20, Buffer.from('x'), 256),                                // a ping with a body
       plain(0x30, Buffer.from('xy'), 256),                               // a close code that is not 4 bytes
       plain(0x30, Buffer.from([0, 0, 0, 1]), 256)                        // a close code outside the range
     ];
     for (const p of cases) {
       const pair = await raw();
-      assertRecordRefused(await pair.node.next(pair.seal(0n, p)));
+      assertRecordRefused(await drive(pair.node, pair.seal(0n, p)));
     }
   });
 
@@ -400,13 +591,13 @@ describe('padding', () => {
     const pair = await raw();
     const p = Buffer.alloc(256);
     p.writeUInt32BE(0xffffffff, 1);
-    assertRecordRefused(await pair.node.next(pair.seal(0n, p)));
+    assertRecordRefused(await drive(pair.node, pair.seal(0n, p)));
   });
 
   it('an unknown kind closes, under a good tag', async () => {
     const raw = await rawSealedPair();
     const pair = await raw();
-    assertRecordRefused(await pair.node.next(pair.seal(0n, plain(0x7f, Buffer.alloc(0), 256))));
+    assertRecordRefused(await drive(pair.node, pair.seal(0n, plain(0x7f, Buffer.alloc(0), 256))));
   });
 });
 
@@ -448,42 +639,44 @@ describe('large frames', () => {
   it('a frame of exactly RECORD_MAX is one record', async () => {
     const { window, node } = await readyPair();
     const frame = crypto.randomBytes(RECORD_MAX);
-    const records = window.wrap(frame);
+    const records = sealFrame(window, frame);
     assert.equal(records.length, 1);
     assert.equal(records[0].length, RECORD_WIRE_MAX);
-    assert.deepEqual((await node.next(records[0])).frames, [frame]);
+    assert.deepEqual((await drive(node, records[0])).frames, [frame]);
   });
 
   it('a frame a byte over is two, with the small end padded to the large rule', async () => {
     const { window, node } = await readyPair();
     const frame = crypto.randomBytes(RECORD_MAX + 1);
-    const records = window.wrap(frame);
+    const records = sealFrame(window, frame);
     assert.equal(records.length, 2);
     assert.equal(records[1].length, 9 + PAD_LARGE + 16);
-    assert.deepEqual((await node.next(records[0])).frames, []);
-    assert.deepEqual((await node.next(records[1])).frames, [frame]);
+    assert.deepEqual((await drive(node, records[0])).frames, []);
+    assert.deepEqual((await drive(node, records[1])).frames, [frame]);
   });
 
   it('a ping between fragments does not break the frame', async () => {
     const { window, node } = await readyPair();
     const frame = crypto.randomBytes(RECORD_MAX + 10);
     const iterator = window.records(frame);
-    const first = iterator.next().value;
-    const ping = window.ping();
-    const second = iterator.next().value;
+    iterator.next();
+    const [first] = window.wire.splice(0);
+    const ping = pingRecord(window);
+    iterator.next();
+    const [second] = window.wire.splice(0);
     assert.equal(iterator.next().done, true);
-    assert.deepEqual((await node.next(first)).frames, []);
-    const answered = await node.next(ping);
+    assert.deepEqual((await drive(node, first)).frames, []);
+    const answered = await drive(node, ping);
     assert.equal(answered.out.length, 1);
-    assert.deepEqual((await node.next(second)).frames, [frame]);
-    assert.deepEqual((await window.next(answered.out[0])).frames, []);
+    assert.deepEqual((await drive(node, second)).frames, [frame]);
+    assert.deepEqual((await drive(window, answered.out[0])).frames, []);
   });
 
   it('a second frame cannot start inside the first', async () => {
     const { window } = await readyPair();
     const iterator = window.records(Buffer.alloc(RECORD_MAX + 10));
     iterator.next();
-    assert.throws(() => window.wrap(Buffer.from('x')), { code: 'SEAL_BUSY' });
+    assert.throws(() => sealFrame(window, Buffer.from('x')), { code: 'SEAL_BUSY' });
     assert.throws(() => window.records(Buffer.from('x')), { code: 'SEAL_BUSY' });
   });
 
@@ -492,13 +685,13 @@ describe('large frames', () => {
     const iterator = window.records(Buffer.alloc(RECORD_MAX + 10));
     iterator.next();
     iterator.return();
-    assert.throws(() => window.wrap(Buffer.from('x')), { code: 'SEAL_BUSY' });
+    assert.throws(() => sealFrame(window, Buffer.from('x')), { code: 'SEAL_BUSY' });
   });
 
   it('a frame over the bridge limit is refused before a counter moves', async () => {
     const { window, node } = await readyPair();
-    assert.throws(() => window.wrap(Buffer.alloc(LIMITS.frameBytes + 1)), { code: 'PAYLOAD_TOO_LARGE' });
-    assert.deepEqual((await node.next(window.wrap(Buffer.from('after'))[0])).frames, [Buffer.from('after')]);
+    assert.throws(() => sealFrame(window, Buffer.alloc(LIMITS.frameBytes + 1)), { code: 'PAYLOAD_TOO_LARGE' });
+    assert.deepEqual((await drive(node, sealFrame(window, Buffer.from('after'))[0])).frames, [Buffer.from('after')]);
   });
 
   it('a fragment run over the limit closes, before it is held', async () => {
@@ -509,16 +702,16 @@ describe('large frames', () => {
     const count = LIMITS.frameBytes / RECORD_MAX - 1;
     let counter = 0n;
     for (; counter < BigInt(count); counter += 1n) {
-      assert.equal((await pair.node.next(pair.seal(counter, fragment))).close, null);
+      assert.equal((await drive(pair.node, pair.seal(counter, fragment))).close, null);
     }
-    assertRecordRefused(await pair.node.next(pair.seal(counter, fragment)));
+    assertRecordRefused(await drive(pair.node, pair.seal(counter, fragment)));
   });
 
   it('a final fragment with nothing in it closes, as no sender makes one', async () => {
     const raw = await rawSealedPair();
     const pair = await raw();
-    await pair.node.next(pair.seal(0n, plain(0x01, Buffer.alloc(RECORD_MAX, 0x61), PAD_LARGE)));
-    assertRecordRefused(await pair.node.next(pair.seal(1n, plain(0x00, Buffer.alloc(0), PAD_LARGE))));
+    await drive(pair.node, pair.seal(0n, plain(0x01, Buffer.alloc(RECORD_MAX, 0x61), PAD_LARGE)));
+    assertRecordRefused(await drive(pair.node, pair.seal(1n, plain(0x00, Buffer.alloc(0), PAD_LARGE))));
   });
 
   it('the largest frame the bridge allows crosses, through the sender', async () => {
@@ -527,14 +720,12 @@ describe('large frames', () => {
     for (let i = 0; i < frame.length; i += 4096) frame.writeUInt32BE(i, i);
     const expected = crypto.createHash('sha256').update(frame).digest('hex');
     let got = null;
-    const sender = createFrameSender({
-      seal: window,
-      write: async (record) => {
-        const result = await node.next(record);
-        assert.equal(result.close, null);
-        if (result.frames.length) [got] = result.frames;
-      }
+    window.redirect(async (record) => {
+      const result = await drive(node, record);
+      assert.equal(result.close, null);
+      if (result.frames.length) [got] = result.frames;
     });
+    const sender = createFrameSender({ seal: window });
     await sender.send(frame);
     assert.equal(got.length, LIMITS.frameBytes);
     assert.equal(crypto.createHash('sha256').update(got).digest('hex'), expected);
@@ -566,7 +757,8 @@ describe('a slow reader', () => {
     const { window } = await readyPair();
     const socket = slowSocket();
     const highWater = 4 * RECORD_WIRE_MAX;
-    const sender = createFrameSender({ seal: window, write: socket.write, highWater });
+    window.redirect(socket.write);
+    const sender = createFrameSender({ seal: window, highWater });
     const done = sender.send(Buffer.alloc(32 * MIB));
     for (let i = 0; i < 5; i += 1) await tick();
     assert.equal(socket.taken.length, 4, 'records stop at the high water');
@@ -585,7 +777,8 @@ describe('a slow reader', () => {
   it('frames queued behind it are refused past the bound, and nothing else is lost', async () => {
     const { window } = await readyPair();
     const socket = slowSocket();
-    const sender = createFrameSender({ seal: window, write: socket.write, highWater: RECORD_WIRE_MAX, maxQueuedBytes: 3 * MIB });
+    window.redirect(socket.write);
+    const sender = createFrameSender({ seal: window, highWater: RECORD_WIRE_MAX, maxQueuedBytes: 3 * MIB });
     const first = sender.send(Buffer.alloc(2 * MIB));
     const second = sender.send(Buffer.alloc(MIB));
     await assert.rejects(sender.send(Buffer.alloc(1)), { code: 'SEND_QUEUE_FULL' });
@@ -597,9 +790,24 @@ describe('a slow reader', () => {
     await second;
   });
 
+  it('a writer that gives no promise ends the sender, not its backpressure', async () => {
+    const { window } = await readyPair();
+    let writes = 0;
+    window.redirect(() => { writes += 1; });
+    const sender = createFrameSender({ seal: window });
+    await assert.rejects(sender.send(Buffer.alloc(32 * MIB)), { code: 'SEND_NO_BACKPRESSURE' });
+    assert.equal(writes, 1);
+  });
+
+  it('a sender takes no writer of its own', async () => {
+    const { window } = await readyPair();
+    assert.throws(() => createFrameSender({ seal: window, write: () => Promise.resolve() }), { code: 'SEAL_INVALID' });
+  });
+
   it('a write that fails ends the sender and every queued frame', async () => {
     const { window } = await readyPair();
-    const sender = createFrameSender({ seal: window, write: async () => { throw new Error('socket gone'); } });
+    window.redirect(async () => { throw new Error('socket gone'); });
+    const sender = createFrameSender({ seal: window });
     const a = sender.send(Buffer.from('one'));
     const b = sender.send(Buffer.from('two'));
     await assert.rejects(a, /socket gone/);
@@ -610,7 +818,8 @@ describe('a slow reader', () => {
   it('stop refuses what is queued', async () => {
     const { window } = await readyPair();
     const socket = slowSocket();
-    const sender = createFrameSender({ seal: window, write: socket.write, highWater: 1 });
+    window.redirect(socket.write);
+    const sender = createFrameSender({ seal: window, highWater: 1 });
     const a = sender.send(Buffer.alloc(3 * MIB));
     const b = sender.send(Buffer.from('two'));
     sender.stop();
@@ -623,27 +832,53 @@ describe('a slow reader', () => {
 describe('ping and close records', () => {
   it('a ping is answered with a pong, which gives nothing', async () => {
     const { window, node } = await readyPair();
-    const answer = await node.next(window.ping());
+    const answer = await drive(node, pingRecord(window));
     assert.equal(answer.out.length, 1);
     assert.deepEqual(answer.frames, []);
-    const result = await window.next(answer.out[0]);
+    const result = await drive(window, answer.out[0]);
     assert.deepEqual(result.out, []);
     assert.deepEqual(result.frames, []);
     assert.equal(result.close, null);
   });
 
-  it('a close record closes with its code, and nothing opens after it', async () => {
+  it('a peer that sends pings and reads nothing costs one pong', async () => {
     const { window, node } = await readyPair();
-    const record = window.closeRecord(4403);
-    assert.deepEqual((await node.next(record)).close, { code: 4403, reason: 'peer' });
-    assert.throws(() => node.wrap(Buffer.from('x')), { code: 'SEAL_CLOSED' });
-    assert.throws(() => window.wrap(Buffer.from('x')), { code: 'SEAL_CLOSED' });
-    assert.deepEqual((await node.next(Buffer.from(record))).close, { code: 4403, reason: 'peer' });
+    const writes = [];
+    node.redirect((record) => new Promise((resolve) => { writes.push({ record, resolve }); }));
+    for (let i = 0; i < 1000; i += 1) {
+      assert.equal((await node.next(pingRecord(window))).close, null);
+    }
+    assert.equal(writes.length, 1);
+    writes[0].resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await node.next(pingRecord(window))).close, null);
+    assert.equal(writes.length, 2);
   });
 
-  it('a close code outside 1000 to 4999 is a caller error', async () => {
+  it('a close code a socket cannot send closes the session', async () => {
+    assert.deepEqual([1000, 1003, 1007, 1014, 3000, 4999].map(isCloseCode), [true, true, true, true, true, true]);
+    for (const code of [1004, 1005, 1006, 1015, 2000, 2999, 999, 5000]) {
+      assert.equal(isCloseCode(code), false);
+      const raw = await rawSealedPair();
+      const pair = await raw();
+      const body = Buffer.alloc(4);
+      body.writeUInt32BE(code);
+      assertRecordRefused(await drive(pair.node, pair.seal(0n, plain(0x30, body, 256))));
+    }
+  });
+
+  it('a close record closes with its code, and nothing opens after it', async () => {
+    const { window, node } = await readyPair();
+    const record = closeRecordOf(window, 4403);
+    assert.deepEqual((await drive(node, record)).close, { code: 4403, reason: 'peer' });
+    assert.throws(() => sealFrame(node, Buffer.from('x')), { code: 'SEAL_CLOSED' });
+    assert.throws(() => sealFrame(window, Buffer.from('x')), { code: 'SEAL_CLOSED' });
+    assert.deepEqual((await drive(node, Buffer.from(record))).close, { code: 4403, reason: 'peer' });
+  });
+
+  it('a close code a socket cannot send is a caller error', async () => {
     const { window } = await readyPair();
-    for (const code of [999, 5000, 1.5, '1000']) assert.throws(() => window.closeRecord(code), { code: 'SEAL_INVALID' });
+    for (const code of [999, 1004, 1005, 1006, 1015, 2000, 2999, 5000, 1.5, '1000']) assert.throws(() => closeRecordOf(window, code), { code: 'SEAL_INVALID' });
   });
 });
 
