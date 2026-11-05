@@ -463,7 +463,9 @@ class MeshTransport extends EventEmitter {
   // door's SNI router hands its `mesh.` sockets to `httpServer`). With
   // requireClientCert, an unpinned or missing client certificate never gets
   // as far as the WebSocket handshake.
-  attachServer(httpServer, { requireClientCert = this.requireClientCert, isPinned = this.isPinned, path: wsPath = '/mesh/v1' } = {}) {
+  // `fallthrough(req, socket, head)` is offered any other path, and that socket is
+  // destroyed unless it answers true.
+  attachServer(httpServer, { requireClientCert = this.requireClientCert, isPinned = this.isPinned, path: wsPath = '/mesh/v1', fallthrough = null } = {}) {
     // The handshake (pair:request refusal, the two-pin tie) follows the
     // transport's own flag, so an attached listener cannot ask for more.
     if (requireClientCert && !this.requireClientCert) {
@@ -474,7 +476,13 @@ class MeshTransport extends EventEmitter {
       let pathname = null;
       try { pathname = new URL(req.url, 'http://mesh.invalid').pathname; } catch { pathname = null; }
       if (pathname !== wsPath) {
-        socket.destroy();
+        let taken = false;
+        try {
+          taken = Boolean(fallthrough) && fallthrough(req, socket, head) === true;
+        } catch (err) {
+          log.warn(`an upgrade fallthrough failed: ${err.message}`);
+        }
+        if (!taken) socket.destroy();
         return;
       }
       if (requireClientCert && (!socket.encrypted || !this._pinnedSocket(socket, isPinned))) {

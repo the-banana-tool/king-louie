@@ -204,7 +204,7 @@ const MCP_LIMITS = Object.freeze({ requestTimeoutMs: REQUEST_TIMEOUT_MS, headers
 
 // The mcp. server. Never listens. `limits` exists for tests, which scale
 // the timings down.
-function createMcpHttpServer(handler, limits = {}) {
+function createMcpHttpServer(handler, limits = {}, { onUpgrade = null } = {}) {
   const l = { ...MCP_LIMITS, ...limits };
   const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, handler);
   // Node's own request timers never run on a server that does not listen;
@@ -214,7 +214,25 @@ function createMcpHttpServer(handler, limits = {}) {
   server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
   server.maxHeadersCount = MAX_HEADERS_COUNT;
   server.frontDoorLimits = Object.freeze(l);
-  return guardConnections(server, l);
+  if (!onUpgrade) return guardConnections(server, l);
+  // /window/v1 (remote window R-RW-3) leaves every timer behind, like the mesh
+  // server's upgrade; any other upgrade is destroyed as before.
+  guardConnections(server, { ...l, upgrades: 'keep' });
+  server.on('upgrade', (req, socket, head) => {
+    let pathname = null;
+    try { pathname = new URL(req.url, 'http://mcp.invalid').pathname; } catch { pathname = null; }
+    if (pathname !== '/window/v1') {
+      socket.destroy();
+      return;
+    }
+    try {
+      onUpgrade(req, socket, head);
+    } catch (err) {
+      log.error(`/window/v1 upgrade failed: ${err && err.message}`);
+      socket.destroy();
+    }
+  });
+  return server;
 }
 
 // The mesh. server: only pinned nodes reach it, and all it serves is the

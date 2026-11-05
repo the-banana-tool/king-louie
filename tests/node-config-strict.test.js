@@ -51,7 +51,7 @@ describe('NODE_YAML_KEYS', () => {
     assert.deepEqual([...NODE_YAML_KEYS.policy], ['allowed_roots', 'remote_sessions', 'max_concurrent_jobs']);
     assert.deepEqual([...NODE_YAML_KEYS.remote_sessions], ['always_confirm', 'deny']);
     assert.deepEqual([...NODE_YAML_KEYS.approvers], ['relay', 'request_ttl_s']);
-    assert.deepEqual([...NODE_YAML_KEYS.frontdoor], ['domain', 'listen', 'acme', 'tls', 'oauth', 'mcp', 'audit']);
+    assert.deepEqual([...NODE_YAML_KEYS.frontdoor], ['domain', 'listen', 'acme', 'tls', 'oauth', 'mcp', 'audit', 'window']);
     assert.deepEqual([...NODE_YAML_KEYS.delegate], ['provider', 'model', 'agent', 'idle_close', 'cwd', 'max_sessions']);
     assert.deepEqual([...NODE_YAML_KEYS.gui], ['enabled', 'apps', 'screenshot', 'live_view', 'lease', 'take', 'browser', 'recorder']);
     assert.ok(Object.isFrozen(NODE_YAML_KEYS));

@@ -6,7 +6,7 @@ const os = require('os');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const FORBIDDEN = ['src/providers/', 'src/execution/agent-loop', 'src/tools/', 'src/browser/', 'src/channels/', 'src/mcp/', 'src/core/create-core', 'src/execution/safety-policy',
+const FORBIDDEN = ['src/providers/', 'src/execution/agent-loop', 'src/tools/', 'src/browser/', 'src/channels/', 'src/mcp/', 'src/desktop-bridge/', 'src/core/create-core', 'src/execution/safety-policy',
   'src/mesh/mesh-discovery', 'src/mesh/mesh-swarm', 'src/mesh/mesh-remote-control', 'src/mesh/mesh-channel'];
 // Fleet stage 5 (Deviation 8): node-config.js needs gui/config.js on every
 // profile and fleet/start.js reads gui/status.js; both are dependency-free.
@@ -120,7 +120,8 @@ describe('frontdoor module graph', () => {
       }).toString();
       const loaded = JSON.parse(out).map((p) => path.relative(ROOT, p).split(path.sep).join('/'));
       assert.ok(loaded.includes('src/frontdoor/profile.js'));
-      const FRONTDOOR_FORBIDDEN = ['src/core/', 'src/providers/', 'src/execution/', 'src/tools/', 'src/runbooks/', 'src/browser/', 'src/channels/', 'src/mcp/',
+      assert.ok(loaded.includes('src/frontdoor/window/splice.js'));
+      const FRONTDOOR_FORBIDDEN = ['src/core/', 'src/providers/', 'src/execution/', 'src/tools/', 'src/runbooks/', 'src/browser/', 'src/channels/', 'src/mcp/', 'src/desktop-bridge/',
         'src/mesh/mesh-discovery', 'src/mesh/mesh-remote-control', 'src/mesh/mesh-swarm'];
       const bad = loaded.filter((p) => FRONTDOOR_FORBIDDEN.some((f) => p.startsWith(f)) || guiLeak(p, RELAY_GUI_ALLOWED));
       assert.deepStrictEqual(bad, []);

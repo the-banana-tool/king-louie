@@ -42,6 +42,7 @@ const { OAuthServer } = require('./oauth/server');
 const { GrantStore, AuthCodes } = require('./oauth/grants');
 const { registerGrantRoutes } = require('./oauth/grant-routes');
 const { TokenStore } = require('./oauth/tokens');
+const { createWindowSplice } = require('./window/splice');
 const { McpHttpEndpoint } = require('./mcp/http-endpoint');
 const { PairingService } = require('./pairing/pairing-service');
 const { createPairHandler } = require('./pairing/pair-http');
@@ -333,8 +334,10 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
     let mcp = null;
     // The shared revoke helper (revokeGrantEverywhere) has already dropped
     // the grant's tokens when this runs; this only ends its MCP sessions.
+    let windowSplice = null;
     const onGrantRevoked = (grantId) => {
       if (mcp) mcp.endSessionsForGrant(grantId);
+      if (windowSplice) windowSplice.closeForGrant(grantId);
     };
     const oauth = new OAuthServer({
       domain, origin: publicUrl, clients, pending, scopeRegistry, scopesEnabled: fdConfig.oauth.scopesEnabled, clientDefaults: fdConfig.oauth.clientDefaults,
@@ -400,11 +403,15 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
       pairHandler: createPairHandler({ pairing }),
       probeHandler: createProbeHandler({ expects: (nonce) => Boolean(probe && probe.expects(nonce)) })
     });
-    const mcpServer = createMcpHttpServer(handler, deps.mcpServerLimits || {});
+    windowSplice = createWindowSplice({
+      tokens, grants, registry, nodeHub: relay.nodeHub, windowResourceUrl: () => `${publicUrl}/window/v1`, config: fdConfig.window, auditLedger: ownLedger
+    });
+    started('window splice', () => windowSplice.stop());
+    const mcpServer = createMcpHttpServer(handler, deps.mcpServerLimits || {}, { onUpgrade: windowSplice.onMcpUpgrade });
     const meshServer = createMeshHttpServer(deps.meshServerLimits || {});
     // Neither listens; the listener's stop() destroys the sockets they hold.
     started('http servers', () => { mcpServer.close(() => {}); meshServer.close(() => {}); });
-    transport.attachServer(meshServer);
+    transport.attachServer(meshServer, { fallthrough: windowSplice.onMeshUpgrade });
     const listener = new SniListener({
       host: listen.host, port: listen.port, domain,
       mcpContext: () => tlsSource.currentContext(),
@@ -503,7 +510,7 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
 
     log.info(`front door ready on ${listen.host}:${listener.address().port} for ${hosts.mcp} and ${hosts.mesh}`);
     return {
-      identity, relay, registry, router, pairing, oauth, tokens, grants, alerts, mirror, probe, tls: tlsSource, mcp,
+      identity, relay, registry, router, pairing, oauth, tokens, grants, alerts, mirror, probe, tls: tlsSource, mcp, windowSplice,
       masterKeySource: ports.masterKeySource,
       address: () => listener.address(),
       reloadTls,

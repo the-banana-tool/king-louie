@@ -12,7 +12,8 @@ const FRONT_DOOR_AUDIT_KINDS = Object.freeze([
   'frontdoor.grant.approved', 'frontdoor.grant.denied', 'frontdoor.grant.revoked',
   'frontdoor.token.issued', 'frontdoor.refresh_reuse',
   'frontdoor.node.enrolled', 'frontdoor.node.removed', 'frontdoor.node.replaced',
-  'frontdoor.pairing.code_issued', 'frontdoor.tls.repin', 'frontdoor.alert.ack'
+  'frontdoor.pairing.code_issued', 'frontdoor.tls.repin', 'frontdoor.alert.ack',
+  'window.session.opened', 'window.session.closed', 'window.session.refused'
 ]);
 
 async function recordFrontDoorEvent(ledger, kind, data = {}) {

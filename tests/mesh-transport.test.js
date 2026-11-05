@@ -4,6 +4,46 @@ const assert = require('node:assert');
 const { MeshIdentity } = require('../src/mesh/mesh-identity');
 // Tests run without TLS for simplicity (no cert generation overhead)
 const { MeshTransport } = require('../src/mesh/mesh-transport');
+const { EventEmitter } = require('events');
+
+describe('MeshTransport attachServer fallthrough', () => {
+  const socket = () => ({ destroyed: 0, destroy() { this.destroyed += 1; } });
+  const attach = (options) => {
+    const transport = new MeshTransport({ identity: new MeshIdentity({ displayName: 'Host' }), listen: false, useTls: false });
+    const server = new EventEmitter();
+    transport.attachServer(server, options);
+    return server;
+  };
+
+  it('offers any other path, and keeps the socket only on true', () => {
+    const seen = [];
+    const answers = [true, false, 'yes'];
+    const server = attach({ fallthrough: (req, s, head) => { seen.push([req.url, head]); return answers.shift(); } });
+    const head = Buffer.from('h');
+    const [kept, refused, truthy] = [socket(), socket(), socket()];
+    server.emit('upgrade', { url: '/window/v1/abc', headers: {} }, kept, head);
+    server.emit('upgrade', { url: '/foo', headers: {} }, refused, head);
+    server.emit('upgrade', { url: '/bar', headers: {} }, truthy, head);
+    assert.deepStrictEqual(seen, [['/window/v1/abc', head], ['/foo', head], ['/bar', head]]);
+    assert.strictEqual(kept.destroyed, 0);
+    assert.strictEqual(refused.destroyed, 1);
+    assert.strictEqual(truthy.destroyed, 1);
+  });
+
+  it('with none, or one that throws, the socket is destroyed', () => {
+    const none = attach({});
+    const plain = socket();
+    none.emit('upgrade', { url: '/window/v1/abc', headers: {} }, plain, Buffer.alloc(0));
+    assert.strictEqual(plain.destroyed, 1);
+
+    let calls = 0;
+    const throwing = attach({ fallthrough: () => { calls += 1; throw new Error('no'); } });
+    const thrown = socket();
+    throwing.emit('upgrade', { url: '/x', headers: {} }, thrown, Buffer.alloc(0));
+    assert.strictEqual(thrown.destroyed, 1);
+    assert.strictEqual(calls, 1);
+  });
+});
 
 describe('MeshTransport', () => {
   let identity1, identity2;
