@@ -83,6 +83,29 @@ crafted signature verifies over any message. Such a key is only ever its holder'
 (an id is derived from its key), so the handshake gains nothing from refusing it, but
 enrollment must not store one.
 
+**Enroll-only (R-RW-36).** A node with `features.remoteWindow` builds its seal with
+`enrollUnknown`. At `auth_w` it verifies `sig_dev` against `pub_dev` first. A good
+signature from a device with no record gives `peer: { deviceId, publicKey, enrolled:
+false }`; a stored key that differs is `4401`, and so is any failure, as ever. Without
+the option an unknown device is `4401` (`handshake-unknown-device`). While `enrolled` is
+false the seal takes frames of at most 4096 bytes and treats `more` as `4400`, until the
+host calls `promote()`. An unknown device's first frame from the node is `{ t: 'enrolling',
+protocol }`. It may send only `t: 'call'` `window.enroll { label }` (answers `{ request_id,
+expires_at }`) and `window.enrollStatus { request_id }` (answers `{ state }`: `pending`,
+`staged`, `approved`, `denied`, `expired`, `unknown`); anything else closes `4400` under
+the seal. It has no connection and no dispatcher, counts against no window's place, and
+has its own cap, deadline and bound on calls. It is promoted, with no new handshake and a
+`{ t: 'ready', service }` frame, only after a fresh read of the devices file finds a
+`remote: true` record with its key.
+
+A lookup that could not read the file is not an unknown device: such a handshake closes
+`4504`, never the enroll state, even if the next read is good.
+
+A device's own window is not proved to it by any of this: `node_key` here is what the
+handshake proved, and a window trusts it only after the code (approval-v1, "a window's
+enrollment"). Until then it holds the key unpersisted and sends only those two methods,
+however `enrollStatus` answers.
+
 ## 3. Keys
 
 ```
@@ -224,6 +247,9 @@ not try to hide them.
 | `1001` | `silence` | 60 s with no record. |
 | `1001` | `write` | A write failed: the socket has gone. |
 | `4403` | `not_remote` | The node: a device that proved a key whose record is local. |
+| `4403` | `not_enrolled` | The node, to an enroll connection: its request was denied or lapsed, or the deadline passed. Sent as a close record; a denied or expired state also goes first in a sealed `{ t: 'enrollState', state }` or the answer to `window.enrollStatus`. |
+| `4400` | `enroll only` | The node, to an enroll connection: anything but the two methods. As a close record. |
+| `1013` | `too many enrolling windows` | Past the node's cap on enroll connections. |
 | `4403` | `unknown device` | The node, at ready: the record went or its key changed during the handshake. |
 | `4403` | `unpaired` | The node's re-read: the record is gone or changed sides. The device is revoked. |
 | `4409` | `too_many_windows` | The node holds its eight windows. |

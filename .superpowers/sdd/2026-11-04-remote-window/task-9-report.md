@@ -61,6 +61,4 @@ Status: DONE_WITH_CONCERNS (see the end).
 
 `tests/window-enrollment.test.js` plus the covering files named in the brief, `desktop-bridge-service`, `desktop-bridge-many-windows`, `window-seal`, `window-vectors`, `window-dialer`, `frontdoor-push`, `electron-boundary`, `service-profile-graph`, `mobile-android-*`: 663 tests, 658 pass, 0 fail, 5 skipped. An earlier wider run with `frontdoor-relay`, `frontdoor-window`, `egress-inventory`, `desktop-pairing*`, `mobile-*`: 980 tests, 0 fail beyond the two pins fixed here. No full `npm test`, no e2e. `generate.js --check`: `77 vectors match` (70 on this branch, not the brief's 69, plus the six and `window-enroll-code`). window-v1 `--check`: 15, unchanged. Gradle not run: no existing vector changed and the new ones are node only.
 
-## Fix round: for the reviewer
-
-Shared worktree notes: `docs/protocol/window-v1.md` was staged by another builder after my edit, so that builder's commit may carry my enroll-only section and the three code rows.
+An existing test in this covering set prints `[context-assembler] Failed to embed during indexing: OpenAI API error: 401`: a real call out with a key that fails. `tests/window-enrollment.test.js` alone does not print it, so it is not from this task; not traced further.
