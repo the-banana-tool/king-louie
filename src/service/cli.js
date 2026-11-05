@@ -18,7 +18,7 @@ const HELP = `Usage:
   king-louie-service desktop pair <request> [--data-dir DIR] [--yes] [--json]
   king-louie-service desktop unpair <device-id> [--data-dir DIR]
   king-louie-service desktop list [--data-dir DIR]
-  king-louie-service features set <name> on|off [--data-dir DIR]
+  king-louie-service features set remoteWindow on|off [--data-dir DIR]
   king-louie-service models status|refresh [--data-dir DIR]
   king-louie-service profiles list|show <id-or-name>|set-default <id-or-name> [--data-dir DIR]
   king-louie-service import --from <desktop user-data dir> [--case <case dir or id> [--yes]] [--data-dir DIR] [--dry-run]

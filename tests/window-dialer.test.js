@@ -16,7 +16,7 @@ const { selfSigned, fingerprint } = require('./helpers/test-certs');
 const { NodeIdentity } = require('../src/mesh/node-identity');
 const { DesktopBridgeServer } = require('../src/desktop-bridge/bridge-server');
 const { WindowSeal, RECORD_WIRE_MAX, PRE_READY_BYTES } = require('../src/desktop-bridge/window-seal');
-const { createWindowDialer, createWindowHandlers, PENDING_SEALS_MAX } = require('../src/desktop-bridge/window-dialer');
+const { createWindowDialer, createWindowHandlers, PENDING_SEALS_MAX, WINDOW_OPENS_PER_MINUTE, CLOSE_GRACE_MS } = require('../src/desktop-bridge/window-dialer');
 const { createRelayDispatcher } = require('../src/approvals/service-wiring');
 const { isReservedMethod, NODE_INBOUND, F3_METHODS } = require('../src/approvals/relay-client');
 const keys = require('../src/desktop-bridge/keys');
@@ -276,6 +276,23 @@ describe('createWindowDialer: the dial', () => {
     }
   });
 
+  it('a throw while building the socket is a failed dial, not a dead node', async () => {
+    const mesh = await fakeMesh();
+    // ws refuses a URL with a fragment by throwing, in the secureConnect handler.
+    const pin = { ...pinFor(mesh.port), mesh_url: `wss://${MESH_HOST}:${mesh.port}/mesh/v1#fragment` };
+    const dialer = createWindowDialer({ identity, frontDoorPin: pin, server: fakeServer(), lookup });
+    cleanups.push(() => dialer.stop());
+    assert.deepStrictEqual(await dialer.open({ session_id: newSessionId() }), { ok: true });
+    await waitFor(() => dialer.pending() === 0, 'the failed dial');
+  });
+
+  it('window.open with null or nothing is invalid_session, not a TypeError', async () => {
+    const dialer = dialerFor(1, fakeServer());
+    for (const params of [null, undefined, {}]) {
+      assert.deepStrictEqual(await dialer.open(params), { ok: false, code: 'invalid_session' });
+    }
+  });
+
   it('refuses a session id that is not the canonical form, with no dial', async () => {
     let dialed = 0;
     const server = net.createServer((socket) => { dialed += 1; socket.destroy(); });
@@ -357,15 +374,112 @@ describe('createWindowDialer: the seals not yet ready (R-RW-36)', () => {
     await waitFor(() => dialer.pending() === 0, 'the deadline to free the place');
   });
 
+  // A front door that answers the upgrade with one bad frame and then never reads or
+  // answers again, so ws's close waits for a close frame that is not coming.
+  async function silentPeer() {
+    const server = https.createServer({ cert: servedCert.cert, key: servedCert.key });
+    const state = { open: 0, peak: 0, total: 0 };
+    server.on('upgrade', (req, socket) => {
+      state.total += 1;
+      state.open += 1;
+      state.peak = Math.max(state.peak, state.open);
+      socket.on('error', () => {});
+      socket.on('close', () => { state.open -= 1; });
+      socket.resume();
+      const accept = crypto.createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+      socket.write(Buffer.concat([Buffer.from(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`), Buffer.from([0x81, 0x01, 0x78])]));
+    });
+    state.port = await closingServer(server);
+    return state;
+  }
+
+  it('a failed seal holds its place until its socket has closed: a peer that never answers the close leaves at most the cap', async () => {
+    assert.ok(CLOSE_GRACE_MS >= 1000 && CLOSE_GRACE_MS <= 2000, 'a grace of 1 to 2 s');
+    const peer = await silentPeer();
+    const unlimited = { opensPerMinute: Number.MAX_SAFE_INTEGER };
+    const dialer = dialerFor(peer.port, realServer(), { ...unlimited, closeGraceMs: 300 });
+    for (let i = 0; i < PENDING_SEALS_MAX; i += 1) await dialer.open({ session_id: newSessionId() });
+    await waitFor(() => peer.open === PENDING_SEALS_MAX, 'every socket');
+    await delay(100);
+    assert.strictEqual(dialer.pending(), PENDING_SEALS_MAX, 'every seal has failed, and its socket is still open');
+    assert.deepStrictEqual(await dialer.open({ session_id: newSessionId() }), { ok: false, code: 'too_many_windows' });
+    await waitFor(() => dialer.pending() === 0, 'the grace to end');
+    await waitFor(() => peer.open === 0, 'the sockets to go');
+    assert.strictEqual(peer.total, PENDING_SEALS_MAX);
+  });
+
+  it('a front door hammering window.open never holds more sockets than the cap', async () => {
+    const peer = await silentPeer();
+    const dialer = dialerFor(peer.port, realServer(), { opensPerMinute: Number.MAX_SAFE_INTEGER, closeGraceMs: 50 });
+    const end = Date.now() + 800;
+    while (Date.now() < end) {
+      await dialer.open({ session_id: newSessionId() });
+      await delay(1);
+    }
+    assert.ok(peer.total > PENDING_SEALS_MAX, 'the places came back');
+    assert.ok(peer.peak <= PENDING_SEALS_MAX, `peak ${peer.peak}`);
+  });
+
+  it('limits window.open per minute: past it, too_many_windows and no dial', async () => {
+    assert.ok(WINDOW_OPENS_PER_MINUTE > 0 && WINDOW_OPENS_PER_MINUTE <= 60, 'a small limit');
+    const mesh = await fakeMesh();
+    let time = 1000;
+    const bridge = { attachSealed: () => Promise.resolve({}) };
+    const dialer = dialerFor(mesh.port, bridge, { opensPerMinute: 3, now: () => time });
+    for (let i = 0; i < 3; i += 1) {
+      assert.deepStrictEqual(await dialer.open({ session_id: newSessionId() }), { ok: true });
+      await waitFor(() => dialer.pending() === 0, 'the place');
+    }
+    assert.deepStrictEqual(await dialer.open({ session_id: newSessionId() }), { ok: false, code: 'too_many_windows' });
+    time += 59000;
+    assert.deepStrictEqual(await dialer.open({ session_id: newSessionId() }), { ok: false, code: 'too_many_windows' });
+    time += 1001;
+    assert.deepStrictEqual(await dialer.open({ session_id: newSessionId() }), { ok: true });
+    await waitFor(() => dialer.pending() === 0, 'the place');
+    assert.strictEqual(mesh.upgrades.length, 4);
+  });
+
+  it('coalesces the failure lines: one per code per minute, the next saying how many it stands for', async () => {
+    const mesh = await fakeMesh();
+    let time = 1000;
+    const lines = [];
+    const warn = (message, meta) => lines.push({ message, meta });
+    const bridge = { attachSealed: () => Promise.reject(Object.assign(new Error('handshake'), { code: 'handshake' })) };
+    const dialer = dialerFor(mesh.port, bridge, { warn, now: () => time, closeGraceMs: 10 });
+    for (let i = 0; i < 3; i += 1) {
+      await dialer.open({ session_id: newSessionId() });
+      await waitFor(() => dialer.pending() === 0, 'the failure');
+    }
+    assert.strictEqual(lines.length, 1);
+    assert.strictEqual(lines[0].meta.code, 'handshake');
+    time += 60001;
+    await dialer.open({ session_id: newSessionId() });
+    await waitFor(() => dialer.pending() === 0, 'the failure');
+    assert.strictEqual(lines.length, 2);
+    assert.strictEqual(lines[1].meta.repeated, 2);
+
+    lines.length = 0;
+    const handlers = createWindowHandlers({ server: realServer({ canSeal: () => false }), dialer: { open: async () => ({ ok: true }) }, warn, now: () => time });
+    for (let i = 0; i < 5; i += 1) await handlers['window.open']({ session_id: newSessionId() });
+    assert.strictEqual(lines.length, 1);
+  });
+
   it('stop() aborts a dial under way, and a later open is remote_window_off', async () => {
     const sockets = [];
-    const server = net.createServer((socket) => { sockets.push(socket); socket.on('error', () => {}); });
+    let farEndClosed = false;
+    const server = net.createServer((socket) => {
+      sockets.push(socket);
+      socket.on('error', () => {});
+      socket.on('close', () => { farEndClosed = true; });
+      socket.resume();
+    });
     const port = await closingServer(server);
     const dialer = dialerFor(port, fakeServer());
     await dialer.open({ session_id: newSessionId() });
     await waitFor(() => sockets.length === 1, 'the connection');
     dialer.stop();
     assert.strictEqual(dialer.pending(), 0);
+    await waitFor(() => farEndClosed, 'the socket to go');
     assert.deepStrictEqual(await dialer.open({ session_id: newSessionId() }), { ok: false, code: 'remote_window_off' });
   });
 });

@@ -13,9 +13,17 @@ const { wsTransport } = require('./sealed-socket');
 const log = createLogger('desktop-bridge/window-dialer');
 
 // R-RW-36: a front door cannot make the node do handshakes without limit. Counted from
-// window.open until the seal is ready or the dial has failed, and bounded in time by
-// the dial's timeoutMs and then the seal's own deadline. window-v1 §5 names it.
+// window.open until the seal is ready or, after a failure, its socket has closed, and
+// bounded in time by the dial's timeoutMs, the seal's own deadline and CLOSE_GRACE_MS.
+// window-v1 §5 names all three limits.
 const PENDING_SEALS_MAX = 4;
+// A failed seal's close frame gets this long to go out; a peer that never answers it
+// would otherwise hold the socket for ws's 30 s.
+const CLOSE_GRACE_MS = 1500;
+// Places alone bound sockets, not work: each dial is a TLS handshake and a signature.
+const WINDOW_OPENS_PER_MINUTE = 30;
+const MINUTE_MS = 60000;
+const LOG_KEYS_MAX = 32;
 const SESSION_ID_BYTES = 32;
 
 const OFF = Object.freeze({ ok: false, code: 'remote_window_off' });
@@ -41,16 +49,68 @@ function whyNotSealing(server) {
   }
 }
 
+// One line per key per minute, the next one saying how many it stands for: a front door
+// can cause these as fast as it can ask.
+function coalesced({ warn, now }) {
+  const seen = new Map();
+  return (key, message, meta = {}) => {
+    const k = seen.has(key) || seen.size < LOG_KEYS_MAX ? key : 'other';
+    const entry = seen.get(k) || { at: -Infinity, repeated: 0 };
+    seen.set(k, entry);
+    if (now() - entry.at < MINUTE_MS) {
+      entry.repeated += 1;
+      return;
+    }
+    warn(message, entry.repeated ? { ...meta, repeated: entry.repeated } : meta);
+    entry.at = now();
+    entry.repeated = 0;
+  };
+}
+
+const defaultWarn = (message, meta) => log.warn(message, meta);
+const defaultNow = () => performance.now();
+
 function dialError(code) {
   return Object.assign(new Error(code), { code });
 }
 
-function createWindowDialer({ identity, frontDoorPin, server, lookup = null, timeoutMs = 10000, maxPending = PENDING_SEALS_MAX }) {
+function createWindowDialer({ identity, frontDoorPin, server, lookup = null, timeoutMs = 10000, maxPending = PENDING_SEALS_MAX,
+  opensPerMinute = WINDOW_OPENS_PER_MINUTE, closeGraceMs = CLOSE_GRACE_MS, warn = defaultWarn, now = defaultNow }) {
   const mesh = new URL(frontDoorPin.mesh_url);
   const pinned = frontDoorPin.mesh_cert_fingerprint;
   // Each place taken and not yet given back. `abort` ends a dial still under way.
   const places = new Set();
+  const opens = [];
+  const note = coalesced({ warn, now });
   let stopped = false;
+
+  function admitOpen() {
+    while (opens.length && now() - opens[0] >= MINUTE_MS) opens.shift();
+    if (opens.length >= opensPerMinute) return false;
+    opens.push(now());
+    return true;
+  }
+
+  // A failure gives its place back only when its socket has closed, so the cap bounds
+  // sockets too. The close frame gets the grace, then the socket is cut.
+  function holdUntilClosed(place) {
+    const { socket, ws } = place;
+    if (!socket || socket.closed) {
+      places.delete(place);
+      return;
+    }
+    const cut = () => {
+      try { if (ws) ws.terminate(); } catch { /* gone */ }
+      socket.destroy();
+    };
+    const timer = setTimeout(cut, closeGraceMs);
+    place.cut = cut;
+    socket.once('close', () => {
+      clearTimeout(timer);
+      places.delete(place);
+    });
+    if (stopped) cut();
+  }
 
   // Settles once: with attachSealed's outcome, or a code. The one timer covers TLS and
   // the upgrade; from `open` on the deadline is the seal's.
@@ -77,7 +137,7 @@ function createWindowDialer({ identity, frontDoorPin, server, lookup = null, tim
       const timer = setTimeout(() => fail('dial_timeout'), timeoutMs);
       place.abort = () => fail('dial_stopped');
 
-      socket = tls.connect({
+      place.socket = tls.connect({
         host: mesh.hostname,
         port: Number(mesh.port) || 443,
         servername: mesh.hostname,
@@ -89,6 +149,7 @@ function createWindowDialer({ identity, frontDoorPin, server, lookup = null, tim
         ALPNProtocols: ['http/1.1'],
         ...(lookup ? { lookup } : {})
       });
+      socket = place.socket;
       socket.once('error', (err) => fail(err.code || 'dial_failed'));
       socket.once('close', () => fail('dial_closed'));
       socket.once('secureConnect', () => {
@@ -99,7 +160,14 @@ function createWindowDialer({ identity, frontDoorPin, server, lookup = null, tim
         }
         const url = new URL(mesh);
         url.pathname = `/window/v1/${sessionId}`;
-        ws = new WebSocket(url, { ...SOCKET_OPTIONS, createConnection: () => socket });
+        // A throw here would be uncaught, in a socket's event.
+        try {
+          ws = new WebSocket(url, { ...SOCKET_OPTIONS, createConnection: () => socket });
+        } catch (err) {
+          fail(err.code || 'dial_failed');
+          return;
+        }
+        place.ws = ws;
         ws.on('error', (err) => fail(err.code || 'dial_refused'));
         ws.once('close', () => fail('dial_closed'));
         // In this tick, not after an await: bytes that came with the 101 are delivered
@@ -121,17 +189,23 @@ function createWindowDialer({ identity, frontDoorPin, server, lookup = null, tim
   return {
     // Answers once the dial is under way. A failure is logged by its code (never the
     // session id) and the session is left for the front door's own close.
-    async open({ session_id: sessionId } = {}) {
+    async open(params) {
+      const sessionId = params?.session_id;
       if (stopped) return OFF;
       if (!isSessionId(sessionId)) return INVALID;
-      if (places.size >= maxPending) return TOO_MANY;
-      const place = { abort: null };
+      if (places.size >= maxPending || !admitOpen()) {
+        note(TOO_MANY.code, 'window.open refused', { code: TOO_MANY.code });
+        return TOO_MANY;
+      }
+      const place = { abort: null, cut: null, socket: null, ws: null };
       places.add(place);
       // attachSealed rejects on every failed handshake, which a front door can cause at
       // will: this catch is what keeps that from being an unhandled rejection.
-      dial(sessionId, place)
-        .catch((err) => log.warn('a window dial failed', { code: err.code || 'unknown' }))
-        .finally(() => places.delete(place));
+      dial(sessionId, place).then(() => places.delete(place), (err) => {
+        const code = err.code || 'unknown';
+        note(code, 'a window dial failed', { code });
+        holdUntilClosed(place);
+      });
       return { ok: true };
     },
     pending: () => places.size,
@@ -139,8 +213,9 @@ function createWindowDialer({ identity, frontDoorPin, server, lookup = null, tim
     stop() {
       stopped = true;
       for (const place of [...places]) {
-        if (place.abort) {
-          place.abort();
+        if (place.abort || place.cut) {
+          if (place.abort) place.abort();
+          if (place.cut) place.cut();
           places.delete(place);
         }
       }
@@ -150,12 +225,13 @@ function createWindowDialer({ identity, frontDoorPin, server, lookup = null, tim
 
 // The link methods this node answers while the feature is on and it has a front door
 // to dial. Task 9 adds the other three; a method with no row answers remote_window_off.
-function createWindowHandlers({ server, dialer }) {
+function createWindowHandlers({ server, dialer, warn = defaultWarn, now = defaultNow }) {
+  const note = coalesced({ warn, now });
   return {
     'window.open': async (params) => {
       // R-RW-30: phone-class arguments would otherwise cross the relay in clear.
       if (server._sealRefusal()) {
-        log.warn(`window.open refused: ${whyNotSealing(server)}`);
+        note('node_not_sealing', `window.open refused: ${whyNotSealing(server)}`);
         return { ok: false, code: 'node_not_sealing', message: NOT_SEALING_LINE };
       }
       return dialer.open(params);
@@ -163,4 +239,4 @@ function createWindowHandlers({ server, dialer }) {
   };
 }
 
-module.exports = { createWindowDialer, createWindowHandlers, PENDING_SEALS_MAX };
+module.exports = { createWindowDialer, createWindowHandlers, PENDING_SEALS_MAX, WINDOW_OPENS_PER_MINUTE, CLOSE_GRACE_MS };

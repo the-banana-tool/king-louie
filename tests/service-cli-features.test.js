@@ -35,10 +35,10 @@ function capture() {
   };
 }
 
-async function run(l, args, { running = null } = {}) {
+async function run(l, args, { running = null, deps = {} } = {}) {
   const c = capture();
   const [sub, arg, arg2] = args;
-  const code = await runFeaturesCommand({ sub, arg, arg2, dataDir: l.dataDir, io: c.io, deps: { configDir: l.configDir, runningServicePid: () => running } });
+  const code = await runFeaturesCommand({ sub, arg, arg2, dataDir: l.dataDir, io: c.io, deps: { configDir: l.configDir, runningServicePid: () => running, ...deps } });
   return { code, out: c.out(), err: c.err() };
 }
 
@@ -79,13 +79,13 @@ describe('features set', () => {
     assert.strictEqual(fs.readFileSync(l.file, 'utf8'), text);
   });
 
-  it('takes any name in DEFAULT_FEATURES and refuses an unknown one', async () => {
+  it('takes remoteWindow alone (R-RW-20): every other feature and an unknown name are refused', async () => {
     assert.ok(Object.hasOwn(DEFAULT_FEATURES, 'remoteWindow'));
     const l = setup({ features: {} });
-    for (const name of Object.keys(DEFAULT_FEATURES)) {
-      assert.strictEqual((await run(l, ['set', name, 'off'])).code, 0, name);
-    }
-    for (const name of ['bogus', '__proto__', 'constructor', undefined]) {
+    assert.strictEqual((await run(l, ['set', 'remoteWindow', 'off'])).code, 0);
+    const others = Object.keys(DEFAULT_FEATURES).filter((name) => name !== 'remoteWindow');
+    assert.ok(others.includes('gateway') && others.includes('desktopBridge'));
+    for (const name of [...others, 'bogus', '__proto__', 'constructor', undefined]) {
       const before = fs.readFileSync(l.file, 'utf8');
       const { code, err } = await run(l, ['set', name, 'on']);
       assert.strictEqual(code, 2, String(name));
@@ -133,12 +133,45 @@ describe('features set', () => {
     }
   });
 
+  it('refuses an elevated prompt under personal hosting; a fleet node is not asked', async () => {
+    const text = '{"features":{}}';
+    const l = setup(text);
+    const personal = { loadNodeConfig: () => ({ hosting: 'personal' }), isAdmin: async () => true };
+    const refused = await run(l, ['set', 'remoteWindow', 'on'], { deps: personal });
+    assert.strictEqual(refused.code, 1);
+    assert.match(refused.err, /not elevated/);
+    assert.strictEqual(fs.readFileSync(l.file, 'utf8'), text);
+    const asOwner = await run(l, ['set', 'remoteWindow', 'on'], { deps: { ...personal, isAdmin: async () => false } });
+    assert.strictEqual(asOwner.code, 0);
+    const fleet = await run(l, ['set', 'remoteWindow', 'off'], { deps: { loadNodeConfig: () => ({ hosting: 'service' }), isAdmin: async () => true } });
+    assert.strictEqual(fleet.code, 0);
+  });
+
+  it('does not make a missing config dir', async () => {
+    const l = setup();
+    fs.rmSync(l.configDir, { recursive: true });
+    const { code, err } = await run(l, ['set', 'remoteWindow', 'on']);
+    assert.strictEqual(code, 1);
+    assert.match(err, /does not exist/);
+    assert.strictEqual(fs.existsSync(l.configDir), false);
+  });
+
+  it('words a denied write without the temp path', async () => {
+    const l = setup({ features: {} });
+    const denied = () => { throw Object.assign(new Error(`EPERM: operation not permitted, open '${l.file}.tmp-abcd1234'`), { code: 'EPERM' }); };
+    const { code, err } = await run(l, ['set', 'remoteWindow', 'on'], { deps: { write: denied } });
+    assert.strictEqual(code, 1);
+    assert.match(err, /EPERM/);
+    assert.doesNotMatch(err, /\.tmp-/);
+    assert.match(err, /service\.json/);
+  });
+
   it('the CLI routes features and lists it in its help', async () => {
     const usage = capture();
     assert.strictEqual(await main(['features', 'set', 'bogus', 'on'], usage.io), 2);
     assert.match(usage.err(), /bogus/);
     const help = capture();
     await main(['help'], help.io);
-    assert.match(help.out(), /features set <name> on\|off/);
+    assert.match(help.out(), /features set remoteWindow on\|off/);
   });
 });

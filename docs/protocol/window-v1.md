@@ -159,10 +159,13 @@ A seal not ready `LIMITS.handshakeMs` (10 s) after it was built closes `4408`, o
 roles, on a ref'd timer. A host must also cap the seals not yet ready, counted from
 `window.open`: the seal cannot see the others. A node holds at most 4
 (`PENDING_SEALS_MAX`, `src/desktop-bridge/window-dialer.js`), each from `window.open`
-until its seal is ready or its dial has failed, so a front door cannot make it do
-handshakes without limit. Past that, `window.open` answers `too_many_windows`. A place
-is bounded by the dial's own 10 s and then the seal's deadline. A node that cannot
-seal to a phone answers `node_not_sealing`, with no dial.
+until its seal is ready or, after a failure, its socket has closed, so the cap bounds
+sockets as well as handshakes. A failed seal's socket gets 1.5 s (`CLOSE_GRACE_MS`) for
+its close frame and is then cut. A place is bounded by the dial's own 10 s, the seal's
+deadline and that grace. A node also takes at most 30 `window.open` a minute
+(`WINDOW_OPENS_PER_MINUTE`). Past either limit, `window.open` answers
+`too_many_windows` with no dial. A node that cannot seal to a phone answers
+`node_not_sealing`, with no dial.
 
 A close that no `next` call is there to return (the deadline, a write that failed)
 goes to `onClose(close)`, given when the seal is built. A write with no promise goes
