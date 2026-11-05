@@ -85,7 +85,8 @@ function closeRecordOf(seal, code) {
 }
 
 // Two ends that keep message boundaries and order, as a binary WebSocket does:
-// { send(bytes), close(code, reason), on('data' | 'close') }.
+// { send(bytes) -> Promise, close(code, reason), on('data' | 'close') }. The promise
+// settles as ws's send callback would: when the socket has taken the bytes.
 function createTransportPair() {
   const make = () => {
     const end = new EventEmitter();
@@ -96,11 +97,17 @@ function createTransportPair() {
   const a = make();
   const b = make();
   const wire = (from, to) => {
-    from.send = (bytes) => {
-      if (from.closed) return;
+    from.send = (bytes) => new Promise((resolve, reject) => {
+      if (from.closed) {
+        reject(new Error('this end is closed'));
+        return;
+      }
       from.sent.push(bytes);
-      setImmediate(() => { if (!to.closed) to.emit('data', bytes); });
-    };
+      setImmediate(() => {
+        if (!to.closed) to.emit('data', bytes, true);
+        resolve();
+      });
+    });
     from.close = (code, reason) => {
       if (from.closed) return;
       from.closed = true;

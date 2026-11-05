@@ -255,7 +255,9 @@ function createBridgeDispatcher({
     if (!approver || !takePhoneSlot(conn.deviceId)) return false;
     try {
       // The signal withdraws the card when the run is stopped.
-      return (await approver.requestApproval('AllowDirectory', { directory, toolName }, { origin: windowOrigin(conn), cardNote: `From ${windowName(conn.label)}`, ...(signal ? { signal } : {}) })) === true;
+      const either = signal ? AbortSignal.any([signal, conn.revokeSignal]) : conn.revokeSignal;
+      const answer = await approver.requestApproval('AllowDirectory', { directory, toolName }, { origin: windowOrigin(conn), cardNote: `From ${windowName(conn.label)}`, signal: either });
+      return answer === true && !conn.revoked;
     } catch (err) {
       log.warn(`asking the phone for a folder failed: ${err.message}`);
       return false;
@@ -397,7 +399,7 @@ function createBridgeDispatcher({
       return { ok: true, request_id: granted.grant_id, args: JSON.parse(text) };
     }
     if (!takePhoneSlot(conn.deviceId)) return remoteRefusal('PHONE_BUSY');
-    const metadata = { origin: windowOrigin(conn), cardNote: windowSummary(name, conn.label) };
+    const metadata = { origin: windowOrigin(conn), cardNote: windowSummary(name, conn.label), signal: conn.revokeSignal };
     let answer;
     try {
       answer = await approver.requestApproval(WINDOW_TOOL, card.params, metadata);
@@ -407,6 +409,8 @@ function createBridgeDispatcher({
     } finally {
       freePhoneSlot(conn.deviceId);
     }
+    // A revoke takes back what the phone said, however the answer raced it (R-RW-31).
+    if (conn.revoked) return remoteRefusal('PHONE_DENIED');
     if (answer === 'unavailable') return remoteRefusal('NO_PHONE', (metadata.refusal && metadata.refusal.error) || MESSAGES.NO_PHONE);
     // Only the exact true approves, and an approval has a request id to carry.
     if (answer !== true || typeof metadata.request_id !== 'string' || !metadata.request_id) return remoteRefusal('PHONE_DENIED');
@@ -585,6 +589,8 @@ function createBridgeDispatcher({
   }
 
   async function handleFrame(conn, frame) {
+    // Nothing a revoked device sent runs, whenever it got here (R-RW-31).
+    if (conn.revoked) return undefined;
     return runFor(conn, () => {
       // A device back after a drop: whatever opens the conversation brings its questions.
       if (conn.remote) replayPrompts(conn);
@@ -656,6 +662,22 @@ function createBridgeDispatcher({
     conn.runs.clear();
   }
 
+  // A revoked device, where a drop stops nothing (R-RW-31): its runs stop, which withdraws
+  // the tool cards they hold. The cards of its calls go by conn.revokeSignal, and
+  // the server calls this for a connection already gone as well.
+  function onRevoke(conn) {
+    for (const [runEvent, chatId] of [...conn.runs]) {
+      try {
+        if (bridgeContext.stopRunForEvent?.(runEvent) !== true) continue;
+        context.appendMessageToChat(chatId, 'assistant', MESSAGES.WINDOW_REVOKED_RUN, {}, { returnChat: false });
+        broadcast('chat:updated', { chatId });
+        log.info(`stopped chat ${chatId}: its window was revoked`);
+      } catch (err) {
+        log.warn(`stopping chat ${chatId} failed: ${err.message}`);
+      }
+    }
+  }
+
   // The core's own ui.send (chat:updated, backgroundTask:completed, case:changed):
   // never a prompt, so a remote-origin run cannot borrow the dialog.
   function forwardAmbient(channel, payload) {
@@ -673,7 +695,7 @@ function createBridgeDispatcher({
   }
 
   return {
-    served, providersConfigured, handleFrame, onDisconnect, forwardAmbient, bridgeContext, scope,
+    served, providersConfigured, handleFrame, onDisconnect, onRevoke, forwardAmbient, bridgeContext, scope,
     gatePhoneClass, replayPrompts, pendingAskUserByDevice
   };
 }

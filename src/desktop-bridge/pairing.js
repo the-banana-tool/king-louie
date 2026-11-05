@@ -147,6 +147,7 @@ function validateDevices(doc) {
     if (raw.length !== 32 || deriveDeviceId(raw, 'kld-') !== d.deviceId) throw invalidDevices(`device ${d.deviceId} does not match its public key`);
     validateLabel(d.label, 'DEVICES_FILE_INVALID');
     if (typeof d.pairedAt !== 'string' || Number.isNaN(Date.parse(d.pairedAt))) throw invalidDevices(`device ${d.deviceId} has no valid pairedAt`);
+    if (d.remote !== undefined && typeof d.remote !== 'boolean') throw invalidDevices(`device ${d.deviceId} has a malformed remote flag`);
     if (seen.has(d.deviceId)) throw invalidDevices(`duplicate device ${d.deviceId}`);
     seen.add(d.deviceId);
   }
@@ -163,9 +164,11 @@ function parseDevices(text) {
   return validateDevices(doc);
 }
 
-function upsertDevice(doc, { deviceId, publicKey, label, pairedAt }) {
+// `remote` picks the record's one path (R-RW-15): only a remote record carries the
+// key, so a local record's bytes are what they were.
+function upsertDevice(doc, { deviceId, publicKey, label, pairedAt, remote = false }) {
   const devices = doc.devices.filter((d) => d.deviceId !== deviceId);
-  devices.push({ deviceId, publicKey, label, pairedAt });
+  devices.push(remote === true ? { deviceId, publicKey, label, pairedAt, remote: true } : { deviceId, publicKey, label, pairedAt });
   return validateDevices({ v: 1, devices });
 }
 
