@@ -200,7 +200,8 @@ A socket's close code is not authenticated: the front door can write any. So a c
 that reaches a side as a socket close (§7) is a reason to look, never proof: a node
 sends a close record before it closes, and only that record, under the seal, says what
 the node decided. No socket code clears a pin or an enrollment, and on the node every
-socket close is a drop.
+socket close is a drop. The front door can also read the code and reason on a socket
+close, so a node's reason (§7) tells it what the node decided.
 
 Padding hides small differences only: within one block, frames look alike, while a
 long reply still looks long. Sizes and timing remain visible, and this protocol does
@@ -221,13 +222,13 @@ not try to hide them.
 | `4403` | `unpaired` | The node's re-read: the record is gone or changed sides. The device is revoked. |
 | `4409` | `too_many_windows` | The node holds its eight windows. |
 | `4503` | `node_not_sealing` | The node cannot seal to a phone. Says nothing about this device. |
-| `4504` | `record_unreadable` | The node cannot read its devices file. Says nothing about this device, and it may attach again once the file reads. |
+| `4504` | `record_unreadable` | The node cannot read its devices file, also before ready, for any device. Says nothing about this device, and it may attach again once the file reads. |
 | `1000` | `replaced by a new connection` | The same device attached again. |
 | `1001` | `service_stopping` | The node is stopping. |
 | `1001` | `send failed` | The sender failed for a reason other than a full queue. |
 | `1013` | `slow reader` | Past the sender's queue limit. |
 | `1013` | `too many pending handshakes` | Past the node's cap on seals not yet ready; the oldest goes. |
-| `1013` | `too many held windows` | The node holds `maxHeldWindows` gone windows whose calls still run. |
+| `1013` | `too many held windows` | The node holds `maxHeldPerDevice` gone windows of this device whose calls still run. |
 | the sender's | `peer` | The peer's close record. |
 | the caller's | `local` | This side's own close record. |
 

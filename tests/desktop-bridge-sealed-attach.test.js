@@ -22,6 +22,7 @@ const keys = require('../src/desktop-bridge/keys');
 const pairing = require('../src/desktop-bridge/pairing');
 const { isLocalDesktopEvent, isRemoteWindowEvent, remoteWindowDeviceId, remoteWindowApproved } = require('../src/core/origin');
 const { PhoneApprover } = require('../src/approvals/phone-approver');
+const { WorkflowEngine } = require('../src/workflows/workflow-engine');
 const { open } = require('../src/approvals/envelope');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
@@ -494,12 +495,14 @@ describe('a sealed connection', () => {
     const device = makeDevice('Field laptop');
     const { server } = makeServer({ devices: [device] });
     const end = slowTransport();
+    end.countsRaw = true;
     const attaching = server.attachSealed({ sessionId: sessionIdOf('counted once'), transport: end });
     const [state] = [...server.sealedSessions];
     end.emit('raw', Buffer.alloc(100));
     assert.strictEqual(state.preReadyBytes, 100);
     end.emit('data', Buffer.alloc(100), true);
     assert.strictEqual(state.preReadyBytes, 100, 'the same bytes are not counted again');
+    // A message can come before its chunk's raw event: ws parses in its own listener.
     await attaching.catch(() => {});
 
     const bare = makeServer({ devices: [device] });
@@ -521,6 +524,27 @@ describe('a sealed connection', () => {
     conn.close(CLOSE.GOING_AWAY, 'going');
     assert.strictEqual(terminated, 0);
     await waitFor(() => terminated === 1, 'the terminate');
+  });
+
+  it('the grace runs on when the session ends for any reason, and a socket already gone is left alone', async () => {
+    const device = makeDevice('Field laptop');
+    const { server } = makeServer({ devices: [device], limits: { closeGraceMs: 10 } });
+    const refused = slowTransport();
+    let cut = 0;
+    refused.terminate = () => { cut += 1; };
+    const attaching = server.attachSealed({ sessionId: sessionIdOf('no ending'), transport: refused });
+    refused.emit('data', Buffer.alloc(3), true);
+    await assert.rejects(attaching);
+    await waitFor(() => cut === 1, 'the terminate of a refusal');
+
+    const gone = slowTransport();
+    let cutGone = 0;
+    gone.terminate = () => { cutGone += 1; };
+    const { conn } = await handshakeOn(server, gone, device);
+    gone.emit('close', 1006);
+    assert.strictEqual(conn.live, false);
+    await delay(30);
+    assert.strictEqual(cutGone, 0);
   });
 
   it('a stop and a refusal look like any small frame on the wire: the real frames, from the real dispatcher', async () => {
@@ -790,6 +814,30 @@ describe('a slow reader (backpressure)', () => {
 });
 
 describe('over a real WebSocket (wsTransport)', () => {
+  it('counts what came off the wire once, the first chunk too', async (t) => {
+    const device = makeDevice('Field laptop');
+    const { server } = makeServer({ devices: [device] });
+    const p = await pair(server, device);
+    t.after(p.cleanup);
+    const [state] = [...server.sealedSessions];
+    p.peer.send(Buffer.alloc(100), { binary: true });
+    await assert.rejects(p.attaching, (err) => err.closeCode === 4401);
+    assert.strictEqual(state.preReadyBytes, 102, 'the message and its two bytes of framing, once');
+  });
+
+  it('a peer that never answers the close is cut off by the grace, so the node sees the socket go', async (t) => {
+    const device = makeDevice('Field laptop');
+    const { server } = makeServer({ devices: [device], limits: { closeGraceMs: 20 } });
+    const p = await pair(server, device);
+    t.after(p.cleanup);
+    await p.seal.next(null);
+    const conn = await p.attaching;
+    await waitFor(() => p.received.some((f) => f.t === 'ready'), 'ready');
+    p.peer._socket.pause();
+    conn.close(CLOSE.GOING_AWAY, 'going');
+    await waitFor(() => p.dialed.readyState === WebSocket.CLOSED, 'the socket gone');
+  });
+
   it('takes only an open socket: before that there is no TCP stream to count', async (t) => {
     const wss = new WebSocket.Server({ host: '127.0.0.1', port: 0 });
     await new Promise((resolve) => { wss.once('listening', resolve); });
@@ -1038,7 +1086,13 @@ describe('a devices file that cannot be read says nothing about a device', () =>
     assert.deepStrictEqual(dispatcher.revoked, [device.deviceId]);
 
     const during = openWindow(server, device);
-    assert.strictEqual((await during.outcome).error.closeCode, 4401, 'nobody attaches while it cannot be read');
+    const refused = (await during.outcome).error;
+    assert.strictEqual(refused.closeCode, CLOSE.RECORD_UNREADABLE, 'nobody attaches while it cannot be read, and is told so');
+    assert.strictEqual(refused.code, 'record_unreadable');
+    await waitFor(() => during.wireClose, 'the close');
+    assert.deepStrictEqual(during.wireClose, { code: CLOSE.RECORD_UNREADABLE, reason: 'record_unreadable' });
+    const stranger = openWindow(server, makeDevice('Stranger'));
+    assert.strictEqual((await stranger.outcome).error.closeCode, CLOSE.RECORD_UNREADABLE, 'a stranger is told the same');
 
     writeDevices(configDir, [device]);
     const again = await attached(server, device);
@@ -1127,9 +1181,9 @@ describe('a devices file that cannot be read says nothing about a device', () =>
     await waitFor(() => server.heldConns.size === 0, 'all let go');
   });
 
-  it('gone windows at work are capped: past it a new session is refused, and none is forgotten', async () => {
+  it('gone windows at work are capped per device: one device cannot lock out another', async () => {
     const devices = [makeDevice('One'), makeDevice('Two')];
-    const { server, dispatcher } = makeServer({ devices, limits: { maxHeldWindows: 1 } });
+    const { server, dispatcher } = makeServer({ devices, limits: { maxHeldPerDevice: 1 } });
     const held = [];
     dispatcher.hold = () => new Promise((resolve) => { held.push(resolve); });
     const first = await attached(server, devices[0]);
@@ -1137,15 +1191,42 @@ describe('a devices file that cannot be read says nothing about a device', () =>
     await waitFor(() => dispatcher.frames.length === 1, 'the frame');
     first.window.windowEnd.close(1006, 'gone');
     await waitFor(() => !first.conn.live, 'the drop');
-    const refused = openWindow(server, devices[1]);
-    const { error } = await refused.outcome;
+
+    const again = openWindow(server, devices[0]);
+    const { error } = await again.outcome;
     assert.strictEqual(error.closeCode, CLOSE.TRY_AGAIN);
     assert.strictEqual(error.code, 'too many held windows');
-    assert.strictEqual(server.heldConns.has(first.conn), true);
+    assert.strictEqual(server.heldConns.has(first.conn), true, 'none is forgotten');
+
+    const other = await attached(server, devices[1]);
+    assert.strictEqual(other.conn.live, true, 'another device still attaches');
     held[0]();
     await waitFor(() => server.heldConns.size === 0, 'let go');
-    assert.ok(await attached(server, devices[1]));
-    assert.strictEqual(LIMITS.maxHeldWindows, 64);
+    assert.ok(await attached(server, devices[0]));
+    assert.strictEqual(LIMITS.maxHeldPerDevice, 8);
+  });
+
+  it('a revoked connection is let go at once, its frame still running', async () => {
+    const devices = [makeDevice('One'), makeDevice('Two')];
+    const { server, dispatcher, configDir } = makeServer({ devices });
+    dispatcher.hold = () => new Promise(() => {});
+    const first = await attached(server, devices[0]);
+    first.window.send({ t: 'invoke', id: 1, channel: 'chat:load', args: [] });
+    await waitFor(() => dispatcher.frames.length === 1, 'the frame');
+    first.window.windowEnd.close(1006, 'gone');
+    await waitFor(() => !first.conn.live, 'the drop');
+    assert.strictEqual(server.heldConns.size, 1);
+    writeDevices(configDir, [devices[1]]);
+    server._recheckLive();
+    assert.strictEqual(first.conn.revoked, true);
+    assert.strictEqual(server.heldConns.size, 0);
+
+    const live = await attached(server, devices[1]);
+    live.window.send({ t: 'invoke', id: 1, channel: 'chat:load', args: [] });
+    await waitFor(() => dispatcher.frames.length === 2, 'the second frame');
+    writeDevices(configDir, []);
+    server._recheckLive();
+    assert.strictEqual(server.heldConns.size, 0, 'revoked while live, frame running');
   });
 });
 
@@ -1511,6 +1592,114 @@ describe('a revoked device is not a dropped one (R-RW-31, Review Focus 5)', () =
       assert.strictEqual(workflows.get('w-run').status, 'cancelled');
       assert.strictEqual(workflows.get('w-planned').status, 'cancelled');
       assert.strictEqual(server.heldConns.size, 0);
+    });
+
+    describe('with the real WorkflowEngine', () => {
+      async function engineRig() {
+        const dir = tempDir('kl-sealed-wf-');
+        const steps = [];
+        const engine = new WorkflowEngine({
+          storageDir: dir,
+          agentExecutorAdapter: {
+            execute: (_agent, _message, options) => new Promise((resolve) => {
+              steps.push({ options, finish: () => resolve({ type: 'complete', content: 'done', iterations: 1 }) });
+            })
+          },
+          getAgent: () => ({ id: 'main', name: 'Main' }),
+          maxConcurrentTasks: 1
+        });
+        await engine.initialize();
+        const workflow = await engine.create({
+          goal: 'g',
+          summary: 's',
+          tasks: [
+            { id: 't1', title: 'One', description: 'one', agentId: 'main', dependsOn: [], priority: 1 },
+            { id: 't2', title: 'Two', description: 'two', agentId: 'main', dependsOn: ['t1'], priority: 2 }
+          ],
+          parallelGroups: [],
+          estimatedTotalSteps: 2
+        }, { chatId: 'c-work' });
+        const device = makeDevice('Field laptop');
+        const hold = { gate: null };
+        const { createDispatcher, approvals, context } = realDispatcher({
+          phone: fakePhone(() => true),
+          contextExtra: { getWorkflowEngine: () => engine },
+          extra: { hosting: 'personal' },
+          listChannels: () => ({ handle: ['workflow:run'], on: [] }),
+          overrides: {
+            'workflow:run': async (_event, { id }) => {
+              if (hold.gate) await hold.gate;
+              engine.run(id).catch(() => {});
+              return { ok: true, id };
+            }
+          }
+        });
+        const made = makeServer({ devices: [device], approvals, createDispatcher });
+        const session = await attached(made.server, device);
+        return { ...made, ...session, engine, steps, workflow, context, hold };
+      }
+      const start = async (rig) => {
+        rig.window.send({ t: 'invoke', id: 1, channel: 'workflow:run', args: [{ id: rig.workflow.id }] });
+        await waitFor(() => rig.steps.length === 1, 'the step');
+      };
+
+      it('a revoke cancels it for good: the step gets its signal, nothing more runs, it cannot be resumed', async () => {
+        const rig = await engineRig();
+        await start(rig);
+        writeDevices(rig.configDir, []);
+        rig.server._recheckLive();
+        assert.strictEqual(rig.steps[0].options.abortSignal.aborted, true);
+        rig.steps[0].finish();
+        await waitFor(() => rig.engine.activeExecutions.size === 0, 'the run over');
+        assert.strictEqual(rig.engine.get(rig.workflow.id).status, 'cancelled');
+        assert.strictEqual(rig.steps.length, 1);
+        await assert.rejects(rig.engine.run(rig.workflow.id), /already cancelled/);
+      });
+
+      it('one bad read pauses it, says so in its chat, and the owner can resume it', async () => {
+        const rig = await engineRig();
+        await start(rig);
+        fs.writeFileSync(path.join(rig.configDir, pairing.DEVICES_FILE), '{"v":1,"dev');
+        rig.server._recheckLive();
+        assert.strictEqual(rig.engine.get(rig.workflow.id).status, 'paused');
+        assert.strictEqual(rig.steps[0].options.abortSignal.aborted, false);
+        assert.deepStrictEqual(rig.context.rows.map((r) => [r[0], r[2]]), [['c-work', MESSAGES.WINDOW_UNCONFIRMED_WORKFLOW]]);
+        rig.steps[0].finish();
+        await waitFor(() => rig.engine.activeExecutions.size === 0, 'the run over');
+        assert.strictEqual(rig.engine.get(rig.workflow.id).status, 'paused');
+        rig.engine.run(rig.workflow.id).catch(() => {});
+        await waitFor(() => rig.steps.length === 2, 'the next step');
+        rig.engine.cancel(rig.workflow.id);
+        rig.steps[1].finish();
+      });
+
+      it('a paused workflow does not hold a gone connection', async () => {
+        const rig = await engineRig();
+        await start(rig);
+        await waitFor(() => rig.window.received.some((f) => f.t === 'result'), 'the answer');
+        rig.window.windowEnd.close(1006, 'gone');
+        await waitFor(() => !rig.conn.live, 'the drop');
+        assert.strictEqual(rig.server.heldConns.has(rig.conn), true);
+        rig.engine.pause(rig.workflow.id);
+        rig.server._recheckLive();
+        assert.strictEqual(rig.server.heldConns.size, 0);
+        rig.steps[0].finish();
+      });
+
+      it('a workflow noted after the revoke is cancelled all the same', async () => {
+        const rig = await engineRig();
+        const gate = deferred();
+        rig.hold.gate = gate.promise;
+        rig.window.send({ t: 'invoke', id: 1, channel: 'workflow:run', args: [{ id: rig.workflow.id }] });
+        await waitFor(() => rig.conn.inFlight === 1, 'the handler');
+        await delay(5);
+        writeDevices(rig.configDir, []);
+        rig.server._recheckLive();
+        assert.strictEqual(rig.engine.get(rig.workflow.id).status, 'pending');
+        gate.resolve();
+        await waitFor(() => rig.engine.get(rig.workflow.id).status === 'cancelled', 'the cancel');
+        rig.steps.forEach((s) => s.finish());
+      });
     });
 
     it('a window gone whose workflow ended is let go at the next re-read', async () => {

@@ -668,28 +668,41 @@ function createBridgeDispatcher({
   // The workflows a remote window started: they outlive their frames, and a revoke
   // has to find them.
   const windowWorkflows = new WeakMap(); // conn -> Set of workflow ids
-  const cancelWorkflow = (id) => {
+  // Revoked, it is cancelled. Unconfirmed (one bad read of the devices file), it is paused,
+  // for the owner to resume or not, and the chat is told.
+  const stopWorkflow = (conn, id) => {
     try {
-      context.getWorkflowEngine?.()?.cancel(id);
+      const engine = context.getWorkflowEngine?.();
+      if (!engine) return;
+      if (conn.revokeReason !== 'unconfirmed') {
+        engine.cancel(id);
+        return;
+      }
+      const chatId = engine.pause(id)?.metadata?.chatId;
+      if (typeof chatId !== 'string' || !chatId) return;
+      context.appendMessageToChat(chatId, 'assistant', MESSAGES.WINDOW_UNCONFIRMED_WORKFLOW, {}, { returnChat: false });
+      broadcast('chat:updated', { chatId });
     } catch (err) {
-      log.warn(`cancelling a workflow failed: ${err.message}`);
+      log.warn(`stopping a workflow failed: ${err.message}`);
     }
   };
   function noteWorkflow(conn, channel, args, value) {
     const id = channel === 'workflow:run' ? args[0]?.id : channel === 'workflow:planAndExecute' ? value?.workflow?.id : null;
     if (typeof id !== 'string' || !id) return;
     if (conn.revoked) {
-      cancelWorkflow(id);
+      stopWorkflow(conn, id);
       return;
     }
     if (!windowWorkflows.has(conn)) windowWorkflows.set(conn, new Set());
     windowWorkflows.get(conn).add(id);
   }
   const WORKFLOW_ENDED = new Set(['completed', 'failed', 'cancelled']);
-  // What the server keeps a gone connection for, besides its frames.
+  // What the server keeps a gone connection for, besides its frames. A paused workflow
+  // holds nothing: it may wait for the owner for ever.
   function stillWorking(conn) {
     const ids = windowWorkflows.get(conn);
     if (!ids) return false;
+    let working = false;
     for (const id of [...ids]) {
       let status = null;
       try {
@@ -698,8 +711,9 @@ function createBridgeDispatcher({
         status = null;
       }
       if (status === null || WORKFLOW_ENDED.has(status)) ids.delete(id);
+      else if (status !== 'paused') working = true;
     }
-    return ids.size > 0;
+    return working;
   }
 
   // A revoked device, where a drop stops nothing (R-RW-31, as amended): its chat runs and
@@ -718,7 +732,7 @@ function createBridgeDispatcher({
         log.warn(`stopping chat ${chatId} failed: ${err.message}`);
       }
     }
-    for (const id of windowWorkflows.get(conn) || []) cancelWorkflow(id);
+    for (const id of windowWorkflows.get(conn) || []) stopWorkflow(conn, id);
   }
 
   // The core's own ui.send (chat:updated, backgroundTask:completed, case:changed):

@@ -11,6 +11,9 @@ const { EventEmitter } = require('events');
 function wsTransport(ws) {
   if (ws.readyState !== ws.OPEN) throw new Error('wsTransport needs an open socket');
   const transport = new EventEmitter();
+  // ws parses in its own listener, so a message can come before its chunk's `raw`:
+  // a transport with raw bytes says so, or the same bytes are counted twice.
+  transport.countsRaw = true;
   const onRaw = (chunk) => transport.emit('raw', chunk);
   const socket = ws._socket;
   if (socket && typeof socket.on === 'function') socket.on('data', onRaw);

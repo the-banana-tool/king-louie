@@ -79,7 +79,7 @@ class DesktopBridgeServer extends EventEmitter {
     // Every open sealed session, from attachSealed until it ends.
     this.sealedSessions = new Set();
     // The connections of ended sessions still at work: a device dropped with an
-    // approval pending can yet be revoked. Bounded at ready by maxHeldWindows.
+    // approval pending can yet be revoked. Bounded at ready by maxHeldPerDevice.
     this.heldConns = new Set();
     this.stopped = false;
     this.failures = new Map();
@@ -543,7 +543,8 @@ class DesktopBridgeServer extends EventEmitter {
 
   // Kept while a frame of it runs or its window's work goes on without one.
   _holdOrRelease(conn) {
-    if (conn.inFlight > 0 || this.dispatcher.stillWorking?.(conn) === true) this.heldConns.add(conn);
+    // Revoked, it has nothing more to hear.
+    if (!conn.revoked && (conn.inFlight > 0 || this.dispatcher.stillWorking?.(conn) === true)) this.heldConns.add(conn);
     else this.heldConns.delete(conn);
   }
 
@@ -585,7 +586,7 @@ class DesktopBridgeServer extends EventEmitter {
     return new Promise((resolve, reject) => {
       const state = {
         transport, stage: 'handshake', seal: null, sender: null, heartbeat: null, conn: null,
-        preReadyBytes: 0, rawSeen: false, resolve, reject
+        preReadyBytes: 0, lookupUnreadable: false, resolve, reject
       };
       const refusal = this.stopped ? [CLOSE.GOING_AWAY, STOPPING] : (this._sealRefusal() && [CLOSE.NOT_SEALING, NOT_SEALING]);
       if (refusal) {
@@ -604,7 +605,9 @@ class DesktopBridgeServer extends EventEmitter {
           // A local record's key too: the handshake proves the key, and the path is
           // judged at ready, so only the key's holder learns its record is local.
           lookupDevice: (deviceId) => {
-            const device = this._lookupDevice(deviceId);
+            const { doc } = this._readDevices();
+            if (!doc) state.lookupUnreadable = true;
+            const device = doc ? findDevice(doc, deviceId) : null;
             return device ? fromB64url(device.publicKey) : null;
           },
           // The seal's one writer: every record reaches the socket in the tick it was
@@ -630,10 +633,7 @@ class DesktopBridgeServer extends EventEmitter {
         this._endSealed(old, CLOSE.TRY_AGAIN, 'too many pending handshakes');
       }
       transport.on('data', (message, isBinary) => this._onSealedMessage(state, message, isBinary));
-      transport.on('raw', (chunk) => {
-        state.rawSeen = true;
-        this._countPreReady(state, chunk.length);
-      });
+      transport.on('raw', (chunk) => this._countPreReady(state, chunk.length));
       transport.on('close', () => this._endSealed(state, CLOSE.GOING_AWAY, 'closed', { transportGone: true }));
     });
   }
@@ -647,8 +647,7 @@ class DesktopBridgeServer extends EventEmitter {
       else this._endSealed(state, CLOSE.MALFORMED, 'record');
       return;
     }
-    // A transport with raw bytes has counted these already.
-    if (!state.rawSeen && Buffer.isBuffer(message)) this._countPreReady(state, message.length);
+    if (!state.transport.countsRaw && Buffer.isBuffer(message)) this._countPreReady(state, message.length);
     if (state.stage === 'closed') return;
     state.seal.next(message)
       .then((result) => this._onSealResult(state, result))
@@ -671,9 +670,11 @@ class DesktopBridgeServer extends EventEmitter {
 
   _onSealResult(state, { frames, close, ready, peer }) {
     if (state.stage === 'closed') return;
-    // The seal's own failures send nothing, and a peer's close needs no answer.
+    // The seal's own failures send nothing, and a peer's close needs no answer. A
+    // lookup that could not read says so: it is about the node, not who is enrolled.
     if (close) {
-      this._endSealed(state, close.code, close.reason);
+      if (state.lookupUnreadable) this._endSealed(state, CLOSE.RECORD_UNREADABLE, RECORD_UNREADABLE);
+      else this._endSealed(state, close.code, close.reason);
       return;
     }
     if (state.stage === 'handshake' && ready) this._onSealedReady(state, peer);
@@ -692,7 +693,7 @@ class DesktopBridgeServer extends EventEmitter {
     if (!device || device.publicKey !== toB64url(peer.publicKey)) return refuse(CLOSE.UNKNOWN_DEVICE, 'unknown device');
     if (device.remote !== true) return refuse(CLOSE.NOT_REMOTE, NOT_REMOTE);
     if (this._sealRefusal()) return refuse(CLOSE.NOT_SEALING, NOT_SEALING);
-    if (this.heldConns.size >= this.limits.maxHeldWindows) return refuse(CLOSE.TRY_AGAIN, TOO_MANY_HELD);
+    if ([...this.heldConns].filter((c) => c.deviceId === device.deviceId).length >= this.limits.maxHeldPerDevice) return refuse(CLOSE.TRY_AGAIN, TOO_MANY_HELD);
     // One connection per device: attaching again takes its own place.
     const old = this.connections.get(device.deviceId);
     if (!old && this.connections.size >= this.limits.maxDevices) return refuse(CLOSE.TOO_MANY_WINDOWS, TOO_MANY);

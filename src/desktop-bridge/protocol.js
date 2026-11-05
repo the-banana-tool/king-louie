@@ -31,9 +31,10 @@ const LIMITS = Object.freeze({
   maxTrackedFailures: 1024,
   // Windows attached at once, local and remote together (spec 2026-11-04 §9).
   maxDevices: 8,
-  // Gone windows whose calls still run, kept so a revoke can reach them. Past this a
-  // new sealed session is refused, never one forgotten.
-  maxHeldWindows: 64
+  // One device's gone windows whose calls still run, kept so a revoke can reach them.
+  // Past this that device's new session is refused, never one forgotten. No bound
+  // across devices is needed: each needs a record, and a record is the owner's.
+  maxHeldPerDevice: 8
 });
 
 const CLOSE = Object.freeze({
@@ -153,6 +154,7 @@ const MESSAGES = Object.freeze({
   DESKTOP_DISCONNECTED_RUN: 'The desktop disconnected; the run was stopped.',
   WINDOW_REVOKED_RUN: 'The window that started this was revoked; the run was stopped.',
   WINDOW_UNCONFIRMED_RUN: "Could not confirm this window's record; the run was stopped.",
+  WINDOW_UNCONFIRMED_WORKFLOW: "Could not confirm this window's record; its workflow was paused.",
   NO_PROVIDER: 'The service has no provider key yet — import or add one in Providers.',
   SECURE_STORAGE_UNAVAILABLE: "This system has no secure storage; the desktop can't hold a pairing key.",
   RULE_NOT_DESKTOP: 'This rule was set on the service and can only be removed there.',
