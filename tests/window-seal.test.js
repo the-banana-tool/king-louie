@@ -343,6 +343,62 @@ describe('the writer', () => {
     }
   });
 
+  it('a writer that gives no promise closes the seal at once, on every path', async () => {
+    const { window, node } = await readyPair();
+    const writes = [];
+    node.redirect((record) => { writes.push(record); });
+    let result;
+    for (let i = 0; i < 1000; i += 1) result = await node.next(pingRecord(window));
+    assert.equal(writes.length, 1);
+    assert.deepEqual(result.close, { code: 1001, reason: 'write' });
+    assert.deepEqual(node.closes, [{ code: 1001, reason: 'write' }]);
+
+    const quiet = await readyPair();
+    quiet.window.redirect(() => undefined);
+    quiet.window.ping();
+    assert.equal(quiet.window.ready, false);
+    assert.throws(() => quiet.window.ping(), { code: 'SEAL_CLOSED' });
+
+    const early = makeWindow();
+    early.redirect(() => undefined);
+    assert.deepEqual((await early.next(null)).close, { code: 1001, reason: 'write' });
+  });
+
+  it('a write that fails after a close changes nothing', async () => {
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    const pendingWrites = (seal) => {
+      const rejects = [];
+      seal.redirect(() => new Promise((_, reject) => { rejects.push(reject); }));
+      return () => rejects.forEach((reject) => reject(new Error('socket gone')));
+    };
+
+    const closed = await readyPair();
+    const failClosed = pendingWrites(closed.window);
+    closed.window.closeRecord(1000);
+    failClosed();
+    await tick();
+    assert.deepEqual(closed.window.closes, []);
+    assert.deepEqual((await closed.window.next(Buffer.alloc(1))).close, { code: 1000, reason: 'local' });
+
+    const destroyed = await readyPair();
+    const failDestroyed = pendingWrites(destroyed.window);
+    destroyed.window.ping();
+    destroyed.window.destroy();
+    failDestroyed();
+    await tick();
+    assert.deepEqual(destroyed.window.closes, []);
+    assert.deepEqual((await destroyed.window.next(Buffer.alloc(1))).close, { code: 1001, reason: 'local' });
+
+    const refused = await readyPair();
+    const failRefused = pendingWrites(refused.window);
+    refused.window.ping();
+    assertRecordRefused(await drive(refused.window, Buffer.alloc(9)));
+    failRefused();
+    await tick();
+    assert.deepEqual(refused.window.closes, []);
+    assertRecordRefused(await drive(refused.window, Buffer.alloc(9)));
+  });
+
   it('a close a next() returns is not said twice', async () => {
     const { node } = await readyPair();
     assertRecordRefused(await drive(node, Buffer.alloc(9)));
@@ -426,6 +482,32 @@ describe('the handshake deadline', () => {
     assert.deepEqual(result.out, []);
     assert.equal(result.ready, false);
     assert.equal(window.closes.length, 1);
+    assert.deepEqual(result.close, { code: HANDSHAKE_TIMEOUT, reason: 'handshake' }, 'the first close stands');
+  });
+
+  it('a signature that comes after a destroy does not turn it into a failure', async () => {
+    let release;
+    const key = windowKey();
+    const window = roles.window({}, (b) => new Promise((resolve) => { release = () => resolve(key.sign(b)); }));
+    const hello = await drive(window, null);
+    const answer = await drive(makeNode(), hello.out[0]);
+    const pending = drive(window, answer.out[0]);
+    window.destroy();
+    release();
+    assert.deepEqual((await pending).close, { code: 1001, reason: 'local' });
+    assert.deepEqual((await drive(window, Buffer.alloc(1))).close, { code: 1001, reason: 'local' });
+    assert.deepEqual(window.closes, []);
+  });
+
+  it('an onClose that throws does not end the process', () => {
+    const clock = timers();
+    const key = windowKey();
+    const seal = WindowSeal.window({
+      sessionId: SESSION, ...key, pin: null, write: () => Promise.resolve(), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+      onClose: () => { throw new Error('a host bug'); }
+    });
+    assert.doesNotThrow(() => clock.fire());
+    assert.throws(() => seal.ping(), { code: 'SEAL_CLOSED' });
   });
 });
 
@@ -968,6 +1050,22 @@ describe('the heartbeat', () => {
     assert.deepEqual(log.silence, []);
   });
 
+  it('its default clock is monotonic: a wall clock that jumps means nothing', (t) => {
+    let fire = null;
+    const log = { pings: 0, silence: 0 };
+    const beat = startHeartbeat({
+      ping: () => { log.pings += 1; },
+      onSilence: () => { log.silence += 1; },
+      setTimer: (fn) => { fire = fn; return 1; },
+      clearTimer: () => {}
+    });
+    const later = Date.now() + 100 * SILENCE_MS;
+    t.mock.method(Date, 'now', () => later);
+    fire();
+    assert.deepEqual(log, { pings: 0, silence: 0 });
+    beat.stop();
+  });
+
   it('uses a ref\'d timer: nothing in the module unrefs', () => {
     const text = fs.readFileSync(path.join(__dirname, '..', 'src', 'desktop-bridge', 'window-seal.js'), 'utf8');
     assert.doesNotMatch(text, /\.unref\(/);
@@ -1012,10 +1110,10 @@ describe('the source', () => {
     throw new Error('unbalanced call');
   }
 
-  it('it uses node:crypto, the bridge\'s keys and protocol, and nothing else', () => {
+  it('it uses node:crypto, the logger, the bridge\'s keys and protocol, and nothing else', () => {
     const text = fs.readFileSync(path.join(SRC, 'desktop-bridge', 'window-seal.js'), 'utf8');
     const required = [...text.matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]).sort();
-    assert.deepEqual(required, ['./keys', './protocol', 'crypto']);
+    assert.deepEqual(required, ['../logging', './keys', './protocol', 'crypto']);
   });
 
   it('the front door, the relay and the runbook code do not load it', () => {

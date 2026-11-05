@@ -32,6 +32,9 @@
 const crypto = require('crypto');
 const { deriveDeviceId, fromB64url, verifyWithRawKey } = require('./keys');
 const { CLOSE, LIMITS } = require('./protocol');
+const { createLogger } = require('../logging');
+
+const log = createLogger('window-seal');
 
 const VERSION = 1;
 const RECORD_MAX = 1048576;
@@ -332,7 +335,8 @@ class SealSession {
     return { size: record.length, written: this.#emit(record) };
   }
 
-  // Every write's failure is observed here, whoever else watches it.
+  // Every write's failure is observed here, whoever else watches it. A write that
+  // gives no promise closes at once: every bound on what a seal writes rests on it.
   #emit(bytes) {
     let written;
     try {
@@ -341,6 +345,7 @@ class SealSession {
       written = Promise.reject(err);
     }
     if (isThenable(written)) written.then(null, () => this.#closeOutside(CLOSE.GOING_AWAY, REASON.write));
+    else this.#closeOutside(CLOSE.GOING_AWAY, REASON.write);
     return written;
   }
 
@@ -348,7 +353,12 @@ class SealSession {
   #closeOutside(code, reason) {
     if (this.#close || (reason === REASON.handshake && this.#state === STATE.open)) return;
     this.#fail(code, reason);
-    this.#onClose(this.#close);
+    try {
+      this.#onClose(this.#close);
+    } catch (err) {
+      // From a timer or a promise a throw here would end the process.
+      log.error(`a seal's onClose threw: ${err.message}`);
+    }
   }
 
   #result({ frames = [] } = {}) {
@@ -361,7 +371,9 @@ class SealSession {
     this.#deadline = null;
   }
 
+  // The first close stands.
   #end(close) {
+    if (this.#close) return;
     this.#clearDeadline();
     this.#close = close;
     this.#run = null;
@@ -370,8 +382,8 @@ class SealSession {
   }
 
   #fail(code, reason) {
+    if (!this.#close) this.#peer = null;
     this.#end({ code, reason });
-    this.#peer = null;
     return this.#result();
   }
 

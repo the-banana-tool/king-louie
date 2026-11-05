@@ -17,7 +17,8 @@ The Node implementation is `src/desktop-bridge/window-seal.js`. The vectors are
   message it makes (handshake messages, frames' records, pings, pongs, a close
   record) reaches `write` in the tick it was made, so the counters' order is the
   wire's however a host awaits `next`. `next` returns only `{ frames, close, ready,
-  peer }`. `write` returns a promise settled when the socket has taken the bytes.
+  peer }`. `write` returns a promise settled when the socket has taken the bytes; a
+  write that returns anything else closes the seal at once (`1001`, reason `write`).
 - Integers are big-endian. `‖` is concatenation. Every field is fixed width, so
   no concatenation below can be read two ways.
 - `session` is the session id's 32 bytes. The front door mints the id as 32 random
@@ -159,8 +160,12 @@ roles, on a ref'd timer. A host must also cap the seals not yet ready, counted f
 `window.open`: the seal cannot see the others.
 
 A close that no `next` call is there to return (the deadline, a write that failed)
-goes to `onClose(close)`, given when the seal is built. `destroy()` is for a socket
-that has gone: it ends the seal and clears the timer, with nothing said.
+goes to `onClose(close)`, given when the seal is built. A write with no promise goes
+there too and may also be returned by the `next` it happened in, so a host's close is
+idempotent. A throw from `onClose` is logged and goes no further. `destroy()` is for a
+socket that has gone: it ends the seal and clears the timer, with nothing said. The
+first close a seal comes to is the one it keeps, and a host calls `sender.stop()` on
+any close, so that no frame waits behind a seal that will not send it.
 
 Failures send nothing: the caller closes the socket with the code. A close record is
 for a side that chooses to end a session in good order. After it, or after any
