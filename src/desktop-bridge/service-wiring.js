@@ -1,6 +1,7 @@
 // Service host wiring for the desktop bridge (fleet stage 7 §3.4). Agent
 // profile only; everything is inert unless the admin config turns
-// features.desktopBridge on.
+// features.desktopBridge or features.remoteWindow on. They are independent
+// (R-RW-20): only desktopBridge listens, and only remoteWindow answers window.open.
 const path = require('path');
 const { createLogger } = require('../logging');
 const { adminConfigDir } = require('../platform/paths');
@@ -13,9 +14,11 @@ function createDesktopBridgeHost({
   configDir = adminConfigDir({ dataDir }),
   version = require(path.join(__dirname, '..', '..', 'package.json')).version
 }) {
-  if (!features.desktopBridge) {
+  if (!features.desktopBridge && !features.remoteWindow) {
     return { coreDeps: {}, start: async () => null, stop: async () => {}, server: null };
   }
+  let dialer = null;
+  let windowApprovals = null;
   const host = {
     server: null,
     // ui: the core's ambient events go to every connected window (never
@@ -59,13 +62,28 @@ function createDesktopBridgeHost({
         createDispatcher: (opts) => require('./bridge-dispatcher').createBridgeDispatcher({ ...opts, createImporter })
       });
       // A failed bind is fatal (parent §4.3 I4): start() throws.
-      await server.start();
+      if (features.desktopBridge) await server.start();
       host.server = server;
+      if (features.remoteWindow) {
+        const frontDoorPin = approvals && approvals.relayClient ? approvals.relayClient.frontDoorPin : null;
+        if (frontDoorPin) {
+          const { createWindowDialer, createWindowHandlers } = require('./window-dialer');
+          dialer = createWindowDialer({ identity, frontDoorPin, server, lookup: approvals.relayClient.dnsLookup || null });
+          windowApprovals = approvals;
+          approvals.setWindowHandlers(createWindowHandlers({ server, dialer }));
+        } else {
+          log.warn('features.remoteWindow is on, but this node has no front door to dial (front-door.json): window.open stays off');
+        }
+      }
       return server;
     },
     async stop() {
       const server = host.server;
       host.server = null;
+      if (windowApprovals) windowApprovals.setWindowHandlers(null);
+      windowApprovals = null;
+      if (dialer) dialer.stop();
+      dialer = null;
       if (server) await server.stop();
     }
   };

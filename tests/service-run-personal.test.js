@@ -19,7 +19,7 @@ const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 const EUID = typeof process.geteuid === 'function' ? process.geteuid() : 0;
 const ME = 'S-1-5-21-1-2-3-1001';
 const OTHER = 'S-1-5-21-1-2-3-1002';
-const OFF = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false };
+const OFF = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false, remoteWindow: false };
 const INFO = { user: 'alice', platform: process.platform, pid: process.pid, capabilities: ['gui.launch', 'gui.screenshot', 'gui.input'], probes: [], displays: [], limits: [], locked: false, since: '2026-10-25T10:00:00.000Z' };
 
 // The broker's channel surface (tests/gui-broker.test.js), with start/stop.
@@ -208,7 +208,7 @@ describe('feature defaults by hosting (the real runService path)', { timeout: 12
 
   it('personal: channels, webhooks and appDiscovery on; gateway, mesh and the bridge stay off', async () => {
     const seen = await startedWith(layout(QUIET_YAML));
-    assert.deepEqual(seen.features, { gateway: false, webhooks: true, mesh: false, channels: true, appDiscovery: true, desktopBridge: false });
+    assert.deepEqual(seen.features, { gateway: false, webhooks: true, mesh: false, channels: true, appDiscovery: true, desktopBridge: false, remoteWindow: false });
     assert.equal(seen.webhooksOnDemand, true);
   });
 

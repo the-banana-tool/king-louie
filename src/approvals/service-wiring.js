@@ -19,6 +19,8 @@ const { open } = require('./envelope');
 const log = createLogger('approvals/service');
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RELAY_PIN_KEY = 'approvals.relay';
+const WINDOW_METHODS = new Set(['window.open', 'window.enroll_response', 'window.revoke', 'window.list']);
+const REMOTE_WINDOW_OFF = Object.freeze({ ok: false, code: 'remote_window_off' });
 
 // A link for a node with no relay: nothing can be delivered, and says why.
 function nullLink(reason) {
@@ -83,10 +85,16 @@ function rejectedAuditLimiter() {
 // leaseList answers lease.list for a node whose dispatcher is the only way in:
 // the front door as its own node, which runs no computer use and so passes
 // offLeaseListing (a signed "nothing"). Without one, lease.list is unknown.
-function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, courierPump = null, leaseList = null }) {
+// windowHandlers reads the desktop bridge's handlers, late bound: approvals start
+// before the bridge, and a runbook node has none. No handler is remote_window_off.
+function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, courierPump = null, leaseList = null, windowHandlers = () => null }) {
   const admitRejectedAudit = rejectedAuditLimiter();
   return async (method, params = {}) => {
     if (method === 'lease.list' && typeof leaseList === 'function') return leaseList(params);
+    if (WINDOW_METHODS.has(method)) {
+      const handlers = windowHandlers();
+      return handlers && handlers[method] ? handlers[method](params) : REMOTE_WINDOW_OFF;
+    }
     if (method === 'approval.response' || method === 'enroll.claim') {
       const inbox = courierPump ? courierPump.routeFor(method, params) : null;
       if (inbox) return { delivered: courierPump.deliver(inbox, method, params), accepted: null, reason: null };
@@ -179,6 +187,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
   let relayClient = null;
   let courierPump = null;
   let stopTracking = () => {};
+  let windowHandlers = null;
 
   const teardown = async () => {
     clearInterval(pruneTimer);
@@ -260,7 +269,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
 
     if (relayClient) {
       courierPump = new CourierPump({ dataDir, relayClient, identity: nodeIdentity });
-      relayClient.onMessage(createRelayDispatcher({ phoneApprover, approverStore, auditLedger, courierPump }));
+      relayClient.onMessage(createRelayDispatcher({ phoneApprover, approverStore, auditLedger, courierPump, windowHandlers: () => windowHandlers }));
       stopTracking = trackDeviceStates({ approverStore, relayClient });
       await relayClient.start();
       courierPump.start();
@@ -281,6 +290,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
     sealPolicy,
     identity: nodeIdentity,
     courierPump,
+    setWindowHandlers(handlers) { windowHandlers = handlers; },
     stop: teardown
   };
 }
