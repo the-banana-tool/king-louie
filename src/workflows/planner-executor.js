@@ -114,7 +114,8 @@ class PlannerExecutor {
 
     const result = await this.agentExecutorAdapter.execute(plannerAgent, goal, execOptions);
 
-    if (result.type === 'error' || result.type === 'stopped') {
+    // A loop guardrail's halt (on by default) carries its message, not a graph.
+    if (result.type === 'error' || result.type === 'stopped' || result.type === 'guardrail_halt') {
       const err = new Error(`Planning failed: ${result.content}`);
       err.plannerOutput = result.content || '';
       err.goal = goal;

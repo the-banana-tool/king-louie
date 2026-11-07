@@ -25,6 +25,14 @@ function jsonBody(init) {
   }
 }
 
+// Whether a content block may carry a cache_control breakpoint: never a
+// thinking block, and never an empty text block (Anthropic refuses both).
+function cacheableBlock(block) {
+  if (block.type === 'thinking' || block.type === 'redacted_thinking') return false;
+  if (block.type === 'text') return typeof block.text === 'string' && block.text.trim() !== '';
+  return typeof block.type === 'string';
+}
+
 // Models that support extended thinking (Claude 3.7+)
 const THINKING_CAPABLE_MODELS = [
   'claude-sonnet-4', 'claude-opus-4',
@@ -154,6 +162,35 @@ class AnthropicProvider extends BaseLLMProvider {
     return blocks.length ? blocks : undefined;
   }
 
+  // The conversation is the bulk of an agent loop's input: every prior tool
+  // result is resent on each iteration. A breakpoint on the last block of the
+  // last message caches the whole prefix, so the next call reads it at the
+  // cache rate and pays full price only for what was appended. With the tools
+  // (one or two) and the system prompt that is at most four breakpoints,
+  // Anthropic's limit. The formatted messages share content arrays with the
+  // caller's history, so the last message and block are copied, never
+  // mutated, or breakpoints would pile up in the history across calls.
+  static markLastMessageCacheable(formatted) {
+    if (!Array.isArray(formatted) || formatted.length === 0) return formatted;
+    const lastIdx = formatted.length - 1;
+    const last = formatted[lastIdx];
+    if (!last) return formatted;
+    let content;
+    if (typeof last.content === 'string') {
+      if (!last.content.trim()) return formatted;
+      content = [{ type: 'text', text: last.content, cache_control: { type: 'ephemeral' } }];
+    } else if (Array.isArray(last.content) && last.content.length > 0) {
+      const block = last.content[last.content.length - 1];
+      if (!block || typeof block !== 'object' || !cacheableBlock(block)) return formatted;
+      content = [...last.content.slice(0, -1), { ...block, cache_control: { type: 'ephemeral' } }];
+    } else {
+      return formatted;
+    }
+    const out = formatted.slice();
+    out[lastIdx] = { ...last, content };
+    return out;
+  }
+
   formatMessages(chatHistory) {
     const buildContent = (text, images = [], documents = []) => {
       const imageParts = Array.isArray(images) && images.length > 0
@@ -263,7 +300,7 @@ class AnthropicProvider extends BaseLLMProvider {
       headers: this.getHeaders(),
       body: JSON.stringify({
         model: options.model || this.getDefaultModel(),
-        messages: this.formatMessages(messages),
+        messages: AnthropicProvider.markLastMessageCacheable(this.formatMessages(messages)),
         ...(cachedSystem ? { system: cachedSystem } : {}),
         max_tokens: options.max_tokens || 4096,
         ...this.temperatureParam(options.model || this.getDefaultModel(), options),
@@ -290,7 +327,7 @@ class AnthropicProvider extends BaseLLMProvider {
 
     const body = {
       model: requestedModel,
-      messages: this.formatMessages(messages),
+      messages: AnthropicProvider.markLastMessageCacheable(this.formatMessages(messages)),
       ...(cachedSystem ? { system: cachedSystem } : {}),
       ...(tools && tools.length ? { tools: this.buildCachedTools(tools) } : {}),
       max_tokens: options.max_tokens || 4096,
@@ -331,7 +368,7 @@ class AnthropicProvider extends BaseLLMProvider {
 
     const body = {
       model: requestedModel,
-      messages: this.formatMessages(messages),
+      messages: AnthropicProvider.markLastMessageCacheable(this.formatMessages(messages)),
       ...(cachedSystem ? { system: cachedSystem } : {}),
       tools: this.buildCachedTools(tools),
       max_tokens: options.max_tokens || 4096,
@@ -576,7 +613,7 @@ class AnthropicProvider extends BaseLLMProvider {
       headers: this.getHeaders(),
       body: JSON.stringify({
         model: requestedModel,
-        messages: this.formatMessages(messages),
+        messages: AnthropicProvider.markLastMessageCacheable(this.formatMessages(messages)),
         ...(cachedSystem ? { system: cachedSystem } : {}),
         max_tokens: options.max_tokens || 4096,
         ...this.temperatureParam(requestedModel, options),

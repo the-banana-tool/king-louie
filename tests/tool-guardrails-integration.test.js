@@ -106,6 +106,37 @@ describe('AgentLoop + tool guardrails', () => {
     assert.match(blocked[0].result.error, /failed 3 times/);
   });
 
+  it('by default, ends a turn that repeats an identical refused call long before maxIterations', async () => {
+    // Measured: one turn made the same refused Executor call 40 times
+    // through 38 warnings. With no guardrail options at all the call is
+    // blocked after 5 failures and the turn halts after 3 blocked repeats.
+    const provider = loopingProvider('Executor', { action: 'submit', payload: { intent: 'x' } }, 1000);
+    const executor = recordingExecutor({ ok: false, error: 'payload field "intent" is not accepted' });
+    const loop = new AgentLoop(provider, executor, { maxIterations: 40 });
+
+    const result = await loop.run([{ role: 'user', content: 'go' }], [], {});
+
+    assert.strictEqual(result.type, 'guardrail_halt');
+    assert.strictEqual(result.guardrail.code, 'same_tool_failure_halt');
+    assert.strictEqual(executor.calls.length, 5, 'blocked repeats never reach the executor');
+    assert.strictEqual(result.iterations, 9);
+    const blocked = result.tools.filter((t) => t.result?.blockedByGuardrail).map((t) => t.result.guardrailCode);
+    assert.deepStrictEqual(blocked, [
+      'repeated_exact_failure_block', 'repeated_exact_failure_block', 'repeated_exact_failure_block',
+      'same_tool_failure_halt'
+    ]);
+  });
+
+  it('keeps warnings only with guardrailConfig { hardStopEnabled: false }', async () => {
+    const provider = loopingProvider('Bash', { command: 'broken' }, 12);
+    const executor = recordingExecutor({ success: false, error: 'nope', exitCode: 1 });
+    const loop = new AgentLoop(provider, executor, { maxIterations: 20, guardrailConfig: { hardStopEnabled: false } });
+
+    const result = await loop.run([{ role: 'user', content: 'go' }], [], {});
+    assert.strictEqual(result.type, 'complete');
+    assert.strictEqual(executor.calls.length, 12);
+  });
+
   it('ends the turn on a halt verdict instead of spinning to maxIterations', async () => {
     // `halt` means the tool has failed across many different arguments —
     // there is nothing to pivot to, so burning the remaining iterations

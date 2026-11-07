@@ -2907,7 +2907,16 @@ class CaseRuntime {
       ...(!opts?.abortSignal && turn.signal ? { abortSignal: turn.signal } : {})
     }, state);
     const current = () => ({ ...list[Math.min(state?.index || 0, list.length - 1)] });
-    return {
+    // The tool_use / tool_result pair an agent loop appends is built by the
+    // provider that answered, as in the router's own routedProvider. Without
+    // these the loop falls back to OpenAI-shaped rows, which Anthropic's
+    // formatMessages drops: the model never saw a tool result and repeated
+    // the call to the iteration cap (measured 2026-10-20).
+    const answered = (name) => {
+      const instance = state?.lastInstance;
+      return instance && typeof instance[name] === 'function' ? instance[name].bind(instance) : undefined;
+    };
+    const provider = {
       getProviderName: () => current().provider,
       getDefaultModel: () => current().model,
       current,
@@ -2917,6 +2926,9 @@ class CaseRuntime {
       sendMessageWithTools: (messages, tools, opts) => call(messages, opts, tools),
       streamMessageWithTools: (messages, tools, opts, onChunk) => call(messages, opts, tools, onChunk)
     };
+    Object.defineProperty(provider, 'buildToolMessages', { enumerable: true, get: () => answered('buildToolMessages') });
+    Object.defineProperty(provider, 'buildMultiToolMessages', { enumerable: true, get: () => answered('buildMultiToolMessages') });
+    return provider;
   }
 
   // ---- Wake-ups (spec §3.6); required lazily, turn-runner needs this module's exports ----

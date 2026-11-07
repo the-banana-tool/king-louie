@@ -24,10 +24,11 @@
  *   - `beforeCall()` runs before a call and can **block** it — the only
  *     point where refusing actually saves anything.
  *
- * Warnings are on by default; hard stops are opt-in, so an interactive
- * session gets a nudge rather than a closed door unless the user asks for
- * a circuit breaker. Loop caps are the exception: they are hard ceilings
- * on runaway-prone tools and apply either way.
+ * Warnings and hard stops are both on by default (owner decision
+ * 2026-11-06): a model that ignores the warnings and repeats a refused call
+ * would otherwise run to the iteration cap, every call billed in full.
+ * `guardrailConfig: { hardStopEnabled: false }` turns the hard stops off.
+ * Loop caps are hard ceilings on runaway-prone tools and apply either way.
  */
 
 const crypto = require('crypto');
@@ -77,9 +78,10 @@ const FILE_MUTATING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
 
 const DEFAULT_CONFIG = Object.freeze({
   warningsEnabled: true,
-  // Off by default: a hard stop in an interactive session is more likely to
-  // frustrate than to help. Opt in for unattended or long-running work.
-  hardStopEnabled: false,
+  // On by default (owner decision 2026-11-06): measured, 37 of 217 turns ran
+  // to the 40-iteration cap, one repeating an identical refused call through
+  // 38 warnings. Opt out with `guardrailConfig: { hardStopEnabled: false }`.
+  hardStopEnabled: true,
 
   // Same tool, same arguments, failing.
   exactFailureWarnAfter: 2,
@@ -300,9 +302,26 @@ class ToolGuardrails {
       return allowDecision(toolName, signature);
     }
 
+    // The halt comes first, and every block below counts as one more failure
+    // of the tool (`_block`): a model that re-issues a blocked call unchanged
+    // would otherwise get the same refusal back until maxIterations, every
+    // iteration a full model call. So the blocks run up the same-tool count
+    // and the turn ends at `sameToolFailureHaltAfter`.
+    const toolFailures = this._toolFailures.get(toolName) || 0;
+    if (toolFailures >= this.config.sameToolFailureHaltAfter) {
+      return this._halt(decision(
+        ACTIONS.HALT,
+        'same_tool_failure_halt',
+        `Halting: ${toolName} has failed ${toolFailures} times this turn`
+        + ' (blocked repeats included). Something about the call or the environment '
+        + 'is wrong; stop and report what you have found.',
+        { toolName, count: toolFailures, signature }
+      ));
+    }
+
     const exact = this._exactFailures.get(signature) || 0;
     if (exact >= this.config.exactFailureBlockAfter) {
-      return this._halt(decision(
+      return this._block(decision(
         ACTIONS.BLOCK,
         'repeated_exact_failure_block',
         `Blocked ${toolName}: this exact call has failed ${exact} times. `
@@ -314,7 +333,7 @@ class ToolGuardrails {
 
     const stalled = this._noProgress.get(signature);
     if (stalled && stalled.count >= this.config.noProgressBlockAfter) {
-      return this._halt(decision(
+      return this._block(decision(
         ACTIONS.BLOCK,
         'idempotent_no_progress_block',
         `Blocked ${toolName}: this read-only call has returned the same result `
@@ -326,7 +345,7 @@ class ToolGuardrails {
 
     const noop = this._noopMutations.get(signature) || 0;
     if (noop >= this.config.noopMutationBlockAfter) {
-      return this._halt(decision(
+      return this._block(decision(
         ACTIONS.BLOCK,
         'noop_mutation_block',
         `Blocked ${toolName}: this edit reported success ${noop} times without `
@@ -336,24 +355,19 @@ class ToolGuardrails {
       ));
     }
 
-    const toolFailures = this._toolFailures.get(toolName) || 0;
-    if (toolFailures >= this.config.sameToolFailureHaltAfter) {
-      return this._halt(decision(
-        ACTIONS.HALT,
-        'same_tool_failure_halt',
-        `Halting: ${toolName} has failed ${toolFailures} times this turn with `
-        + 'varying arguments. Something about the environment is wrong; stop and '
-        + 'report what you have found.',
-        { toolName, count: toolFailures, signature }
-      ));
-    }
-
     return allowDecision(toolName, signature);
   }
 
   _halt(halted) {
     this._haltDecision = halted;
     return halted;
+  }
+
+  // A blocked call never reaches recordResult, so it is counted here.
+  _block(blocked) {
+    const name = blocked.toolName;
+    this._toolFailures.set(name, (this._toolFailures.get(name) || 0) + 1);
+    return this._halt(blocked);
   }
 
   /**
