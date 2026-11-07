@@ -354,10 +354,10 @@ describe('providers accept a call with no tools', () => {
     assert.ok(!('tools' in bodies[0]));
   });
 
-  it('Anthropic sends a non-empty tool list exactly as before', async () => {
+  it('Anthropic sends a non-empty tool list exactly as before (the last message carries its cache breakpoint)', async () => {
     const bodies = captureRaw(REPLY);
     await new AnthropicProvider('test-key-minimum-length').sendMessageWithTools(MSGS, TOOLS, { model: 'claude-sonnet-4-5', systemPrompt: 'S' });
-    assert.strictEqual(bodies[0], '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"S","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"ToolSearch","description":"Find tools","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]},"cache_control":{"type":"ephemeral"}},{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}},"cache_control":{"type":"ephemeral"}}],"max_tokens":4096,"stream":false,"temperature":0.7}');
+    assert.strictEqual(bodies[0], '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}],"system":[{"type":"text","text":"S","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"ToolSearch","description":"Find tools","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]},"cache_control":{"type":"ephemeral"}},{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}},"cache_control":{"type":"ephemeral"}}],"max_tokens":4096,"stream":false,"temperature":0.7}');
   });
 });
 
