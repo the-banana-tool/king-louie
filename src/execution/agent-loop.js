@@ -33,8 +33,9 @@ class AgentLoop {
     // one definition in the codebase.
     this.failoverPolicy = options.failoverPolicy || new FailoverPolicy(options.failover || {});
 
-    // Per-turn loop detection. Warnings on, hard stops off by default —
-    // pass `guardrails: false` to disable entirely.
+    // Per-turn loop detection. Warnings and hard stops on by default —
+    // `guardrailConfig: { hardStopEnabled: false }` keeps the warnings only,
+    // `guardrails: false` disables both.
     this.guardrails = options.guardrails === false
       ? null
       : (options.guardrails || new ToolGuardrails(options.guardrailConfig || {}));

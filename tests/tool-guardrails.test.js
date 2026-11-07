@@ -131,11 +131,12 @@ describe('ToolGuardrails — repeated identical failures', () => {
     assert.strictEqual(after.action, ACTIONS.ALLOW, 'a success should reset the counter');
   });
 
-  it('does not block while hard stops are off', () => {
+  it('does not block while hard stops are turned off', () => {
+    const lenient = new ToolGuardrails({ hardStopEnabled: false });
     const args = { command: 'broken' };
-    for (let i = 0; i < 10; i += 1) guard.recordResult('Bash', args, bashFail());
+    for (let i = 0; i < 10; i += 1) lenient.recordResult('Bash', args, bashFail());
 
-    const gate = guard.beforeCall('Bash', args);
+    const gate = lenient.beforeCall('Bash', args);
     assert.strictEqual(gate.action, ACTIONS.ALLOW);
     assert.strictEqual(gate.allowsExecution, true);
   });
@@ -151,6 +152,27 @@ describe('ToolGuardrails — repeated identical failures', () => {
     assert.strictEqual(gate.code, 'repeated_exact_failure_block');
     assert.strictEqual(gate.shouldHalt, true);
     assert.strictEqual(strict.haltDecision.code, 'repeated_exact_failure_block');
+  });
+});
+
+describe('ToolGuardrails — hard stops by default', () => {
+  it('blocks an identical failing call with no options', () => {
+    const guard = new ToolGuardrails();
+    const args = { command: 'broken' };
+    for (let i = 0; i < 5; i += 1) guard.recordResult('Bash', args, bashFail());
+    assert.strictEqual(guard.beforeCall('Bash', args).code, 'repeated_exact_failure_block');
+  });
+
+  it('counts each blocked repeat as a failure, so re-issuing the block halts at the same-tool threshold', () => {
+    const guard = new ToolGuardrails();
+    const args = { command: 'broken' };
+    for (let i = 0; i < 5; i += 1) guard.recordResult('Bash', args, bashFail());
+    // Failures 6, 7 and 8 are the blocks themselves.
+    for (let i = 0; i < 3; i += 1) assert.strictEqual(guard.beforeCall('Bash', args).action, ACTIONS.BLOCK);
+    const gate = guard.beforeCall('Bash', args);
+    assert.strictEqual(gate.action, ACTIONS.HALT);
+    assert.strictEqual(gate.code, 'same_tool_failure_halt');
+    assert.strictEqual(gate.count, 8);
   });
 });
 
