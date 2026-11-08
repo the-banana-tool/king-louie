@@ -734,6 +734,19 @@ function createDesktopController({
     return answer();
   }
 
+  // Task 13: "Just a window" action - sets windowOnly flag to skip service install
+  // and mark setup as done when no node is paired.
+  function setupWindowOnly() {
+    return joined('windowOnly', async () => {
+      clearAnswers();
+      // Set the windowOnly flag in desktop state, which tells nextSetupStep
+      // to return 'done' when there's no paired node
+      state.noteSetup({ windowOnly: true });
+      notify();
+      return setupStep();
+    });
+  }
+
   function joined(key, work) {
     if (pressRuns.has(key)) return pressRuns.get(key);
     const run = Promise.resolve().then(work).finally(() => {
@@ -1967,7 +1980,7 @@ function createDesktopController({
     status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
     importPlan, importApply, migrationPlan, migrationApply, restartLater, dismissServiceCommand, createClient, setClient, dispose,
     startAttached, startIdle, refreshIdle, nodeStart, nodeRestart, nodeInstallPreview, nodeInstall,
-    setupStep, setupLater, setupFinish, finishedForNow: () => finishedForNow,
+    setupStep, setupLater, setupFinish, setupWindowOnly, finishedForNow: () => finishedForNow,
     on: (event, fn) => emitter.on(event, fn)
   };
 }

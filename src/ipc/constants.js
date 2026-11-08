@@ -295,6 +295,7 @@ module.exports = {
   DESKTOP_SETUP_STEP: 'desktop:setupStep',
   DESKTOP_SETUP_LATER: 'desktop:setupLater',
   DESKTOP_SETUP_FINISH: 'desktop:setupFinish',
+  DESKTOP_SETUP_WINDOW_ONLY: 'desktop:setupWindowOnly',
   DESKTOP_NODE_RESTART: 'desktop:nodeRestart',
   DESKTOP_RESTART_LATER: 'desktop:restartLater',
   DESKTOP_STATUS_CHANGED: 'desktop:statusChanged',

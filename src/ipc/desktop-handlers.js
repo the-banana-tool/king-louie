@@ -28,6 +28,7 @@ const DESKTOP_METHODS = Object.freeze({
   [IPC.DESKTOP_SETUP_STEP]: 'setupStep',
   [IPC.DESKTOP_SETUP_LATER]: 'setupLater',
   [IPC.DESKTOP_SETUP_FINISH]: 'setupFinish',
+  [IPC.DESKTOP_SETUP_WINDOW_ONLY]: 'setupWindowOnly',
   [IPC.DESKTOP_NODE_RESTART]: 'nodeRestart',
   [IPC.DESKTOP_RESTART_LATER]: 'restartLater',
   // Task 11: node management for the remote window (attach stage 3 part B)
