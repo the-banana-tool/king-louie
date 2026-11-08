@@ -198,7 +198,7 @@ describe('desktop:* handlers', () => {
       'desktop:nodeInstall', 'desktop:nodeInstallPreview', 'desktop:nodeRestart', 'desktop:nodeStart', 'desktop:noteSetup',
       'desktop:pairCancel', 'desktop:pairConfirm', 'desktop:pairRestartConfirm', 'desktop:pairStart', 'desktop:removeNode', 'desktop:restartLater', 'desktop:retry',
       'desktop:setNodeOrder', 'desktop:setPairing', 'desktop:setSetup',
-      'desktop:setupFinish', 'desktop:setupLater', 'desktop:setupStep',
+      'desktop:setupFinish', 'desktop:setupLater', 'desktop:setupStep', 'desktop:setupWindowOnly',
       'desktop:standaloneOnce', 'desktop:status', 'desktop:unpair', 'desktop:updateNode'
     ]);
   });
