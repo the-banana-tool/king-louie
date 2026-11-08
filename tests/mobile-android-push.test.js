@@ -44,7 +44,9 @@ describe('Android push (spec 3 §7.2)', () => {
     // The relay's list (src/frontdoor/push/text.js) less grant, which goes to
     // APNs only. Until T01 lands the relay knows only the first five; then the
     // two lists must be equal.
-    const relay = require('../src/frontdoor/push/text.js').KINDS.filter((k) => k !== 'grant');
+    // `window` joins the app with its row (remote window, Task 15): until then a phone
+    // drops that push and sees the request in its next list.
+    const relay = require('../src/frontdoor/push/text.js').KINDS.filter((k) => k !== 'grant' && k !== 'window');
     for (const k of relay) assert.ok(kinds.includes(k), `the app accepts the relay's ${k}`);
     if (relay.includes('session_ended')) assert.deepEqual([...kinds].sort(), [...relay].sort());
     const received = section(fcm(), 'override fun onMessageReceived(message: RemoteMessage) {', '\n    }\n');

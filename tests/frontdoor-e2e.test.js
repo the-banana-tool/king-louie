@@ -10,6 +10,7 @@ const net = require('net');
 const path = require('path');
 const tls = require('tls');
 const crypto = require('crypto');
+const WebSocket = require('ws');
 const { startFrontDoor, makePinCheck, mirrorFetcher, stopInOrder, DUPLICATE_PING_MS } = require('../src/frontdoor/profile');
 const { NodeRegistry } = require('../src/frontdoor/router/node-registry');
 const { rawEd25519 } = require('../src/frontdoor/protocol/messages');
@@ -52,6 +53,13 @@ const lookup = (host, options, cb) => {
   else done(null, '127.0.0.1', 4);
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (fn, ms = 5000) => {
+  const start = Date.now();
+  while (!fn()) {
+    if (Date.now() - start > ms) throw new Error('timed out');
+    await sleep(5);
+  }
+};
 // A raw TLS client: writes `text` (never finishing it) and resolves with what
 // came back and how long until the server closed, or null after `ms`.
 function trickle({ port, servername, text, ca = null, cert = null, key = null, ms = 4000 }) {
@@ -75,7 +83,7 @@ const until = async (fn, what, ms = 15000) => {
   }
 };
 // The steps startFrontDoor stops, in the order it stops them.
-const ALL_STEPS = ['SIGHUP handler', 'probe', 'listener', 'http servers', 'client purge', 'router', 'device states', 'courier', 'registry transport watch', 'relay', 'tls', 'audit prune']
+const ALL_STEPS = ['SIGHUP handler', 'probe', 'listener', 'http servers', 'window splice', 'client purge', 'router', 'device states', 'courier', 'registry transport watch', 'relay', 'tls', 'audit prune']
   .filter((s) => POSIX || s !== 'SIGHUP handler');
 
 async function layout({ fdRaw = {} } = {}) {
@@ -293,6 +301,21 @@ describe('a running front door', () => {
     assert.equal(res.json.issuer, t.base);
   });
 
+  it('keeps the window list and resource off until enabled; on, the list is routed with the metadata URL on the bound port', async () => {
+    const list = () => request(t.base, { path: '/window/v1/nodes', tls: t.tls });
+    assert.equal((await list()).status, 404);
+    assert.equal((await request(t.base, { path: '/.well-known/oauth-protected-resource/window/v1', tls: t.tls })).status, 404);
+    const enabled = t.fd.oauth.scopesEnabled;
+    t.fd.oauth.scopesEnabled = [...enabled, 'window:attach'];
+    try {
+      const res = await list();
+      assert.equal(res.status, 401);
+      assert.equal(res.headers['www-authenticate'], `Bearer error="invalid_token", resource_metadata="${t.base}/.well-known/oauth-protected-resource/window/v1"`);
+    } finally {
+      t.fd.oauth.scopesEnabled = enabled;
+    }
+  });
+
   it('pairs a node the phone approves; the node links with its pin; the mirror catches up; an MCP client runs a runbook', async () => {
     const { fd } = t;
     // 1. The phone asks for a pairing code; the node proves it over /pair/v1.
@@ -428,6 +451,69 @@ describe('a running front door', () => {
     });
     assert.ok(r.closedAt !== null && r.closedAt < 500, `closed after ${r.closedAt} ms`);
     assert.equal(r.reply, '');
+  });
+
+  it('remote window: /window/v1 on mcp. answers a stranger with 4401 over a 101, and nothing else opens', async () => {
+    const r = await trickle({
+      port: t.port, servername: 'mcp.kl.example.com', ca: t.ca.cert,
+      text: 'GET /window/v1?node=x HTTP/1.1\r\nHost: mcp.kl.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: kl-window-v1\r\n\r\n'
+    });
+    assert.match(r.reply, /^HTTP\/1\.1 101 /);
+    assert.ok(r.reply.includes('invalid_token'));
+    assert.ok(!/x-kl-window-session/i.test(r.reply));
+    assert.ok(r.closedAt !== null);
+  });
+
+  // The listeners, servers and wiring are all real. Only the token, the grant and
+  // window.open are stood in: an OAuth window and the node's dialer are other tasks.
+  it('remote window: a window on mcp. and its node\'s dial on mesh. are joined through the real SNI listener', async () => {
+    const { fd, node } = t;
+    const real = { authenticate: fd.tokens.authenticate, live: fd.grants.live, rpc: fd.relay.nodeHub.rpc };
+    const opens = [];
+    fd.tokens.authenticate = (token, opts) => (token === 'kla_window_test' ? { grant_id: 'g-window', client_id: 'c-window', scopes: ['window:attach'], aud: opts.aud } : real.authenticate.call(fd.tokens, token, opts));
+    fd.grants.live = (id) => (id === 'g-window' ? { client_id: 'c-window', scopes: [{ scope: 'window:attach', machines: null }], machine_ids: {} } : real.live.call(fd.grants, id));
+    fd.relay.nodeHub.rpc = async (nodeId, method, params) => { opens.push({ nodeId, method, params }); return { ok: true }; };
+    const enabled = fd.oauth.scopesEnabled;
+    let win = null;
+    let dial = null;
+    try {
+      // Off, as it is by default: the same token is refused like a stranger's.
+      const off = await trickle({
+        port: t.port, servername: 'mcp.kl.example.com', ca: t.ca.cert,
+        text: `GET /window/v1?node=${node.nodeId} HTTP/1.1\r\nHost: mcp.kl.example.com\r\nAuthorization: Bearer kla_window_test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: kl-window-v1\r\n\r\n`
+      });
+      assert.ok(off.reply.includes('invalid_token'));
+      assert.equal(opens.length, 0);
+      fd.oauth.scopesEnabled = [...enabled, 'window:attach'];
+      win = new WebSocket(`wss://mcp.kl.example.com:${t.port}/window/v1?node=${node.nodeId}`, 'kl-window-v1', {
+        ca: t.ca.cert, lookup, headers: { authorization: 'Bearer kla_window_test' }, perMessageDeflate: false
+      });
+      let session = null;
+      win.on('upgrade', (res) => { session = res.headers['x-kl-window-session']; });
+      await new Promise((resolve, reject) => { win.once('open', resolve); win.once('error', reject); });
+      await waitUntil(() => opens.length === 1);
+      assert.equal(opens[0].params.session_id, session);
+      dial = new WebSocket(`wss://mesh.kl.example.com:${t.port}/window/v1/${session}`, {
+        cert: node.tlsCert, key: node.tlsKey, rejectUnauthorized: false, lookup, perMessageDeflate: false
+      });
+      const atNode = new Promise((resolve) => { dial.once('message', resolve); });
+      await new Promise((resolve, reject) => { dial.once('open', resolve); dial.once('error', reject); });
+      win.send(Buffer.from('to the node'));
+      assert.equal((await atNode).toString(), 'to the node');
+      const atWindow = new Promise((resolve) => { win.once('message', resolve); });
+      dial.send(Buffer.from('to the window'));
+      assert.equal((await atWindow).toString(), 'to the window');
+      const windowClosed = new Promise((resolve) => { win.once('close', resolve); });
+      fd.windowSplice.closeForGrant('g-window');
+      assert.equal(await windowClosed, 4403);
+    } finally {
+      fd.oauth.scopesEnabled = enabled;
+      fd.tokens.authenticate = real.authenticate;
+      fd.grants.live = real.live;
+      fd.relay.nodeHub.rpc = real.rpc;
+      if (win) win.terminate();
+      if (dial) dial.terminate();
+    }
   });
 
   it('round 2: a pipelined request\'s headers deadline starts when the previous response finishes', async () => {

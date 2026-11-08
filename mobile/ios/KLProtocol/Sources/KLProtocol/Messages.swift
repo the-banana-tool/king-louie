@@ -391,7 +391,7 @@ enum Rules {
 
     static func origin(_ v: JSONValue?) -> Bool {
         guard let o = v?.objectValue, let client = o["client"]?.stringValue else { return false }
-        let keys = ExactText.same(client, "desktop") ? ["client", "session", "job_id", "deviceId"] : ["client", "session", "job_id"]
+        let keys = (ExactText.same(client, "desktop") || ExactText.same(client, "remote-window")) ? ["client", "session", "job_id", "deviceId"] : ["client", "session", "job_id"]
         return hasExactKeys(o, keys) && o.values.allSatisfy { $0.isNull || withinLength($0, originStringMax) }
     }
 

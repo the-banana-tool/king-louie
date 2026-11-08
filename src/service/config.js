@@ -11,7 +11,7 @@ const PROFILES = new Set(['agent', 'runbook', 'frontdoor']);
 // Chat channels are off by default: in stage 1 the service denies every
 // remote approval, and stage 3 brings the phone approver that makes channels
 // useful for unsafe work.
-const DEFAULT_FEATURES = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false };
+const DEFAULT_FEATURES = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false, remoteWindow: false };
 // Attach stage 2: on a personal node the window is the only way in and nobody
 // writes service.json by hand, so what a desktop had on is on. None of the
 // three opens anything with nothing configured: a channel starts only with its
@@ -24,6 +24,7 @@ const PERSONAL_FEATURE_DEFAULTS = Object.freeze({ webhooks: true, channels: true
 // over a port, and an unprivileged local user squatting the mesh port cannot
 // keep the service's gateway off the air.
 // desktopBridge (fleet stage 7): the loopback listener the desktop app attaches to.
+// remoteWindow (R-RW-20) needs no port: the node dials its front door.
 // 18795 is taken by the relay mesh listener (fleet stage 3), hence 18796.
 const DEFAULT_PORTS = { gateway: 18793, webhook: 18794, desktopBridge: 18796 };
 const CONFIG_FILE = 'service.json';
@@ -504,6 +505,9 @@ function loadServiceConfig(dataDir, overrides = {}, {
   // The desktop bridge needs the agent stack it proxies to.
   if (features.desktopBridge && profile === 'runbook') {
     throw new Error('desktopBridge needs profile: agent');
+  }
+  if (features.remoteWindow && profile !== 'agent') {
+    throw new Error('remoteWindow needs profile: agent');
   }
 
   // Loud, per-feature, naming the file responsible: an operator reading the

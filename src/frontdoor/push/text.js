@@ -8,7 +8,8 @@
 // ending or contact pause, and a task's ending (tasks stage 1, keyed by its
 // task id, to every fcm phone). All are content-free: `{ k, rid, n }`.
 const SESSION_KINDS = ['session_ended', 'session_paused', 'task_ended'];
-const FCM_ONLY_KINDS = [...SESSION_KINDS, 'test'];
+// `window` (a window asks to attach, R-RW-14) comes with its mailbox message.
+const FCM_ONLY_KINDS = [...SESSION_KINDS, 'window', 'test'];
 const KINDS = ['approval', 'grant', 'pairing', 'alert', 'question', 'lease', ...FCM_ONLY_KINDS];
 const TITLES = {
   approval: 'Approval needed',
@@ -20,6 +21,7 @@ const TITLES = {
   session_ended: 'Session ended',
   session_paused: 'Session paused',
   task_ended: 'Task ended',
+  window: 'Window asking to attach',
   test: 'Test'
 };
 

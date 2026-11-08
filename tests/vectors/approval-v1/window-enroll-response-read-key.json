@@ -1,0 +1,39 @@
+{
+  "name": "window-enroll-response-read-key",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "box": {
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "d": "G4xu6oJW0Cytp2E9o732vG-h6xdVFltHuGbnFLBr8_8"
+    },
+    "device": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+        "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+      }
+    },
+    "type": "kl.window.enroll.response",
+    "request": {
+      "request_id": "e389ad13-2de5-4faf-892e-311de27ea147",
+      "nonce": "DgLxD7RiX5bgdUScE6dHmtIEUiFmX5voaCGzTVOQjBQ",
+      "enroll_hash": "bjR4nK3wgSq87NI4SfBtHRq422HJc298pmNrBDByrBA",
+      "expires_at": "2026-09-23T18:14:11.201Z"
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJlbnJvbGxfaGFzaCI6ImJqUjRuSzN3Z1NxODdOSTRTZkJ0SFJxNDIySEpjMjk4cG1OckJEQnlyQkEiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODoxNDoxMS4yMDFaIiwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub25jZSI6IkRnTHhEN1JpWDViZ2RVU2NFNmRIbXRJRVVpRm1YNXZvYUNHelRWT1FqQlEiLCJyZXF1ZXN0X2lkIjoiZTM4OWFkMTMtMmRlNS00ZmFmLTg5MmUtMzExZGUyN2VhMTQ3Iiwic2VhbGVkIjp7ImN0Ijoic0V0NjBaUXBiVmxmU2RlSkNQM2JGSllwUHRIYXhtTWV5YmM0TkhDTFFzZWNSSUppT0Z1QVM4c19OMVNNdHBmZ3phYTdXbUlTV0ZUTXRKa21jR2hxZldaYXVDQ25OSHoyMmFyVDVXOWZ1QXlwZ2g3XzZwZjhiTEJMUjItQUZZM0dtVVZMVG03Q05pMHFuVDRjUWQ1UWRqT3pwTnBFdlQ4UWNYNXJTV1d4Zm9KcXNRbnF3dExIdnoweVNJZXlhQU1zeTdWWFh6Wk5PWFBsTzNXZ0Fsa1N2VWF1bm4zaTRrZWNCWFBnT1JRVWtYTnhXVzVaVXlUMXZBb3pSNVRpblVXekpxVEtsemlxdlFVSVNYdDlzUUNNQWQ1aGZmOGgyUjdXSzNhdW94TzB5QXp6dk12QkRVMF9BOFh1eUItWC1DQzhaY051UVBfVnZpcTR1RjkzcWZTUEJsTlBuaGtiekdVT0tER1M3aXM0cDk4IiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiRWxjQ1pXRmNRUWkwLU5iekNQM2dqSlFFai1DNzhGQ2F0SGpMZl9ZckxjbyIsInkiOiJPSnZOWmJpaTNnYlhEQzZLSjl3cmJFMjQzdDBCYmp5U0E5NDVpOGlyRzA4In0sIml2IjoidnR2aE5IaFZRMzRYdkVIdSIsImtleXMiOnsia2wtYzJ1YmQ2ampxdW1hbHp0NSI6IlI4eHRxSDRGMGlHdTFPdzg5OHZ4Y2dhUmRjM18xYjJadGxOSTJIc0Z3a1U3Ri1QZ1AyZnQzVmxZTG82aHl3ZTcifSwidiI6MX0sInNpZ25lZF9hdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsInR5cGUiOiJrbC53aW5kb3cuZW5yb2xsLnJlc3BvbnNlIiwidiI6MX0",
+    "sig": "5xLSde4aN_k3-Om2YlQzwAtjtYE9b2kVBsn35_AA3dH9_irTWRLI8cShW9fg24MVZ2XeUEc84AQ8fknK-wHFOw"
+  },
+  "expect": {
+    "reason": "bad_signature",
+    "decision": null
+  }
+}

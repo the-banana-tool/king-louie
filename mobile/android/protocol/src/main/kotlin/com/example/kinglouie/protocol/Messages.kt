@@ -478,7 +478,7 @@ internal object Rules {
     private fun origin(v: JsonElement?): Boolean {
         val o = v.obj() ?: return false
         val client = o["client"].str() ?: return false
-        val keys = if (client == "desktop") listOf("client", "session", "job_id", "deviceId") else listOf("client", "session", "job_id")
+        val keys = if (client == "desktop" || client == "remote-window") listOf("client", "session", "job_id", "deviceId") else listOf("client", "session", "job_id")
         return hasExactKeys(o, keys) && o.values.all { it is JsonNull || withinLength(it, ORIGIN_STRING_MAX) }
     }
 

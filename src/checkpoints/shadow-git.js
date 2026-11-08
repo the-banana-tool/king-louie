@@ -77,6 +77,13 @@ function projectKey(workdir) {
   return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16);
 }
 
+// What a checkpoint id is. Anything else could reach git as an option:
+// --output=x would create or truncate a file.
+const COMMIT_ID = /^[0-9a-f]{40}$/;
+function assertCommitId(commit) {
+  if (typeof commit !== 'string' || !COMMIT_ID.test(commit)) throw new Error('Not a checkpoint id.');
+}
+
 class ShadowGit {
   /**
    * @param {object} options
@@ -195,7 +202,15 @@ class ShadowGit {
     if (!alreadyInitialized) {
       await fs.promises.mkdir(this.storeDir, { recursive: true });
       // --bare: no worktree of its own. We supply GIT_WORK_TREE per call.
-      await this._run(['init', '--bare', '--quiet', this.storeDir]);
+      // The object format is pinned: a checkpoint id is 40 hex whatever the user's git
+      // defaults to (init.defaultObjectFormat).
+      await this._run(['init', '--bare', '--quiet', '--object-format=sha1', this.storeDir]).catch(async () => {
+        // Older than git 2.29, which has no such flag and may still make only sha1.
+        await this._run(['init', '--bare', '--quiet', this.storeDir]);
+        // Before git 2.25 this echoes the flag back as text: that git makes only sha1.
+        const format = (await this._run(['rev-parse', '--show-object-format']).catch(() => 'sha1')).trim();
+        if (format === 'sha256') throw new Error(`The checkpoint store must be sha1, and git made ${format}.`);
+      });
     }
 
     await fs.promises.mkdir(this.indexesDir, { recursive: true });
@@ -288,6 +303,7 @@ class ShadowGit {
    * survive the restore.
    */
   async restore(workdir, commit, { key = projectKey(workdir) } = {}) {
+    assertCommitId(commit);
     await this.init();
     const opts = { workdir, key };
 
@@ -322,6 +338,8 @@ class ShadowGit {
 
   /** Files changed between two snapshots (or a snapshot and its parent). */
   async diffNames(commit, base = null) {
+    assertCommitId(commit);
+    if (base !== null) assertCommitId(base);
     const args = base
       ? ['diff', '--name-status', base, commit]
       : ['diff', '--name-status', `${commit}^`, commit];
@@ -375,6 +393,7 @@ class ShadowGit {
 }
 
 module.exports = {
+  assertCommitId,
   ShadowGit,
   projectKey,
   DEFAULT_EXCLUDES

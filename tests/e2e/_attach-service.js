@@ -32,7 +32,17 @@ process.on('disconnect', () => process.exit(0));
 class StubProvider {
   async listModels() { return ['stub']; }
   async sendMessage() { return 'Stub chat'; }
-  async streamMessage(_messages, _options, onChunk) {
+  async streamMessage(messages, options, onChunk) {
+    // Held until Stop, for a test of what a window does during a reply.
+    if (String(messages[messages.length - 1]?.text || '').includes('hold the reply')) {
+      onChunk('Holding ');
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 90000);
+        timer.unref?.();
+        options?.abortSignal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+      });
+      return { content: 'Holding', llmMetrics: null };
+    }
     const text = 'Hello from the stub provider.';
     for (const word of text.split(' ')) onChunk(`${word} `);
     return { content: text, llmMetrics: null };

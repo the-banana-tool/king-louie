@@ -205,6 +205,6 @@ describe('the front door\'s own ledger', () => {
     assert.deepEqual(entries, [{ kind: 'frontdoor.token.issued', data: { grant_id: 'gr_x', kind: 'access' } }]);
     await assert.rejects(recordFrontDoorEvent(ledger, 'frontdoor.made_up', {}), /unknown front-door audit kind/);
     await recordFrontDoorEvent({ append: async () => { throw new Error('disk full'); } }, 'frontdoor.alert.ack', { id: '1' });
-    assert.equal(FRONT_DOOR_AUDIT_KINDS.length, 11);
+    assert.equal(FRONT_DOOR_AUDIT_KINDS.length, 14);
   });
 });

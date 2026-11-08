@@ -8,6 +8,76 @@ const { createInMemoryEventLedger, EVENT_TYPES } = require('../src/events/event-
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+describe('cancel, with a step running', () => {
+  // A step that ends only when it is told to, as an agent loop does on its signal.
+  function heldEngine(dir) {
+    const steps = [];
+    const engine = new WorkflowEngine({
+      storageDir: dir,
+      agentExecutorAdapter: {
+        execute: (_agent, _message, options) => new Promise((resolve) => {
+          steps.push({ options, finish: () => resolve({ type: 'complete', content: 'done', iterations: 1 }) });
+        })
+      },
+      getAgent: () => ({ id: 'main', name: 'Main' }),
+      maxConcurrentTasks: 1
+    });
+    return { engine, steps };
+  }
+  const graph = () => ({
+    goal: 'g',
+    summary: 's',
+    tasks: [
+      { id: 't1', title: 'One', description: 'one', agentId: 'main', dependsOn: [], priority: 1 },
+      { id: 't2', title: 'Two', description: 'two', agentId: 'main', dependsOn: ['t1'], priority: 2 }
+    ],
+    parallelGroups: [],
+    estimatedTotalSteps: 2
+  });
+  const started = async (steps) => {
+    while (steps.length === 0) await new Promise((resolve) => { setTimeout(resolve, 2); });
+  };
+
+  it('stays cancelled, its step gets the signal, it cannot be run again, and the next step never starts', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-wf-cancel-'));
+    const { engine, steps } = heldEngine(dir);
+    await engine.initialize();
+    const workflow = await engine.create(graph());
+    const running = engine.run(workflow.id);
+    await started(steps);
+    const { abortSignal } = steps[0].options;
+    assert.strictEqual(abortSignal.aborted, false);
+    engine.cancel(workflow.id);
+    assert.strictEqual(abortSignal.aborted, true);
+    steps[0].finish();
+    await running;
+    assert.strictEqual(engine.get(workflow.id).status, WORKFLOW_STATUS.CANCELLED);
+    assert.strictEqual(steps.length, 1);
+    await assert.rejects(engine.run(workflow.id), /already cancelled/);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('pause gives its step no signal, stays paused and can be run again', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-wf-pause-'));
+    const { engine, steps } = heldEngine(dir);
+    await engine.initialize();
+    const workflow = await engine.create(graph());
+    const running = engine.run(workflow.id);
+    await started(steps);
+    engine.pause(workflow.id);
+    assert.strictEqual(steps[0].options.abortSignal.aborted, false);
+    steps[0].finish();
+    await running;
+    assert.strictEqual(engine.get(workflow.id).status, WORKFLOW_STATUS.PAUSED);
+    const again = engine.run(workflow.id);
+    while (steps.length < 2) await new Promise((resolve) => { setTimeout(resolve, 2); });
+    steps[1].finish();
+    await again;
+    assert.strictEqual(engine.get(workflow.id).status, WORKFLOW_STATUS.COMPLETED);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 function makeTmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'kl-wf-test-'));
 }

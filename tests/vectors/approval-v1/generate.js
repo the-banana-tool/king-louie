@@ -16,6 +16,8 @@ const { canonicalize } = require('../../../src/platform/jcs');
 const { seal, fromB64url, verifyEs256, nodeSigner, deviceIdFromJwk } = require('../../../src/approvals/envelope');
 const { enrollMac, phoneAuthString, READ_KEY_MAX_MS, BOX_KEY_MAX_MS } = require('../../../src/approvals/messages');
 const { sealContent, saltedHash, splitMessage } = require('../../../src/approvals/seal');
+const { qrFor, enrollCode, enrollHashBytes, rawNodeKey } = require('../../../src/approvals/window-messages');
+const WINDOW_KEYS = require('../window-v1/keys.json');
 const { deriveNodeId, base32Encode } = require('../../../src/mesh/node-identity');
 const { AuditLedger, entryHash } = require('../../../src/audit/audit-ledger');
 const { phoneView, phoneReadAuthString } = require('./phone-reference');
@@ -195,6 +197,10 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     summary: 'Run runbook site.pull_and_restart on web-01'
   };
   phoneVector('request-display', request(web, 'display', runbookAction, { origin: { client: 'stdio-mcp', session: null, job_id: 'job-1' } }), pinnedWeb);
+  // A remote window's channel call (remote window plan R-RW-12, R-RW-33): the card names
+  // the window, by label in the summary and by device id in the origin.
+  const windowAction = { kind: 'tool', name: 'Window', params: { channel: 'chat:delete', args: ['chat-1'] }, cwd: null, summary: 'chat:delete from Field laptop · 1 parameter, 1 KB' };
+  phoneVector('request-display-window', request(web, 'display window', windowAction, { origin: { client: 'remote-window', deviceId: 'kld-abcdefghijklmnop', session: null, job_id: null } }), pinnedWeb);
 
   // A syntactically well-formed, canonical, correctly-signed envelope whose
   // *message* is not a valid kl.approval.request (missing node_name): the
@@ -591,6 +597,95 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
       ask: fullAsk, answer: fullAnswer.answer, nonce: fullAnswer.nonce, signed_at: NOW
     },
     input: seal(sealedReply, A), expect: { reason: null, message: fullAnswer }
+  });
+
+  // ── A window's enrollment (remote window R-RW-14, R-RW-34). The node's for now;
+  // the phones join in Task 15. The window's key is window-v1's A, which a node never
+  // enrolls: these pin bytes, not a real path.
+  const windowKey = WINDOW_KEYS.windows.A;
+  const windowRaw = Buffer.from(windowKey.public_key, 'hex');
+  const pin = rawNodeKey(web.key);
+  const qrN = sha('window qr n').subarray(0, 16);
+  add({
+    name: 'window-enroll-code', consumers: ['node'],
+    given: { n: qrN.toString('base64url'), device_public_key: windowRaw.toString('base64url'), node_public_key: pin.toString('base64url') },
+    input: null,
+    expect: {
+      code: enrollCode({ nonce: qrN, devicePublicKey: windowRaw, nodePublicKey: pin }),
+      qr: qrFor({ devicePublicKey: windowRaw, nodePublicKey: pin, nonce: qrN }),
+      h: enrollHashBytes(windowRaw, pin).toString('base64url')
+    }
+  });
+  const enrollType = 'kl.window.enroll';
+  const windowField = { device_id: windowKey.id, public_key: windowRaw.toString('base64url'), label: 'Road laptop', platform: 'windows' };
+  const enrollSalt = sha('window enroll salt').toString('base64url');
+  const enrollExpires = iso(NOW_MS + 600000);
+  const fullEnroll = {
+    v: 1, type: enrollType, request_id: uuidOf('window enroll'), node_id: web.nodeId, node_name: 'web-01',
+    enroll_hash: saltedHash(enrollSalt, { window: windowField, node_key: web.key }), created_at: NOW, expires_at: enrollExpires,
+    nonce: nonceOf('window enroll'), node_box: webBox, window: windowField, node_key: web.key, salt: enrollSalt
+  };
+  const enrollSplit = splitMessage(enrollType, fullEnroll);
+  const sealedEnroll = seal(sealContent({
+    type: enrollType, senderId: web.nodeId, clear: enrollSplit.clear, content: enrollSplit.content, recipients: { ...boxA, ...boxB, [web.nodeId]: webBox },
+    ephemeral: fixedBox(sha('window enroll epk')), random: (n) => (n === 32 ? sha('window enroll cek') : sha('window enroll iv').subarray(0, n))
+  }), nodeSigner(web));
+  add({
+    name: 'window-enroll-sealed', consumers: ['node'],
+    given: { box: boxOfA, type: enrollType, node_public_key: web.key, pin_raw: pin.toString('base64url') },
+    input: sealedEnroll,
+    expect: { reason: null, message: fullEnroll, qr_hash: enrollHashBytes(windowRaw, pin).toString('base64url') }
+  });
+  const nodeBoxGiven = { node_id: web.nodeId, d: KEYS.nodes['web-01'].box.d };
+  const responseType = 'kl.window.enroll.response';
+  const windowResponse = (label, signer, { enrollHash = fullEnroll.enroll_hash } = {}) => {
+    const clear = {
+      v: 1, type: responseType, request_id: fullEnroll.request_id, node_id: web.nodeId, enroll_hash: enrollHash, nonce: fullEnroll.nonce,
+      device_id: A.id, expires_at: enrollExpires, signed_at: NOW
+    };
+    return seal(sealContent({
+      type: responseType, senderId: A.id, clear, content: { decision: 'approve' }, recipients: { [web.nodeId]: webBox },
+      ephemeral: fixedBox(sha(`window response epk ${label}`)), random: (n) => (n === 32 ? sha(`window response cek ${label}`) : sha(`window response iv ${label}`).subarray(0, n))
+    }), signer);
+  };
+  const responseGiven = {
+    now: NOW, box: nodeBoxGiven, device: { device_id: A.id, jwk: A.jwk }, type: responseType,
+    request: { request_id: fullEnroll.request_id, nonce: fullEnroll.nonce, enroll_hash: fullEnroll.enroll_hash, expires_at: enrollExpires }
+  };
+  add({ name: 'window-enroll-response-approve', consumers: ['node'], given: responseGiven, input: windowResponse('approve', A), expect: { reason: null, decision: 'approve' } });
+  add({ name: 'window-enroll-response-read-key', consumers: ['node'], given: responseGiven, input: windowResponse('read key', deviceSigner('A_read', sigCache)), expect: { reason: 'bad_signature', decision: null } });
+  add({
+    name: 'window-enroll-response-hash-mismatch', consumers: ['node'], given: responseGiven,
+    input: windowResponse('hash', A, { enrollHash: saltedHash(enrollSalt, { window: windowField, node_key: nodeIdentity('gpu-box').key }) }),
+    expect: { reason: 'enroll_hash_mismatch', decision: null }
+  });
+  const revokeType = 'kl.window.revoke';
+  const fullRevoke = {
+    v: 1, type: revokeType, node_id: web.nodeId, window_id: windowKey.id, device_id: A.id, created_at: NOW, expires_at: iso(NOW_MS + 3600000),
+    nonce: nonceOf('window revoke'), reason: 'Revoked from the phone'
+  };
+  const revokeSplit = splitMessage(revokeType, fullRevoke);
+  add({
+    name: 'window-revoke-sealed', consumers: ['node'], given: { now: NOW, box: nodeBoxGiven, device: { device_id: A.id, jwk: A.jwk }, type: revokeType },
+    input: seal(sealContent({
+      type: revokeType, senderId: A.id, clear: revokeSplit.clear, content: revokeSplit.content, recipients: { [web.nodeId]: webBox },
+      ephemeral: fixedBox(sha('window revoke epk')), random: (n) => (n === 32 ? sha('window revoke cek') : sha('window revoke iv').subarray(0, n))
+    }), A),
+    expect: { reason: null, message: fullRevoke }
+  });
+  const listType = 'kl.window.list';
+  const fullList = {
+    v: 1, type: listType, node_id: web.nodeId, to_device: A.id, at: NOW, nonce: nonceOf('window list'), node_box: webBox,
+    windows: [{ device_id: windowKey.id, label: 'Road laptop', platform: 'windows', enrolled_at: NOW, attached: true }]
+  };
+  const listSplit = splitMessage(listType, fullList);
+  add({
+    name: 'window-list-sealed', consumers: ['node'], given: { box: boxOfA, type: listType, node_public_key: web.key },
+    input: seal(sealContent({
+      type: listType, senderId: web.nodeId, clear: listSplit.clear, content: listSplit.content, recipients: boxA,
+      ephemeral: fixedBox(sha('window list epk')), random: (n) => (n === 32 ? sha('window list cek') : sha('window list iv').subarray(0, n))
+    }), nodeSigner(web)),
+    expect: { reason: null, message: fullList }
   });
 
   return vectors;

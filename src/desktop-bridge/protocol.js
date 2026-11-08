@@ -28,7 +28,18 @@ const LIMITS = Object.freeze({
   lockoutMs: 60000,
   deviceRecheckMs: 5000,
   headersTimeoutMs: 10000,
-  maxTrackedFailures: 1024
+  maxTrackedFailures: 1024,
+  // Windows attached at once, local and remote together (spec 2026-11-04 §9).
+  maxDevices: 8,
+  // Devices with no record waiting on a phone (R-RW-36). They count against nothing
+  // else, and each has a deadline and a bound on the calls it may make.
+  maxEnrollWindows: 4,
+  enrollDeadlineMs: 15 * 60 * 1000,
+  enrollCallsMax: 1200,
+  // One device's gone windows whose calls still run, kept so a revoke can reach them.
+  // Past this that device's new session is refused, never one forgotten. No bound
+  // across devices is needed: each needs a record, and a record is the owner's.
+  maxHeldPerDevice: 8
 });
 
 const CLOSE = Object.freeze({
@@ -38,7 +49,14 @@ const CLOSE = Object.freeze({
   MALFORMED: 4400,
   BAD_SIGNATURE: 4401,
   UNKNOWN_DEVICE: 4403,
-  OTHER_DEVICE: 4409,
+  // An enroll connection whose request was denied, lapsed or ran out of time.
+  NOT_ENROLLED: 4403,
+  // A device whose record is local, on the sealed path (R-RW-15), with its own reason.
+  NOT_REMOTE: 4403,
+  // Neither says anything about the device, so a window must not read them as a revoke.
+  NOT_SEALING: 4503,
+  RECORD_UNREADABLE: 4504,
+  TOO_MANY_WINDOWS: 4409,
   PROTOCOL_MISMATCH: 4426,
   LOCKED_OUT: 4429
 });
@@ -136,11 +154,14 @@ const MESSAGES = Object.freeze({
   PAIR_NOT_FOUND: 'No local service was found yet. Wait for its fingerprint to appear, then confirm.',
   PAIR_SERVICE_CHANGED: 'The local service changed since its fingerprint was shown. Cancel and start pairing again.',
   PAIR_CONFIRM_STALE: 'This confirm did not say which service it was for. Reopen Settings > Local service and try again.',
-  ANOTHER_DEVICE: (label) => `Another desktop (${label}) is attached to this service.`,
+  TOO_MANY_WINDOWS: 'Too many windows are attached to this node. Close one, then try again.',
   PROTOCOL_MISMATCH: (theirs) => `This app speaks desktop-bridge protocol ${PROTOCOL}; the service speaks ${theirs}. Upgrade the older one.`,
   SERVICE_TOO_OLD: (version, channel) => `The local service (version ${version}) does not support ${channel}. Upgrade the service.`,
   SERVICE_RESTARTED: 'The local service restarted; the reply was lost.',
   DESKTOP_DISCONNECTED_RUN: 'The desktop disconnected; the run was stopped.',
+  WINDOW_REVOKED_RUN: 'The window that started this was revoked; the run was stopped.',
+  WINDOW_UNCONFIRMED_RUN: "Could not confirm this window's record; the run was stopped.",
+  WINDOW_UNCONFIRMED_WORKFLOW: "Could not confirm this window's record; its workflow was paused.",
   NO_PROVIDER: 'The service has no provider key yet — import or add one in Providers.',
   SECURE_STORAGE_UNAVAILABLE: "This system has no secure storage; the desktop can't hold a pairing key.",
   RULE_NOT_DESKTOP: 'This rule was set on the service and can only be removed there.',
@@ -148,7 +169,13 @@ const MESSAGES = Object.freeze({
   PATH_NOT_ACCESSIBLE: (account, target) => `The service runs as ${account || 'its own account'} and cannot read ${target}. Grant that account access or pick another folder.`,
   LOCKED_OUT: 'Too many failed handshakes from this desktop; try again in a minute.',
   BAD_SIGNATURE: "The service rejected this desktop's signature.",
-  MALFORMED: 'The desktop bridge handshake failed.'
+  MALFORMED: 'The desktop bridge handshake failed.',
+  REMOTE_LOCAL_ONLY: 'Not available from a remote window.',
+  REMOTE_PRESS: 'Answer on your phone.',
+  NO_PHONE: 'No phone can approve this on the node. Nothing ran.',
+  PHONE_DENIED: 'Not approved on the phone. Nothing ran.',
+  REMOTE_ARGS_INVALID: 'That request cannot be signed. Nothing ran.',
+  REMOTE_ARGS_TOO_LARGE: 'That request is too large to show on the phone. Nothing ran.'
 });
 
 module.exports = {

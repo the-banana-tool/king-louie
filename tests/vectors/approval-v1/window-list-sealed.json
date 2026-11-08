@@ -1,0 +1,46 @@
+{
+  "name": "window-list-sealed",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "box": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "d": "vw9VRd4DXvE8_ARm3X8nTSRjVU_dxhvbZH8IEGW4BQQ"
+    },
+    "type": "kl.window.list",
+    "node_public_key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-c2ubd6jjqumalzt5",
+    "payload": "eyJhdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsIm5vZGVfYm94Ijp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoidHNZRzZmZlVwYmpzOTBSendGUXlFRnFLX3hremJPMlhmQVUteTczTUpNdyIsInkiOiJxU2x3ZjhrbFJHUFVTcFNBd29HV3Z4RmhlT0dOS1ZrbTRheE9yWmVVSllRIn0sIm5vZGVfaWQiOiJrbC1jMnViZDZqanF1bWFsenQ1Iiwibm9uY2UiOiJIeFJDT3o0dVBhU3pIVDBMYmxqNmtEbUVHTTNiQkF4elIzSTRxdG53N2kwIiwic2VhbGVkIjp7ImN0IjoiaXlPSVhlTjctdWVnOGk4SDQyVl9ya0xLYXg3UjBYUmUyR2d4R1IyeW5XNEhGUjl3LTVFX1A3cG9fWEtrNFdYeFhoMzVtRW45SEgwd0ZJOWFMNUJlYUljcm9Hc1g1UjRXX1I4ZWJ0WjI2aHlPQlVKZnhvSmprYVVhVnRtYTdDeTdVWHhXNWVMXzZiYlM1MlllaGdyZG5WYkZ5RWJQcmI2ZGptanJfZ29yLUJ3M3dpYllmbHVjTXZlekh0S09WVHhiU0FFSnZOY0tNLURpOUVhRGJFZW5mc0NzQjg1SENzODhBZmtTZWo2QmswRm9ad2hvU0FySVFLbGh4UVdyVFFXWE5hRlAyWFI5NUlsTFR4SHotRjM5aEFGV29MbWdHclRxUUhUeFZ4Y2NyRE03bU5GQVlZZzB2WDZ5S1U0YVhBQ0NYSzFyQWhrcFlKMUk2NGkxNjF0ODFwNEw5YlBCZW00NWFJUEJEQzdwNFQ0IiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiUzRCQ0NZcl9MQktQc1B1bmZVM0R3MXFvRGN4NkpnOFBmYnRGekY5UUJ4MCIsInkiOiJOeWZ2SnhBblNudTkxV2x4NjN4OGpvanM5enpyVkZ3bFh0bVhMdHhTdDBjIn0sIml2IjoiMXdwWDluMVpyR0czUDc2eSIsImtleXMiOnsiZC0zdm13cmloaGRibml0NG9pIjoidWNLdW02cWNHTnlCdHhjU0JxTkFWOWZleUlMeFVZaW14WFZjcWdpeFNncUc1LUNhYmtTbmN0azk3TU1hbFFLNyJ9LCJ2IjoxfSwidG9fZGV2aWNlIjoiZC0zdm13cmloaGRibml0NG9pIiwidHlwZSI6ImtsLndpbmRvdy5saXN0IiwidiI6MX0",
+    "sig": "tbUsdY-WUmDovHZzNNr13GgplkU07qxiMhZLnmS9VlBdHYsHmqVTj7r7sBO9p8OwGMr_i3ChfYRxFrPOWdUrBg"
+  },
+  "expect": {
+    "reason": null,
+    "message": {
+      "v": 1,
+      "type": "kl.window.list",
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "to_device": "d-3vmwrihhdbnit4oi",
+      "at": "2026-09-23T18:04:11.201Z",
+      "nonce": "HxRCOz4uPaSzHT0Lblj6kDmEGM3bBAxzR3I4qtnw7i0",
+      "node_box": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "tsYG6ffUpbjs90RzwFQyEFqK_xkzbO2XfAU-y73MJMw",
+        "y": "qSlwf8klRGPUSpSAwoGWvxFheOGNKVkm4axOrZeUJYQ"
+      },
+      "windows": [
+        {
+          "device_id": "kld-kxxgvjxu2fdtvh5s",
+          "label": "Road laptop",
+          "platform": "windows",
+          "enrolled_at": "2026-09-23T18:04:11.201Z",
+          "attached": true
+        }
+      ]
+    }
+  }
+}

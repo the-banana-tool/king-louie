@@ -28,8 +28,18 @@ const DESKTOP_METHODS = Object.freeze({
   [IPC.DESKTOP_SETUP_STEP]: 'setupStep',
   [IPC.DESKTOP_SETUP_LATER]: 'setupLater',
   [IPC.DESKTOP_SETUP_FINISH]: 'setupFinish',
+  [IPC.DESKTOP_SETUP_WINDOW_ONLY]: 'setupWindowOnly',
   [IPC.DESKTOP_NODE_RESTART]: 'nodeRestart',
-  [IPC.DESKTOP_RESTART_LATER]: 'restartLater'
+  [IPC.DESKTOP_RESTART_LATER]: 'restartLater',
+  // Task 11: node management for the remote window (attach stage 3 part B)
+  [IPC.DESKTOP_NODE_ADD]: 'addNode',
+  [IPC.DESKTOP_NODE_UPDATE]: 'updateNode',
+  [IPC.DESKTOP_NODE_REMOVE]: 'removeNode',
+  [IPC.DESKTOP_NODE_SET_ORDER]: 'setNodeOrder',
+  [IPC.DESKTOP_NODE_SET_PAIRING]: 'setPairing',
+  [IPC.DESKTOP_NODE_CLEAR_PAIRING]: 'clearPairing',
+  [IPC.DESKTOP_NODE_SET_SETUP]: 'setSetup',
+  [IPC.DESKTOP_NODE_NOTE_SETUP]: 'noteSetup'
 });
 
 const unavailable = () => ({ ok: false, code: 'ATTACHED_UNAVAILABLE', error: 'Not available here.' });

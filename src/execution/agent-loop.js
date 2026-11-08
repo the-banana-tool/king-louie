@@ -132,7 +132,7 @@ class AgentLoop {
     let grantedPromise = this._pendingDirectoryAccess.get(dirKey);
     if (!grantedPromise) {
       grantedPromise = this.prompter
-        .requestDirectoryAccess({ directory: dirToAllow, toolName })
+        .requestDirectoryAccess({ directory: dirToAllow, toolName, signal: options?.signal || null })
         .catch(() => false);
       this._pendingDirectoryAccess.set(dirKey, grantedPromise);
       // Clean up the entry once resolved so a later denial of a different
@@ -425,7 +425,7 @@ class AgentLoop {
           if (call.toolName === 'AskUser') {
             const question = call.parameters?.question;
             toolResult = await this.prompter
-              .askUser({ question })
+              .askUser({ question, signal: callOptions.signal })
               .catch((err) => ({ ok: false, error: err.message || String(err) }));
           } else {
             toolResult = await this.executor.execute(

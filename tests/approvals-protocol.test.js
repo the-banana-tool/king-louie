@@ -29,6 +29,8 @@ const { phoneView, phoneReadAuthString } = require('./vectors/approval-v1/phone-
 // noise, not a signal, so this file's own run is silenced.
 setLogLevel('fatal');
 
+const { qrFor, enrollCode, enrollHashBytes, verifyWindowResponse, verifyWindowRevoke } = require('../src/approvals/window-messages');
+const { validateOpenedWindow } = require('../src/approvals/messages');
 const DIR = path.join(__dirname, 'vectors', 'approval-v1');
 // The read-key vectors (android-slim spec §8.8): `node`, and `android` where
 // the phone builds or signs something; never `ios`.
@@ -45,9 +47,11 @@ const BOX_KEY = ['enroll-console-box-key', 'enroll-console-box-key-equal', 'enro
 const SEALED_APPROVAL = ['request-sealed-display', 'response-approve-sealed', 'response-reject-sealed-changed-parameter', 'response-reject-sealed-hash-unsalted'];
 // Sealed questions (R-SP-4): the node's and both phones'.
 const SEALED_QUESTION = ['question-ask-sealed', 'question-answer-sealed'];
+// A window's enrollment (remote window R-RW-14, R-RW-34): the node's, until Task 15.
+const WINDOW = ['window-enroll-code', 'window-enroll-sealed', 'window-enroll-response-approve', 'window-enroll-response-read-key', 'window-enroll-response-hash-mismatch', 'window-revoke-sealed', 'window-list-sealed'];
 const SEALED_PHONES = [...SEAL, ...SEALED_QUESTION, 'request-sealed-display', 'enroll-console-box-key', 'box-key-valid'];
 const EXPECTED = [
-  'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
+  'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display', 'request-display-window',
   'request-malformed', 'request-display-edge', 'request-malformed-equivalent-keys',
   'response-approve', 'response-deny',
   ...['malformed-noncanonical', 'unsupported-version', 'wrong-alg', 'kid-mismatch', 'unknown-device', 'demo-device', 'test-key', 'revoked-device',
@@ -60,7 +64,8 @@ const EXPECTED = [
   ...SEAL,
   ...BOX_KEY,
   ...SEALED_APPROVAL,
-  ...SEALED_QUESTION
+  ...SEALED_QUESTION,
+  ...WINDOW
 ];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json') && f !== 'keys.json')
@@ -108,10 +113,14 @@ async function runResponseVector(v) {
 
 // What a phone does with a sealed request: open it, then hold the clear hash to
 // the opened content before anything is shown.
-function runSealVector(v) {
+function agreeWith(d) {
   const ecdh = crypto.createECDH('prime256v1');
-  ecdh.setPrivateKey(fromB64url(v.given.box.d));
-  const agree = (jwk) => ecdh.computeSecret(Buffer.concat([Buffer.from([0x04]), fromB64url(jwk.x), fromB64url(jwk.y)]));
+  ecdh.setPrivateKey(fromB64url(d));
+  return (jwk) => ecdh.computeSecret(Buffer.concat([Buffer.from([0x04]), fromB64url(jwk.x), fromB64url(jwk.y)]));
+}
+
+function runSealVector(v) {
+  const agree = agreeWith(v.given.box.d);
   let opened;
   try {
     opened = openSealed({ type: v.given.type, message: v.input, recipientId: v.given.box.device_id, agree });
@@ -128,8 +137,9 @@ describe('approval-v1 vectors', () => {
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
   });
 
-  it('69 vectors; the read-key ones name node and android only, android where the phone builds or signs; the sealed ones both phones where a phone builds or opens', () => {
-    assert.equal(EXPECTED.length, 69);
+  it('77 vectors; the read-key ones name node and android only, android where the phone builds or signs; the sealed ones both phones where a phone builds or opens', () => {
+    assert.equal(EXPECTED.length, 77);
+    for (const name of WINDOW) assert.deepEqual(byName.get(name).consumers, ['node'], name);
     for (const name of [...SEAL, ...BOX_KEY, ...SEALED_APPROVAL, ...SEALED_QUESTION]) {
       assert.deepEqual(byName.get(name).consumers, SEALED_PHONES.includes(name) ? ['node', 'ios', 'android'] : ['node'], name);
     }
@@ -139,6 +149,53 @@ describe('approval-v1 vectors', () => {
     }
     // iOS consumes exactly what it did before the read key.
     assert.deepEqual(vectors.filter((v) => v.consumers.includes('ios')).map((v) => v.name).filter((n) => READ_KEY.includes(n)), []);
+  });
+
+  it('window-enroll-code: the code, the QR and h from the given keys', () => {
+    const v = byName.get('window-enroll-code');
+    const given = { nonce: fromB64url(v.given.n), devicePublicKey: fromB64url(v.given.device_public_key), nodePublicKey: fromB64url(v.given.node_public_key) };
+    assert.equal(enrollCode(given), v.expect.code);
+    assert.equal(qrFor(given), v.expect.qr);
+    assert.equal(enrollHashBytes(given.devicePublicKey, given.nodePublicKey).toString('base64url'), v.expect.h);
+  });
+
+  it('window-enroll-sealed: opens, and the phone\'s hash over the opened key and its pin is expect.qr_hash', () => {
+    const v = byName.get('window-enroll-sealed');
+    assert.equal(verifyEd25519(v.input, v.given.node_public_key), true);
+    const { message } = open(v.input);
+    assert.equal(validateMessage(v.given.type, message), null);
+    const opened = openSealed({ type: v.given.type, message, recipientId: v.given.box.device_id, agree: agreeWith(v.given.box.d) });
+    assert.deepEqual(opened.message, v.expect.message);
+    assert.equal(validateOpenedWindow(v.given.type, opened.message), null);
+    assert.equal(enrollHashBytes(fromB64url(opened.content.window.public_key), fromB64url(v.given.pin_raw)).toString('base64url'), v.expect.qr_hash);
+  });
+
+  for (const name of ['window-enroll-response-approve', 'window-enroll-response-read-key', 'window-enroll-response-hash-mismatch']) {
+    it(name, () => {
+      const v = byName.get(name);
+      const verdict = verifyWindowResponse({
+        envelope: v.input, expected: v.given.request, nodeId: v.given.box.node_id, now: Date.parse(v.given.now), agree: agreeWith(v.given.box.d),
+        signerOf: (id) => (id === v.given.device.device_id ? { public_key: v.given.device.jwk } : null)
+      });
+      assert.deepEqual({ reason: verdict.reason, decision: verdict.decision || null }, v.expect);
+    });
+  }
+
+  it('window-revoke-sealed: verified by the device key, opened by the node', () => {
+    const v = byName.get('window-revoke-sealed');
+    const verdict = verifyWindowRevoke({ envelope: v.input, nodeId: v.given.box.node_id, now: Date.parse(v.given.now), signerOf: () => ({ public_key: v.given.device.jwk }) });
+    assert.equal(verdict.reason, null);
+    const opened = openSealed({ type: v.given.type, message: open(v.input).message, recipientId: v.given.box.node_id, agree: agreeWith(v.given.box.d) });
+    assert.deepEqual(opened.message, v.expect.message);
+    assert.equal(validateOpenedWindow(v.given.type, opened.message), null);
+  });
+
+  it('window-list-sealed: node-signed, opened by its one phone', () => {
+    const v = byName.get('window-list-sealed');
+    assert.equal(verifyEd25519(v.input, v.given.node_public_key), true);
+    const opened = openSealed({ type: v.given.type, message: open(v.input).message, recipientId: v.given.box.device_id, agree: agreeWith(v.given.box.d) });
+    assert.deepEqual(opened.message, v.expect.message);
+    assert.equal(validateOpenedWindow(v.given.type, opened.message), null);
   });
 
   it('the committed files are exactly what generate.js produces', () => {

@@ -59,7 +59,7 @@ const BRIDGE_HELP = {
   DEVICE_UNPAIRED: { help: 'King Louie Node no longer knows this app. In Local service settings press Unpair, then Pair.' },
   SERVICE_KEY_CHANGED: { help: 'King Louie Node\'s identity changed after this app paired with it. If you reinstalled it, press Unpair in Local service settings, then Pair. If you did not, do not pair again until you know why.' },
   PROTOCOL_MISMATCH: { help: 'This app and King Louie Node are too far apart in version. Restart the node. If that does not help, install the same version of both.', action: { id: 'nodeRestart', label: 'Restart King Louie Node' } },
-  ANOTHER_DEVICE: { help: 'Another desktop is attached to King Louie Node. Close it, then press Check again.' }
+  TOO_MANY_WINDOWS: { help: 'Too many windows are attached to King Louie Node. Close one, then press Check again.' }
 };
 
 // The press after a refused move, by what can actually help. MIGRATION_BUSY and
@@ -164,6 +164,10 @@ function nextSetupStep(facts) {
   if (f.pendingPair) return 'pair';
   if (!f.paired) {
     const n = f.node;
+    // Task 13: if windowOnly is set but a node appeared, go back to install to reconsider
+    if (setupOf(f).windowOnly && n) return 'install';
+    // Task 13: if windowOnly is set and no node, we're done (remote window only, no service)
+    if (setupOf(f).windowOnly && !n) return 'done';
     return n && !n.fresh && n.personal && n.task === 'registered' && !n.programGone ? 'pair' : 'install';
   }
   if (f.attached === false) return 'pair';
@@ -218,8 +222,31 @@ function programGoneBody(node) {
 
 function installStep(s, f) {
   const n = f.node;
-  if (!n || (!n.fresh && !n.personal)) {
-    const b = s.bridge || {};
+  const b = s.bridge || {};
+  const fleetDetected = s.fleetMachine || false;
+  
+  // Check if there's a detected fleet machine - this takes precedence over bridge errors
+  if (fleetDetected) {
+    return {
+      lines: ['A local King Louie service is installed on this computer.', 'Local service settings shows what was found and how to connect this app to it.'],
+      error: { code: 'NOT_PERSONAL', message: 'This computer already has a King Louie setup that this app cannot take over, so it does not install King Louie Node here.' },
+      actions: [SERVICE_SETTINGS, CHECK_AGAIN]
+    };
+  }
+  
+  // Check for bridge detection error (ok: false means bridge detection failed)
+  // This prevents installation when we can't determine if a fleet service exists
+  if (!n && !b.ok && b.error) {
+    return {
+      lines: [long(b.error)],
+      error: { code: b.code || 'BRIDGE_FILE_UNTRUSTED', message: long(b.error) },
+      actions: [CHECK_AGAIN, SERVICE_SETTINGS]
+    };
+  }
+  
+  // Check if there's a detected fleet service (bridge.ok) with no node
+  // or a non-personal non-fresh node - both mean we can't install a personal node here
+  if ((!n && b.ok) || (n && !n.fresh && !n.personal)) {
     const lines = [];
     if (b.ok) lines.push('A local King Louie service is installed on this computer.');
     else if (b.error) lines.push(long(b.error));
@@ -230,15 +257,25 @@ function installStep(s, f) {
       actions: [SERVICE_SETTINGS, CHECK_AGAIN]
     };
   }
-  const help = !n.fresh && own(TASK_HELP, n.task);
+  const help = !n || n.fresh ? undefined : own(TASK_HELP, n.task);
   if (help) return { lines: [help.help], error: { code: help.code, message: help.message }, actions: [CHECK_AGAIN] };
-  if (n.programGone) return installAnswer(s) || programGoneBody(s.node);
+  if (n && n.programGone) return installAnswer(s) || programGoneBody(s.node);
+  // Task 13: offer the third action "Just a window" when no node exists yet
+  const actions = [{ id: 'nodeInstallPreview', label: 'Install…' }];
+  if (!n) {
+    // No node at all - offer both service settings and window-only
+    actions.push({ id: 'openServiceSettings', label: 'Local service settings' });
+    actions.push({ id: 'setupWindowOnly', label: 'Just a window' });
+  } else if (n.fresh && n.personal) {
+    // Fresh personal node - offer window-only
+    actions.push({ id: 'setupWindowOnly', label: 'Just a window' });
+  }
   return installAnswer(s) || {
     lines: [
       'King Louie now runs as King Louie Node, a background program on this computer that runs as you. This window is how you reach it.',
       'Installing adds a logon task that starts it when you sign in. You see what it does before anything changes.'
     ],
-    actions: [{ id: 'nodeInstallPreview', label: 'Install…' }]
+    actions
   };
 }
 

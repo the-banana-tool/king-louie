@@ -18,6 +18,7 @@ const HELP = `Usage:
   king-louie-service desktop pair <request> [--data-dir DIR] [--yes] [--json]
   king-louie-service desktop unpair <device-id> [--data-dir DIR]
   king-louie-service desktop list [--data-dir DIR]
+  king-louie-service features set remoteWindow on|off [--data-dir DIR]
   king-louie-service models status|refresh [--data-dir DIR]
   king-louie-service profiles list|show <id-or-name>|set-default <id-or-name> [--data-dir DIR]
   king-louie-service import --from <desktop user-data dir> [--case <case dir or id> [--yes]] [--data-dir DIR] [--dry-run]
@@ -489,6 +490,11 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
         });
         io.stdout.write(`${command === 'token' ? 'Token' : 'Secret'} "${name}" saved (encrypted).\n`);
         return 0;
+      }
+
+      case 'features': {
+        const { runFeaturesCommand } = require('./commands/features');
+        return await runFeaturesCommand({ sub, arg, arg2, dataDir, io, deps: { runningServicePid } });
       }
 
       case 'models': {

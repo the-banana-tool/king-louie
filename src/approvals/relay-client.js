@@ -28,14 +28,17 @@ function sleepSync(ms) {
 const F3_METHODS = new Set([
   'relay.hello', 'approval.submit', 'approval.status', 'approval.response', 'message.submit', 'push.notify',
   'enroll.open', 'enroll.done', 'enroll.claim', 'device.enroll', 'device.revoke', 'device.read_key', 'device.box_key', 'device.state',
-  'audit.slice', 'audit.head'
+  'audit.slice', 'audit.head',
+  'window.open', 'window.enroll_response', 'window.revoke', 'window.list'
 ]);
 const RESERVED_PREFIXES = ['mesh.task.', 'mesh.channel.'];
 // relay → node methods answered by the onMessage handler (service-wiring).
 // device.read_key (android-slim spec §8.7): a device key's statement of its
 // read key, staged beside device.enroll; answers { state[, reason] }.
 // device.box_key (sealed phones, R-SP-10): the same, for its box key.
-const NODE_INBOUND = ['approval.response', 'enroll.claim', 'device.enroll', 'device.revoke', 'device.read_key', 'device.box_key', 'audit.slice', 'audit.head'];
+// window.* (R-RW-3, R-RW-14): a front door asking for a dial-back, and a phone's
+// answers about windows.
+const NODE_INBOUND = ['approval.response', 'enroll.claim', 'device.enroll', 'device.revoke', 'device.read_key', 'device.box_key', 'audit.slice', 'audit.head', 'window.open', 'window.enroll_response', 'window.revoke', 'window.list'];
 
 function isReservedMethod(name) {
   return F3_METHODS.has(name) || RESERVED_PREFIXES.some((p) => String(name).startsWith(p));

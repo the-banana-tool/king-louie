@@ -142,6 +142,13 @@ describe('origin marks', () => {
     assert.deepStrictEqual(callers.filter((f) => !allowed.has(f)), []);
   });
 
+  it('markRemoteWindowEvent is called only by the bridge dispatcher', () => {
+    const allowed = new Set(['src/core/origin.js', 'src/desktop-bridge/bridge-dispatcher.js']);
+    const callers = findMarkCallers(/markRemoteWindowEvent\(/);
+    assert.ok(callers.includes('src/core/origin.js'), 'the walk found the definition');
+    assert.deepStrictEqual(callers.filter((f) => !allowed.has(f)), []);
+  });
+
   it('markLocalRequester is called only by origin.js, the ToolExecutor, the standalone wrapper and the bridge dispatcher', () => {
     const allowed = new Set([
       'src/core/origin.js',

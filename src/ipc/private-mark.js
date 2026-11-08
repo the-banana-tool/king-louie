@@ -5,14 +5,15 @@
 // (src/models/private-facts.js) and nothing is marked; with it, the chat or
 // the case is marked, one way. Only an event the host marked as the local
 // desktop's (the app's own window, or a paired desktop through the bridge
-// dispatcher) is accepted; a tool, a management tool, MCP or a channel never
+// dispatcher), or a remote window's call the phone approved (remote window plan
+// R-RW-13), is accepted; a tool, a management tool, MCP or a channel never
 // reaches these. A request to clear a mark is PRIVATE_ONE_WAY.
 //
 // Order on confirm: a bridge chat is refused (PRIVATE_BRIDGE_CHAT: its text
 // passes through the bridge's servers, and its voice reply may go to
 // ElevenLabs), then a chat with a turn running (PRIVATE_CHAT_BUSY), then the
 // mark: a case chat marks its case and every chat of it.
-const { isLocalDesktopEvent } = require('../core/origin');
+const { isLocalDesktopEvent, remoteWindowApproved } = require('../core/origin');
 const { bridgeOriginFor } = require('../history/bridge-origin');
 const { egressPolicy } = require('../models/egress');
 const { privateFacts } = require('../models/private-facts');
@@ -29,7 +30,7 @@ const BUSY = () => refusal('PRIVATE_CHAT_BUSY', 'A reply is still running in thi
 // The checks every call makes, before anything is read. → a refusal or null.
 function precheck(event, payload) {
   if (Object.prototype.hasOwnProperty.call(payload, 'private') && payload.private !== true) return ONE_WAY();
-  if (!isLocalDesktopEvent(event)) return NOT_WINDOW();
+  if (!isLocalDesktopEvent(event) && remoteWindowApproved(event) === null) return NOT_WINDOW();
   return null;
 }
 

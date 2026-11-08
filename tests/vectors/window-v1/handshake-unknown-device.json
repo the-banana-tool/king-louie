@@ -1,0 +1,42 @@
+{
+  "name": "handshake-unknown-device",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "session_id": "w2jUc285Clxi20TXukyRC_tWJUeOTbssqYfXSZxvX9M",
+    "window": {
+      "key": "A",
+      "device_id": "kld-kxxgvjxu2fdtvh5s",
+      "public_key": "UwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec",
+      "ephemeral": "f2-7975Bgm-8Bew6I2PgsN4JDeDThtcnT72gk4o3VTI"
+    },
+    "node": {
+      "key": "web-01",
+      "node_id": "kl-t7zd5qd7crh3ttn3",
+      "public_key": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec",
+      "ephemeral": "0QTTdv0344J8tvO-9depSIHKRzeYYWiXYeYTeW9wiVo"
+    },
+    "pin": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec",
+    "known_devices": []
+  },
+  "input": {
+    "hello_w": "AQGfb_EEhopnApS2rqX657FYB9m0Q2jVj468M03NUgGHBmtsZC1reHhndmp4dTJmZHR2aDVzUwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec",
+    "hello_n": "AmhufcEb_ggzH6LN0ae-CRdwx92orbYOXZVSDGINneAIa2wtdDd6ZDVxZDdjcmgzdHRuMwFD5LvV8wm61jDdf1wS-5TjQtPMfmB2Wb46_lAlvEnnAnmwJc7-btpMUCoKQCXXouEW56pxldDaRsEAM6HMxHyByokkwrODH2hSyp4gV5AyQx6DbBgHK-A38ll4MtQgAQ",
+    "auth_w": "A5t-pie80B1n9pt7kQmbMJkeKyfT7rPkv3BO-Ga9U4zHlGfMDwSbD_xyYMeExeqmZVhfpYNNaccVBF3XMbDawgI"
+  },
+  "expect": {
+    "hello_n_answered": true,
+    "close": {
+      "code": 4401,
+      "reason": "handshake"
+    },
+    "stored_other_key": {
+      "key": "jSZydkiE_QCOZf8H3eSZP5D-OOACxAHCLqQ0eGLxs64",
+      "close": {
+        "code": 4401,
+        "reason": "handshake"
+      }
+    }
+  }
+}

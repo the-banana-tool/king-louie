@@ -1,0 +1,17 @@
+{
+  "name": "window-enroll-code",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "n": "FJDRt-eM7xX12bPMJGadbg",
+    "device_public_key": "UwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec",
+    "node_public_key": "bxliVJqIWRjT2MV0VJkZTyAom9o-BB5DPk-hXhZVhCM"
+  },
+  "input": null,
+  "expect": {
+    "code": "132471",
+    "qr": "kl1:eyJoIjoiZzcxd29UQ25JV0tCNjVOaXhJc1VEN1BpRDg3RDYtQ3NVWW9HN0pnX0pDQSIsIm4iOiJGSkRSdC1lTTd4WDEyYlBNSkdhZGJnIiwidCI6ImtsLndpbmRvdyJ9",
+    "h": "g71woTCnIWKB65NixIsUD7PiD87D6-CsUYoG7Jg_JCA"
+  }
+}

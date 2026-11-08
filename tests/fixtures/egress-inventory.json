@@ -150,6 +150,18 @@
     "label": "transport",
     "why": "the service's loopback listener for a paired desktop (127.0.0.1 only); it carries IPC, and makes no model call"
   },
+  "src/desktop-bridge/oauth-client.js": {
+    "label": "no-chat-text",
+    "why": "a window's OAuth with its front door: registration, tokens and revocation, credentials only, never a chat's text"
+  },
+  "src/desktop-bridge/remote-client.js": {
+    "label": "transport",
+    "why": "a remote window's socket to the owner's own node, through a front door that sees only sealed records; carries the bridge by design, not a model call"
+  },
+  "src/desktop-bridge/window-dialer.js": {
+    "label": "transport",
+    "why": "the node's dial-back to its pinned front door for a remote window: only window-v1 handshake messages and sealed records cross it, to the owner's own enrolled window; not a model call"
+  },
   "src/execution/agent-loop.js": {
     "label": "behind-gate",
     "gate": "src/providers/inference-router.js",

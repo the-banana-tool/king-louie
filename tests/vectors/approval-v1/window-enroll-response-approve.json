@@ -1,0 +1,39 @@
+{
+  "name": "window-enroll-response-approve",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "box": {
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "d": "G4xu6oJW0Cytp2E9o732vG-h6xdVFltHuGbnFLBr8_8"
+    },
+    "device": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+        "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+      }
+    },
+    "type": "kl.window.enroll.response",
+    "request": {
+      "request_id": "e389ad13-2de5-4faf-892e-311de27ea147",
+      "nonce": "DgLxD7RiX5bgdUScE6dHmtIEUiFmX5voaCGzTVOQjBQ",
+      "enroll_hash": "bjR4nK3wgSq87NI4SfBtHRq422HJc298pmNrBDByrBA",
+      "expires_at": "2026-09-23T18:14:11.201Z"
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJlbnJvbGxfaGFzaCI6ImJqUjRuSzN3Z1NxODdOSTRTZkJ0SFJxNDIySEpjMjk4cG1OckJEQnlyQkEiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODoxNDoxMS4yMDFaIiwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub25jZSI6IkRnTHhEN1JpWDViZ2RVU2NFNmRIbXRJRVVpRm1YNXZvYUNHelRWT1FqQlEiLCJyZXF1ZXN0X2lkIjoiZTM4OWFkMTMtMmRlNS00ZmFmLTg5MmUtMzExZGUyN2VhMTQ3Iiwic2VhbGVkIjp7ImN0IjoiaHVBOHRMU2RuMlYtOWV1YW1LRTU1ZDYyZlVMOWVVMnVuN1Z4dDRqYXpjU2JZVlJua3FwVWEyekcyakFQeXZCdTJPSXJCTFpBNnNDWFY1eGZrV2g1SVhVYWotVGNlSTRQcUttWm1XRTlYd2ljNGJmNmRnc21uOGhzbEo4ZmlPbk5mVFJETzZuWkl0NGpMSERyMzNnNmFQSkNMelZYczBXQ0ZUbmJLMV9Od3FNNVBacVIwVVZfRjdsaldjQXdjNFU5MmdnWVhyUmNfa3pWdmZYUHVnbVlsYllHZll5TTlUc21DUzBDUF84VjRDV05KajZ1d2ExV085S2J4blVxMUdKU3ZTX0taZTdqMGQtRGpnSGxGZF9sS2gxRnBuQmdKRFdieWJFc3FTWExLMGhMM0NKdXJTalo1eGNJNjdUOFoyMzNCdV9fZFZhWndvVkZUcFVycm5zNm95WFpNclZnVzhFSGh5YXQ1MEZUQnJvIiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiN3EzOVZiLWJ6VHNiNlFibkUySjl0Yld3X2JETHlvMmxyOFZmMzBPQmVVVSIsInkiOiJFMzMtRUVUWDNKbDFYTGRHM1hqWEx1QmYyNExvU0lKUVVyeExwWWRDTzRvIn0sIml2IjoiZWhwM2FhQzVFS3U0cnRHSyIsImtleXMiOnsia2wtYzJ1YmQ2ampxdW1hbHp0NSI6InRFa25Pb1YtSnZNQWJNemY5V0lTY2J6cmpqR0FvcF9NT1czc0xxa1ZtdUZSajdKMXZ0RjZfRk5OMTc0LUJObGkifSwidiI6MX0sInNpZ25lZF9hdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsInR5cGUiOiJrbC53aW5kb3cuZW5yb2xsLnJlc3BvbnNlIiwidiI6MX0",
+    "sig": "-iXZjWI-Siiydja-Wn8FxwABmiEy4aaRcp_BUZpLcw7Fq2oHh0ISodkvlz05-DSXHxqnc0y8qNkJ_KVKAmflfw"
+  },
+  "expect": {
+    "reason": null,
+    "decision": "approve"
+  }
+}

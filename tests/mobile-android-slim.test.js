@@ -78,7 +78,11 @@ const SPEC_ROUTE_AUTH = [
   ['POST', '/v1/enroll/{code_id}', 'code'],
   ['GET', '/v1/enroll/{code_id}', 'code'],
   ['POST', '/v1/devices/invites/{id}/claim', 'invite'],
-  ['GET', '/v1/repin', 'none']
+  ['GET', '/v1/repin', 'none'],
+  // Remote window R-RW-14, beside the table of §8.4.
+  ['POST', '/v1/windows/enroll', 'device'],
+  ['POST', '/v1/windows/revoke', 'device'],
+  ['GET', '/v1/windows', 'read']
 ];
 
 // The relay test's ROUTE_AUTH, read as text: requiring that file would run its tests here too.

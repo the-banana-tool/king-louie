@@ -712,9 +712,8 @@ const actions = {
       return { ok: true, untrusted_output: true, image, page: pageInfo, _images, note: IMAGE_NOTE };
     }
     const fs = require('fs');
-    const os = require('os');
     const path = require('path');
-    const screenshotDir = path.join(os.tmpdir(), 'king-louie-screenshots');
+    const screenshotDir = require('../../browser/screenshot-store').screenshotDir();
     if (!fs.existsSync(screenshotDir)) fs.mkdirSync(screenshotDir, { recursive: true });
     const screenshotPath = path.join(screenshotDir, `screenshot-${Date.now()}.png`);
 

@@ -85,6 +85,9 @@ class WorkflowEngine extends EventEmitter {
     this.eventLedger = options.eventLedger || null;
     this.workflows = new Map();
     this.activeExecutions = new Map(); // workflowId → AbortController
+    // workflowId → AbortController only cancel() aborts. A pause lets its running step
+    // finish; a cancel tells that step too (its executor's abortSignal).
+    this.cancelControllers = new Map();
     // Per-workflow mutex serializes _save (writeFile + rename) and prevents
     // pause/cancel from racing _executeLoop's state mutations.
     this._saveMutex = new AsyncMutex();
@@ -197,6 +200,7 @@ class WorkflowEngine extends EventEmitter {
 
     const abortController = new AbortController();
     this.activeExecutions.set(workflowId, abortController);
+    this.cancelControllers.set(workflowId, new AbortController());
 
     workflow.status = WORKFLOW_STATUS.RUNNING;
     workflow.startedAt = workflow.startedAt || new Date().toISOString();
@@ -209,7 +213,9 @@ class WorkflowEngine extends EventEmitter {
     try {
       await this._executeLoop(workflow, abortController.signal);
     } catch (error) {
-      if (error.name === 'AbortError' || abortController.signal.aborted) {
+      if (workflow.status === WORKFLOW_STATUS.CANCELLED) {
+        // cancel() set this and said so; the abort it caused is not a pause.
+      } else if (error.name === 'AbortError' || abortController.signal.aborted) {
         workflow.status = WORKFLOW_STATUS.PAUSED;
         this.emit('workflow:paused', { workflowId, chatId });
         this._recordEvent(EVENT_TYPES.WORKFLOW_PAUSED, workflowId, { chatId });
@@ -220,6 +226,7 @@ class WorkflowEngine extends EventEmitter {
       }
     } finally {
       this.activeExecutions.delete(workflowId);
+      this.cancelControllers.delete(workflowId);
       workflow.updatedAt = new Date().toISOString();
       this._save(workflow);
     }
@@ -254,6 +261,7 @@ class WorkflowEngine extends EventEmitter {
     if (controller) {
       controller.abort();
     }
+    this.cancelControllers.get(workflowId)?.abort();
     const workflow = this.workflows.get(workflowId);
     if (workflow) {
       workflow.status = WORKFLOW_STATUS.CANCELLED;
@@ -511,6 +519,8 @@ class WorkflowEngine extends EventEmitter {
         executeOptions.allowedDirectories = snapshot.allowedDirectories;
       }
     }
+    const cancelSignal = this.cancelControllers.get(workflow.id)?.signal || null;
+    if (cancelSignal) executeOptions.abortSignal = cancelSignal;
     // The task's model role (models spec 2026-09-27 §8), else its agent's.
     if (task.role) executeOptions.role = task.role;
     // A planned preferredModel was written by the planner LLM, so it must
@@ -562,6 +572,8 @@ class WorkflowEngine extends EventEmitter {
         this.agentExecutorAdapter.execute(agent, fullMessage, executeOptions),
         timeoutPromise
       ]);
+      // What a cancelled step hands back is not its result.
+      if (cancelSignal && cancelSignal.aborted) throw new Error('Workflow cancelled');
 
       task.status = TASK_STATUS.COMPLETED;
       task.result = result.content || '';

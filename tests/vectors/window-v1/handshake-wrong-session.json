@@ -1,0 +1,38 @@
+{
+  "name": "handshake-wrong-session",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "session_id": "w2jUc285Clxi20TXukyRC_tWJUeOTbssqYfXSZxvX9M",
+    "window": {
+      "key": "A",
+      "device_id": "kld-kxxgvjxu2fdtvh5s",
+      "public_key": "UwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec",
+      "ephemeral": "f2-7975Bgm-8Bew6I2PgsN4JDeDThtcnT72gk4o3VTI"
+    },
+    "node": {
+      "key": "web-01",
+      "node_id": "kl-t7zd5qd7crh3ttn3",
+      "public_key": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec",
+      "ephemeral": "0QTTdv0344J8tvO-9depSIHKRzeYYWiXYeYTeW9wiVo"
+    },
+    "pin": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec",
+    "other_session_id": "5jN50xdrG9mruGjl-EszkX8J-gLXRe_8TIpqsxBXuOY"
+  },
+  "input": {
+    "hello_w": "AQGfb_EEhopnApS2rqX657FYB9m0Q2jVj468M03NUgGHBmtsZC1reHhndmp4dTJmZHR2aDVzUwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec",
+    "hello_n_other_session": "AmhufcEb_ggzH6LN0ae-CRdwx92orbYOXZVSDGINneAIa2wtdDd6ZDVxZDdjcmgzdHRuMwFD5LvV8wm61jDdf1wS-5TjQtPMfmB2Wb46_lAlvEnnhEmjubdBcfMZAEaZB3RNhNT3lmWGu6ARcE1_sS7Gt8NnKXWqMVq3txQ-_1iJgIgtHbVa_Zzt1wiqujirlrcZAw",
+    "auth_w": "A5t-pie80B1n9pt7kQmbMJkeKyfT7rPkv3BO-Ga9U4zHlGfMDwSbD_xyYMeExeqmZVhfpYNNaccVBF3XMbDawgI"
+  },
+  "expect": {
+    "window_on_other_hello_n": {
+      "code": 4401,
+      "reason": "handshake"
+    },
+    "node_on_other_session": {
+      "code": 4401,
+      "reason": "handshake"
+    }
+  }
+}

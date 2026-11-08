@@ -29,7 +29,7 @@ describe('loadServiceConfig', () => {
   it('defaults to agent profile with listeners and chat channels off, on the service ports', () => {
     assert.deepStrictEqual(loadServiceConfig(tmp()), {
       profile: 'agent',
-      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false },
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false, remoteWindow: false },
       ports: { gateway: 18793, webhook: 18794, desktopBridge: 18796 },
       relay: null,
       audit: { retentionDays: 365 },
@@ -240,7 +240,7 @@ describe('loadServiceConfig: only an admin-owned file may enable a listener', ()
 
   it('defaults every feature off when there is no admin config at all', () => {
     assert.deepStrictEqual(loadServiceConfig(tmp(), {}, opts(path.join(tmp(), 'nope'))).features, {
-      gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false
+      gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false, remoteWindow: false
     });
   });
 });
@@ -304,7 +304,7 @@ describe('loadServiceConfig: unknown keys in the admin service.json (R55)', () =
     assert.throws(() => loadServiceConfig(tmp(), {}, opts(admin)), (err) => {
       assert.strictEqual(
         err.message,
-        `Invalid ${file}: unknown key "features.webhook" (known: gateway, webhooks, mesh, channels, appDiscovery, desktopBridge)`
+        `Invalid ${file}: unknown key "features.webhook" (known: gateway, webhooks, mesh, channels, appDiscovery, desktopBridge, remoteWindow)`
       );
       return true;
     });
@@ -329,12 +329,12 @@ describe('loadServiceConfig: unknown keys in the admin service.json (R55)', () =
     const admin = tmp();
     writeAdmin(admin, {
       profile: 'runbook',
-      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false },
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false, remoteWindow: false },
       ports: { gateway: 18793, webhook: 18794, desktopBridge: 18796 }
     });
     const cfg = loadServiceConfig(tmp(), {}, opts(admin));
     assert.strictEqual(cfg.profile, 'runbook');
-    assert.deepStrictEqual(Object.keys(cfg.features).sort(), ['appDiscovery', 'channels', 'desktopBridge', 'gateway', 'mesh', 'webhooks']);
+    assert.deepStrictEqual(Object.keys(cfg.features).sort(), ['appDiscovery', 'channels', 'desktopBridge', 'gateway', 'mesh', 'remoteWindow', 'webhooks']);
   });
 
   // The brief's own wording ("still only warns... whatever their names") never

@@ -2,6 +2,8 @@ module.exports = {
   APP_QUIT_WINDOW: 'app:quitWindow',
 
   CHAT_LOAD: 'chat:load',
+  CHAT_RUNNING: 'chat:running',
+  CHAT_READ_SCREENSHOT: 'chat:readScreenshot',
   CHAT_GET: 'chat:get',
   CHAT_CREATE: 'chat:create',
   CHAT_SET_ACTIVE: 'chat:setActive',
@@ -293,8 +295,18 @@ module.exports = {
   DESKTOP_SETUP_STEP: 'desktop:setupStep',
   DESKTOP_SETUP_LATER: 'desktop:setupLater',
   DESKTOP_SETUP_FINISH: 'desktop:setupFinish',
+  DESKTOP_SETUP_WINDOW_ONLY: 'desktop:setupWindowOnly',
   DESKTOP_NODE_RESTART: 'desktop:nodeRestart',
   DESKTOP_RESTART_LATER: 'desktop:restartLater',
   DESKTOP_STATUS_CHANGED: 'desktop:statusChanged',
-  DESKTOP_IMPORT_PROGRESS: 'desktop:importProgress'
+  DESKTOP_IMPORT_PROGRESS: 'desktop:importProgress',
+  // Task 11: node management IPC for the remote window (attach stage 3 part B)
+  DESKTOP_NODE_ADD: 'desktop:addNode',
+  DESKTOP_NODE_UPDATE: 'desktop:updateNode',
+  DESKTOP_NODE_REMOVE: 'desktop:removeNode',
+  DESKTOP_NODE_SET_ORDER: 'desktop:setNodeOrder',
+  DESKTOP_NODE_SET_PAIRING: 'desktop:setPairing',
+  DESKTOP_NODE_CLEAR_PAIRING: 'desktop:clearPairing',
+  DESKTOP_NODE_SET_SETUP: 'desktop:setSetup',
+  DESKTOP_NODE_NOTE_SETUP: 'desktop:noteSetup'
 };

@@ -113,7 +113,10 @@ missing the `cwd` key at all is malformed, not defaulted); `envelope` actions
 have no `cwd` field at all, since they name a C3 executor and case, not a
 directory. Every action kind requires `summary`.
 
-`origin` is `{ client, session, job_id }`, plus `deviceId` when `client` is `desktop`.
+`origin` is `{ client, session, job_id }`, plus `deviceId` when `client` is `desktop`
+or `remote-window`, so a card names the window that asked. A phone without this
+change rejects a `remote-window` origin with `deviceId` as `malformed`, so phones
+upgrade before any node serves a remote window.
 The request lives at most 300 seconds (`expires_at − created_at`, 30–300 s).
 
 ### 3.2 `kl.approval.response` (phone-signed)
@@ -1021,7 +1024,7 @@ their field. See `src/approvals/audit-fields.js`.
 
 ### Vectors
 
-Twenty more, 69 in all (`generate.js --check` says `69 vectors match`).
+Twenty more, and `request-display-window`: 70 in all (`generate.js --check` says `70 vectors match`).
 `keys.json` adds `A_box` and `B_box`. A vector's `given.box` is the recipient's id
 and key.
 
@@ -1043,3 +1046,54 @@ and key.
 
 `.github/workflows/test.yml`'s `phone-cores-android` and `phone-cores-ios` run both
 cores against them on every pull request and every push to `main`.
+
+## Revised 2026-11-04: a window's enrollment
+
+A remote window asks to attach to a node through a front door that is treated as hostile
+(remote window plan R-RW-14, R-RW-15, R-RW-34). All four types are born sealed: they have
+no clear form, and join `SEAL_TABLE`.
+
+| Type | Signed by | Sealed to | Clear | Content |
+|---|---|---|---|---|
+| `kl.window.enroll` | node | the phones, the node | `v, type, request_id, node_id, node_name, enroll_hash, created_at, expires_at, nonce, node_box` | `window: { device_id, public_key, label, platform }, node_key, salt` |
+| `kl.window.enroll.response` | phone, device key only | the node's box | `v, type, request_id, node_id, enroll_hash, nonce, device_id, expires_at, signed_at` | `decision` (`approve`, `deny`) |
+| `kl.window.revoke` | phone, device key only | the node's box | `v, type, node_id, window_id, device_id, created_at, expires_at, nonce` | `reason` |
+| `kl.window.list` | node | one phone | `v, type, node_id, to_device, at, nonce, node_box` | `windows: [{ device_id, label, platform, enrolled_at, attached }]` |
+
+`enroll_hash = saltedHash(salt, { window, node_key })`, `node_key` the node's hex SPKI,
+`public_key` raw Ed25519 in base64url, `platform` `windows`. A request lasts 10 minutes. A
+response copies the request's `request_id`, `enroll_hash`, `nonce` and `expires_at`. `signed_at`
+dates it. The node refuses a response signed by the read key (`bad_signature`), one that is not an
+active approver's, and one whose hash is not the request's (`enroll_hash_mismatch`). The first
+answer stands; a later one is `already_answered`.
+
+**The QR is the window's**, not the node's: `kl1:` + base64url of JCS `{ t: 'kl.window', h, n }`,
+`h = b64url(SHA-256(raw_device_key ‖ raw_node_key))`, `n` 16 random bytes that never cross a
+socket. The phone computes `h` from the opened `window.public_key` and **its own pin for
+`node_id`**, never `node_key`, and enables Allow only on equality.
+
+**The code.** After Allow the phone shows six digits: the first 8 bytes of
+SHA-256(`kl-window-confirm-v1\n` ‖ n ‖ raw_device_key ‖ raw_node_key), big-endian, modulo
+1000000, zero padded. The owner types them into the window, which computes the same over
+the key its handshake proved. Only on a match does it keep that key as its pin. Five wrong codes
+end the attempt.
+
+**Routes.** `POST /v1/windows/enroll` and `POST /v1/windows/revoke` (auth `device`) forward the body
+to the node as `window.enroll_response` and `window.revoke`, and answer `202 { state, reason,
+pending_apply }`. `GET /v1/windows` (auth `read`) answers rows of `{ node_id, envelope | null }`: each
+active node's `kl.window.list`, null when it cannot say, and any `kl.window.enroll` still in the
+mailbox; a phone tells them by the opened message's type. Each request is sent with
+`message.submit` and the push `{ kind: 'window', id: request_id }`, fcm only.
+
+**Where the record goes.** A personal node writes `desktop-devices.json` (`remote: true`) on an
+approve and removes it on a revoke (`revoked`). A fleet node stages: an approve answers `{ state:
+'approved', pending_apply: true }` and counts for nothing until `device apply` verifies the pair and
+writes it; a revoke answers `revoked-pending-apply` and takes effect at once from an in-memory
+overlay rebuilt from what is staged. A revoke dated more than 5 minutes before the record it
+meets is `stale`. A key of small order, or a published test key, is never enrolled.
+
+`window.revoke` and `window.list` are answered with `features.remoteWindow` off, so a phone can
+always cut a window off; `window.open` and `window.enroll_response` are `remote_window_off` then.
+
+Not bound to the asking phone: `kl.window.list` carries no nonce of the phone's, so a relay can
+replay an older list to the phone it was sealed to; `at` says how old it is.

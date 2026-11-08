@@ -7053,8 +7053,7 @@ async function handleChatPlanAndExecute() {
   try {
     const result = await window.electron.workflow.plan(goal, {
       chatId,
-      workingDirectory,
-      chatMessages
+      workingDirectory
     });
     if (!result?.ok) {
       removePlannerIndicator();
@@ -9358,6 +9357,32 @@ function showTextInputDialog({ heading: headingText, value = '', placeholder = '
   });
 }
 
+// The node refused: nothing was stored and any reply running here goes on, so its
+// streaming node and Stop stay. The words go back in the box.
+function showBusyRefusal(chatId, message, refusal, tempId = null) {
+  appState.chats = appState.chats.map((chat) => (
+    chat.id === chatId && tempId && Array.isArray(chat.messages)
+      ? { ...chat, messages: chat.messages.filter((m) => m.id !== tempId) }
+      : chat
+  ));
+  // Only with no stream to lose: a redraw empties the view.
+  if (!appState.activeResponses.has(chatId)) refreshUI();
+  dom.chatMessages.querySelector('.chat-busy-refusal')?.remove();
+  addMessage('assistant', refusal.error || 'Unable to send message.');
+  const added = dom.chatMessages.lastElementChild;
+  added?.classList.add('chat-busy-refusal');
+  const streaming = dom.chatMessages.querySelector('.message.streaming');
+  if (streaming && added && added !== streaming) dom.chatMessages.insertBefore(added, streaming);
+  if (!dom.userInput.value) dom.userInput.value = message;
+}
+
+// A refused send's attachments go back beside whatever was added since.
+function giveBackAttachments(images, documents) {
+  appState.pendingImages = [...images, ...(appState.pendingImages || [])];
+  appState.pendingDocuments = [...documents, ...(appState.pendingDocuments || [])];
+  renderPendingImages();
+}
+
 async function sendMessage() {
   const message = dom.userInput.value.trim();
   const pendingImages = Array.isArray(appState.pendingImages) ? [...appState.pendingImages] : [];
@@ -9783,16 +9808,20 @@ async function sendMessage() {
     }
   }
 
+  // A reply is streaming in this chat: a redraw would drop its node, so the new row
+  // waits for the answer (on the bridge, most often a refusal).
+  const busyHere = appState.activeResponses.has(appState.activeChatId);
+  const tempId = busyHere ? null : `temp-${Date.now()}`;
   const now = new Date().toISOString();
   appState.chats = appState.chats.map((chat) => {
-    if (chat.id !== appState.activeChatId) return chat;
+    if (chat.id !== appState.activeChatId || busyHere) return chat;
     return {
       ...chat,
       updatedAt: now,
       messages: [
         ...chat.messages,
         {
-          id: `temp-${Date.now()}`,
+          id: tempId,
           sender: 'user',
           text: message,
           timestamp: now,
@@ -9806,12 +9835,19 @@ async function sendMessage() {
       ]
     };
   });
-  refreshUI();
+  if (!busyHere) refreshUI();
 
   dom.userInput.value = '';
   dom.userInput.style.height = 'auto';
-  clearPendingImages();
+  // Kept unrevoked until the node answers: a refusal hands them back, and this window
+  // may not know another window's turn holds the chat.
+  appState.pendingImages = [];
+  appState.pendingDocuments = [];
+  if (dom.imageFileInput) dom.imageFileInput.value = '';
+  renderPendingImages();
 
+  let refused = false;
+  let gaveBack = false;
   try {
     const pinnedInfo = await window.electron.skill.getPinned({ chatId: appState.activeChatId });
     if (pinnedInfo?.pinned) {
@@ -9843,6 +9879,12 @@ async function sendMessage() {
       agentMode: appState.isAgentModeEnabled,
       sandboxMode: appState.isSandboxModeEnabled
     });
+    if (rawResult?.code === 'CHAT_BUSY') {
+      refused = true;
+      showBusyRefusal(appState.activeChatId, message, rawResult, tempId);
+      giveBackAttachments(pendingImages, pendingDocuments);
+      return;
+    }
     const updatedChat = unwrapIpcResult(rawResult, 'Unable to send message.');
 
     if (updatedChat) {
@@ -9874,9 +9916,18 @@ async function sendMessage() {
     const lastUser = (appState.chats.find((c) => c.id === appState.activeChatId)?.messages || []).findLast((m) => m.sender === 'user');
     const storedRow = lastUser && lastUser.text === message && !String(lastUser.id).startsWith('temp-');
     if (!storedRow && !dom.userInput.value) dom.userInput.value = message;
+    if (!storedRow) {
+      giveBackAttachments(pendingImages, pendingDocuments);
+      gaveBack = true;
+    }
   } finally {
-    setResponseActive(false, appState.activeChatId);
-    flushToolGroup();
+    if (!refused) {
+      for (const image of gaveBack ? [] : pendingImages) {
+        if (image?.previewUrl) URL.revokeObjectURL(image.previewUrl);
+      }
+      setResponseActive(false, appState.activeChatId);
+      flushToolGroup();
+    }
   }
 }
 
@@ -9935,13 +9986,19 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
 
   // Truncate from this message onward (removes the user message + its response)
   try {
-    const updatedChat = await window.electron.chat.truncateFrom({ chatId, fromIndex: msgIndex });
+    const rawTruncated = await window.electron.chat.truncateFrom({ chatId, fromIndex: msgIndex });
+    if (rawTruncated?.code === 'CHAT_BUSY') {
+      showBusyRefusal(chatId, message, rawTruncated);
+      return;
+    }
+    const updatedChat = unwrapIpcResult(rawTruncated, 'Unable to resend.');
     if (updatedChat) {
       appState.chats = appState.chats.map((c) => (c.id === updatedChat.id ? updatedChat : c));
       refreshUI();
     }
   } catch (err) {
     addMessage('assistant', `Error: ${err.message || 'Unable to resend.'}`);
+    if (!dom.userInput.value) dom.userInput.value = message;
     return;
   }
 
@@ -9957,6 +10014,7 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
 
   // Re-send the message through the normal flow
   // Add user message to local state optimistically
+  const tempId = `temp-${Date.now()}`;
   const now = new Date().toISOString();
   appState.chats = appState.chats.map((c) => {
     if (c.id !== chatId) return c;
@@ -9966,7 +10024,7 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
       messages: [
         ...(c.id === latest.id ? latest.messages : c.messages),
         {
-          id: `temp-${Date.now()}`,
+          id: tempId,
           sender: 'user',
           text: message,
           timestamp: now,
@@ -9978,6 +10036,7 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
   });
   refreshUI();
 
+  let refused = false;
   try {
     setResponseActive(true, chatId);
     const rawResult = await window.electron.chat.sendMessage({
@@ -9988,6 +10047,16 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
       agentMode: appState.isAgentModeEnabled,
       sandboxMode: appState.isSandboxModeEnabled
     });
+    if (rawResult?.code === 'CHAT_BUSY') {
+      refused = true;
+      // Another window's run took the chat after the truncate: its stream, if it has
+      // reached here, keeps the chat active; this send's own mark does not.
+      if (!dom.chatMessages.querySelector('.message.streaming')) setResponseActive(false, chatId);
+      showBusyRefusal(chatId, message, rawResult, tempId);
+      // The truncate took the stored row, and its attachments with it.
+      giveBackAttachments(images, documents);
+      return;
+    }
     const updatedChat = unwrapIpcResult(rawResult, 'Unable to send message.');
     if (updatedChat) {
       appState.chats = appState.chats.map((c) => (c.id === updatedChat.id ? updatedChat : c));
@@ -10010,8 +10079,10 @@ async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
       addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
     }
   } finally {
-    setResponseActive(false, chatId);
-    flushToolGroup();
+    if (!refused) {
+      setResponseActive(false, chatId);
+      flushToolGroup();
+    }
   }
 }
 
@@ -12880,6 +12951,55 @@ window.addEventListener('blur', () => {
   }
 });
 
+// What another window's turn left this one behind on: its rows are in the store. Read
+// when no reply is active here, since a full load redraws the view (see refreshChatListOnly).
+const watchedRuns = new Set();
+// Chats whose turn began before this window came, so it never saw the turn's start.
+const adoptedRuns = new Set();
+let chatUpdatedDuringReply = false;
+function afterReplyEnded(chatId) {
+  adoptedRuns.delete(chatId);
+  const watched = watchedRuns.delete(chatId);
+  if (!watched && !chatUpdatedDuringReply) return;
+  if (appState.activeResponses.size > 0) {
+    chatUpdatedDuringReply = true;
+    return;
+  }
+  chatUpdatedDuringReply = false;
+  loadChats().catch((err) => chatLog.warn(`Chat reload failed: ${err.message}`));
+}
+
+// A window that comes to a chat part way through a turn (remote window plan R-RW-8):
+// it shows the chat as running, Stop in place of Send, and reads the rows when the turn
+// ends. Back from a drop, a reply it was showing may have ended while it was away, and
+// its end was never heard; the load before this has emptied any stream it was drawing.
+async function syncRunningChats({ reconnected = false } = {}) {
+  let answer;
+  try {
+    answer = await window.electron.chat.running();
+  } catch (err) {
+    chatLog.warn(`reading the running chats failed: ${err.message}`);
+    return;
+  }
+  if (answer?.ok !== true || !Array.isArray(answer.chatIds)) return;
+  const running = new Set(answer.chatIds);
+  for (const chatId of running) {
+    if (appState.activeResponses.has(chatId)) {
+      if (reconnected) watchedRuns.add(chatId);
+      continue;
+    }
+    adoptedRuns.add(chatId);
+    watchedRuns.add(chatId);
+    setResponseActive(true, chatId);
+  }
+  for (const chatId of reconnected ? [...appState.activeResponses] : [...adoptedRuns]) {
+    if (running.has(chatId)) continue;
+    watchedRuns.add(chatId);
+    setResponseActive(false, chatId);
+    afterReplyEnded(chatId);
+  }
+}
+
 unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, responseId }) => {
   setResponseActive(true, chatId);
   appState._streamStartTime = Date.now();
@@ -12972,6 +13092,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
   streamTextOffsets.delete(responseId);
   if (appState.streamRenderedTools) appState.streamRenderedTools.clear();
   setResponseActive(false, chatId);
+  afterReplyEnded(chatId);
   if (chatId !== appState.activeChatId) return;
   const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"]`);
   if (messageDiv) {
@@ -13030,6 +13151,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
   streamTextOffsets.delete(responseId);
   if (appState.streamRenderedTools) appState.streamRenderedTools.clear();
   setResponseActive(false, chatId);
+  afterReplyEnded(chatId);
   if (chatId !== appState.activeChatId) return;
 
   // Remove streaming class from the wrapper div
@@ -13177,9 +13299,17 @@ unsubscribeHandlers.push(window.electron.tool.onDirectoryAccessRequired(({ reque
   showDirectoryAccessDialog(requestId, directory, toolName);
 }));
 
+// The run that asked was stopped: nothing is waiting for an answer here any more.
+unsubscribeHandlers.push(window.electron.agent.onAskEnded(({ requestId }) => {
+  for (const row of dom.chatMessages.querySelectorAll('.prompt-message')) {
+    if (row.dataset.askRequestId === requestId) row.remove();
+  }
+}));
+
 unsubscribeHandlers.push(window.electron.agent.onAskUser(({ requestId, question }) => {
   const messageDiv = document.createElement('div');
   messageDiv.className = 'message assistant prompt-message';
+  messageDiv.dataset.askRequestId = requestId;
 
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
@@ -13234,7 +13364,49 @@ unsubscribeHandlers.push(window.electron.agent.onAskUser(({ requestId, question 
 
 // Listen for chat updates from Telegram bridge or other sources
 unsubscribeHandlers.push(window.electron.chat.onChatUpdated(async () => {
+  if (adoptedRuns.size > 0) await syncRunningChats();
+  // A full load empties the view, and a reply streaming here with it: the list now,
+  // the rest when the reply ends (afterReplyEnded).
+  if (appState.activeResponses.size > 0) {
+    chatUpdatedDuringReply = true;
+    await refreshChatListOnly();
+    return;
+  }
   await loadChats();
+}));
+
+// Another window's row (remote window plan, task 2): drawn in place, above a reply
+// streaming here. Its attachments arrive with the reload when the run ends.
+unsubscribeHandlers.push(window.electron.chat.onRowAdded(({ chatId, run, message }) => {
+  if (!chatId || !message) return;
+  if (run) watchedRuns.add(chatId);
+  const chat = getActiveChat();
+  if (!chat || chat.id !== chatId || !Array.isArray(chat.messages) || chat.messages.some((m) => m.id === message.id)) return;
+  chat.messages.push(message);
+  addMessage(message.sender, message.text, { seq: message.seq, chatId, messageId: message.id });
+  const added = dom.chatMessages.lastElementChild;
+  const streaming = dom.chatMessages.querySelector('.message.streaming');
+  if (streaming && added && added !== streaming) dom.chatMessages.insertBefore(added, streaming);
+  updateEmptyState();
+}));
+
+// A remote window's run is waiting on its owner's answer there; nothing here can answer it.
+unsubscribeHandlers.push(window.electron.chat.onQuestionWaiting(({ chatId, label }) => {
+  if (chatId === appState.activeChatId) showNotice(`A question is waiting on ${label}.`);
+}));
+
+// Another window made, renamed or deleted a chat. The open chat deleted there: this
+// window says so and opens the node's next one for it (chat:load's answer), or none.
+unsubscribeHandlers.push(window.electron.chat.onListChanged(async ({ chatId, what }) => {
+  if (what === 'deleted' && chatId === appState.activeChatId) {
+    setResponseActive(false, chatId);
+    await loadChats();
+    showNotice(`Another window deleted the chat you had open.${appState.activeChatId ? ' This is the next one.' : ''}`);
+    return;
+  }
+  await refreshChatListOnly();
+  const open = getActiveChat();
+  if (open && open.id === chatId && open.title) dom.chatHeaderTitle.textContent = open.title;
 }));
 
 window.addEventListener('beforeunload', () => {
@@ -14389,7 +14561,7 @@ async function exportAsMarkdown() {
   emptyState.appendChild(card);
 })();
 
-loadChats();
+loadChats().then(() => syncRunningChats()).catch((err) => chatLog.warn(`Chat load failed: ${err.message}`));
 loadSettings();
 renderAgentModeButton();
 renderHistoryToggleButton();
@@ -14943,6 +15115,7 @@ function pressSetupAction(id) {
     migrationPlan: () => desktop.migrationPlan(),
     migrationApply: () => desktop.migrationApply({ confirmed: true }),
     setupLater: () => desktop.setupLater(),
+    setupWindowOnly: () => desktop.setupWindowOnly(),
     setupFinish: () => desktop.setupFinish(),
     skip: () => desktop.setupFinish({ skip: setupView.answer.step })
   };
@@ -15059,7 +15232,7 @@ async function refreshServiceStatus() {
   await refreshSetupView(status);
   const conn = status.connection ? status.connection.status : null;
   if (conn === 'connected' && serviceLastConnection && serviceLastConnection !== 'connected') {
-    loadChats();
+    loadChats().then(() => syncRunningChats({ reconnected: true })).catch((err) => chatLog.warn(`Chat load failed: ${err.message}`));
     // What the panes said with the node down is over; a form open in the drawer is left alone.
     if (document.getElementById('settings-drawer')?.hidden) loadSettings();
   }

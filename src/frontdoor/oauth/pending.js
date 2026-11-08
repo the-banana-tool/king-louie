@@ -59,7 +59,7 @@ class PendingAuthorizations {
 
   // ipCounted: the caller already spent this address's hit (countIp) on
   // the same attempt.
-  create({ client, redirectUri, codeChallenge, resource, requestedScopes, preselected, state = null, ip = 'unknown', clientHost, ipCounted = false }) {
+  create({ client, redirectUri, codeChallenge, resource, requestedScopes, preselected, notice = null, state = null, ip = 'unknown', clientHost, ipCounted = false }) {
     this.sweep();
     if (!ipCounted) this.assertIpAllowed(ip);
     const t = this.now();
@@ -88,6 +88,7 @@ class PendingAuthorizations {
       user_code: userCode,
       requested_scopes: [...requestedScopes],
       preselected: [...preselected],
+      notice,
       state,
       created_at_ms: t,
       expires_at_ms: t + this.ttlMs,

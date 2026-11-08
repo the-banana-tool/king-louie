@@ -48,6 +48,18 @@ const waitFor = async (fn, ms = 5000) => {
 };
 
 describe('service config', () => {
+  it('adds remoteWindow off by default, and it needs profile: agent', () => {
+    assert.strictEqual(DEFAULT_FEATURES.remoteWindow, false);
+    const off = layout();
+    assert.strictEqual(loadServiceConfig(off.dataDir, {}, opts(off.configDir)).features.remoteWindow, false);
+    const on = layout({ features: { remoteWindow: true } });
+    assert.strictEqual(loadServiceConfig(on.dataDir, {}, opts(on.configDir)).features.remoteWindow, true);
+    const runbook = layout({ profile: 'runbook', features: { remoteWindow: true } });
+    assert.throws(() => loadServiceConfig(runbook.dataDir, {}, opts(runbook.configDir)), /remoteWindow needs profile: agent/);
+    const frontdoor = layout({ profile: 'frontdoor', features: { remoteWindow: true } });
+    assert.throws(() => loadServiceConfig(frontdoor.dataDir, {}, opts(frontdoor.configDir)), /remoteWindow needs profile: agent/);
+  });
+
   it('adds desktopBridge off by default on port 18796', () => {
     assert.strictEqual(DEFAULT_FEATURES.desktopBridge, false);
     assert.strictEqual(DEFAULT_PORTS.desktopBridge, 18796);
@@ -81,6 +93,65 @@ describe('createDesktopBridgeHost', () => {
     assert.deepStrictEqual(host.coreDeps, {});
     assert.strictEqual(await host.start({}), null);
     await host.stop();
+  });
+
+  describe('remoteWindow beside desktopBridge', () => {
+    const PIN = { mesh_url: 'wss://mesh.kl.example.com/mesh/v1', mesh_cert_fingerprint: 'a'.repeat(64) };
+    async function withHost(features, fn) {
+      const { dataDir, configDir } = layout();
+      const host = createDesktopBridgeHost({ dataDir, configDir, features, ports: { desktopBridge: 0 }, adminUid: selfUid, version: '26.11.0' });
+      const servicePorts = buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS });
+      const core = createCore({
+        ...servicePorts,
+        ...host.coreDeps,
+        features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
+        remoteApprovals: 'deny',
+        workingDirectory: dataDir,
+        builtinSkillsDir: path.join(__dirname, '..', 'skills')
+      });
+      await core.start();
+      try {
+        await fn({ host, core, servicePorts });
+      } finally {
+        await host.stop();
+        await core.shutdown();
+      }
+    }
+
+    it('with only remoteWindow on it builds the server, listens on nothing and takes window.open', async () => {
+      await withHost({ remoteWindow: true }, async ({ host, core, servicePorts }) => {
+        assert.strictEqual(host.coreDeps.host.interactive(), false);
+        let handlers = 'never set';
+        const approvals = {
+          sealPolicy: { canSeal: () => false, whyNot: () => 'no active phone holds a box key' },
+          relayClient: { frontDoorPin: PIN },
+          setWindowHandlers: (h) => { handlers = h; }
+        };
+        const server = await host.start({ core, ports: servicePorts, approvals });
+        assert.strictEqual(server.wss, null, 'no listener');
+        assert.strictEqual(host.server, server);
+        assert.strictEqual((await handlers['window.open']({ session_id: 'x' })).code, 'node_not_sealing');
+        await host.stop();
+        assert.strictEqual(handlers, null, 'stop takes them away');
+      });
+    });
+
+    it('with remoteWindow on and no front door pin there is nothing to dial: window.open stays off', async () => {
+      await withHost({ remoteWindow: true }, async ({ host, core, servicePorts }) => {
+        const calls = [];
+        await host.start({ core, ports: servicePorts, approvals: { relayClient: null, setWindowHandlers: (h) => calls.push(h) } });
+        assert.deepStrictEqual(calls.filter(Boolean), []);
+      });
+    });
+
+    it('with only desktopBridge on it listens, and window.open stays off', async () => {
+      await withHost({ desktopBridge: true, remoteWindow: false }, async ({ host, core, servicePorts }) => {
+        const calls = [];
+        const server = await host.start({ core, ports: servicePorts, approvals: { relayClient: { frontDoorPin: PIN }, setWindowHandlers: (h) => calls.push(h) } });
+        assert.ok(server.wss, 'it listens');
+        assert.deepStrictEqual(calls.filter(Boolean), []);
+      });
+    });
   });
 
   it('binds, serves a paired desktop, forwards ambient events and reports interactive', async () => {

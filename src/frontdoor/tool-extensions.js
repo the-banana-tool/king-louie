@@ -8,3 +8,7 @@ module.exports = [];
 // Cases stage 7 (spec §3.8) and management surfaces (spec §3.3): cases:read,
 // cases:answer and their case tools.
 module.exports.push(require('../cases/mcp-tool-definitions').registerFrontDoorCaseTools);
+
+// The remote window (R-RW-10): window:attach. It registers a scope and no tool.
+const { registerWindowScope } = require('./window/scope');
+module.exports.push(({ scopeRegistry }) => registerWindowScope(scopeRegistry));

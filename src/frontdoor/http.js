@@ -26,7 +26,7 @@ function hostHeaderCount(req) {
 // `mcpHost` is the name the SNI listener routed this connection by
 // (mcp.<domain>), never the TLS socket's servername: a request whose Host
 // names anything else is misdirected (421), whatever its TLS name was.
-function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, pairHandler = null, probeHandler = null } = {}) {
+function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, pairHandler = null, probeHandler = null, windowRoutes = null } = {}) {
   if (typeof mcpHost !== 'string' || !mcpHost) throw new TypeError('createFrontDoorHandler needs mcpHost');
   const host = mcpHost.toLowerCase();
   const route = async (req, res) => {
@@ -81,6 +81,10 @@ function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, p
       await mcp.handle(req, res);
       return;
     }
+    if (pathname === '/window/v1/nodes' && windowRoutes) {
+      await windowRoutes.handle(req, res);
+      return;
+    }
     sendJson(res, 404, { error: 'not_found' });
   };
   return async (req, res) => {
@@ -110,9 +114,9 @@ function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, p
 // A request cut before it has an answer gets 408 and the connection closes.
 // Upgrades: with `upgrades: 'keep'` (the mesh server, where
 // MeshTransport#attachServer authenticates the socket in the same 'upgrade'
-// event) an upgraded connection leaves every timer behind. Otherwise (the
-// mcp. server, which serves no upgrade) an upgrade request is destroyed at
-// once, so no client can park sockets outside every deadline.
+// event, and the mcp. server, given onUpgrade for /window/v1 alone) an upgraded
+// connection leaves every timer behind. Otherwise an upgrade request is destroyed
+// at once, so no client can park sockets outside every deadline.
 const END_GRACE_MS = 1000;
 
 function guardConnections(server, { headersTimeoutMs, requestTimeoutMs, idleTimeoutMs, upgrades = 'refuse' }) {
@@ -204,7 +208,7 @@ const MCP_LIMITS = Object.freeze({ requestTimeoutMs: REQUEST_TIMEOUT_MS, headers
 
 // The mcp. server. Never listens. `limits` exists for tests, which scale
 // the timings down.
-function createMcpHttpServer(handler, limits = {}) {
+function createMcpHttpServer(handler, limits = {}, { onUpgrade = null } = {}) {
   const l = { ...MCP_LIMITS, ...limits };
   const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, handler);
   // Node's own request timers never run on a server that does not listen;
@@ -214,7 +218,25 @@ function createMcpHttpServer(handler, limits = {}) {
   server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
   server.maxHeadersCount = MAX_HEADERS_COUNT;
   server.frontDoorLimits = Object.freeze(l);
-  return guardConnections(server, l);
+  if (!onUpgrade) return guardConnections(server, l);
+  // /window/v1 (remote window R-RW-3) leaves every timer behind, like the mesh
+  // server's upgrade; any other upgrade is destroyed as before.
+  guardConnections(server, { ...l, upgrades: 'keep' });
+  server.on('upgrade', (req, socket, head) => {
+    let pathname = null;
+    try { pathname = new URL(req.url, 'http://mcp.invalid').pathname; } catch { pathname = null; }
+    if (pathname !== '/window/v1') {
+      socket.destroy();
+      return;
+    }
+    try {
+      onUpgrade(req, socket, head);
+    } catch (err) {
+      log.error(`/window/v1 upgrade failed: ${err && err.message}`);
+      socket.destroy();
+    }
+  });
+  return server;
 }
 
 // The mesh. server: only pinned nodes reach it, and all it serves is the

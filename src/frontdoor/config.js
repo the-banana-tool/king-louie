@@ -10,7 +10,7 @@ const { isDnsName, SCOPE_RE } = require('./protocol/messages');
 const LETS_ENCRYPT_PRODUCTION = 'https://acme-v02.api.letsencrypt.org/directory';
 const FLEET_SCOPES = Object.freeze(['fleet:read', 'fleet:run', 'fleet:unsafe', 'fleet:delegate']);
 const FRONTDOOR_KEYS = Object.freeze({
-  top: Object.freeze(['domain', 'listen', 'acme', 'tls', 'oauth', 'mcp', 'audit']),
+  top: Object.freeze(['domain', 'listen', 'acme', 'tls', 'oauth', 'mcp', 'audit', 'window']),
   listen: Object.freeze(['host', 'port']),
   acme: Object.freeze(['email', 'directory', 'terms_agreed']),
   tls: Object.freeze(['cert_file', 'key_file']),
@@ -18,8 +18,13 @@ const FRONTDOOR_KEYS = Object.freeze({
   clientDefault: Object.freeze(['match', 'scopes']),
   match: Object.freeze(['host']),
   mcp: Object.freeze(['progress_hold_s']),
-  audit: Object.freeze(['retention_days'])
+  audit: Object.freeze(['retention_days']),
+  window: Object.freeze(['max_sessions_per_grant', 'max_sessions_per_device_node', 'max_bytes_per_hour', 'idle_s'])
 });
+// Remote window R-RW-5. A session pings every 20 s, so idle_s is at least the 60 s
+// its seal stays silent for.
+const WINDOW_DEFAULTS = Object.freeze({ maxSessionsPerGrant: 4, maxSessionsPerDeviceNode: 2, maxBytesPerHour: 1073741824, idleS: 600 });
+const MIN_WINDOW_IDLE_S = 60;
 const MIN = 60000;
 const DAY = 86400000;
 
@@ -100,6 +105,13 @@ function parseFrontDoorConfig(raw, file) {
     throw invalid('frontdoor.audit.retention_days must be null or an integer of at least 30');
   }
 
+  const win = block(top.window, 'frontdoor.window', FRONTDOOR_KEYS.window);
+  const limit = (key, fallback, min = 1) => {
+    const value = win[key] === undefined ? fallback : win[key];
+    if (!Number.isSafeInteger(value) || value < min) throw invalid(`frontdoor.window.${key} must be a whole number of at least ${min}`);
+    return value;
+  };
+
   return {
     domain: top.domain,
     listen: { host: host.trim(), port },
@@ -107,7 +119,13 @@ function parseFrontDoorConfig(raw, file) {
     tls,
     oauth: { accessTokenTtlMs, refreshIdleTtlMs, scopesEnabled: [...scopesEnabled], clientDefaults },
     mcp: { progressHoldS },
-    audit: { retentionDays }
+    audit: { retentionDays },
+    window: {
+      maxSessionsPerGrant: limit('max_sessions_per_grant', WINDOW_DEFAULTS.maxSessionsPerGrant),
+      maxSessionsPerDeviceNode: limit('max_sessions_per_device_node', WINDOW_DEFAULTS.maxSessionsPerDeviceNode),
+      maxBytesPerHour: limit('max_bytes_per_hour', WINDOW_DEFAULTS.maxBytesPerHour),
+      idleS: limit('idle_s', WINDOW_DEFAULTS.idleS, MIN_WINDOW_IDLE_S)
+    }
   };
 }
 
@@ -115,4 +133,4 @@ function frontDoorHosts(domain) {
   return { mcp: `mcp.${domain}`, mesh: `mesh.${domain}` };
 }
 
-module.exports = { parseFrontDoorConfig, frontDoorHosts, FRONTDOOR_KEYS, FLEET_SCOPES, LETS_ENCRYPT_PRODUCTION };
+module.exports = { parseFrontDoorConfig, frontDoorHosts, FRONTDOOR_KEYS, FLEET_SCOPES, LETS_ENCRYPT_PRODUCTION, WINDOW_DEFAULTS };

@@ -341,6 +341,7 @@ describe('example roles: load through the real loaders', () => {
       }
       assert.deepEqual(service.playbooks, { sources: [], autoUpdate: false }, 'examples ship { sources: [], autoUpdate: false }: no URL sources, local folders unrestricted, no auto-update');
       assert.deepEqual(Object.keys(rawService.features), Object.keys(DEFAULT_FEATURES));
+      assert.equal(rawService.features.remoteWindow, false, 'listed, and off');
       assert.deepEqual(Object.keys(rawService.ports), Object.keys(DEFAULT_PORTS));
       assert.ok(Object.values(rawService.features).every((v) => v === false), 'every listener off in the examples');
 
@@ -374,6 +375,7 @@ describe('example roles: load through the real loaders', () => {
     const rawService = JSON.parse(fs.readFileSync(path.join(config, 'service.json'), 'utf8'));
     assert.deepEqual(Object.keys(rawService), ['profile', 'features', 'ports']);
     assert.deepEqual(Object.keys(rawService.features), Object.keys(DEFAULT_FEATURES));
+    assert.equal(rawService.features.remoteWindow, false, 'listed, and off');
     assert.deepEqual(Object.keys(rawService.ports), Object.keys(DEFAULT_PORTS));
     assert.ok(Object.values(rawService.features).every((v) => v === false), 'every listener feature off on the front door');
   });

@@ -99,8 +99,9 @@ function connection(label = 'desk a') {
   return conn;
 }
 
-function makeDispatcher({ overrides = {}, coreOverride = null, approvals = null, createImporter = null, hosting = undefined } = {}) {
+function makeDispatcher({ overrides = {}, patchContext = null, coreOverride = null, approvals = null, createImporter = null, hosting = undefined } = {}) {
   let current = null;
+  const attached = new Set();
   const dispatcher = createBridgeDispatcher({
     core: coreOverride || core,
     cipher,
@@ -110,13 +111,15 @@ function makeDispatcher({ overrides = {}, coreOverride = null, approvals = null,
     ...(hosting ? { hosting } : {}),
     getServiceInfo: () => ({ version: '26.9.0' }),
     getConnection: () => current,
+    getConnections: () => [...attached],
     registerHandlers: (ipc, ctx) => {
       registerHandlers(ipc, ctx);
       for (const [channel, fn] of Object.entries(overrides)) ipc.handle(channel, fn);
+      if (patchContext) patchContext(ctx);
     },
     createImporter
   });
-  return { dispatcher, use: (conn) => { current = conn; } };
+  return { dispatcher, use: (conn) => { current = conn; attached.add(conn); } };
 }
 
 const waitFor = async (fn, ms = 5000) => {
@@ -201,8 +204,15 @@ describe('bridge dispatcher', () => {
     const stopped = [];
     const { dispatcher, use } = makeDispatcher({
       overrides: {
-        'chat:sendMessage': async (_event, { chatId }) => new Promise((resolve) => stops.set(chatId, resolve)),
-        'chat:stopResponse': async (_event, { chatId }) => { stopped.push(chatId); stops.get(chatId)({ ok: true, data: null }); return { ok: true }; }
+        'chat:sendMessage': async (event, { chatId }) => new Promise((resolve) => stops.set(event, { chatId, resolve }))
+      },
+      patchContext: (ctx) => {
+        ctx.stopRunForEvent = (event) => {
+          const run = stops.get(event);
+          stopped.push(run.chatId);
+          run.resolve({ ok: true, data: null });
+          return true;
+        };
       }
     });
     core.context.createChat({ id: 'c-run', title: 'Run', createdAt: '2026-09-23T10:00:00Z', updatedAt: '2026-09-23T10:00:00Z', messages: [] });

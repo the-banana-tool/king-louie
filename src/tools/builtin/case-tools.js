@@ -320,7 +320,7 @@ function writeScopedBriefField(ctx, params) {
   const view = rt.scopeView(ctx.caseId);
   if (view.error) return { ok: false, error: view.error };
   const born = user
-    ? { origin: 'owner-quote', confirmed: { by: 'owner-quote', channel: 'in-app-chat', quote } }
+    ? { origin: 'owner-quote', confirmed: { by: 'owner-quote', channel: ctx.ownerChannel || 'in-app-chat', quote } }
     : { origin: 'model', confirmed: null };
   const state = user ? 'confirmed' : 'proposed';
   const quoteNote = user ? `, quote: ${JSON.stringify(quote)}` : '';

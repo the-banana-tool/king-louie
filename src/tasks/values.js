@@ -8,6 +8,7 @@ const { plainLineProblem } = require('../cases/hidden-chars');
 const { approvalOrigin } = require('../fleet/fleet-tools');
 const { MCP_TOOLS } = require('../fleet/tool-definitions');
 const { GUI_TOOL_NAMES } = require('../gui/errors');
+const { TASK_REMOVED_TOOLS, isSessionTool } = require('../approvals/outliving-tools');
 
 const TITLE_MAX = 60;
 // What a task runs on with no press: nobody was shown more.
@@ -17,8 +18,7 @@ const SAFE_CODE_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const ACTING_GUI = new Set(GUI_TOOL_NAMES.filter((name) => name !== 'ListApps' && name !== 'Screenshot'));
 // Each starts or reads a run that outlives the turn, which would escape the task's spend cap
 // and its ending (stage 1).
-const DETACHED_TOOLS = ['BackgroundTask', 'TaskStatus', 'Cron', 'RemoteDispatch'];
-const EXCLUDED_TOOLS = new Set(['message', ...DETACHED_TOOLS, ...MCP_TOOLS.map((t) => t.name)]);
+const EXCLUDED_TOOLS = new Set([...TASK_REMOVED_TOOLS, ...MCP_TOOLS.map((t) => t.name)]);
 const PUBLIC_KEYS = Object.freeze(['task_id', 'chat_id', 'node', 'text', 'state', 'seq', 'proposal', 'grant', 'placement', 'spend',
   'answer', 'reason', 'deadline_at', 'ended', 'interrupted_at', 'created_at', 'updated_at']);
 
@@ -49,7 +49,7 @@ function privateView(record) {
 // read at each turn so a tool registered after start is included. Case tools stay.
 function taskToolNames(registry) {
   return new Set(registry.list().map((tool) => tool.name)
-    .filter((name) => !name.startsWith('sessions_') && !EXCLUDED_TOOLS.has(name) && !ACTING_GUI.has(name)));
+    .filter((name) => !isSessionTool(name) && !EXCLUDED_TOOLS.has(name) && !ACTING_GUI.has(name)));
 }
 
 // One plain line of at most 60 code points, or '' when nothing is left.

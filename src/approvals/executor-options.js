@@ -8,7 +8,9 @@
 // mode only ever get the phone.
 const { createLogger } = require('../logging');
 const { paramsHmac, auditOriginOf, auditError, errorByCode } = require('./audit-fields');
+const { toolCardParams } = require('./hidden-card');
 const originHelpers = require('../core/origin');
+const { outlivesRemoteTurn } = require('./outliving-tools');
 
 const log = createLogger('approvals/executor-options');
 const PHONE_GRACE_MS = 15000;
@@ -68,10 +70,24 @@ function refuseUnsafeGate(classifyCall, allowedRoots = null) {
   });
 }
 
+const REMOTE_WINDOW = 'remote-window';
+const SANDBOX_OFF_NOTE = 'Sandbox off';
+
+// A remote window's run may start nothing that outlives its turn without the
+// phone: the window can go while it runs. A node's denial stands.
+function remoteClassifier(classifyCall) {
+  return (toolName, params, ctx) => {
+    const decision = classifyCall ? classifyCall(toolName, params, ctx) : null;
+    if (!outlivesRemoteTurn(toolName) || (decision && decision.tier === 'denied')) return decision;
+    return { tier: 'unsafe', reason: 'remote_outlives_turn' };
+  };
+}
+
 function runOrigin({ executorOptions, event, local, helpers }) {
   if (executorOptions.origin) return executorOptions.origin;
   const session = executorOptions.chatId || null;
   if (local) return { client: 'desktop', deviceId: helpers.localDesktopDeviceId(event), session, job_id: null };
+  if (helpers.isRemoteWindowEvent(event)) return { client: 'remote-window', deviceId: helpers.remoteWindowDeviceId(event), session, job_id: null };
   return { client: 'king-louie', session, job_id: null };
 }
 
@@ -84,7 +100,7 @@ function policyForRun(nodePolicy, taskPolicy) {
 }
 
 // Phone-mode options merged into the ToolExecutor, plus the audit listeners.
-function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = null, origin, local, approvalRequester = null }) {
+function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = null, origin, local, approvalRequester = null, cardNoteFor = null }) {
   // phoneApprover.ttlMs validity and the missing-nodePolicy/auditLedger
   // warnings are checked once, at createCore construction (next to
   // `remoteApprovals 'phone' needs deps.phoneApprover`), not here: this
@@ -99,7 +115,9 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
       // What the phone is shown; the kind and the ids are the ledger's.
       const { kind, grant_id: grantId, client_id: clientId, ...phoneOrigin } = origin;
       metadata.origin = phoneOrigin;
-      return phoneApprover.requestApproval(toolName, parameters, metadata);
+      const cardNote = cardNoteFor ? cardNoteFor(toolName) : null;
+      if (cardNote) metadata.cardNote = cardNote;
+      return phoneApprover.requestApproval(toolName, toolCardParams(toolName, parameters), metadata);
     };
     // The phone's own expiry answers first ('timeout' from the approver).
     options.approvalTimeoutMs = phoneApprover.ttlMs + PHONE_GRACE_MS;
@@ -159,11 +177,19 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
 }
 
 // → { toolExecutorOptions, attach(executor), local, origin }
+// `approvalGate` is part C's seam (remote window plan R-RW-21), asked before the phone
+// on a remote run: ({ toolName, params, metadata }) → null | { allow: true, by, grant_id }.
+// Nothing passes one yet.
 function approvalSeam({ remoteApprovals, event = null, approvalRequester = null, executorOptions = {}, phoneApprover = null,
-  auditLedger = null, nodePolicy = null, helpers = originHelpers }) {
-  const local = helpers.isLocalDesktopEvent(event) || helpers.isLocalRequester(approvalRequester);
+  auditLedger = null, nodePolicy = null, helpers = originHelpers, approvalGate = null }) {
+  // A remote window's run is never local and never auto-approved, in any mode
+  // and whatever requester it was handed (remote window plan R-RW-9). A child
+  // of one has no event; it carries the origin, which only the host sets.
+  const remoteTurn = helpers.isRemoteWindowEvent(event);
+  const remote = remoteTurn || (executorOptions.origin && executorOptions.origin.client) === REMOTE_WINDOW;
+  const local = !remote && (helpers.isLocalDesktopEvent(event) || helpers.isLocalRequester(approvalRequester));
   const origin = runOrigin({ executorOptions, event, local, helpers });
-  const denyAutoApproval = (remoteApprovals !== 'allow' && !local) || executorOptions.denyAutoApproval === true;
+  const denyAutoApproval = remote || (remoteApprovals !== 'allow' && !local) || executorOptions.denyAutoApproval === true;
   // Set by a delegate turn (executorOptions) or inherited through the
   // re-threaded requester of its sub-agents.
   const refuseUnsafe = executorOptions.refuseUnsafe === true || Boolean(approvalRequester && approvalRequester.refuseUnsafe === true);
@@ -172,30 +198,49 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
   const gate = refuseUnsafe
     ? { refuseUnsafe: true, ...(Array.isArray(rawRoots) && rawRoots.length > 0 ? { allowedRoots: rawRoots } : {}) }
     : {};
+  // The turn's own typed words answer a spoken question; they lift nothing
+  // (ToolExecutor keeps denyAutoApproval). A child has none.
+  const remoteOptions = remoteTurn && executorOptions.denyAutoApproval !== true ? { remoteWindowTurn: true } : {};
 
   if (remoteApprovals === 'phone') {
     // A marked (local) requester is kept; an unmarked one from a local event
     // is dropped so the on-screen dialog answers (requester null).
     const localRequester = helpers.isLocalRequester(approvalRequester) ? approvalRequester : null;
     const taskPolicy = executorOptions.taskPolicy || (approvalRequester && approvalRequester.taskPolicy) || null;
-    const phone = phoneExecutorOptions({ phoneApprover, auditLedger, nodePolicy: policyForRun(nodePolicy, taskPolicy), origin, local, approvalRequester: localRequester });
-    const toolExecutorOptions = { ...phone.options, denyAutoApproval };
+    const sandboxOff = remoteTurn && executorOptions.useSandbox === false;
+    const cardNoteFor = sandboxOff ? (toolName) => (toolName === 'Bash' ? SANDBOX_OFF_NOTE : null) : null;
+    const phone = phoneExecutorOptions({ phoneApprover, auditLedger, nodePolicy: policyForRun(nodePolicy, taskPolicy), origin, local, approvalRequester: localRequester, cardNoteFor });
+    const toolExecutorOptions = { ...phone.options, denyAutoApproval, ...remoteOptions };
+    if (remote) toolExecutorOptions.classifyCall = remoteClassifier(phone.options.classifyCall || null);
+    if (remote && approvalGate) {
+      const toPhone = toolExecutorOptions.approvalRequester;
+      toolExecutorOptions.approvalRequester = async (toolName, parameters, metadata = {}) => {
+        const granted = await approvalGate({ toolName, params: parameters, metadata });
+        return granted && granted.allow === true ? true : toPhone(toolName, parameters, metadata);
+      };
+    }
     if (refuseUnsafe) {
-      toolExecutorOptions.classifyCall = refuseUnsafeClassifier(phone.options.classifyCall || null);
+      toolExecutorOptions.classifyCall = refuseUnsafeClassifier(toolExecutorOptions.classifyCall || null);
       Object.assign(toolExecutorOptions, gate);
     }
-    return { toolExecutorOptions, attach: phone.attach, local, origin };
+    return { toolExecutorOptions, attach: phone.attach, local, origin, remote };
   }
 
   let requester;
-  if (remoteApprovals === 'allow') requester = approvalRequester;
+  // A remote run has nobody on this host to ask: a no, at once, never a wait.
+  if (remote) requester = async () => false;
+  else if (remoteApprovals === 'allow') requester = approvalRequester;
   else requester = local && helpers.isLocalRequester(approvalRequester) ? approvalRequester : null;
   return {
-    toolExecutorOptions: { approvalRequester: requester, denyAutoApproval, localOrigin: local, origin, ...gate },
+    toolExecutorOptions: {
+      approvalRequester: requester, denyAutoApproval, localOrigin: local, origin, ...gate, ...remoteOptions,
+      ...(remote ? { classifyCall: remoteClassifier(null) } : {})
+    },
     attach: () => {},
     local,
-    origin
+    origin,
+    remote
   };
 }
 
-module.exports = { approvalSeam, phoneExecutorOptions, refuseUnsafeClassifier, refuseUnsafeGate, PHONE_GRACE_MS, REFUSE_UNSAFE_MESSAGE };
+module.exports = { approvalSeam, phoneExecutorOptions, refuseUnsafeClassifier, remoteClassifier, refuseUnsafeGate, PHONE_GRACE_MS, REFUSE_UNSAFE_MESSAGE };

@@ -141,7 +141,7 @@ describe('DesktopBridgeServer handshake', () => {
     assert.strictEqual(out.ready.service.nodeId, identity.nodeId);
     assert.strictEqual(out.ready.service.account, 'LOCAL SERVICE');
     assert.deepStrictEqual(out.ready.service.channels, ['chat:load', 'chat:sendMessage', 'tool:approvalResponse']);
-    assert.deepStrictEqual(server.connected, { deviceId: device.deviceId, label: device.label });
+    assert.deepStrictEqual(server.connected, [{ deviceId: device.deviceId, label: device.label, remote: false }]);
     out.c.send({ t: 'invoke', id: 1, channel: 'chat:load', args: [] });
     const result = await out.c.next((f) => f.t === 'result' && f.id === 1);
     assert.deepStrictEqual(result.value, { ok: true, data: { echo: [] } });
@@ -237,15 +237,17 @@ describe('DesktopBridgeServer handshake', () => {
     out.c.ws.close();
   });
 
-  it('second device is refused while the first is live', async () => {
+  it('a second device attaches while the first is live', async () => {
     const first = makeDevice('first desk');
     const second = makeDevice('second desk');
     const { port } = await startServer({ devices: [first, second] });
     const live = await handshake(port, first);
     assert.ok(live.ready);
-    const refused = await handshake(port, second);
-    assert.deepStrictEqual(refused.close, { code: 4409, reason: 'first desk' });
+    const also = await handshake(port, second);
+    assert.ok(also.ready);
+    assert.strictEqual(live.c.ws.readyState, WebSocket.OPEN);
     live.c.ws.close();
+    also.c.ws.close();
   });
 
   it('a reconnect from the same device replaces the old connection', async () => {
@@ -551,7 +553,7 @@ async function impostorServer({ nodeId = identity.nodeId } = {}) {
 // the real server sends before ever proving itself: MALFORMED,
 // PROTOCOL_MISMATCH, UNKNOWN_DEVICE) or right after `auth` (for codes the
 // real server only reaches once a signature has been checked: BAD_SIGNATURE,
-// OTHER_DEVICE, LOCKED_OUT). This isolates the client's own close-code
+// TOO_MANY_WINDOWS, LOCKED_OUT). This isolates the client's own close-code
 // mapping (`errorForClose`) from the server's pairing/lockout state — which
 // is already covered by tests/desktop-bridge-protocol.test.js's server suite
 // — the same way `impostorServer` isolates the "never trust an unproven
@@ -849,10 +851,10 @@ describe('DesktopBridgeClient fix round 1 (review findings)', () => {
     await fake.close();
   });
 
-  it('maps 4409 (another device) to a fatal ANOTHER_DEVICE error carrying the label', async () => {
-    const fake = await closingServer({ after: 'auth', code: 4409, reason: 'gpu-box desk' });
+  it('maps 4409 (no room) to a fatal TOO_MANY_WINDOWS error', async () => {
+    const fake = await closingServer({ after: 'auth', code: 4409, reason: 'too many windows' });
     const client = clientFor(fake.port, makeDevice(), { backoffMs: [20] });
-    await assert.rejects(client.connect(), (err) => err.code === 'ANOTHER_DEVICE' && /gpu-box desk/.test(err.message));
+    await assert.rejects(client.connect(), (err) => err.code === 'TOO_MANY_WINDOWS' && /[Tt]oo many windows/.test(err.message));
     assert.strictEqual(client.status, 'failed');
     assert.strictEqual(client.nextRetryAt, null, 'fatal — no retry until retryNow()');
     client.close();
@@ -873,7 +875,7 @@ describe('DesktopBridgeClient fix round 1 (review findings)', () => {
     const fake = await closingServer({ after: 'auth', code: 4429, reason: 'too many failed handshakes' });
     const client = clientFor(fake.port, makeDevice(), { backoffMs: [20] });
     await assert.rejects(client.connect(), (err) => err.code === 'LOCKED_OUT');
-    assert.strictEqual(client.status, 'disconnected', 'not fatal, unlike DEVICE_UNPAIRED/ANOTHER_DEVICE/PROTOCOL_MISMATCH/SERVICE_KEY_CHANGED');
+    assert.strictEqual(client.status, 'disconnected', 'not fatal, unlike DEVICE_UNPAIRED/TOO_MANY_WINDOWS/PROTOCOL_MISMATCH/SERVICE_KEY_CHANGED');
     assert.ok(client.nextRetryAt !== null, 'a retry is scheduled on the normal backoff schedule — this client always signs correctly, so the lockout does not apply to its own retries');
     client.close();
     await fake.close();

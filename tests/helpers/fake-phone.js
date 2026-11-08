@@ -14,7 +14,7 @@
 const crypto = require('crypto');
 const path = require('path');
 const { seal, open, deviceIdFromJwk, nodeSigner } = require('../../src/approvals/envelope');
-const { openSealed } = require('../../src/approvals/seal');
+const { openSealed, sealContent } = require('../../src/approvals/seal');
 const { generateBoxKey, createBox } = require('../../src/approvals/node-box-key');
 const { deriveNodeId } = require('../../src/mesh/node-identity');
 const { enrollMac, phoneAuthString, randomNonce, iso } = require('../../src/approvals/messages');
@@ -191,6 +191,33 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
         expires_at: iso(now + ttlMs),
         nonce: nonce || randomNonce()
       }, signer);
+    },
+
+    // window enrollment (remote window R-RW-14): answers a node-signed kl.window.enroll
+    // as the apps do, sealed to the request's node_box. `signWith: 'read'` signs it with
+    // the read key, for refusal tests.
+    windowRespond(requestEnvelope, decision, { signWith = 'device', signedAt = new Date().toISOString(), overrides = {} } = {}) {
+      const { message: req } = open(requestEnvelope);
+      const clear = {
+        v: 1,
+        type: 'kl.window.enroll.response',
+        request_id: req.request_id,
+        node_id: req.node_id,
+        enroll_hash: req.enroll_hash,
+        nonce: req.nonce,
+        device_id: deviceId,
+        expires_at: req.expires_at,
+        signed_at: signedAt,
+        ...overrides
+      };
+      const message = sealContent({ type: clear.type, senderId: deviceId, clear, content: { decision }, recipients: { [req.node_id]: req.node_box } });
+      return seal(message, signWith === 'read' ? readSigner : signer);
+    },
+
+    windowRevoke(nodeId, nodeBox, windowId, { now = Date.now(), ttlMs = 60 * 60 * 1000, reason = 'Revoked from the phone', nonce = null, signWith = 'device' } = {}) {
+      const clear = { v: 1, type: 'kl.window.revoke', node_id: nodeId, window_id: windowId, device_id: deviceId, created_at: iso(now), expires_at: iso(now + ttlMs), nonce: nonce || randomNonce() };
+      const message = sealContent({ type: clear.type, senderId: deviceId, clear, content: { reason }, recipients: { [nodeId]: nodeBox } });
+      return seal(message, signWith === 'read' ? readSigner : signer);
     },
 
     // lease-v1 (fleet stage 5 §4.1): answers a node-signed kl.lease.request

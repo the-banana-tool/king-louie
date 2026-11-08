@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { isCommandAvailable, resetRuntimeEnvironmentCache } = require('../execution/runtime-environment');
 const { resolveProgram } = require('../cases/verify/check');
-const { localDesktopDeviceId } = require('../core/origin');
+const { localDesktopDeviceId, isRemoteWindowEvent } = require('../core/origin');
 const { createLogger } = require('../logging');
 
 const log = createLogger('skill');
@@ -141,7 +141,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
     if (isLocalPath) {
       // A window names a path on its own disk; relative to the node's working
       // directory, which a model can write, it would name anything.
-      if (localDesktopDeviceId(event) && !path.isAbsolute(cleaned)) {
+      if ((localDesktopDeviceId(event) || isRemoteWindowEvent(event)) && !path.isAbsolute(cleaned)) {
         return { ok: false, code: 'RELATIVE_PATH', error: 'Give the skill\'s folder as a full path, such as C:\\skills\\my-skill.' };
       }
       // Local directory — resolve and symlink into skills/

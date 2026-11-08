@@ -1,0 +1,57 @@
+{
+  "name": "handshake-reflected",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "session_id": "w2jUc285Clxi20TXukyRC_tWJUeOTbssqYfXSZxvX9M",
+    "window": {
+      "key": "A",
+      "device_id": "kld-kxxgvjxu2fdtvh5s",
+      "public_key": "UwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec",
+      "ephemeral": "f2-7975Bgm-8Bew6I2PgsN4JDeDThtcnT72gk4o3VTI"
+    },
+    "node": {
+      "key": "web-01",
+      "node_id": "kl-t7zd5qd7crh3ttn3",
+      "public_key": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec",
+      "ephemeral": "0QTTdv0344J8tvO-9depSIHKRzeYYWiXYeYTeW9wiVo"
+    },
+    "pin": "AUPku9XzCbrWMN1_XBL7lONC08x-YHZZvjr-UCW8Sec"
+  },
+  "input": {
+    "cases": [
+      {
+        "name": "hello_w back to the window",
+        "to": "window",
+        "stage": "hello",
+        "bytes": "AQGfb_EEhopnApS2rqX657FYB9m0Q2jVj468M03NUgGHBmtsZC1reHhndmp4dTJmZHR2aDVzUwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec"
+      },
+      {
+        "name": "hello_n back to the node",
+        "to": "node",
+        "stage": "hello",
+        "bytes": "AmhufcEb_ggzH6LN0ae-CRdwx92orbYOXZVSDGINneAIa2wtdDd6ZDVxZDdjcmgzdHRuMwFD5LvV8wm61jDdf1wS-5TjQtPMfmB2Wb46_lAlvEnnAnmwJc7-btpMUCoKQCXXouEW56pxldDaRsEAM6HMxHyByokkwrODH2hSyp4gV5AyQx6DbBgHK-A38ll4MtQgAQ"
+      },
+      {
+        "name": "hello_w again at auth",
+        "to": "node",
+        "stage": "auth",
+        "bytes": "AQGfb_EEhopnApS2rqX657FYB9m0Q2jVj468M03NUgGHBmtsZC1reHhndmp4dTJmZHR2aDVzUwL0LuhwqBRBKUu1bGlCIAOYsrP3gjZ3iquywE9Hrec"
+      },
+      {
+        "name": "the window's own ephemeral, under a real node signature",
+        "to": "window",
+        "stage": "hello",
+        "bytes": "Ap9v8QSGimcClLaupfrnsVgH2bRDaNWPjrwzTc1SAYcGa2wtdDd6ZDVxZDdjcmgzdHRuMwFD5LvV8wm61jDdf1wS-5TjQtPMfmB2Wb46_lAlvEnnBK-a3KYOHB6sMGglUroDFvOsFHPDHUq9Cn19ci120-xeT3oDQHxxzYx3RT0hOYV0bGhDpCy5Bsa0h13UydEDCQ"
+      }
+    ]
+  },
+  "expect": {
+    "close": {
+      "code": 4401,
+      "reason": "handshake"
+    },
+    "out": []
+  }
+}

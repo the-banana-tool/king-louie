@@ -406,6 +406,7 @@ contextBridge.exposeInMainWorld(
   {
     chat: {
       load: () => ipcRenderer.invoke('chat:load'),
+      running: () => ipcRenderer.invoke('chat:running'),
       get: (chatId) => {
         validateString(chatId, 'chatId');
         return ipcRenderer.invoke('chat:get', { chatId });
@@ -505,7 +506,10 @@ contextBridge.exposeInMainWorld(
       onToolUse: (callback) => registerAdditive('chat:toolUse', callback),
       onToolResult: (callback) => registerOnce('chat:toolResult', callback),
       onToolProgress: (callback) => registerOnce('chat:toolProgress', callback),
-      onChatUpdated: (callback) => registerOnce('chat:updated', callback)
+      onChatUpdated: (callback) => registerOnce('chat:updated', callback),
+      onRowAdded: (callback) => registerOnce('chat:rowAdded', callback),
+      onListChanged: (callback) => registerOnce('chat:listChanged', callback),
+      onQuestionWaiting: (callback) => registerOnce('chat:questionWaiting', callback)
     },
     tool: {
       list: () => ipcRenderer.invoke('tool:list'),
@@ -551,6 +555,7 @@ contextBridge.exposeInMainWorld(
         return ipcRenderer.invoke('agent:executeWithDeps', payload);
       },
       onAskUser: (callback) => registerOnce('agent:askUser', callback),
+      onAskEnded: (callback) => registerOnce('agent:askEnded', callback),
       sendUserResponse: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.requestId, 'requestId');

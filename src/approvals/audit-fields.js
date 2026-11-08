@@ -41,6 +41,8 @@ function auditOriginOf(origin) {
     return { kind: 'frontdoor', grant_id: id(o.grant_id), client_id: id(o.client_id) };
   }
   if (ORIGIN_KINDS.includes(o.kind)) return { kind: o.kind };
+  // The bare id (R-RW-33): the front door already sees it in the clear hello_w.
+  if (o.client === 'remote-window') return { kind: 'remote-window', deviceId: typeof o.deviceId === 'string' && o.deviceId ? o.deviceId : null };
   if (typeof o.client === 'string' && Object.hasOwn(LOCAL_CLIENTS, o.client)) return { kind: LOCAL_CLIENTS[o.client] };
   return { kind: 'remote' };
 }

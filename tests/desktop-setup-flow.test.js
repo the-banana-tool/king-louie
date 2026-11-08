@@ -446,7 +446,7 @@ describe('describeSetup: start', () => {
   });
 
   it('a bridge code waiting will not change names what helps, not a retry', () => {
-    for (const [code, re] of [['DEVICE_UNPAIRED', /Unpair/], ['SERVICE_KEY_CHANGED', /Unpair/], ['PROTOCOL_MISMATCH', /[Rr]estart/], ['ANOTHER_DEVICE', /[Aa]nother/]]) {
+    for (const [code, re] of [['DEVICE_UNPAIRED', /Unpair/], ['SERVICE_KEY_CHANGED', /Unpair/], ['PROTOCOL_MISMATCH', /[Rr]estart/], ['TOO_MANY_WINDOWS', /[Tt]oo many windows/]]) {
       const m = describeSetup(down({ running: true }, { connection: { status: 'disconnected', code, error: 'said\u0007' } }));
       assert.strictEqual(m.step, 'start');
       assert.strictEqual(m.error.code, code);

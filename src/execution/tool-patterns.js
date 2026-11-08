@@ -46,22 +46,36 @@ function patternMatch(pattern, target) {
   return regex.test(target);
 }
 
+// The field that says what each tool acts on, from its own schema. A tool ignores keys
+// it does not declare, so a field read for every tool could name something other than
+// what runs (Write with a decoy command). This file loads no registry: the runbook
+// profile must not, so the table is here.
+const ACTION_TOOLS = ['Browser', 'BrowserPage', 'BrowserExtract', 'BrowserSession', 'Cron', 'RemoteDispatch', 'TaskStatus',
+  'Canvas', 'Ledger', 'Brief', 'Reorient', 'Plan', 'Executor', 'Detour', 'Playbook', 'Progress', 'Ingest'];
+const DETAIL_FIELDS = Object.freeze({
+  Bash: 'command',
+  PowerShell: 'command',
+  Git: 'command',
+  Read: 'file_path',
+  Write: 'file_path',
+  Edit: 'file_path',
+  Vault: 'key',
+  SpawnAgent: 'task',
+  ...Object.fromEntries(ACTION_TOOLS.map((name) => [name, 'action']))
+});
+
 /**
- * Formats a tool call into a string pattern for policy checking.
- * e.g., Bash(ssh user@server) or Vault(get_token)
+ * Formats a tool call into a string pattern for policy checking and a phone card.
+ * e.g., Bash(ssh user@server) or Vault(get_token). A tool with no entry shows all its
+ * parameters, so it never names one that does nothing.
  */
 function formatToolPattern(toolName, parameters = {}) {
   let detail = '';
   if (typeof parameters === 'string') {
     detail = parameters;
   } else if (parameters && typeof parameters === 'object') {
-    if (parameters.command) detail = String(parameters.command);
-    else if (parameters.filePath) detail = String(parameters.filePath);
-    else if (parameters.path) detail = String(parameters.path);
-    else if (parameters.key) detail = String(parameters.key);
-    else if (parameters.action) detail = String(parameters.action);
-    else if (parameters.subcommand) detail = String(parameters.subcommand);
-    else detail = JSON.stringify(parameters);
+    const field = Object.hasOwn(DETAIL_FIELDS, toolName) ? DETAIL_FIELDS[toolName] : null;
+    detail = field && parameters[field] ? String(parameters[field]) : JSON.stringify(parameters);
   }
   return `${toolName}(${detail})`;
 }

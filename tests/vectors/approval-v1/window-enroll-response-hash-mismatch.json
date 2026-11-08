@@ -1,0 +1,39 @@
+{
+  "name": "window-enroll-response-hash-mismatch",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "box": {
+      "node_id": "kl-c2ubd6jjqumalzt5",
+      "d": "G4xu6oJW0Cytp2E9o732vG-h6xdVFltHuGbnFLBr8_8"
+    },
+    "device": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+        "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+      }
+    },
+    "type": "kl.window.enroll.response",
+    "request": {
+      "request_id": "e389ad13-2de5-4faf-892e-311de27ea147",
+      "nonce": "DgLxD7RiX5bgdUScE6dHmtIEUiFmX5voaCGzTVOQjBQ",
+      "enroll_hash": "bjR4nK3wgSq87NI4SfBtHRq422HJc298pmNrBDByrBA",
+      "expires_at": "2026-09-23T18:14:11.201Z"
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJlbnJvbGxfaGFzaCI6Ikw5SHd6Mk5LaFB1UzFJYk5EQlVvNy1Yam9mN0U3YUUtSks2cEFQMGh3QlEiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODoxNDoxMS4yMDFaIiwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub25jZSI6IkRnTHhEN1JpWDViZ2RVU2NFNmRIbXRJRVVpRm1YNXZvYUNHelRWT1FqQlEiLCJyZXF1ZXN0X2lkIjoiZTM4OWFkMTMtMmRlNS00ZmFmLTg5MmUtMzExZGUyN2VhMTQ3Iiwic2VhbGVkIjp7ImN0IjoiX0dIUmdLejRoNElmUWdDTjdLMGlBMGhVTnFKTzlLczAwcjZqWmYwSEM4NlpieU1LXzVuamxsbkxONVQydG9ldHk4UjVyNk9wbEFweGQ1VnZwN2Q4YWhFaExkTUpRb0x6N3YtakFHZWNhV0VsREJDUzVfR1ZrUl9wX0tOb19BYXFReThSQV9jNUZoT29yOWVPWGYwVWtyS0trZ1BCV2k5RWx2QmVtYUVKZDE2YnB5MldXSVlHcDd6VVF6SXZieXJvZFFsRTRFWktoTUlndEVGcnJoS3N2Ri13Uzl5MkVXSnp3Um42dmd0YTF6cVBvRGhZZXh3MUI2LXNfNHRnWHJzUTZ3RXc2YUJHaXc0dmtvNnF4U3hzQWp3VURFRHR4VkZfRC1pVHBJeVNMVUZlRVo0RGIwLU1XUzFncHR1d0tFanFKV1hvRnA0em1rWkZseXBYb0pKaHZwblZWejBQMUctM0lWRTdkSExDQ19zIiwiZXBrIjp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4Ijoid2JQc04tYV9Bc2dDTURNZkNhYkZ6S2xMbGQxcU1raHNzRU9Ja2FhVVFxcyIsInkiOiJZYzFaTm4zVGRuSjdWaTJuN0N3S2ZrTEc5N2d6cXFNQk9QYS1keFdhalkwIn0sIml2IjoiWEhlTUxFandJYThnODFwQyIsImtleXMiOnsia2wtYzJ1YmQ2ampxdW1hbHp0NSI6ImZHdFp1cHN6VGVkbDNKdVkzZmw5OVpxTU1GOFp3ZjZqSDg4WjN4cnRMSVd0cGF0ajJXT0RMcldZTWdNRWVobk0ifSwidiI6MX0sInNpZ25lZF9hdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTEuMjAxWiIsInR5cGUiOiJrbC53aW5kb3cuZW5yb2xsLnJlc3BvbnNlIiwidiI6MX0",
+    "sig": "CM6lAwQlirZCygvH6BX9ybnQbfhOam3DK_6xR7wIaU8XYiqRTPMn_zo7Tha1zYcoHzQHJ_eRJ_KD0KdH9MTdkg"
+  },
+  "expect": {
+    "reason": "enroll_hash_mismatch",
+    "decision": null
+  }
+}

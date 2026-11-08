@@ -26,7 +26,11 @@ const { CASE_MCP_TOOLS, STATUS_CHANGING, NEVER_OVER_MCP, untrusted, answerClass,
 const { fold, wordsInText, ownerQuoteInTurn } = require('../tools/owner-quote');
 
 const CHAT_CHANNEL = 'in-app-chat';
-const CHANNELS = new Set(['mcp-stdio', 'mcp-frontdoor', CHAT_CHANNEL]);
+// A remote window's turn (remote window plan R-RW-9): the owner's typed words,
+// checked as the chat's are. It is in no list that takes a channel as a press.
+const REMOTE_WINDOW_CHANNEL = 'remote-window';
+const CHANNELS = new Set(['mcp-stdio', 'mcp-frontdoor', CHAT_CHANNEL, REMOTE_WINDOW_CHANNEL]);
+const CHECKED_CHANNELS = new Set([CHAT_CHANNEL, REMOTE_WINDOW_CHANNEL]);
 const RATE_WINDOW_MS = 60 * 1000;
 // Management surfaces spec §3.1-3.2 and part 1's Global Constraints.
 const PRESSED_MESSAGE = "Answer this with the buttons on the question in the case's chat, or on your phone.";
@@ -292,7 +296,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
       return true;
     }
   };
-  const hidesPrivate = (askerIsPrivate) => !(channel === CHAT_CHANNEL && askerIsPrivate === true);
+  const hidesPrivate = (askerIsPrivate) => !(CHECKED_CHANNELS.has(channel) && askerIsPrivate === true);
   const privateShape = (meta) => ({ id: meta.id, status: meta.status, private: true, data: untrusted({ title: meta.title }) });
   // → the private shape when the case's text is not shown here, else null.
   const hiddenCase = (rt, meta, askerIsPrivate) => (privateOf(rt, meta.id) && hidesPrivate(askerIsPrivate) ? privateShape(meta) : null);
@@ -462,7 +466,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
   function checkQuote(quote, ownerTurnText) {
     if (!fold(quote)) throw fail('invalid_params', '"quote" must hold the owner\'s words');
     if (quoteWordCount(quote) < MIN_QUOTE_WORDS) throw fail('quote_too_short', QUOTE_TOO_SHORT_MESSAGE);
-    if (channel === CHAT_CHANNEL) {
+    if (CHECKED_CHANNELS.has(channel)) {
       if (typeof ownerTurnText !== 'string' || !fold(ownerTurnText)) throw fail('not_owner', OWNER_ONLY_MESSAGE);
       if (!ownerQuoteInTurn(quote, ownerTurnText)) throw fail('quote_not_found', 'the quote is not in the owner\'s message this turn; quote their words exactly');
     }
@@ -775,7 +779,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
   // True when a CaseRuntime is there: the tools are listed only then.
   const available = () => currentRuntime() !== null;
 
-  return { names, tools, call, available };
+  return { names, tools, call, available, channel };
 }
 
 // What F4's router adds to a case tool's arguments (FleetRouter._callExtra):
@@ -815,6 +819,7 @@ module.exports = {
   NEVER_OVER_MCP,
   CaseToolError,
   CHAT_CHANNEL,
+  REMOTE_WINDOW_CHANNEL,
   createCaseToolHandler,
   untrusted,
   answerClass,

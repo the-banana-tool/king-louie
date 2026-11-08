@@ -5,9 +5,10 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { ApproverStore, checkApproverRecord, writeFileAtomic, FUTURE_SKEW_MS, judgeReadKey, judgeBoxKey } = require('./approver-store');
-const { open, verifyEs256 } = require('./envelope');
+const { open, verifyEs256, fromB64url } = require('./envelope');
 const { validateMessage, iso, DEVICE_ID_RE, NONCE_RE } = require('./messages');
 const { hasTestKey } = require('./test-keys');
+const { verifyWindowResponse, verifyWindowRevoke, refusedWindowKey, revokeCovers } = require('./window-messages');
 
 const MAX_STAGED_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 // Not every platform defines O_NOFOLLOW (Windows does not); fall back to 0
@@ -62,8 +63,14 @@ const KEY_STATEMENTS = Object.freeze({
 // A staged file's type is whatever the service account wrote: Object.hasOwn
 // alone would coerce ['kl.device.box_key'] into a match.
 const isKeyStatement = (type) => typeof type === 'string' && Object.hasOwn(KEY_STATEMENTS, type);
+const WINDOW_ENROLL = 'kl.window.enroll.response';
+const WINDOW_REVOKE = 'kl.window.revoke';
+const isWindowItem = (type) => type === WINDOW_ENROLL || type === WINDOW_REVOKE;
 
 function stagedParties(message) {
+  // An approve's window is inside the request's seal, which apply opens.
+  if (message.type === WINDOW_ENROLL) return { deviceId: null, signer: message.device_id };
+  if (message.type === WINDOW_REVOKE) return { deviceId: message.window_id, signer: message.device_id };
   if (message.type === 'kl.device.revoke') return { deviceId: message.device_id, signer: message.revoked_by };
   if (isKeyStatement(message.type)) return { deviceId: message.device_id, signer: message.device_id };
   return { deviceId: message.device && message.device.device_id, signer: message.enrolled_by };
@@ -178,7 +185,7 @@ class ApproverAdmin {
         continue;
       }
       try {
-        const { received_at: receivedAt, envelope } = JSON.parse(readRegularFile(file));
+        const { received_at: receivedAt, envelope, request } = JSON.parse(readRegularFile(file));
         const { message } = open(envelope);
         if (message.nonce !== stem) {
           items.push(unsafe(file, 'misnamed'));
@@ -192,7 +199,8 @@ class ApproverAdmin {
           signer,
           receivedAt, // display only — never read for a policy decision (I1)
           envelope,
-          message
+          message,
+          ...(message.type === WINDOW_ENROLL ? { request: request === undefined ? null : request } : {})
         });
       } catch (err) {
         items.push({ file, type: 'unreadable', deviceId: null, signer: null, receivedAt: null, envelope: null, message: null, error: err.message });
@@ -234,7 +242,11 @@ class ApproverAdmin {
   // though, when its own signer is itself the target of a *different*
   // valid revoke in this same batch: a compromised phone must not get to
   // plant a lasting block moments before its own compromise is undone.
-  async applyStaged({ now = this.now(), confirm }) {
+  //
+  // `windowDevices` (createWindowDevices, desktop-bridge/window-enrollment.js) opens a
+  // window's request and writes its record: this module never loads the bridge. With
+  // none, a window's items stay staged.
+  async applyStaged({ now = this.now(), confirm, windowDevices = null }) {
     const items = this.listStaged();
     if (items.length === 0) return [];
     if (!(await confirm(items))) return [];
@@ -255,7 +267,7 @@ class ApproverAdmin {
     const newestOf = (type) => items.filter((i) => i.type === type)
       .sort((x, y) => Date.parse(y.message.created_at) - Date.parse(x.message.created_at));
     const keyStatements = [...newestOf('kl.device.read_key'), ...newestOf('kl.device.box_key')];
-    const rest = items.filter((i) => i.type !== 'kl.device.revoke' && !isKeyStatement(i.type) && i.type !== 'unsafe');
+    const rest = items.filter((i) => i.type !== 'kl.device.revoke' && !isKeyStatement(i.type) && !isWindowItem(i.type) && i.type !== 'unsafe');
     const unsafe = items.filter((i) => i.type === 'unsafe');
 
     // Pass 1: judge every revoke against the pre-batch snapshot only, and
@@ -356,11 +368,74 @@ class ApproverAdmin {
       results.push({ file: item.file, type: item.type, deviceId: item.deviceId, signer: item.signer, result: this._applyKeyStatement(item, { now, applied, revokedTargets }) });
     }
 
+    // Revokes first, so a revoke in this batch wins over an approve of the same window.
+    const revokedWindows = new Set();
+    const windowItems = [...items.filter((i) => i.type === WINDOW_REVOKE), ...items.filter((i) => i.type === WINDOW_ENROLL)];
+    for (const item of windowItems) {
+      const outcome = item.type === WINDOW_REVOKE
+        ? this._applyWindowRevoke(item, { now, applied, revokedTargets, revokedWindows, windowDevices })
+        : this._applyWindowEnroll(item, { now, applied, revokedTargets, revokedWindows, windowDevices });
+      if (outcome.done !== false) this._done(item.file);
+      results.push({ file: item.file, type: item.type, deviceId: outcome.deviceId || item.deviceId, signer: item.signer, result: outcome.result, label: outcome.label });
+    }
+
     for (const item of unsafe) {
       results.push({ file: item.file, type: item.type, deviceId: item.deviceId, signer: item.signer, result: `rejected: ${item.reason}` });
     }
 
     return results;
+  }
+
+  _windowSigner(applied, revokedTargets) {
+    return (id) => (revokedTargets.has(id) ? null : applied.get(id) || null);
+  }
+
+  _applyWindowRevoke(item, { now, applied, revokedTargets, revokedWindows, windowDevices }) {
+    if (!windowDevices) return { result: 'deferred: this command cannot write windows', done: false };
+    const { message, envelope } = item;
+    if (this._fromFuture(message, now)) return { result: 'rejected: created in the future' };
+    if (this._tooOld(message, now)) return { result: 'rejected: older than 7 days' };
+    const { reason } = verifyWindowRevoke({ envelope, nodeId: windowDevices.nodeId, signerOf: this._windowSigner(applied, revokedTargets) });
+    if (reason) return { result: reason === 'unknown_device' ? 'rejected: signer is not an active approver' : `rejected: ${reason.replace(/_/g, ' ')}` };
+    revokedWindows.add(message.window_id);
+    let record;
+    try {
+      record = windowDevices.find(message.window_id);
+      if (record && record.remote !== true) return { result: 'rejected: not a remote window' };
+      if (record && !revokeCovers(record, Date.parse(message.created_at))) return { result: 'rejected: older than the enrollment' };
+      if (record) windowDevices.remove(message.window_id);
+    } catch (err) {
+      return { result: `failed: ${err.message}`, done: false };
+    }
+    return { result: 'window revoked' };
+  }
+
+  // Both envelopes again, from nothing but this node's key and the approver set: the
+  // staged file is the service account's, the request in it included.
+  _applyWindowEnroll(item, { now, applied, revokedTargets, revokedWindows, windowDevices }) {
+    if (!windowDevices) return { result: 'deferred: this command cannot write windows', done: false };
+    const { message, envelope, request } = item;
+    const dated = { created_at: message.signed_at };
+    if (this._fromFuture(dated, now)) return { result: 'rejected: created in the future' };
+    if (this._tooOld(dated, now)) return { result: 'rejected: older than 7 days' };
+    if (!request) return { result: 'rejected: no request' };
+    const opened = windowDevices.openRequest(request);
+    if (opened.reason) return { result: opened.reason === 'bad_node_signature' ? 'rejected: request not signed by this node' : `rejected: request ${opened.reason.replace(/_/g, ' ')}` };
+    const { window } = opened.content;
+    const answer = verifyWindowResponse({ envelope, expected: opened.message, nodeId: windowDevices.nodeId, signerOf: this._windowSigner(applied, revokedTargets), agree: windowDevices.agree });
+    if (answer.reason) return { deviceId: window.device_id, result: answer.reason === 'unknown_device' ? 'rejected: signer is not an active approver' : `rejected: ${answer.reason.replace(/_/g, ' ')}` };
+    if (answer.decision !== 'approve') return { deviceId: window.device_id, result: 'rejected: not an approve' };
+    if (revokedWindows.has(window.device_id)) return { deviceId: window.device_id, result: 'rejected: window was revoked' };
+    const refused = refusedWindowKey(fromB64url(window.public_key), { allowTestKeys: this.allowTestKeys });
+    if (refused) return { deviceId: window.device_id, result: `rejected: ${refused.replace(/_/g, ' ')}` };
+    try {
+      const existing = windowDevices.find(window.device_id);
+      if (existing && existing.remote !== true) return { deviceId: window.device_id, result: 'rejected: a local pairing holds this key' };
+      windowDevices.write({ deviceId: window.device_id, publicKey: window.public_key, label: window.label, pairedAt: iso(now), remote: true });
+    } catch (err) {
+      return { deviceId: window.device_id, result: `failed: ${err.message}`, done: false };
+    }
+    return { deviceId: window.device_id, label: window.label, result: 'window enrolled' };
   }
 
   // One staged key statement, judged against the admin set as it stood before

@@ -20,7 +20,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { ShadowGit, projectKey } = require('./shadow-git');
+const { ShadowGit, projectKey, assertCommitId } = require('./shadow-git');
 const { createLogger } = require('../logging');
 
 const log = createLogger('checkpoint-manager');
@@ -211,6 +211,8 @@ class CheckpointManager {
   async restore(workdir, checkpointId, { safetyLabel = 'before restore' } = {}) {
     if (!this.enabled) throw new Error('Checkpoints are disabled');
     if (!checkpointId) throw new Error('restore requires a checkpoint id');
+    // Before the safety snapshot: a bad id leaves no snapshot behind.
+    assertCommitId(checkpointId);
 
     const resolved = path.resolve(workdir);
     const key = projectKey(resolved);

@@ -23,6 +23,8 @@ const NONCE_RE = /^[A-Za-z0-9_-]{43}$/;
 const HASH_RE = /^[A-Za-z0-9_-]{43}$/;
 const CODE_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 const DEVICE_ID_RE = /^d-[a-z2-7]{16}$/;
+const WINDOW_ID_RE = /^kld-[a-z2-7]{16}$/;
+const NODE_SPKI_HEX_RE = /^[0-9a-f]{88}$/;
 const NODE_ID_RE = /^kl-[a-z2-7]{16}$/;
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_ACTION_BYTES = 262144;
@@ -43,6 +45,8 @@ const ENROLL_MAX_MS = 10 * 60 * 1000;
 const REVOKE_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const READ_KEY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const BOX_KEY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+const WINDOW_LABEL_MAX_BYTES = 64;
+const WINDOW_REASON_MAX = 200;
 const PLATFORMS = ['ios', 'android', 'demo'];
 const STATUS_STATES = ['approved', 'denied', 'expired', 'withdrawn', 'refused'];
 
@@ -99,17 +103,24 @@ function cloneJson(value) {
   }
 }
 
-function toolAction(toolName, params, cwd) {
+// The pseudo-tool of a remote window's channel call (remote window plan R-RW-12).
+// Its card is the host's own line, with no parameters in it: they may be 64 KiB.
+const WINDOW_TOOL = 'Window';
+
+// `note` is host-written and comes first, so a cut never takes it.
+function toolAction(toolName, params, cwd, note = null) {
   // Required here, like runbook-engine in runbookAction, so a module that
   // only verifies envelopes (the front door) never loads src/execution/.
   const { formatToolPattern } = require('../execution/tool-patterns');
   const cloned = cloneJson(params === undefined || params === null ? {} : params);
+  const pattern = () => formatToolPattern(toolName, cloned);
+  const summary = toolName === WINDOW_TOOL && note ? note : (note ? `${note}: ${pattern()}` : pattern());
   return {
     kind: 'tool',
     name: String(toolName),
     params: cloned,
     cwd: cwd === undefined || cwd === null ? null : String(cwd),
-    summary: cutSummary(formatToolPattern(toolName, cloned))
+    summary: cutSummary(summary)
   };
 }
 
@@ -163,6 +174,9 @@ function actionHash(action, { salt = null } = {}) {
   return sha256b64url(text);
 }
 
+// The clients whose origin names the device that asked (R-RW-33 for a remote window).
+const DEVICE_ORIGINS = Object.freeze(['desktop', 'remote-window']);
+
 function normalizeOrigin(origin) {
   const o = origin || {};
   const out = {
@@ -170,7 +184,7 @@ function normalizeOrigin(origin) {
     session: o.session === undefined || o.session === null ? null : String(o.session),
     job_id: o.job_id === undefined || o.job_id === null ? null : String(o.job_id)
   };
-  if (out.client === 'desktop') out.deviceId = o.deviceId === undefined || o.deviceId === null ? null : String(o.deviceId);
+  if (DEVICE_ORIGINS.includes(out.client)) out.deviceId = o.deviceId === undefined || o.deviceId === null ? null : String(o.deviceId);
   return out;
 }
 
@@ -334,7 +348,7 @@ function checkAction(action) {
 
 function checkOrigin(origin) {
   if (!isPlainObject(origin) || !isString(origin.client)) return false;
-  const keys = origin.client === 'desktop' ? ['client', 'session', 'job_id', 'deviceId'] : ['client', 'session', 'job_id'];
+  const keys = DEVICE_ORIGINS.includes(origin.client) ? ['client', 'session', 'job_id', 'deviceId'] : ['client', 'session', 'job_id'];
   return hasExactKeys(origin, keys) && Object.values(origin).every((v) => v === null || withinLength(v, ORIGIN_STRING_MAX));
 }
 
@@ -383,6 +397,49 @@ function validateOpenedRequest(m) {
   }
 }
 
+function isWindowLabel(label) {
+  return isString(label) && label.length > 0 && Buffer.byteLength(label, 'utf8') <= WINDOW_LABEL_MAX_BYTES;
+}
+
+// The windows a node lists to a phone, one row each (R-RW-14).
+const isWindowRow = (w) => isPlainObject(w) && hasExactKeys(w, ['device_id', 'label', 'platform', 'enrolled_at', 'attached'])
+  && WINDOW_ID_RE.test(w.device_id) && isWindowLabel(w.label) && w.platform === 'windows' && isTimestamp(w.enrolled_at) && typeof w.attached === 'boolean';
+
+function isWindowIdentity(w) {
+  if (!isPlainObject(w) || !hasExactKeys(w, ['device_id', 'public_key', 'label', 'platform'])) return false;
+  if (!WINDOW_ID_RE.test(w.device_id) || !isWindowLabel(w.label) || w.platform !== 'windows') return false;
+  let raw;
+  try {
+    raw = fromB64url(w.public_key);
+  } catch {
+    return false;
+  }
+  return raw.length === 32 && deriveDeviceId(raw, 'kld-') === w.device_id;
+}
+
+// A sealed window message after opening (clear part and content together). → null, or
+// the reason it is refused. An enrollment's hash is held to its content here.
+function validateOpenedWindow(type, m) {
+  try {
+    if (!isPlainObject(m) || m.type !== type || m.v !== 1) return 'malformed';
+    if (type === 'kl.window.enroll') {
+      if (!isWindowIdentity(m.window) || !NODE_SPKI_HEX_RE.test(m.node_key) || !HASH_RE.test(m.salt)) return 'malformed';
+      return saltedHash(m.salt, { window: m.window, node_key: m.node_key }) === m.enroll_hash ? null : 'enroll_hash_mismatch';
+    }
+    if (type === 'kl.window.enroll.response') return m.decision === 'approve' || m.decision === 'deny' ? null : 'malformed';
+    if (type === 'kl.window.revoke') return withinLength(m.reason, WINDOW_REASON_MAX) ? null : 'malformed';
+    if (type === 'kl.window.list') return Array.isArray(m.windows) && m.windows.every(isWindowRow) ? null : 'malformed';
+    return 'malformed';
+  } catch {
+    return 'malformed';
+  }
+}
+
+const spanWithin = (m, max) => {
+  const span = Date.parse(m.expires_at) - Date.parse(m.created_at);
+  return span > 0 && span <= max;
+};
+
 const VALIDATORS = {
   'kl.approval.request': (m) => isClearRequest(m) || isSealedRequest(m),
   'kl.approval.response': (m) => hasExactKeys(m, ['v', 'type', 'request_id', 'node_id', 'action_hash', 'nonce', 'decision', 'expires_at', 'device_id', 'signed_at'])
@@ -427,6 +484,15 @@ const VALIDATORS = {
     const span = Date.parse(m.expires_at) - Date.parse(m.created_at);
     return span > 0 && span <= BOX_KEY_MAX_MS;
   },
+  // Born sealed (R-RW-14): each has its sealed shape only, and what it holds inside is
+  // validateOpenedWindow's. A signer and a key are the verifier's.
+  'kl.window.enroll': (m) => isSealedShape('kl.window.enroll', m) && UUID_V4_RE.test(m.request_id) && NODE_ID_RE.test(m.node_id) && withinLength(m.node_name, NODE_NAME_MAX)
+    && HASH_RE.test(m.enroll_hash) && isTimestamp(m.created_at) && isTimestamp(m.expires_at) && NONCE_RE.test(m.nonce) && isDeviceJwk(m.node_box) && spanWithin(m, ENROLL_MAX_MS),
+  'kl.window.enroll.response': (m) => isSealedShape('kl.window.enroll.response', m) && UUID_V4_RE.test(m.request_id) && NODE_ID_RE.test(m.node_id)
+    && HASH_RE.test(m.enroll_hash) && NONCE_RE.test(m.nonce) && DEVICE_ID_RE.test(m.device_id) && isTimestamp(m.expires_at) && isTimestamp(m.signed_at),
+  'kl.window.revoke': (m) => isSealedShape('kl.window.revoke', m) && NODE_ID_RE.test(m.node_id) && WINDOW_ID_RE.test(m.window_id) && DEVICE_ID_RE.test(m.device_id)
+    && isTimestamp(m.created_at) && isTimestamp(m.expires_at) && NONCE_RE.test(m.nonce) && spanWithin(m, REVOKE_MAX_MS),
+  'kl.window.list': (m) => isSealedShape('kl.window.list', m) && NODE_ID_RE.test(m.node_id) && DEVICE_ID_RE.test(m.to_device) && isTimestamp(m.at) && NONCE_RE.test(m.nonce) && isDeviceJwk(m.node_box),
   'kl.enroll.open': (m) => hasExactKeys(m, ['v', 'type', 'node_id', 'code_id', 'expires_at', 'nonce'])
     && NODE_ID_RE.test(m.node_id) && CODE_ID_RE.test(m.code_id) && isTimestamp(m.expires_at) && NONCE_RE.test(m.nonce),
   'kl.enroll.done': (m) => hasExactKeys(m, ['v', 'type', 'node_id', 'code_id', 'enroll', 'refused', 'nonce'])
@@ -501,6 +567,8 @@ module.exports = {
   SEALED_PAYLOAD_MAX,
   sealTargets,
   validateOpenedRequest,
+  validateOpenedWindow,
+  WINDOW_ID_RE,
   TTL_MIN_MS,
   TTL_MAX_MS,
   PLATFORMS,
@@ -509,6 +577,7 @@ module.exports = {
   randomNonce,
   clampTtl,
   cutSummary,
+  WINDOW_TOOL,
   toolAction,
   runbookAction,
   envelopeAction,

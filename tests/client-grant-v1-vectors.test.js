@@ -119,9 +119,9 @@ describe('client-grant-v1 vectors', () => {
     }
   });
 
-  it('leaves approval-v1 untouched: 69 vectors (41, 8 for the read key, 8 for the seal, 6 for the box key, 4 for sealed approvals and 2 for sealed questions), no shared names', () => {
+  it('leaves approval-v1 untouched: 77 vectors (42, 8 for the read key, 8 for the seal, 6 for the box key, 4 for sealed approvals, 2 for sealed questions, and 7 for sealed leases/tasks), no shared names', () => {
     const approval = fs.readdirSync(APPROVAL_DIR).filter((f) => f.endsWith('.json') && f !== 'keys.json');
-    assert.equal(approval.length, 69);
+    assert.equal(approval.length, 77);
     const names = new Set(approval.map((f) => f.replace(/\.json$/, '')));
     for (const n of EXPECTED) assert.ok(!names.has(n), `${n} collides with an approval-v1 vector`);
     assert.ok(!fs.existsSync(path.join(DIR, 'keys.json')), 'client-grant-v1 reads ../approval-v1/keys.json, never a copy');

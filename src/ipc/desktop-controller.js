@@ -53,7 +53,7 @@ const INSTALL_REFUSALS = {
   unknown: { code: 'NODE_TASK_UNREADABLE', message: TASK_REFUSALS.unknown.message }
 };
 // §7.3: the bridge codes that end an attached start's wait (the client's FATAL).
-const BRIDGE_FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'ANOTHER_DEVICE', 'SERVICE_KEY_CHANGED']);
+const BRIDGE_FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'TOO_MANY_WINDOWS', 'SERVICE_KEY_CHANGED']);
 // pairConfirm answers that waiting will not change (the bridge client's
 // FATAL set, and the pairing's own refusals); anything else is a bridge
 // that is not up yet.
@@ -443,6 +443,7 @@ function createDesktopController({
       }
     }
     let bridge = null;
+    let fleetMachine = false;
     // §7.4: a disconnected personal pairing shows what §7.1 finds now
     // (rate-limited: not a PowerShell call per repaint).
     if (current === 'attached-disconnected') await refreshNode().catch(() => {});
@@ -456,6 +457,10 @@ function createDesktopController({
           const local = await nodeRunner.inspectLocal({ bridgeFile: bridgeFile() });
           r = (readBridgeFile ? await readBridgeFile() : local.trust) || {};
           node = await unpairedNode(local.node);
+          // Track if we detected a fleet machine (personal: false)
+          if (local.node && !local.node.personal && !local.node.fresh) {
+            fleetMachine = true;
+          }
         } else {
           r = (await readFile()) || {};
         }
@@ -489,6 +494,7 @@ function createDesktopController({
       profileDir: userDataDir ? shown(userDataDir, 400) : null,
       bridgeFile: bridgeFile(),
       bridge,
+      fleetMachine,
       pairing: pairing ? {
         deviceId: pairing.deviceId,
         fingerprint: fingerprintGroups(pairing.deviceId),
@@ -732,6 +738,19 @@ function createDesktopController({
     }
     state.setSetup({ completedAt: now().toISOString() });
     return answer();
+  }
+
+  // Task 13: "Just a window" action - sets windowOnly flag to skip service install
+  // and mark setup as done when no node is paired.
+  function setupWindowOnly() {
+    return joined('windowOnly', async () => {
+      clearAnswers();
+      // Set the windowOnly flag in desktop state, which tells nextSetupStep
+      // to return 'done' when there's no paired node
+      state.noteSetup({ windowOnly: true });
+      notify();
+      return setupStep();
+    });
   }
 
   function joined(key, work) {
@@ -1967,7 +1986,7 @@ function createDesktopController({
     status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
     importPlan, importApply, migrationPlan, migrationApply, restartLater, dismissServiceCommand, createClient, setClient, dispose,
     startAttached, startIdle, refreshIdle, nodeStart, nodeRestart, nodeInstallPreview, nodeInstall,
-    setupStep, setupLater, setupFinish, finishedForNow: () => finishedForNow,
+    setupStep, setupLater, setupFinish, setupWindowOnly, finishedForNow: () => finishedForNow,
     on: (event, fn) => emitter.on(event, fn)
   };
 }

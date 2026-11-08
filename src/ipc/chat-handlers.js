@@ -21,6 +21,8 @@ const { bridgeOriginFor } = require('../history/bridge-origin');
 const { offerCaseNudge } = require('../cases/case-nudge');
 const { egressPolicy } = require('../models/egress');
 const { createPrivateMark } = require('./private-mark');
+const { localDesktopDeviceId, isRemoteWindowEvent } = require('../core/origin');
+const { readScreenshot } = require('../browser/screenshot-store');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -82,6 +84,12 @@ async function refreshProvider(availability, provider) {
 }
 
 const TASK_RUNNING_MESSAGE = 'A task is still running in this chat. Send your message when it has finished.';
+const REMOTE_ADDABLE_SENDERS = Object.freeze(['user', 'assistant']);
+const REPLY_RUNNING_MESSAGE = 'A reply is still running in this chat.';
+
+// A window on a node's bridge. Another window cannot see this one's turn, so its
+// Send box is no guard; the Electron host's own window keeps its overlapping sends.
+const fromBridgeWindow = (event) => localDesktopDeviceId(event) !== null || isRemoteWindowEvent(event);
 
 function registerChatHandlers(ipcMain, context = {}) {
   const {
@@ -126,11 +134,27 @@ function registerChatHandlers(ipcMain, context = {}) {
   // (targeted fix, after final review I2's fix wave). Stop aborts every
   // controller in the set and clears the whole entry.
   const activeRuns = new Map();
+  // A send's event -> its controller, for stopping that run and no other.
+  const runByEvent = new WeakMap();
+  // chatId -> sends waiting on a case's beginTurn, the one await before activeRuns.
+  const beginningSends = new Map();
   // Owner decision Q29: case:attach refuses a chat while a turn runs in it
   // (src/ipc/case-handlers.js reads this from the context the two share). A
   // task's turn counts (tasks spec 2026-11-03 §4.3): src/fleet/start.js sets
   // isTaskChatRunning while the node runs, so it is read on every call.
-  context.isChatRunning = (chatId) => activeRuns.has(chatId) || context.isTaskChatRunning?.(chatId) === true;
+  context.isChatRunning = (chatId) => activeRuns.has(chatId) || beginningSends.has(chatId) || context.isTaskChatRunning?.(chatId) === true;
+
+  // Stops the run this event started, if it is still going. False for one already
+  // stopped or never begun (a refused send).
+  context.stopRunForEvent = (event) => {
+    const controller = runByEvent.get(event);
+    if (!controller || controller.signal.aborted) return false;
+    controller.abort();
+    for (const [chatId, set] of activeRuns) {
+      if (set.delete(controller) && set.size === 0) activeRuns.delete(chatId);
+    }
+    return true;
+  };
 
   const assertNoTaskRunning = (chatId) => {
     if (context.isTaskChatRunning?.(chatId) === true) throw Object.assign(new Error(TASK_RUNNING_MESSAGE), { code: 'CHAT_BUSY' });
@@ -252,6 +276,24 @@ function registerChatHandlers(ipcMain, context = {}) {
     }
   }
 
+  // What the window that acted has already drawn, for the other windows on the bridge
+  // (the dispatcher leaves that window out). The Electron host's own window is alone.
+  const notifyOtherWindows = (event, channel, payload) => {
+    if (fromBridgeWindow(event)) safeSend(event.sender, channel, payload);
+  };
+  // The row without its attachments' bytes: the store has them for the reload at the end.
+  const notifyRowAdded = (event, chatId, chat, run) => {
+    const messages = chat && Array.isArray(chat.messages) ? chat.messages : [];
+    const row = messages[messages.length - 1];
+    if (!row) return;
+    const attachments = (row.images?.length || 0) + (row.documents?.length || 0);
+    notifyOtherWindows(event, 'chat:rowAdded', {
+      chatId,
+      run,
+      message: { id: row.id, seq: row.seq, sender: row.sender, text: row.text, timestamp: row.timestamp, ...(attachments ? { attachments } : {}) }
+    });
+  };
+
   const getMainWindow = () => (
     typeof context.getMainWindow === 'function' ? context.getMainWindow() : context.mainWindow
   );
@@ -294,7 +336,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     return { ok: true, chat: withPrivateMark(chat) };
   }));
 
-  ipcMain.handle(IPC.CHAT_CREATE, wrapHandler(IPC.CHAT_CREATE, async (_event, title = 'New Chat') => {
+  ipcMain.handle(IPC.CHAT_CREATE, wrapHandler(IPC.CHAT_CREATE, async (event, title = 'New Chat') => {
     const now = new Date().toISOString();
     const settings = typeof context.getSettings === 'function' ? context.getSettings() : {};
     const defaults = settings.defaults || {};
@@ -316,6 +358,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     };
     createChat(newChat, { position: 'front' });
     setActiveChatId(newChat.id);
+    notifyOtherWindows(event, 'chat:listChanged', { chatId: newChat.id, what: 'created' });
     return newChat;
   }));
 
@@ -324,12 +367,15 @@ function registerChatHandlers(ipcMain, context = {}) {
     return { activeChatId: chatId };
   }));
 
-  ipcMain.handle(IPC.CHAT_RENAME, wrapHandler(IPC.CHAT_RENAME, async (_event, { chatId, name }) => {
-    return patchChat(chatId, { title: name, updatedAt: new Date().toISOString() });
+  ipcMain.handle(IPC.CHAT_RENAME, wrapHandler(IPC.CHAT_RENAME, async (event, { chatId, name }) => {
+    const renamed = patchChat(chatId, { title: name, updatedAt: new Date().toISOString() });
+    notifyOtherWindows(event, 'chat:listChanged', { chatId, what: 'renamed' });
+    return renamed;
   }));
 
-  ipcMain.handle(IPC.CHAT_DELETE, wrapHandler(IPC.CHAT_DELETE, async (_event, chatId) => {
+  ipcMain.handle(IPC.CHAT_DELETE, wrapHandler(IPC.CHAT_DELETE, async (event, chatId) => {
     deleteChat(chatId);
+    notifyOtherWindows(event, 'chat:listChanged', { chatId, what: 'deleted' });
     if (getActiveChatId() === chatId) {
       setActiveChatId(listChats({ messages: false })[0]?.id || null);
     }
@@ -370,9 +416,31 @@ function registerChatHandlers(ipcMain, context = {}) {
     return { canceled: false, chat: patchChat(chatId, { workingDirectory: dir, updatedAt: new Date().toISOString() }) };
   }));
 
-  ipcMain.handle(IPC.CHAT_ADD_MESSAGE, wrapHandler(IPC.CHAT_ADD_MESSAGE, async (_event, payload = {}) => {
+  // Which chats have a turn under way, for a window that comes to them part way
+  // through one (remote window plan R-RW-8): it missed the turn's start.
+  ipcMain.handle(IPC.CHAT_RUNNING, wrapHandler(IPC.CHAT_RUNNING, async () => ({
+    ok: true,
+    chatIds: historyStatus().available
+      ? listChats({ messages: false }).map((chat) => chat.id).filter((id) => context.isChatRunning(id))
+      : []
+  })));
+
+  // A screenshot's bytes, by name, for a window that cannot open the node's files
+  // (remote window plan R-RW-19).
+  ipcMain.handle(IPC.CHAT_READ_SCREENSHOT, wrapHandler(IPC.CHAT_READ_SCREENSHOT, async (_event, payload) => (
+    readScreenshot(payload && typeof payload === 'object' ? payload.path : null)
+  )));
+
+  ipcMain.handle(IPC.CHAT_ADD_MESSAGE, wrapHandler(IPC.CHAT_ADD_MESSAGE, async (event, payload = {}) => {
     const { chatId, sender, text, ...metadata } = payload;
-    return appendMessageToChat(chatId, sender, text, metadata);
+    // A remote window adds the owner's words or a plain reply; a status row, a
+    // tool row or a card, and every field that makes one, are the node's own.
+    if (isRemoteWindowEvent(event) && (!REMOTE_ADDABLE_SENDERS.includes(sender) || Object.keys(metadata).length > 0)) {
+      return { ok: false, code: 'REMOTE_MESSAGE_REFUSED', error: 'A remote window may add only a plain user or assistant message.' };
+    }
+    const updated = appendMessageToChat(chatId, sender, text, metadata);
+    if (REMOTE_ADDABLE_SENDERS.includes(sender)) notifyRowAdded(event, chatId, updated, false);
+    return updated;
   }));
 
   // The owner's private mark on a chat (local inference spec 2026-10-13
@@ -430,6 +498,8 @@ function registerChatHandlers(ipcMain, context = {}) {
     // words landing in a client's run would be read by that run as the client's. Before anything
     // is begun or stored.
     assertNoTaskRunning(chatId);
+    // Two windows on one node: the second never starts a second run in the chat.
+    if (fromBridgeWindow(event) && context.isChatRunning(chatId)) return { ok: false, code: 'CHAT_BUSY', error: REPLY_RUNNING_MESSAGE };
 
     // Resolve working directory: per-chat > process.cwd()
     const chatForDir = findChat(chatId, { messages: true });
@@ -439,6 +509,8 @@ function registerChatHandlers(ipcMain, context = {}) {
 
     const responseId = createId();
     const runId = createId();
+    const abortController = new AbortController();
+    runByEvent.set(event, abortController);
 
     // Case mode (spec §5): begin before the prompt hook fires or the user
     // message is persisted. A busy or missing case must run nothing — no
@@ -449,9 +521,17 @@ function registerChatHandlers(ipcMain, context = {}) {
     // { ok: false, error }.
     const caseId = chatForDir?.caseId || null;
     const caseRuntime = caseId && typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
-    let caseTurn = caseRuntime
-      ? await caseRuntime.beginTurn(caseId, { turnId: `turn-${runId}`, source: 'owner', ownerMessage: safeMessage, chatId })
-      : null;
+    let caseTurn = null;
+    if (caseRuntime) {
+      beginningSends.set(chatId, (beginningSends.get(chatId) || 0) + 1);
+      try {
+        caseTurn = await caseRuntime.beginTurn(caseId, { turnId: `turn-${runId}`, source: 'owner', ownerMessage: safeMessage, chatId });
+      } finally {
+        const left = beginningSends.get(chatId) - 1;
+        if (left > 0) beginningSends.set(chatId, left);
+        else beginningSends.delete(chatId);
+      }
+    }
     const endCaseTurn = async (fields) => {
       if (!caseTurn) return;
       const turn = caseTurn;
@@ -481,7 +561,6 @@ function registerChatHandlers(ipcMain, context = {}) {
     const subagentRuns = [];
     const summarize = () => summarizeTurnLlm({ calls: ownCalls, subagents: subagentRuns });
     let llmSummary = summarize();
-    const abortController = new AbortController();
     // Registered right after beginTurn, before the prompt hook and the
     // usability gate: Stop was invisible to activeRuns for the whole gate
     // (a connection test can run 20s or more), so a Stop pressed there was
@@ -544,6 +623,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       if (!userMessage) {
         throw new Error('Chat not found');
       }
+      notifyRowAdded(event, chatId, userMessage, true);
       // The new message's seq, read in the same synchronous tick as the
       // append: the tail and recall consider only what came before it.
       const historyStore = typeof getHistoryStore === 'function' ? getHistoryStore() : null;
@@ -790,7 +870,9 @@ function registerChatHandlers(ipcMain, context = {}) {
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment, null, {
         workingDirectory: chatWorkingDirectory,
         allowedDirectories,
-        useSandbox: sandboxMode,
+        // A remote window's payload does not choose: the chat's stored value does,
+        // and only a phone approval changes that (chat:setSandboxMode).
+        useSandbox: isRemoteWindowEvent(event) ? chatForDir?.sandboxMode !== false : sandboxMode,
         chatId,
         // This is the chat's own turn: SearchHistory and ReadHistory read the
         // chat's history scope (stage H4). Its children are not given this.
@@ -801,7 +883,9 @@ function registerChatHandlers(ipcMain, context = {}) {
         // SpawnAgent children report their calls here (spec §10).
         onSubagentLlm: (run) => { subagentRuns.push(run); },
         ownerTurnText,
-        caseContext: caseTurn ? caseRuntime.caseContext(caseTurn, { ownerMessages, ownerMessageTimes }) : null
+        caseContext: caseTurn
+          ? { ...caseRuntime.caseContext(caseTurn, { ownerMessages, ownerMessageTimes }), ...(isRemoteWindowEvent(event) ? { ownerChannel: 'remote-window' } : {}) }
+          : null
       });
 
       executor.on('preExecute', ({ toolName, parameters }) => {
@@ -1087,9 +1171,10 @@ function registerChatHandlers(ipcMain, context = {}) {
     }
   }));
 
-  ipcMain.handle(IPC.CHAT_TRUNCATE_FROM, wrapHandler(IPC.CHAT_TRUNCATE_FROM, async (_event, { chatId, fromIndex }) => {
+  ipcMain.handle(IPC.CHAT_TRUNCATE_FROM, wrapHandler(IPC.CHAT_TRUNCATE_FROM, async (event, { chatId, fromIndex }) => {
     // A Resend truncates, then sends: refused here, it has removed nothing.
     assertNoTaskRunning(chatId);
+    if (fromBridgeWindow(event) && context.isChatRunning(chatId)) return { ok: false, code: 'CHAT_BUSY', error: REPLY_RUNNING_MESSAGE };
     const chat = findChat(chatId, { messages: true });
     if (!chat) throw new Error('Chat not found');
     if (!Number.isInteger(fromIndex) || fromIndex < 0 || fromIndex >= chat.messages.length) {

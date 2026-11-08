@@ -365,4 +365,4 @@ async function runDesktop({ sub, arg, dataDir, io, deps, yes, result }) {
   return 0;
 }
 
-module.exports = { runDesktopCommand, grantDirectoryReadControl, applyWindowsAcls, defaultConfirm, DESKTOP_HELP, PAIR_WARNING };
+module.exports = { runDesktopCommand, writeKeepingOwnership, readHosting, grantDirectoryReadControl, applyWindowsAcls, defaultConfirm, DESKTOP_HELP, PAIR_WARNING };

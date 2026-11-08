@@ -20,6 +20,84 @@ try {
 
 const skip = gitAvailable ? false : 'git is not installed';
 
+describe('ShadowGit checkpoint ids', { skip }, () => {
+  it('only 40 hex reaches git: an option never does, for a local event or a remote one', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-checkpoint-id-'));
+    const workdir = path.join(base, 'project');
+    fs.mkdirSync(workdir);
+    const git = new ShadowGit({ rootDir: path.join(base, 'checkpoints') });
+    const ran = [];
+    const realRun = git._run.bind(git);
+    git._run = (args, opts) => { ran.push(args[0]); return realRun(args, opts); };
+    try {
+      for (const bad of ['--output=written.txt', '--output=x', 'HEAD', 'abc123', 'A'.repeat(40), `${'a'.repeat(40)}\n`, '', null, undefined, 7]) {
+        await assert.rejects(git.restore(workdir, bad), /Not a checkpoint id/, String(bad));
+        await assert.rejects(git.diffNames(bad), /Not a checkpoint id/, String(bad));
+      }
+      await assert.rejects(git.diffNames('a'.repeat(40), '--output=written.txt'), /Not a checkpoint id/);
+      assert.deepStrictEqual(ran, []);
+      assert.deepStrictEqual(fs.readdirSync(workdir), []);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the checkpoint store', { skip }, () => {
+  it('is pinned to sha1, so an id is always 40 hex', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-checkpoint-format-'));
+    const git = new ShadowGit({ rootDir: path.join(base, 'checkpoints') });
+    const ran = [];
+    const realRun = git._run.bind(git);
+    git._run = (args, opts) => { ran.push(args); return realRun(args, opts); };
+    try {
+      await git.init();
+      assert.ok(ran.find((args) => args[0] === 'init').includes('--object-format=sha1'));
+      assert.strictEqual((await git._run(['rev-parse', '--show-object-format'])).trim(), 'sha1');
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('on a git too old for the flag it inits plainly, then checks the format', async () => {
+    for (const [format, ok] of [['sha1', true], ['sha256', false], ['--show-object-format', true]]) {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-checkpoint-oldgit-'));
+      const git = new ShadowGit({ rootDir: path.join(base, 'checkpoints') });
+      const ran = [];
+      const realRun = git._run.bind(git);
+      git._run = (args, opts) => {
+        ran.push(args);
+        if (args.includes('--object-format=sha1')) return Promise.reject(new Error('git init failed: unknown option'));
+        if (args[1] === '--show-object-format') return Promise.resolve(`${format}\n`);
+        return realRun(args, opts);
+      };
+      try {
+        if (ok) await git.init();
+        else await assert.rejects(git.init(), /sha256/);
+        assert.ok(ran.some((args) => args[0] === 'init' && !args.includes('--object-format=sha1')));
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('a restore with a bad id takes no safety snapshot', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-checkpoint-early-'));
+    const project = path.join(base, 'project');
+    fs.mkdirSync(project);
+    const manager = new CheckpointManager({ rootDir: path.join(base, 'checkpoints'), enabled: true });
+    let snapshots = 0;
+    const real = manager.git.snapshot.bind(manager.git);
+    manager.git.snapshot = (...args) => { snapshots += 1; return real(...args); };
+    try {
+      await assert.rejects(manager.restore(project, '--output=x'), /Not a checkpoint id/);
+      assert.strictEqual(snapshots, 0);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('CheckpointManager', { skip }, () => {
   let root;      // checkpoint store
   let workdir;   // simulated user project

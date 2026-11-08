@@ -6,6 +6,19 @@ const log = createLogger('settings');
 const { isContactVaultKey } = require('../cases/contact-settings');
 const { isLocalServerVaultKey } = require('../models/local-vault-keys');
 const { createVault, vaultNodeAt, hasPrototypePart } = require('../platform/vault');
+const { isRemoteWindowEvent } = require('../core/origin');
+
+const VAULT_REFERENCE = /^\$\{vault:[^}]+\}$/;
+const HIDDEN = '(hidden)';
+// What a remote window is shown of an MCP server's env value or argument.
+const shownToRemote = (value) => (typeof value === 'string' && VAULT_REFERENCE.test(value) ? value : HIDDEN);
+
+// A settings section with every stored key taken out, for a remote window.
+function withoutApiKeys(section) {
+  if (Array.isArray(section)) return section.map(withoutApiKeys);
+  if (!section || typeof section !== 'object') return section;
+  return Object.fromEntries(Object.entries(section).filter(([key]) => key !== 'apiKey').map(([key, value]) => [key, withoutApiKeys(value)]));
+}
 
 function registerSettingsHandlers(ipcMain, context = {}) {
   const {
@@ -62,7 +75,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
       .catch((err) => log.warn(`Retesting ${provider} after a key change failed: ${err.message}`));
   };
 
-  ipcMain.handle('settings:load', wrapHandler('settings:load', async () => {
+  ipcMain.handle('settings:load', wrapHandler('settings:load', async (event) => {
     const tokens = getApiTokens();
     const status = getApiStatus();
     const settings = getSettings();
@@ -100,8 +113,8 @@ function registerSettingsHandlers(ipcMain, context = {}) {
         bridgeActive: Boolean(getTelegramBridge()),
         status: status.telegram || null
       },
-      webSearch: settings.webSearch,
-      imageGeneration: settings.imageGeneration,
+      webSearch: isRemoteWindowEvent(event) ? withoutApiKeys(settings.webSearch) : settings.webSearch,
+      imageGeneration: isRemoteWindowEvent(event) ? withoutApiKeys(settings.imageGeneration) : settings.imageGeneration,
       allowedDirectories: settings.allowedDirectories || [],
       anthropicOAuth: anthropicOAuth ? anthropicOAuth.getStatus() : { connected: false }
     };
@@ -566,7 +579,8 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     cwd: raw.cwd ? String(raw.cwd) : undefined
   });
 
-  ipcMain.handle('settings:mcpList', wrapHandler('settings:mcpList', async () => {
+  ipcMain.handle('settings:mcpList', wrapHandler('settings:mcpList', async (event) => {
+    const remote = isRemoteWindowEvent(event);
     const settings = getSettings();
     const servers = settings.mcpServers || {};
     const mgr = getMcpManager();
@@ -575,8 +589,8 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     const list = Object.entries(servers).map(([name, cfg]) => ({
       name,
       command: cfg.command || '',
-      args: cfg.args || [],
-      env: cfg.env || {},
+      args: remote ? (Array.isArray(cfg.args) ? cfg.args.map(shownToRemote) : []) : (cfg.args || []),
+      env: remote ? Object.fromEntries(Object.entries(cfg.env || {}).map(([key, value]) => [key, shownToRemote(value)])) : (cfg.env || {}),
       cwd: cfg.cwd || '',
       connected: Boolean(status[name]?.connected),
       tools: status[name]?.tools || []
