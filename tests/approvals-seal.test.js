@@ -511,14 +511,18 @@ describe('boxKeyFingerprint', () => {
 });
 
 describe('SEAL_SPLIT', () => {
-  it('SEAL_SPLIT names exactly the six types of the spec table', () => {
+  it('SEAL_SPLIT names exactly the types in the spec table', () => {
     assert.deepEqual(Object.keys(SEAL_SPLIT).map((t) => [t, [...SEAL_SPLIT[t]]]).sort(), [
       ['kl.approval.request', ['action', 'origin', 'salt']],
       ['kl.lease.request', ['lease', 'origin', 'salt']],
       ['kl.lease.status', ['name']],
       ['kl.lease.view', ['foreground', 'frame', 'frame_dropped', 'actions']],
       ['kl.question.ask', ['case_id', 'question_id', 'case_title', 'text', 'options']],
-      ['kl.question.answer', ['case_id', 'question_id', 'answer']]
+      ['kl.question.answer', ['case_id', 'question_id', 'answer']],
+      ['kl.window.enroll', ['window', 'node_key', 'salt']],
+      ['kl.window.enroll.response', ['decision']],
+      ['kl.window.list', ['windows']],
+      ['kl.window.revoke', ['reason']]
     ].sort());
     assert.equal(Object.isFrozen(SEAL_SPLIT), true);
     for (const keys of Object.values(SEAL_SPLIT)) assert.equal(Object.isFrozen(keys), true);

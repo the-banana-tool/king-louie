@@ -15115,6 +15115,7 @@ function pressSetupAction(id) {
     migrationPlan: () => desktop.migrationPlan(),
     migrationApply: () => desktop.migrationApply({ confirmed: true }),
     setupLater: () => desktop.setupLater(),
+    setupWindowOnly: () => desktop.setupWindowOnly(),
     setupFinish: () => desktop.setupFinish(),
     skip: () => desktop.setupFinish({ skip: setupView.answer.step })
   };
