@@ -23,7 +23,7 @@ const { checkPath: defaultCheckPath } = require('./check-path');
 const { MESSAGES } = require('./protocol');
 const { runFor, currentConnection, runInChat, currentChatId } = require('./run-context');
 const { PRESS_CHANNELS_REMOTE, remotePayloadClass } = require('./remote-classes');
-const { windowCard } = require('./window-cards');
+const { windowCard, undeclaredToolCall } = require('./window-cards');
 
 const log = createLogger('desktop-bridge');
 
@@ -53,7 +53,7 @@ const windowName = (label) => (plainLineProblem(label) === null ? label : 'a win
 // what the call runs, whatever a caller put ahead of it there.
 function windowSummary(name, label, card) {
   const head = Array.from(`${name} from ${windowName(label)}`).slice(0, WINDOW_SUMMARY_MAX).join('');
-  const count = `${card.parameters} parameter${card.parameters === 1 ? '' : 's'}, ${card.kb} KB`;
+  const count = `${card.parameters} parameter${card.parameters === 1 ? '' : 's'}, ${card.kb} KB${card.longText ? ', long text, read it all' : ''}`;
   return [head, count, ...(card.runs ? [`runs: ${card.runs}`] : [])].join(' · ');
 }
 
@@ -390,6 +390,7 @@ function createBridgeDispatcher({
     } catch {
       return remoteRefusal('REMOTE_ARGS_INVALID');
     }
+    if (name === 'tool:execute' && undeclaredToolCall(JSON.parse(text), context.toolRegistry)) return remoteRefusal('REMOTE_ARGS_INVALID');
     const card = windowCard(name, JSON.parse(text), text);
     if (card.refusal) return remoteRefusal(card.refusal);
     // Part C's seam (R-RW-21), asked before the phone; nothing passes one yet.

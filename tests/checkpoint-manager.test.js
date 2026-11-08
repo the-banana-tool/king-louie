@@ -60,7 +60,7 @@ describe('the checkpoint store', { skip }, () => {
   });
 
   it('on a git too old for the flag it inits plainly, then checks the format', async () => {
-    for (const [format, ok] of [['sha1', true], ['sha256', false]]) {
+    for (const [format, ok] of [['sha1', true], ['sha256', false], ['--show-object-format', true]]) {
       const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-checkpoint-oldgit-'));
       const git = new ShadowGit({ rootDir: path.join(base, 'checkpoints') });
       const ran = [];

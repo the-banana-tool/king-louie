@@ -40,6 +40,11 @@ function matchesPatternList(toolName, parameters, patternList = []) {
     const command = String(parameters.command);
     commands.push(command, ...splitShellSegments(command));
   }
+  // The display names one field per tool. A deny or confirm list only ever gains by
+  // looking at these too, on any tool, such as an MCP tool's `path`.
+  for (const field of ['filePath', 'path', 'key', 'action', 'subcommand']) {
+    if (typeof parameters?.[field] === 'string' && parameters[field]) commands.push(parameters[field]);
+  }
 
   for (const pattern of patternList) {
     if (!pattern) continue;

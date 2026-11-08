@@ -207,8 +207,9 @@ class ShadowGit {
       await this._run(['init', '--bare', '--quiet', '--object-format=sha1', this.storeDir]).catch(async () => {
         // Older than git 2.29, which has no such flag and may still make only sha1.
         await this._run(['init', '--bare', '--quiet', this.storeDir]);
+        // Before git 2.25 this echoes the flag back as text: that git makes only sha1.
         const format = (await this._run(['rev-parse', '--show-object-format']).catch(() => 'sha1')).trim();
-        if (format !== 'sha1') throw new Error(`The checkpoint store must be sha1, and git made ${format}.`);
+        if (format === 'sha256') throw new Error(`The checkpoint store must be sha1, and git made ${format}.`);
       });
     }
 

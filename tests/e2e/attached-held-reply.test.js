@@ -152,6 +152,23 @@ describe('E2E: an attached window while a reply is held', { timeout: 240000 }, (
     await waitFor(ctx, `document.querySelector('.kl-notice')?.textContent === 'A question is waiting on Field laptop.'`);
   });
 
+  it('a stopped run takes its question back, and a reload takes a stale one', async () => {
+    const rows = () => evaluate(ctx, `document.querySelectorAll('#chat-messages .prompt-message').length`);
+    await fromAnotherWindow(ctx, 'agent:askUser', { requestId: 'ask-1', question: 'Which lot?' });
+    await waitFor(ctx, `document.querySelectorAll('#chat-messages .prompt-message').length === 1`);
+    await fromAnotherWindow(ctx, 'agent:askEnded', { requestId: 'ask-other' });
+    await pause(200);
+    assert.strictEqual(await rows(), 1, 'another question leaves it');
+    await fromAnotherWindow(ctx, 'agent:askEnded', { requestId: 'ask-1' });
+    await waitFor(ctx, `document.querySelectorAll('#chat-messages .prompt-message').length === 0`);
+
+    // Offline at the Stop, it heard nothing: the load on reconnect draws no such row.
+    await fromAnotherWindow(ctx, 'agent:askUser', { requestId: 'ask-2', question: 'Which lot?' });
+    await waitFor(ctx, `document.querySelectorAll('#chat-messages .prompt-message').length === 1`);
+    await evaluate(ctx, `loadChats().then(() => true)`);
+    assert.strictEqual(await rows(), 0);
+  });
+
   it('a window that comes to a chat part way through a turn shows it running and reads the rows when it ends', async () => {
     const before = await evaluate(ctx, `appState.activeChatId`);
     await click(ctx, '#new-chat-btn');

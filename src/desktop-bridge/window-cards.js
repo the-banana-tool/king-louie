@@ -10,6 +10,8 @@
 //     whose text is what runs, may pass the leaf and shown limits, to 64 KiB in all;
 //   - a phone shows parameters in JCS key order, which is signed, so nothing can be moved
 //     up the list: the summary carries a host-built count and a "runs:" line instead.
+// That line is the first thing the owner reads, so it must never say something false.
+// Where the host cannot be sure what acts, it says less, never a guess.
 //   - a channel with a known shape refuses any other key (ARG_KEYS): JCS sorts keys, so
 //     an unknown one could otherwise sit on the card ahead of the real leaves.
 // What runs is always parsed from the one text, whatever the card shows.
@@ -23,6 +25,7 @@ const WINDOW_LEAVES_MAX = 64;
 const WINDOW_DEPTH_MAX = 6;
 const WINDOW_SHOWN_MAX = 8192;
 const INGEST_FILES_MAX = 64;
+const WORKFLOW_TASKS_MAX = 32;
 
 // Where each channel's free text is, from its first argument. Each is what runs, read
 // by a model or a shell, so a long one is the point of the call and the owner reads it.
@@ -31,28 +34,37 @@ const FREE_TEXT_FIELDS = Object.freeze({
   'cron:update': [['patch', 'payload', 'message']],
   'memory:capture': [['content']],
   'skill:handleMessage': [['message']],
-  'tool:execute': [['parameters', 'command'], ['parameters', 'content']],
   'workflow:plan': [['goal']],
   'workflow:planAndExecute': [['goal']]
 });
+// tool:execute's are the tool's: another tool's field of that name does nothing.
+const TOOL_FREE_TEXT = Object.freeze({ Bash: 'command', PowerShell: 'command', Write: 'content' });
 
 // The field that says what a call runs, from the card's copy of its first argument.
 const RUNS_FIELDS = Object.freeze({
+  'apps:add': ['launchCmd'],
   'bridge.addAllowedDirectory': ['path'],
   'bridge.setWorkingDirectory': ['path'],
   'case:addPlaybook': ['source'],
+  'case:applyPlaybookProposal': ['repoPath'],
+  'channel:accessAllow': ['id'],
   'chat:setWorkingDirectory': ['workingDirectory'],
-  'cron:add': ['payload', 'message'],
-  'cron:update': ['patch', 'payload', 'message'],
+  'checkpoint:restore': ['workingDirectory'],
+  'history:embedder.save': ['embedder', 'ollama', 'baseUrl'],
   'memory:capture': ['content'],
   'models:setOllamaBaseUrl': ['baseUrl'],
-  'skill:execute': ['command'],
   'skill:handleMessage': ['message'],
+  'webhook:create': ['messageTemplate'],
   'skill:install': ['url'],
   'workflow:plan': ['goal'],
   'workflow:planAndExecute': ['goal']
 });
-const TOOL_MAIN_FIELDS = Object.freeze(['command', 'file_path', 'path', 'url', 'selector', 'query', 'action']);
+// What each tool's line names. Any other tool's line is its name alone.
+const TOOL_MAIN_FIELD = Object.freeze({ Bash: 'command', PowerShell: 'command', Write: 'file_path', Edit: 'file_path', SpawnAgent: 'task' });
+const BROWSER_TOOLS = new Set(['Browser', 'BrowserPage', 'BrowserExtract', 'BrowserSession']);
+// The actions a target says something about; for any other the field does nothing.
+const BROWSER_URL_ACTIONS = new Set(['navigate', 'open_tab']);
+const BROWSER_SELECTOR_ACTIONS = new Set(['click', 'dblclick', 'fill', 'type', 'press', 'clear', 'select_option', 'check', 'uncheck', 'drag_and_drop', 'set_input_files', 'hover', 'focus']);
 
 const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const namesOf = (value) => (isObject(value) ? Object.keys(value).sort() : []);
@@ -60,6 +72,10 @@ const pick = (payload, keys) => Object.fromEntries(keys.filter((k) => Object.has
 
 // The first argument's whole set of keys, from each handler.
 const ARG_KEYS = Object.freeze({
+  'apps:add': ['id', 'description', 'capabilities', 'category', 'launchCmd'],
+  'workflow:create': ['taskGraph', 'chatId', 'workingDirectory'],
+  'workflow:plan': ['goal', 'options', 'chatId', 'workingDirectory', 'chatMessages'],
+  'workflow:planAndExecute': ['goal', 'options', 'background', 'chatId', 'workingDirectory', 'chatMessages'],
   'apps:remove': ['id'],
   'bridge.addAllowedDirectory': ['path'],
   'bridge.setWorkingDirectory': ['chatId', 'path'],
@@ -158,7 +174,17 @@ const HIDDEN_FIELDS = Object.freeze({
   'webhook:update': (p) => ({ ...pick(p, ['id']), fields: namesOf(p).filter((k) => k !== 'id') }),
   'skill:saveSettings': (p) => ({ ...pick(p, ['skillId']), setting_names: namesOf(p.settings) }),
   'settings:saveTemplateVariables': (p) => ({ variable_names: namesOf(p.templateVariables) }),
-  'settings:saveNotifications': (p) => ({ notifications: withoutNtfyTopic(p.notifications) ?? null })
+  'settings:saveNotifications': (p) => ({ notifications: withoutNtfyTopic(p.notifications) ?? null }),
+  // A graph's depth and its other fields are its own; a card shows each task.
+  'workflow:create': (p) => {
+    const graph = isObject(p.taskGraph) ? p.taskGraph : {};
+    const tasks = Array.isArray(graph.tasks) ? graph.tasks : [];
+    return {
+      ...pick(p, ['chatId', 'workingDirectory']),
+      goal: graph.goal ?? null,
+      tasks: tasks.map((task) => (isObject(task) ? { id: task.id ?? null, title: task.title ?? null, description: task.description ?? null } : null))
+    };
+  }
 });
 
 // The bulk channel's card: what it read of each file, never what the window says of it.
@@ -228,7 +254,17 @@ function badShape(name, args) {
   const payload = firstArg(args);
   if (payload === undefined) return false;
   if (!isObject(payload)) return true;
-  return Object.keys(payload).some((key) => !ARG_KEYS[name].includes(key));
+  if (Object.keys(payload).some((key) => !ARG_KEYS[name].includes(key))) return true;
+  return PLANNING.has(name) && badPlan(payload);
+}
+
+// Messages that name no chat would drive the plan, while the line shows only the goal,
+// and the node recalls the chat for itself when it is named.
+const PLANNING = new Set(['workflow:plan', 'workflow:planAndExecute']);
+function badPlan(payload) {
+  const options = isObject(payload.options) ? payload.options : {};
+  if (Object.hasOwn(payload, 'chatMessages') || Object.hasOwn(options, 'chatMessages')) return true;
+  return !payload.chatId && !options.chatId && !payload.goal;
 }
 
 const overLeaf = (text) => Buffer.byteLength(text) > WINDOW_LEAF_MAX && Array.from(text).length > WINDOW_LEAF_MAX;
@@ -237,13 +273,14 @@ const HOST_FIELDS = new Set(['channel', 'args_sha256', 'bytes']);
 
 // Holds a built card to its limits. → how many rows it has, or null when it is over.
 function measure(params, name) {
-  const free = new Set((FREE_TEXT_FIELDS[name] || []).map((path) => JSON.stringify(['args', 0, ...path])));
-  const ingest = name === 'case:ingestFiles';
-  const leavesMax = ingest ? Infinity : WINDOW_LEAVES_MAX;
-  const shownMax = ingest ? WINDOW_ARGS_INLINE_MAX : WINDOW_SHOWN_MAX;
+  const free = new Set(freeTextPaths(name, params).map((path) => JSON.stringify(path)));
+  // Their rows are the point of the call, and each has its own cap on how many.
+  const listing = name === 'case:ingestFiles' || name === 'workflow:create';
+  const leavesMax = listing ? Infinity : WINDOW_LEAVES_MAX;
+  const shownMax = listing ? WINDOW_ARGS_INLINE_MAX : WINDOW_SHOWN_MAX;
   let leaves = 0;
   let shown = 0;
-  let freeBytes = 0;
+  let longText = false;
   const walk = (value, path, depth) => {
     if (Array.isArray(value) || isObject(value)) {
       if (depth + 1 > WINDOW_DEPTH_MAX) return false;
@@ -259,22 +296,57 @@ function measure(params, name) {
     } else {
       leaves += 1;
       const text = typeof value === 'string' ? value : JSON.stringify(value);
-      if (typeof value === 'string' && free.has(JSON.stringify(path))) freeBytes += Buffer.byteLength(text);
+      if (typeof value === 'string' && free.has(JSON.stringify(path))) longText = longText || overLeaf(text);
       else if (overLeaf(text)) return false;
       else shown += Buffer.byteLength(text);
     }
-    return leaves <= leavesMax && shown <= shownMax && shown + freeBytes <= WINDOW_ARGS_INLINE_MAX;
+    return leaves <= leavesMax && shown <= shownMax;
   };
   const top = Object.entries(params).filter(([key]) => !HOST_FIELDS.has(key));
   // The root is depth 1.
   for (const [key, value] of top) {
     if (!walk(value, [key], 1)) return null;
   }
-  return leaves;
+  return { leaves, longText };
+}
+
+// Whole paths from the card's root. Every form but ingest's is held to 64 KiB of text
+// before it is measured, so free text needs no total of its own here.
+function freeTextPaths(name, params) {
+  if (name === 'workflow:create') return (Array.isArray(params.tasks) ? params.tasks : []).map((_, i) => ['tasks', i, 'description']);
+  if (name === 'tool:execute') {
+    const first = Array.isArray(params.args) ? params.args[0] : null;
+    const field = isObject(first) && Object.hasOwn(TOOL_FREE_TEXT, first.toolName) ? TOOL_FREE_TEXT[first.toolName] : null;
+    return field ? [['args', 0, 'parameters', field]] : [];
+  }
+  return (FREE_TEXT_FIELDS[name] || []).map((path) => ['args', 0, ...path]);
 }
 
 const at = (value, path) => path.reduce((v, key) => (isObject(v) ? v[key] : undefined), value);
-const oneLine = (text) => (plainLineProblem(text) === null ? text : '(not one plain line)');
+const NOT_PLAIN = '(not one plain line)';
+function oneLine(text) {
+  if (plainLineProblem(text) === null) return text;
+  const lines = text.split(/\r\n|\r|\n/);
+  return lines.length > 1 && lines[0] && plainLineProblem(lines[0]) === null ? `${lines[0]} (${lines.length} lines)` : NOT_PLAIN;
+}
+
+// A browser call's line: the action, then the target only where that action has one.
+function browserDetail(parameters) {
+  if (typeof parameters.action !== 'string') return null;
+  const target = BROWSER_URL_ACTIONS.has(parameters.action) ? parameters.url
+    : BROWSER_SELECTOR_ACTIONS.has(parameters.action) ? parameters.selector : undefined;
+  return typeof target === 'string' ? `${parameters.action} ${target}` : parameters.action;
+}
+
+// A job's message, ahead of it where the result goes.
+function cronLine(job) {
+  if (!isObject(job)) return null;
+  const message = at(job, ['payload', 'message']);
+  if (typeof message !== 'string') return null;
+  const target = at(job, ['delivery', 'target']);
+  if (target === undefined || target === null) return oneLine(message);
+  return typeof target === 'string' && plainLineProblem(target) === null ? oneLine(`to ${target}: ${message}`) : NOT_PLAIN;
+}
 
 // What the call runs, in a line. Built from the card, so it shows what the card shows.
 function runsLine(name, params) {
@@ -285,8 +357,19 @@ function runsLine(name, params) {
   const first = Array.isArray(params.args) ? params.args[0] : params.args;
   if (name === 'tool:execute' && isObject(first)) {
     const parameters = isObject(first.parameters) ? first.parameters : {};
-    const main = TOOL_MAIN_FIELDS.map((key) => parameters[key]).find((value) => typeof value === 'string');
-    return oneLine(main === undefined ? String(first.toolName) : `${first.toolName} ${main}`);
+    const main = BROWSER_TOOLS.has(first.toolName) ? browserDetail(parameters)
+      : Object.hasOwn(TOOL_MAIN_FIELD, first.toolName) ? parameters[TOOL_MAIN_FIELD[first.toolName]] : null;
+    return oneLine(typeof main === 'string' ? `${first.toolName} ${main}` : String(first.toolName));
+  }
+  if (name === 'workflow:create') return `${(params.tasks || []).length} tasks`;
+  if (name === 'settings:saveNotifications') {
+    const server = at(params, ['notifications', 'ntfy', 'server']);
+    return typeof server === 'string' ? oneLine(server) : null;
+  }
+  if (name === 'cron:add') return cronLine(first);
+  if (name === 'cron:update') return cronLine(isObject(first) ? first.patch : null);
+  if (name === 'skill:execute' && isObject(first) && typeof first.command === 'string') {
+    return oneLine([first.command, ...(Array.isArray(first.args) ? first.args.map(String) : [])].join(' '));
   }
   const value = Object.hasOwn(RUNS_FIELDS, name) ? at(first, RUNS_FIELDS[name]) : undefined;
   return typeof value === 'string' ? oneLine(value) : null;
@@ -309,6 +392,10 @@ function windowCard(name, args, text) {
   const hidden = hiddenFieldsFor(name, object);
   let params;
   if (name === 'case:ingestFiles' && Array.isArray(object.files) && object.files.length > INGEST_FILES_MAX) return { refusal: 'REMOTE_ARGS_TOO_LARGE' };
+  if (name === 'workflow:create') {
+    const tasks = at(object, ['taskGraph', 'tasks']);
+    if (Buffer.byteLength(text) > WINDOW_ARGS_INLINE_MAX || (Array.isArray(tasks) && tasks.length > WORKFLOW_TASKS_MAX)) return { refusal: 'REMOTE_ARGS_TOO_LARGE' };
+  }
   if (hidden) {
     params = { channel: name, ...hidden, ...hiddenMark(text) };
   } else {
@@ -320,12 +407,25 @@ function windowCard(name, args, text) {
       ? { channel: name, args: Array.isArray(inline) ? [shown, ...inline.slice(1)] : shown, ...hiddenMark(text) }
       : { channel: name, args: inline };
   }
-  const parameters = measure(params, name);
-  if (parameters === null) return { refusal: 'REMOTE_ARGS_TOO_LARGE' };
-  return { params, parameters, kb: Math.max(1, Math.ceil(Buffer.byteLength(text) / 1024)), runs: runsLine(name, params) };
+  const measured = measure(params, name);
+  if (measured === null) return { refusal: 'REMOTE_ARGS_TOO_LARGE' };
+  return { params, parameters: measured.leaves, longText: measured.longText, kb: Math.max(1, Math.ceil(Buffer.byteLength(text) / 1024)), runs: runsLine(name, params) };
+}
+
+// tool:execute names a tool: it must exist, and take every parameter it is given, as
+// validateParameters ignores the rest and a card would show what does nothing.
+function undeclaredToolCall(args, registry) {
+  const first = firstArg(args);
+  if (!isObject(first) || typeof first.toolName !== 'string') return true;
+  const tool = registry && typeof registry.get === 'function' ? registry.get(first.toolName) : null;
+  if (!tool) return true;
+  if (first.parameters === undefined) return false;
+  if (!isObject(first.parameters)) return true;
+  const declared = (tool.parameters && tool.parameters.properties) || {};
+  return Object.keys(first.parameters).some((key) => !Object.hasOwn(declared, key));
 }
 
 module.exports = {
-  windowCard, fetchedUrlShown, gitUrlShown, ARG_KEYS, HIDDEN_FIELDS, FREE_TEXT_FIELDS,
+  windowCard, undeclaredToolCall, fetchedUrlShown, gitUrlShown, ARG_KEYS, HIDDEN_FIELDS, FREE_TEXT_FIELDS,
   WINDOW_ARGS_INLINE_MAX, WINDOW_LEAF_MAX, WINDOW_LEAVES_MAX, WINDOW_DEPTH_MAX, WINDOW_SHOWN_MAX, INGEST_FILES_MAX
 };

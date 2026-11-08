@@ -7053,8 +7053,7 @@ async function handleChatPlanAndExecute() {
   try {
     const result = await window.electron.workflow.plan(goal, {
       chatId,
-      workingDirectory,
-      chatMessages
+      workingDirectory
     });
     if (!result?.ok) {
       removePlannerIndicator();

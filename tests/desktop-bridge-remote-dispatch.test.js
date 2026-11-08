@@ -18,7 +18,7 @@ const { Tool } = require('../src/tools/tool-schema');
 const { toolRegistry } = require('../src/tools');
 const { registerHandlers } = require('../src/ipc/register');
 const { createBridgeDispatcher } = require('../src/desktop-bridge/bridge-dispatcher');
-const { WINDOW_ARGS_INLINE_MAX, WINDOW_LEAF_MAX, FREE_TEXT_FIELDS } = require('../src/desktop-bridge/window-cards');
+const { windowCard, WINDOW_ARGS_INLINE_MAX, WINDOW_LEAF_MAX, FREE_TEXT_FIELDS } = require('../src/desktop-bridge/window-cards');
 const { isRendererEvent } = require('../src/desktop-bridge/allowlist');
 const { toolCardParams } = require('../src/approvals/hidden-card');
 const { createConnection } = require('../src/desktop-bridge/connection');
@@ -38,7 +38,7 @@ const { profileSettings, everyRole } = require('./helpers/profile-settings');
 const { closeOpenHistoryStores } = require('./helpers/close-history-stores');
 
 process.env.KL_TEST_MODE = '1';
-globalThis.fetch = async (url) => { throw new Error(`this test has no network: ${url}`); };
+const { blocked } = require('./helpers/block-network');
 
 const PROBE = 'KlTestRemoteDispatchProbe';
 const STOPPED_ROW = MESSAGES.DESKTOP_DISCONNECTED_RUN;
@@ -117,6 +117,9 @@ before(async () => {
 });
 
 after(async () => {
+  // A real turn's memory step embeds through src/memory/embedding-provider.js, by plain
+  // fetch, whenever an openai token is saved. It is refused here; nothing else may try.
+  assert.deepStrictEqual(blocked.filter((what) => what !== 'https://api.openai.com/v1/embeddings'), [], 'nothing else tried to leave the machine');
   await core.shutdown().catch(() => {});
   await phoneCore.shutdown().catch(() => {});
   if (realOpenAI) ProviderFactory.registerProvider('openai', realOpenAI);
@@ -586,12 +589,12 @@ describe('the phone gate', () => {
     });
 
     it('a leaf over the cap is refused, a value or a key, even in a shape nobody listed', async () => {
-      const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'workflow:plan': async () => ({ ok: true }) } });
+      const { dispatcher, phone, use } = makeDispatcher({ overrides: { 'contactPolicy:set': async () => ({ ok: true }) } });
       const a = connection();
       use(a);
-      await invoke(dispatcher, a, 1, 'workflow:plan', { note: 'g'.repeat(WINDOW_LEAF_MAX + 1) });
-      await invoke(dispatcher, a, 2, 'workflow:plan', { ['g'.repeat(WINDOW_LEAF_MAX + 1)]: 'x' });
-      await invoke(dispatcher, a, 3, 'workflow:plan', { note: 'g'.repeat(WINDOW_LEAF_MAX) });
+      await invoke(dispatcher, a, 1, 'contactPolicy:set', { note: 'g'.repeat(WINDOW_LEAF_MAX + 1) });
+      await invoke(dispatcher, a, 2, 'contactPolicy:set', { ['g'.repeat(WINDOW_LEAF_MAX + 1)]: 'x' });
+      await invoke(dispatcher, a, 3, 'contactPolicy:set', { note: 'g'.repeat(WINDOW_LEAF_MAX) });
       assert.strictEqual(resultFor(a, 1).value.code, 'REMOTE_ARGS_TOO_LARGE');
       assert.strictEqual(resultFor(a, 2).value.code, 'REMOTE_ARGS_TOO_LARGE');
       assert.strictEqual(phone.calls.length, 1);
@@ -1433,26 +1436,23 @@ describe('what a card says of itself (second review)', () => {
 
   describe('small leaves cannot push what runs off the screen', () => {
     it('65 leaves, nested or flat, are refused; 64 pass', async () => {
-      assert.strictEqual((await cardFor('workflow:plan', flat(65))).value.code, 'REMOTE_ARGS_TOO_LARGE');
-      assert.strictEqual((await cardFor('apps:add', flat(65))).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('contactPolicy:set', flat(65))).value.code, 'REMOTE_ARGS_TOO_LARGE');
       const nested = await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { ...flat(65), message: 'go' } });
       assert.strictEqual(nested.value.code, 'REMOTE_ARGS_TOO_LARGE');
-      const bash = await cardFor('tool:execute', { toolName: 'Bash', parameters: { ...flat(65), command: 'evil' } });
-      assert.strictEqual(bash.value.code, 'REMOTE_ARGS_TOO_LARGE');
-      assert.strictEqual((await cardFor('workflow:plan', flat(64))).value.ok, true);
+      assert.strictEqual((await cardFor('contactPolicy:set', flat(64))).value.ok, true);
     });
 
     it('depth 7 is refused, 6 passes', async () => {
       // The card is params > args > the payload: three more objects reach 6.
       const six = { a: { b: { c: { d: 'x' } } } };
       const seven = { a: { b: { c: { d: { e: 'x' } } } } };
-      assert.strictEqual((await cardFor('workflow:plan', six)).value.ok, true);
-      assert.strictEqual((await cardFor('workflow:plan', seven)).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('contactPolicy:set', six)).value.ok, true);
+      assert.strictEqual((await cardFor('contactPolicy:set', seven)).value.code, 'REMOTE_ARGS_TOO_LARGE');
     });
 
     it('more than 8 KB of shown text is refused, keys counted', async () => {
-      assert.strictEqual((await cardFor('workflow:plan', flat(5, 1900))).value.code, 'REMOTE_ARGS_TOO_LARGE');
-      assert.strictEqual((await cardFor('workflow:plan', flat(4, 1900))).value.ok, true);
+      assert.strictEqual((await cardFor('contactPolicy:set', flat(5, 1900))).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('contactPolicy:set', flat(4, 1900))).value.ok, true);
     });
 
     it('a hidden form has the same caps', async () => {
@@ -1466,15 +1466,16 @@ describe('what a card says of itself (second review)', () => {
 
     it('the leaf cap is 2000 code points; a free-text field may pass it, up to 64 KiB in all', async () => {
       assert.strictEqual(WINDOW_LEAF_MAX, 2000);
-      assert.strictEqual((await cardFor('workflow:plan', { note: 'n'.repeat(2001) })).value.code, 'REMOTE_ARGS_TOO_LARGE');
-      assert.strictEqual((await cardFor('workflow:plan', { note: '\u{1F34C}'.repeat(2000) })).value.code, undefined, 'code points, not bytes... within 8 KB');
+      assert.strictEqual((await cardFor('contactPolicy:set', { note: 'n'.repeat(2001) })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('contactPolicy:set', { note: '\u{1F34C}'.repeat(2000) })).value.code, undefined, 'code points, not bytes');
       assert.strictEqual((await cardFor('workflow:plan', { goal: 'g'.repeat(40000) })).value.ok, true);
       assert.strictEqual((await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'm'.repeat(40000) } })).value.ok, true);
       assert.strictEqual((await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { 'x': 'm'.repeat(40000), message: 'go' } })).value.code, 'REMOTE_ARGS_TOO_LARGE');
       assert.strictEqual((await cardFor('tool:execute', { toolName: 'Bash', parameters: { command: 'c'.repeat(40000) } })).value.ok, true);
-      assert.strictEqual((await cardFor('tool:execute', { toolName: 'Bash', parameters: { other: 'c'.repeat(40000) } })).value.code, 'REMOTE_ARGS_TOO_LARGE');
-      assert.strictEqual((await cardFor('workflow:plan', { 'args.0.goal': 'g'.repeat(40000) })).value.code, 'REMOTE_ARGS_TOO_LARGE', 'a key with dots is not the path');
-      assert.deepStrictEqual(Object.keys(FREE_TEXT_FIELDS).sort(), ['cron:add', 'cron:update', 'memory:capture', 'skill:handleMessage', 'tool:execute', 'workflow:plan', 'workflow:planAndExecute']);
+      assert.strictEqual((await cardFor('tool:execute', { toolName: 'Write', parameters: { file_path: 'a.txt', content: 'c'.repeat(40000) } })).value.ok, true);
+      assert.strictEqual((await cardFor('tool:execute', { toolName: 'Read', parameters: { file_path: 'c'.repeat(40000) } })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('contactPolicy:set', { 'args.0.goal': 'g'.repeat(40000) })).value.code, 'REMOTE_ARGS_TOO_LARGE', 'a key with dots is not the path');
+      assert.deepStrictEqual(Object.keys(FREE_TEXT_FIELDS).sort(), ['cron:add', 'cron:update', 'memory:capture', 'skill:handleMessage', 'workflow:plan', 'workflow:planAndExecute']);
     });
 
     it('case:ingestFiles takes at most 64 files', async () => {
@@ -1489,8 +1490,8 @@ describe('what a card says of itself (second review)', () => {
     it('says how much, from the host', async () => {
       const { call } = await cardFor('chat:delete', 'c-any');
       assert.strictEqual(summaryOf(call), 'chat:delete from Field laptop · 1 parameter, 1 KB');
-      const many = await cardFor('workflow:plan', { goal: 'g'.repeat(3000), a: '1', b: '2' });
-      assert.match(summaryOf(many.call), / · 3 parameters, 3 KB · runs: g+/);
+      const many = await cardFor('workflow:plan', { goal: 'g'.repeat(3000), options: { a: '1', b: '2' } });
+      assert.match(summaryOf(many.call), / · 3 parameters, 3 KB, long text, read it all · runs: g+/);
     });
 
     it('the hidden forms count what they show and size what runs', async () => {
@@ -1501,22 +1502,26 @@ describe('what a card says of itself (second review)', () => {
     it('names what runs, ahead of anything a caller can add', async () => {
       const line = async (channel, payload) => summaryOf((await cardFor(channel, payload)).call);
       assert.match(await line('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'evil things', aaa: 'x' } }), / · runs: evil things$/);
-      assert.match(await line('tool:execute', { toolName: 'Bash', parameters: { command: 'rm -rf x', aaa: 'y' } }), / · runs: Bash rm -rf x$/);
-      assert.match(await line('tool:execute', { toolName: 'Read', parameters: { file_path: 'a.txt' } }), / · runs: Read a\.txt$/);
+      assert.match(await line('tool:execute', { toolName: 'Bash', parameters: { command: 'rm -rf x' } }), / · runs: Bash rm -rf x$/);
+      assert.match(await line('tool:execute', { toolName: 'Read', parameters: { file_path: 'a.txt' } }), / · runs: Read$/);
       assert.match(await line('settings:mcpSave', { name: 'files', server: { command: 'npx', args: ['evil-package', '--yes'] } }), / · runs: npx evil-package --yes$/);
       assert.match(await line('skill:install', { url: 'https://me:pw@git.example.com/s.git' }), / · runs: https:\/\/git\.example\.com\/s\.git$/);
       assert.match(await line('skill:handleMessage', { chatId: 'c', message: 'hello there' }), / · runs: hello there$/);
     });
 
     it('a value that is not one plain line is not put in the line', async () => {
-      const { call } = await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'fine\nthen evil \u202E' } });
-      assert.match(summaryOf(call), / · runs: \(not one plain line\)$/);
+      const hidden = await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'evil \u202E\nthen fine' } });
+      assert.match(summaryOf(hidden.call), / · runs: \(not one plain line\)$/);
+      const blank = await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: '\nthen fine' } });
+      assert.match(summaryOf(blank.call), / · runs: \(not one plain line\)$/);
+      const lines = await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'first line\nsecond\nthird' } });
+      assert.match(summaryOf(lines.call), / · runs: first line \(3 lines\)$/);
     });
 
     it('the head and the count are never cut, whatever the value', async () => {
       const { call } = await cardFor('cron:add', { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'm'.repeat(3000) } });
       const summary = summaryOf(call);
-      assert.match(summary, /^cron:add from Field laptop · 3 parameters, 3 KB · runs: m+…$/);
+      assert.match(summary, /^cron:add from Field laptop · 3 parameters, 3 KB, long text, read it all · runs: m+…$/);
       assert.strictEqual(Array.from(summary).length, 300);
     });
   });
@@ -1573,6 +1578,132 @@ describe('what a card says of itself (second review)', () => {
       approver.stop();
       await going;
       store.cleanup();
+    });
+  });
+
+  describe('runs: is never false (third review)', () => {
+    const line = async (channel, payload) => summaryOf((await cardFor(channel, payload)).call);
+    const refused = async (channel, payload, code = 'REMOTE_ARGS_INVALID') => {
+      const { value, phone } = await cardFor(channel, payload);
+      assert.strictEqual(value.code, code, JSON.stringify(payload).slice(0, 80));
+      assert.deepStrictEqual(phone.calls, []);
+    };
+
+    it('a parameter the tool does not declare is refused, and so is a tool nobody registered', async () => {
+      await refused('tool:execute', { toolName: 'Write', parameters: { command: 'echo hello', file_path: 'a.txt', content: 'x' } });
+      await refused('tool:execute', { toolName: 'SpawnAgent', parameters: { task: 'go', query: 'decoy' } });
+      await refused('tool:execute', { toolName: 'NoSuchToolAnywhere', parameters: {} });
+      await refused('tool:execute', { toolName: 'Bash', parameters: 'not an object' });
+      await refused('tool:execute', { toolName: 'constructor', parameters: {} });
+    });
+
+    it('each tool names only its own main field', async () => {
+      // PowerShell is named ahead of being registered, so it is read from the card alone.
+      const shell = [{ toolName: 'PowerShell', parameters: { command: 'dir' } }];
+      assert.strictEqual(windowCard('tool:execute', shell, canonicalize(shell)).runs, 'PowerShell dir');
+      assert.match(await line('tool:execute', { toolName: 'Write', parameters: { file_path: 'a.txt', content: 'x' } }), / · runs: Write a\.txt$/);
+      assert.match(await line('tool:execute', { toolName: 'Edit', parameters: { file_path: 'a.txt', old_string: 'x', new_string: 'y' } }), / · runs: Edit a\.txt$/);
+      assert.match(await line('tool:execute', { toolName: 'SpawnAgent', parameters: { task: 'do the thing', agentId: 'main' } }), / · runs: SpawnAgent do the thing$/);
+      assert.match(await line('tool:execute', { toolName: 'Grep', parameters: { pattern: 'x', path: 'decoy' } }), / · runs: Grep$/);
+    });
+
+    it('a browser tool says the action, and a target only where that action has one', async () => {
+      const browser = (parameters) => line('tool:execute', { toolName: 'BrowserPage', parameters });
+      assert.match(await browser({ action: 'click', selector: '#ok' }), / · runs: BrowserPage click #ok$/);
+      assert.match(await browser({ action: 'evaluate', selector: '#ok' }), / · runs: BrowserPage evaluate$/);
+      assert.match(await browser({ action: 'fill_payment', url: 'https://safe.example.com' }), / · runs: BrowserPage fill_payment$/);
+      const full = (parameters) => line('tool:execute', { toolName: 'Browser', parameters });
+      assert.match(await full({ action: 'navigate', url: 'https://a.example.com/' }), / · runs: Browser navigate https:\/\/a\.example\.com\/$/);
+      assert.match(await full({ action: 'evaluate', selector: '#ok' }), / · runs: Browser evaluate$/);
+      assert.match(await full({ action: 'fill_payment', url: 'https://safe.example.com' }), / · runs: Browser fill_payment$/);
+    });
+
+    it('free text is tied to the tool', async () => {
+      const long = 'c'.repeat(3000);
+      assert.strictEqual((await cardFor('tool:execute', { toolName: 'Bash', parameters: { command: long } })).value.ok, true);
+      assert.strictEqual((await cardFor('tool:execute', { toolName: 'Write', parameters: { file_path: 'a', content: long } })).value.ok, true);
+      assert.strictEqual((await cardFor('tool:execute', { toolName: 'Git', parameters: { command: long } })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('tool:execute', { toolName: 'Bash', parameters: { command: 'x', description: long } })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      assert.strictEqual((await cardFor('tool:execute', { toolName: 'Edit', parameters: { file_path: 'a', old_string: 'x', new_string: long } })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+    });
+
+    it('skill:execute shows its arguments; cron names where the result goes', async () => {
+      assert.match(await line('skill:execute', { command: 'std', args: ['--go', 'now'] }), / · runs: std --go now$/);
+      assert.match(await line('skill:execute', { command: 'std' }), / · runs: std$/);
+      const cron = { schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'report' } };
+      assert.match(await line('cron:add', { ...cron, delivery: { target: 'telegram:1' } }), / · runs: to telegram:1: report$/);
+      assert.match(await line('cron:add', { ...cron, delivery: { target: 'bad\ntarget' } }), / · runs: \(not one plain line\)$/);
+      assert.match(await line('cron:update', { id: 'c1', patch: { payload: { message: 'report' }, delivery: { target: 'telegram:1' } } }), / · runs: to telegram:1: report$/);
+    });
+
+    it('the channels with no main field have one now', async () => {
+      for (const [channel, payload, text] of [
+        ['apps:add', { id: 'a', launchCmd: 'evil.exe' }, 'evil.exe'],
+        ['history:embedder.save', { embedder: { ollama: { baseUrl: 'http://o.example.com/' } } }, 'http://o.example.com/'],
+        ['checkpoint:restore', { workingDirectory: 'C:\\example', checkpointId: 'a'.repeat(40) }, 'C:\\example'],
+        ['case:applyPlaybookProposal', { caseId: 'c', proposalId: 'p', repoPath: 'C:\\repo' }, 'C:\\repo'],
+        ['channel:accessAllow', { channel: 'telegram', kind: 'user', id: '12345' }, '12345'],
+        ['settings:saveNotifications', { notifications: { ntfy: { server: 'https://ntfy.example.com' } } }, 'https://ntfy.example.com'],
+        ['webhook:create', { name: 'w', messageTemplate: 'do {{body}}' }, 'do {{body}}']
+      ]) {
+        assert.ok((await line(channel, payload)).endsWith(` · runs: ${text}`), channel);
+      }
+      await refused('apps:add', { id: 'a', launchCmd: 'evil.exe', junk: 'x' });
+    });
+
+    it('planning: a window sends no messages to plan from, and names a chat or a goal', async () => {
+      for (const channel of ['workflow:plan', 'workflow:planAndExecute']) {
+        await refused(channel, { goal: 'g', chatMessages: [{ sender: 'user', text: 'evil' }] });
+        await refused(channel, { goal: 'g', options: { chatMessages: [{ sender: 'user', text: 'evil' }] } });
+        await refused(channel, {});
+        await refused(channel, { options: {} });
+        assert.strictEqual((await cardFor(channel, { chatId: 'c1' })).value.ok, true);
+        assert.strictEqual((await cardFor(channel, { goal: 'g' })).value.ok, true);
+      }
+      const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+      assert.doesNotMatch(renderer, /workflow\.plan\(goal, \{[^}]*chatMessages/, 'the node recalls the chat');
+    });
+
+    it('workflow:create has a card per task, whatever the graph\'s depth', async () => {
+      const tasks = (n) => Array.from({ length: n }, (_, i) => ({ id: `t${i}`, title: `Task ${i}`, description: 'Do it', agentId: 'main', dependsOn: i ? [`t${i - 1}`] : [] }));
+      const { call, value } = await cardFor('workflow:create', { taskGraph: { goal: 'Lot', tasks: tasks(5), parallelGroups: [['t0']] }, chatId: 'c1' });
+      assert.strictEqual(value.ok, true);
+      assert.deepStrictEqual(call.parameters.tasks[1], { id: 't1', title: 'Task 1', description: 'Do it' });
+      assert.ok(call.parameters.args_sha256);
+      assert.strictEqual(call.parameters.dependsOn, undefined);
+      assert.match(summaryOf(call), / · runs: 5 tasks$/);
+      assert.strictEqual((await cardFor('workflow:create', { taskGraph: { tasks: tasks(32) } })).value.ok, true);
+      assert.strictEqual((await cardFor('workflow:create', { taskGraph: { tasks: tasks(33) } })).value.code, 'REMOTE_ARGS_TOO_LARGE');
+      const long = await cardFor('workflow:create', { taskGraph: { tasks: [{ id: 't', title: 'T', description: 'd'.repeat(3000) }] } });
+      assert.match(summaryOf(long.call), /long text, read it all/);
+      const pad = await cardFor('workflow:create', { taskGraph: { tasks: tasks(1), pad: 'x'.repeat(70000) } });
+      assert.strictEqual(pad.value.code, 'REMOTE_ARGS_TOO_LARGE');
+      await refused('workflow:create', { taskGraph: { tasks: tasks(1) }, junk: 'x' });
+    });
+  });
+
+  describe('the second card reads declared fields only', () => {
+    const { formatToolPattern, matchesPatternList } = (() => {
+      const patterns = require('../src/execution/tool-patterns');
+      const policy = require('../src/execution/safety-policy');
+      return { formatToolPattern: patterns.formatToolPattern, matchesPatternList: policy.matchesPatternList };
+    })();
+
+    it('a decoy field names nothing', () => {
+      assert.strictEqual(formatToolPattern('Write', { command: 'echo hello', file_path: 'a.txt', content: 'x' }), 'Write(a.txt)');
+      assert.strictEqual(formatToolPattern('Browser', { action: 'evaluate', path: 'decoy', key: 'decoy' }), 'Browser(evaluate)');
+      assert.strictEqual(formatToolPattern('SpawnAgent', { query: 'decoy', task: 'do it' }), 'SpawnAgent(do it)');
+      assert.strictEqual(formatToolPattern('Vault', { action: 'retrieve', key: 'a.key' }), 'Vault(a.key)');
+      assert.strictEqual(formatToolPattern('Bash', { command: 'ls' }), 'Bash(ls)');
+    });
+
+    it('a tool with no entry shows all its parameters, never one it picked', () => {
+      assert.strictEqual(formatToolPattern('mcp_other', { command: 'decoy', z: 1 }), 'mcp_other({"command":"decoy","z":1})');
+    });
+
+    it('a deny or confirm pattern on a field still matches, whatever the display says', () => {
+      assert.strictEqual(matchesPatternList('mcp_other', { path: '/etc/passwd' }, ['mcp_other(/etc/*)']), true);
+      assert.strictEqual(matchesPatternList('mcp_other', { command: 'rm -rf x' }, ['rm *']), true);
     });
   });
 
