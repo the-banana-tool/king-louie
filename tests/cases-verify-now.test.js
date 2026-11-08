@@ -340,6 +340,6 @@ describe('Check now: the owner asks for a verify pass', () => {
       }
     };
     walk(path.join(__dirname, '..', 'src'));
-    assert.deepStrictEqual(naming.sort(), ['src/cases/case-runtime.js', 'src/ipc/case-progress-handlers.js', 'src/ipc/constants.js']);
+    assert.deepStrictEqual(naming.sort(), ['src/cases/case-runtime.js', 'src/desktop-bridge/remote-classes.js', 'src/ipc/case-progress-handlers.js', 'src/ipc/constants.js']);
   });
 });
