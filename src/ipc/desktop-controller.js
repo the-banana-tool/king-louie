@@ -443,6 +443,7 @@ function createDesktopController({
       }
     }
     let bridge = null;
+    let fleetMachine = false;
     // §7.4: a disconnected personal pairing shows what §7.1 finds now
     // (rate-limited: not a PowerShell call per repaint).
     if (current === 'attached-disconnected') await refreshNode().catch(() => {});
@@ -456,6 +457,10 @@ function createDesktopController({
           const local = await nodeRunner.inspectLocal({ bridgeFile: bridgeFile() });
           r = (readBridgeFile ? await readBridgeFile() : local.trust) || {};
           node = await unpairedNode(local.node);
+          // Track if we detected a fleet machine (personal: false)
+          if (local.node && !local.node.personal && !local.node.fresh) {
+            fleetMachine = true;
+          }
         } else {
           r = (await readFile()) || {};
         }
@@ -489,6 +494,7 @@ function createDesktopController({
       profileDir: userDataDir ? shown(userDataDir, 400) : null,
       bridgeFile: bridgeFile(),
       bridge,
+      fleetMachine,
       pairing: pairing ? {
         deviceId: pairing.deviceId,
         fingerprint: fingerprintGroups(pairing.deviceId),

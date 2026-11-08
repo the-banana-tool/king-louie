@@ -223,6 +223,16 @@ function programGoneBody(node) {
 function installStep(s, f) {
   const n = f.node;
   const b = s.bridge || {};
+  const fleetDetected = s.fleetMachine || false;
+  
+  // Check if there's a detected fleet machine - this takes precedence over bridge errors
+  if (fleetDetected) {
+    return {
+      lines: ['A local King Louie service is installed on this computer.', 'Local service settings shows what was found and how to connect this app to it.'],
+      error: { code: 'NOT_PERSONAL', message: 'This computer already has a King Louie setup that this app cannot take over, so it does not install King Louie Node here.' },
+      actions: [SERVICE_SETTINGS, CHECK_AGAIN]
+    };
+  }
   
   // Check for bridge detection error (ok: false means bridge detection failed)
   // This prevents installation when we can't determine if a fleet service exists
