@@ -392,6 +392,79 @@ class DesktopController {
     }
     return { ok: true, view, qr: view.qr };
   }
+
+  // Node management methods for task 11
+  addNode(entry) {
+    try {
+      this.state.addNode(entry);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  updateNode({ id, ...patch }) {
+    try {
+      this.state.updateNode(id, patch);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  removeNode({ id }) {
+    try {
+      this.state.removeNode(id);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  setNodeOrder({ ids }) {
+    try {
+      this.state.setNodeOrder(ids);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  setPairing(pairing) {
+    try {
+      this.state.setPairing(pairing);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  clearPairing() {
+    try {
+      this.state.clearPairing();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  setSetup(entry) {
+    try {
+      this.state.setSetup(entry);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  noteSetup(options) {
+    try {
+      this.state.noteSetup(options);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
 }
 
 module.exports = { openDesktopState, secureStorageUsable, MODES, DesktopState };

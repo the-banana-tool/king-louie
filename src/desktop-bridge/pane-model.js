@@ -192,6 +192,16 @@ function describeApprovals(status) {
 
 function describeServicePane(status = {}) {
   const s = status || {};
+  
+  // Task 11: Handle remote entries (attach stage 3 part B)
+  if (s.kind === 'remote') {
+    return {
+      kind: 'remote',
+      status: s.status || 'unknown',
+      // Remote entries have no install, restart, unpair or detach actions
+    };
+  }
+  
   const lines = [];
   const actions = [];
   let request = null;
