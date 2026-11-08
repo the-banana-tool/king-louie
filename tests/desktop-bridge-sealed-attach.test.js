@@ -720,6 +720,7 @@ describe('no new socket, and the loopback path as it was', () => {
     writeDevices(configDir, []);
     server._recheckLive();
     assert.deepStrictEqual(await loop.closed, { code: 4403, reason: 'unpaired' });
+    await waitFor(() => dispatcher.disconnects.length === 1, 'the cleanup');
     assert.strictEqual(conn.revoked, false);
     assert.deepStrictEqual(dispatcher.revoked, []);
     assert.deepStrictEqual(dispatcher.disconnects, [local.deviceId]);

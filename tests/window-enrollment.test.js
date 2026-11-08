@@ -60,6 +60,19 @@ const POSIX = process.platform !== 'win32';
 const UID = POSIX ? process.getuid() : 0;
 const selfOwner = { geteuid: () => UID, adminUid: UID };
 
+// The identity point as an Ed25519 public key (R-RW-14): S = 1, R = the base point
+// satisfies S·B = R + h·A for any h when A is the identity, so this signature is
+// forged to "verify" over any message. Whether the platform's own Ed25519 verify
+// (OpenSSL, through node:crypto) actually accepts that forgery varies by build —
+// some reject a small-order/identity public key outright during verification,
+// which is a second line of defense beyond refusedWindowKey's own check. Computed
+// once so the tests that rely on the forgery working can skip cleanly where it does
+// not, rather than asserting a specific library's behavior as if it were ours.
+const IDENTITY_KEY = Buffer.from('0100000000000000000000000000000000000000000000000000000000000000', 'hex');
+const IDENTITY_BASE_POINT = Buffer.from('5866666666666666666666666666666666666666666666666666666666666666', 'hex');
+const IDENTITY_FORGED_SIG = Buffer.concat([IDENTITY_BASE_POINT, Buffer.from('01'.padEnd(64, '0'), 'hex')]);
+const IDENTITY_FORGERY_VERIFIES = keys.verifyWithRawKey(IDENTITY_KEY, Buffer.from('anything at all'), IDENTITY_FORGED_SIG) === true;
+
 function tempDir(prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -180,13 +193,16 @@ describe('the messages (R-RW-14, R-RW-34)', () => {
   });
 
   it('the identity point really does verify a crafted signature over any message, which is why it is refused', () => {
-    const identityKey = Buffer.from('0100000000000000000000000000000000000000000000000000000000000000', 'hex');
-    // S = 1, R = the base point: S·B = R + h·A holds for any h when A is the identity.
-    const base = Buffer.from('5866666666666666666666666666666666666666666666666666666666666666', 'hex');
-    const sig = Buffer.concat([base, Buffer.from('01'.padEnd(64, '0'), 'hex')]);
-    assert.equal(keys.verifyWithRawKey(identityKey, Buffer.from('anything at all'), sig), true);
-    assert.equal(keys.verifyWithRawKey(identityKey, Buffer.from('something else'), sig), true);
-    assert.equal(refusedWindowKey(identityKey), 'small_order_key');
+    // Demonstrates the forgery where this platform's Ed25519 verify still accepts
+    // it (IDENTITY_FORGERY_VERIFIES, computed once at module load); where the
+    // underlying library has started rejecting a small-order public key itself,
+    // that premise no longer holds here, but refusedWindowKey must refuse the key
+    // either way, so that assertion runs unconditionally.
+    if (IDENTITY_FORGERY_VERIFIES) {
+      assert.equal(keys.verifyWithRawKey(IDENTITY_KEY, Buffer.from('anything at all'), IDENTITY_FORGED_SIG), true);
+      assert.equal(keys.verifyWithRawKey(IDENTITY_KEY, Buffer.from('something else'), IDENTITY_FORGED_SIG), true);
+    }
+    assert.equal(refusedWindowKey(IDENTITY_KEY), 'small_order_key');
   });
 
   it('the published window-v1 keys are refused, all of them', () => {
@@ -829,11 +845,15 @@ describe('the enroll-only session (R-RW-36)', () => {
     assert.equal(window.sealClose, null);
   });
 
-  it('a small-order key completes the handshake and cannot make a request', async () => {
+  // Needs the forged identity-point signature (R-RW-14) to pass the handshake's
+  // own Ed25519 verify so the key can reach window.enroll at all; where this
+  // platform's verify already refuses a small-order public key (see
+  // IDENTITY_FORGERY_VERIFIES), the handshake fails for that reason instead and
+  // this scenario cannot be constructed.
+  it('a small-order key completes the handshake and cannot make a request', { skip: !IDENTITY_FORGERY_VERIFIES }, async () => {
     const b = await bridge();
-    const raw = Buffer.from('0100000000000000000000000000000000000000000000000000000000000000', 'hex');
-    const baseEncoding = Buffer.from('5866666666666666666666666666666666666666666666666666666666666666', 'hex');
-    const sig = Buffer.concat([baseEncoding, Buffer.from('01'.padEnd(64, '0'), 'hex')]);
+    const raw = IDENTITY_KEY;
+    const sig = IDENTITY_FORGED_SIG;
     const device = { deviceId: keys.deriveDeviceId(raw, 'kld-'), raw };
     const [nodeEnd, windowEnd] = createTransportPair();
     const sessionId = sessionIdOf(`small ${crypto.randomUUID()}`);
