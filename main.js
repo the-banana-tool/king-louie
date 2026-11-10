@@ -6,7 +6,7 @@ if (nodeLauncher.isNodeServiceLaunch(process.argv)) {
   return;
 }
 
-const { app, BrowserWindow, ipcMain, safeStorage, shell, protocol, net, Notification, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, shell, protocol, net, Notification, dialog, Tray, Menu } = require('electron');
 require('./src/history/sqlite-warning').suppressSqliteExperimentalWarning();
 const os = require('os');
 const path = require('path');
@@ -54,11 +54,14 @@ const attached = launch.host === 'attached';
 const standaloneOnce = launch.degraded;
 const deps = { app, ipcMain, safeStorage, shell, dialog, Notification, getWindow, state, appDir: __dirname, standaloneOnce, launch };
 const host = attached ? startAttachedHost(deps) : startStandaloneHost(deps);
+// Boot-node-tray §5.4: attached to this machine's personal node, the app lives in the tray.
+const trayHost = require('./src/ipc/tray-host').createTrayHost({ app, Tray, Menu, dialog, host, launch, state, getWindow, createWindow: () => createWindow(), appDir: __dirname });
 
-function createWindow() {
+function createWindow({ show = true } = {}) {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
+    show,
     icon: path.join(__dirname, 'favicon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -77,6 +80,7 @@ function createWindow() {
   // An attached launch hides the chat shell until the first status says whether it may
   // show (renderer-helpers/launch-class.js). A standalone one loads as it always has.
   mainWindow.loadFile('index.html', attached ? { query: { launch: 'attached' } } : undefined);
+  trayHost.watchWindow(mainWindow);
   mainWindow.on('closed', function () {
     mainWindow = null;
   });
@@ -97,8 +101,8 @@ app.whenReady().then(async () => {
     }
   });
 
-  // Show the window immediately — don't block on infrastructure.
-  createWindow();
+  // Show the window immediately — don't block on infrastructure (hidden under --kl-tray in tray mode).
+  createWindow({ show: !trayHost.startHidden });
   try {
     await host.start();
   } catch (err) {
@@ -107,6 +111,7 @@ app.whenReady().then(async () => {
     app.quit();
     return;
   }
+  trayHost.start();
 
   // Catalog refresh and stale provider retests (spec 2026-09-27 §4.1, §5.2),
   // started here rather than in the core's start() — unit tests build a core
@@ -119,7 +124,5 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', function () {
-  if (process.platform !== 'darwin') {
-    host.shutdown().finally(() => app.quit());
-  }
+  if (process.platform !== 'darwin') trayHost.allWindowsClosed();
 });

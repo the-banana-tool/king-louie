@@ -3,6 +3,10 @@
 // host is built. First match wins. Stage 4 removes the `platform` row.
 const STANDALONE_FLAG = '--kl-standalone';
 const STANDALONE_ONCE_FLAG = '--kl-standalone-once';
+// Boot-node-tray §5.4 (C-8): start in the tray with no window shown. It says
+// only how the window starts; it never takes part in the host choice below,
+// and it shows nothing hidden unless tray mode is on (local-personal.js).
+const TRAY_FLAG = '--kl-tray';
 
 // `migrated`: the marker of a verified move (§6.5). A migrated profile is never
 // opened as a live King Louie again, so the once flag means nothing to it; the
@@ -15,4 +19,13 @@ function resolveLaunchMode({ argv, platform, stateMode, migrated = false }) {
   return { host: 'attached', why: 'needs-node', degraded: false };
 }
 
-module.exports = { resolveLaunchMode, STANDALONE_FLAG, STANDALONE_ONCE_FLAG };
+// The arguments a relaunch passes (argv without the binary): both standalone
+// flags go, since the persisted mode decides again; everything else, the tray
+// flag included, stays. `extraArgs` are appended.
+function relaunchArgs(argv, extraArgs = []) {
+  return argv.slice(1).filter((a) => a !== STANDALONE_ONCE_FLAG && a !== STANDALONE_FLAG).concat(extraArgs);
+}
+
+const startsInTray = (argv) => Array.isArray(argv) && argv.includes(TRAY_FLAG);
+
+module.exports = { resolveLaunchMode, relaunchArgs, startsInTray, STANDALONE_FLAG, STANDALONE_ONCE_FLAG, TRAY_FLAG };

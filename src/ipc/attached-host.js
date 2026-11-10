@@ -9,6 +9,7 @@ const { classifyChannel, isRendererEvent } = require('../desktop-bridge/allowlis
 const { wrapHandler } = require('./wrap-handler');
 const { createImportPicks, createPickImportFile, createAttachedImport } = require('./import-picks');
 const { MESSAGES, DEFAULT_DESKTOP_BRIDGE_PORT } = require('../desktop-bridge/protocol');
+const { localPersonalDataDir } = require('../desktop-bridge/local-personal');
 
 const log = createLogger('attached-host');
 
@@ -54,13 +55,7 @@ function startAttachedHost(deps) {
   const screenHostFactory = deps.screenHostFactory || ((opts) => require('./screen-host').startScreenHost(opts));
   let screenHost = null;
   const screenHostStopMs = deps.screenHostStopMs || 30000;
-  const screenHostDataDir = () => {
-    if (platform !== 'win32') return null;
-    const record = state.pairing;
-    if (!record || record.kind === 'remote') return null;
-    const svc = record.service;
-    return svc && svc.hosting === 'personal' && typeof svc.dataDir === 'string' && svc.dataDir ? svc.dataDir : null;
-  };
+  const screenHostDataDir = () => localPersonalDataDir(state.pairing, platform);
 
   async function providerReady() {
     if (!client.service || client.service.providersConfigured !== false) return true;

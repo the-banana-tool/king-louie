@@ -24,7 +24,7 @@ const { SECRET_CATEGORIES } = require('../migration/desktop-import');
 const { setAsideUnreadableSecrets } = require('../migration/desktop-source');
 const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
 const { shown } = require('../service/commands/io');
-const { STANDALONE_FLAG, STANDALONE_ONCE_FLAG: STANDALONE_ONCE } = require('../desktop-bridge/launch-mode');
+const { relaunchArgs, STANDALONE_ONCE_FLAG: STANDALONE_ONCE } = require('../desktop-bridge/launch-mode');
 
 const log = createLogger('desktop-controller');
 
@@ -274,7 +274,8 @@ function createDesktopController({
       app.quit();
       return { ok: true, relaunching: true };
     }
-    const args = argv.slice(1).filter((a) => a !== STANDALONE_ONCE && a !== STANDALONE_FLAG).concat(extraArgs);
+    // Both standalone flags go; --kl-tray stays (launch-mode.js).
+    const args = relaunchArgs(argv, extraArgs);
     app.relaunch({ args });
     app.exit(0);
     return { ok: true, relaunching: true };
