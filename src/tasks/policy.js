@@ -24,19 +24,33 @@ const LOOK = Object.freeze({ allow: true, look: true });
 const PASSTHROUGH = Object.freeze({ passthrough: true });
 
 // Acting, but not what the card's "click and type" or "sign in with saved logins" says
-// (spec §4.5): running code, uploading a file, filling a saved card. Each asks on its own.
-const NOT_IN_ANY_CLASS = new Set(['evaluate', 'evaluate_in_frame', 'set_input_files', 'fill_payment']);
+// (spec §4.5): uploading a file, filling a saved card. Each asks on its own. A page script
+// (`evaluate`, `evaluate_in_frame`) is browser-act on a granted site (owner ruling 2026-11-10):
+// one card covers working in a site, and a script there can do no more than clicks and typing can.
+const NOT_IN_ANY_CLASS = new Set(['set_input_files', 'fill_payment']);
 
 // Reading a page takes these as well as take-policy's look-only list; none changes what a site
-// holds. Run in every state, on any page. Not `reload`, which can resubmit a form.
+// holds. Run in every state, on any page. Not `reload`, which can resubmit a form. The two profile
+// actions read saved profiles' names and open nothing.
 const LOOK_ACTIONS = new Set([
   ...LOOK_ONLY_ACTIONS.filter((a) => a !== 'reload'),
   'hover', 'focus', 'scroll', 'mouse_move', 'mouse_wheel', 'set_viewport',
+  'profile_list', 'profile_current',
 ]);
 
 // What `start` may carry and still mean the task's own browser, the king-louie profile: its other
 // parameters (profile, ephemeral, userDataPath) each open something else.
 const PLAIN_START_KEYS = new Set(['action', 'headless']);
+// A start on one of the owner's saved profiles: his signed-in browser, which is what the card's
+// browser-act words grant (owner ruling 2026-11-10). No page is open yet, so no site bounds it;
+// every later act is held to the sites. `ephemeral` and `userDataPath` still ask.
+const SAVED_START_KEYS = new Set(['action', 'headless', 'profile']);
+const PROFILE_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function savedProfileStart(p) {
+  return p.action === 'start' && typeof p.profile === 'string' && PROFILE_NAME_RE.test(p.profile)
+    && Object.keys(p).every((k) => SAVED_START_KEYS.has(k));
+}
 
 const FILE_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
 
@@ -110,7 +124,8 @@ function createTaskPolicy({ getState, currentUrl, workDir, waitForGrant }) {
   // call, 'navigate' for navigation, or null for a call no class covers.
   function classify(toolName, p, cwd) {
     if (BROWSER_TOOLS.has(toolName)) {
-      // The task's browser is the king-louie profile; any other is the phone's to allow.
+      if (savedProfileStart(p)) return { cls: 'browser-act', inScope: async () => true };
+      // Any other call that names a profile, or an ephemeral browser, is the phone's to allow.
       if (present(p.profile) || present(p.ephemeral)) return null;
       const action = p.action;
       if (LOOK_ACTIONS.has(action) || action === 'stop') return 'look';
