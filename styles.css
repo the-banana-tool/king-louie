@@ -1975,6 +1975,62 @@ body {
   font-weight: normal;
 }
 
+/* A row whose control is a text area: label above, control full width. */
+.settings-row.is-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.settings-row.is-stacked > :last-child:not(:first-child) {
+  flex-shrink: 1;
+}
+
+/* A field on the right of its label keeps a bounded width, so the label stays whole. */
+.settings-row:not(.is-stacked) > .provider-input {
+  width: min(340px, 55%);
+  flex: 0 0 auto;
+}
+
+.settings-row:not(.is-stacked) > span:last-child:not(.unit-field) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 60%;
+}
+
+.settings-row:not(.is-stacked) > span:last-child:not(.unit-field) > .provider-input {
+  width: 240px;
+}
+
+/* Settings that depend on a switch, greyed until it is on (spec §5.8 rule 2). */
+.settings-row.is-greyed > label {
+  color: var(--text-muted);
+}
+
+.settings-row.is-greyed {
+  opacity: 0.55;
+}
+
+/* A failed auto-save's error, beside its field (spec §7.1). */
+.settings-field-error {
+  margin: 2px 0 6px;
+  font-size: var(--settings-fs-help);
+  color: var(--error);
+}
+
+.settings-advanced {
+  margin-top: 10px;
+}
+
+.settings-advanced > summary {
+  cursor: pointer;
+  font-size: var(--settings-fs-help);
+  color: var(--text-secondary);
+}
+
 /* --- Switch: a styled checkbox ----------------------------- */
 .switch {
   -webkit-appearance: none;

@@ -55,10 +55,26 @@ describe('renderer: History and recall pane', () => {
     assert.ok(SETTINGS_GROUPS.flatMap((g) => g.pages).some((p) => p.tab === 'history' && p.label === 'History & recall'));
     assert.match(html, /data-tab="history"/);
     for (const id of ['history-embedder-kind', 'history-rerank-search', 'history-embedder-model', 'history-ollama-url', 'history-ollama-model',
-      'history-openai-model', 'history-rerank-turn', 'history-embedder-save-btn', 'history-embedder-retry-btn', 'history-embedder-rebuild-btn', 'history-embedder-status']) {
+      'history-openai-model', 'history-rerank-turn', 'history-embedder-retry-btn', 'history-embedder-rebuild-btn', 'history-embedder-status']) {
       assert.match(html, new RegExp(`id="${id}"`), id);
     }
     assert.match(html, /sends chat text to OpenAI/);
+    // Settings redesign §5.8 rule 1: it saves as it changes, so no Save button.
+    assert.doesNotMatch(html, /id="history-embedder-save-btn"/);
+  });
+
+  it('saves on change; a refused save puts the fields back and says why beside them', () => {
+    const wire = block('function wireHistorySettings(', '\nif (document.readyState');
+    assert.match(wire, /registerSettingsAutosave\('history\.recall'/);
+    assert.match(wire, /immediate: true/);
+    const save = block('async function saveHistorySettings(', '\nasync function saveHistoryJevKey(');
+    assert.match(save, /return \{ ok: false, error/);
+    assert.match(save, /return \{ ok: true \}/);
+    const states = block('function onHistorySaveState(', '\nfunction wireHistorySettings(');
+    assert.match(states, /state === 'error'/);
+    assert.match(states, /applyHistoryFields\(historyStored\)/);
+    assert.match(states, /setSettingsFieldError\(/);
+    assert.doesNotMatch(states, /innerHTML/);
   });
 
   it('preload exposes the four embedder channels', () => {

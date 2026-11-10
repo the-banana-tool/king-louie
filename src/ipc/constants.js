@@ -171,6 +171,7 @@ module.exports = {
   SETTINGS_SAVE_VOICE: 'settings:saveVoice',
   SETTINGS_SAVE_ELEVENLABS_KEY: 'settings:saveElevenLabsKey',
   SETTINGS_TEST_VOICE: 'settings:testVoice',
+  SETTINGS_LIST_VOICES: 'settings:listVoices',
   SETTINGS_SAVE_PROVIDER: 'settings:saveProvider',
   SETTINGS_TEST_PROVIDER: 'settings:testProvider',
   SETTINGS_RUN_LLM_COMMAND: 'settings:runLlmCommand',

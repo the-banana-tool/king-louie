@@ -576,6 +576,7 @@ contextBridge.exposeInMainWorld(
       saveElevenLabsKey: (payload) => ipcRenderer.invoke('settings:saveElevenLabsKey', payload),
       testVoice: (payload) =>
         throttleInvoke('settings:testVoice', () => ipcRenderer.invoke('settings:testVoice', payload)),
+      listVoices: () => ipcRenderer.invoke('settings:listVoices'),
       saveNotifications: (payload) => ipcRenderer.invoke('settings:saveNotifications', payload),
       saveDefaults: (payload) => ipcRenderer.invoke('settings:saveDefaults', payload),
       addAllowedDirectory: () => ipcRenderer.invoke('settings:addAllowedDirectory'),

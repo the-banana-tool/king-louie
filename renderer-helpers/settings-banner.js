@@ -40,6 +40,17 @@ function switchToNodeAction(status) {
     : null;
 }
 
+// §8.4: the voices listed are this computer's, so the Voice page offers them only
+// when the settings it edits live on this computer: a standalone window, or a
+// personal node. A fleet node, or a status not read yet, keeps the text field.
+function voicesAreLocal(status) {
+  if (!status) return false;
+  if (status.mode !== 'attached') return true;
+  const hosting = (status.service && status.service.hosting)
+    || (status.pairing && status.pairing.service && status.pairing.service.hosting);
+  return hosting === 'personal';
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { settingsBanner, switchToNodeAction };
+  module.exports = { settingsBanner, switchToNodeAction, voicesAreLocal };
 }

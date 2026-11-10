@@ -7,6 +7,7 @@ const { isContactVaultKey } = require('../cases/contact-settings');
 const { isLocalServerVaultKey } = require('../models/local-vault-keys');
 const { createVault, vaultNodeAt, hasPrototypePart } = require('../platform/vault');
 const { isRemoteWindowEvent } = require('../core/origin');
+const { listSystemVoices } = require('../voice/list-voices');
 
 const VAULT_REFERENCE = /^\$\{vault:[^}]+\}$/;
 const HIDDEN = '(hidden)';
@@ -325,6 +326,13 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
     await ttsEngine.testConnection(voiceSettings);
     return { ok: true };
+  }));
+
+  // The voices this computer's speech engine has (settings redesign §7.3). The
+  // renderer asks only when the settings live on this computer (§8.4).
+  ipcMain.handle('settings:listVoices', wrapHandler('settings:listVoices', async () => {
+    const voices = await listSystemVoices();
+    return { ok: true, voices };
   }));
 
   ipcMain.handle('settings:saveProvider', wrapHandler('settings:saveProvider', async (_event, { provider, token, clear }) => {

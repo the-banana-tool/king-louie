@@ -272,34 +272,30 @@
           <i class="fas fa-triangle-exclamation"></i> Secure storage is unavailable. API and Telegram tokens cannot be safely saved on this system.
         </div>
 
-        <!-- Tab: General -->
+        <!-- Tab: General (New chats) -->
         <div class="settings-tab-content" data-tab="general">
           <section class="template-variables-card">
-            <h3>New Chat Defaults</h3>
-            <p>These settings are applied when creating a new chat.</p>
-            <div class="template-variables-grid">
-              <label class="inline-toggle" for="default-agent-mode">
-                <input id="default-agent-mode" type="checkbox">
-                <span>Agent mode on by default</span>
-              </label>
-              <label class="inline-toggle" for="default-sandbox-mode">
-                <input id="default-sandbox-mode" type="checkbox" checked>
-                <span>Sandbox mode on by default</span>
-              </label>
+            <h3>New chats</h3>
+            <p class="settings-row-help">Applied when a new chat is created.</p>
+            <div class="settings-row">
+              <label for="default-agent-mode">Agent mode on by default</label>
+              <input id="default-agent-mode" class="switch" type="checkbox">
             </div>
-            <span class="provider-message" id="general-defaults-status"></span>
+            <div class="settings-row">
+              <label for="default-sandbox-mode">Sandbox mode on by default</label>
+              <input id="default-sandbox-mode" class="switch" type="checkbox" checked>
+            </div>
+            <span class="provider-message settings-row-help" id="general-defaults-status"></span>
           </section>
 
           <section class="template-variables-card">
-            <h3>File Checkpoints</h3>
-            <p>Snapshots the working directory before the first file-changing tool of each turn, so a turn's edits can be undone from the <i class="fas fa-clock-rotate-left"></i> menu in the chat header. Requires git. Files excluded by <code>.gitignore</code> are not snapshotted.</p>
-            <div class="template-variables-grid">
-              <label class="inline-toggle" for="checkpoints-enabled">
-                <input id="checkpoints-enabled" type="checkbox">
-                <span>Enable file checkpoints</span>
-              </label>
+            <h3>File checkpoints</h3>
+            <div class="settings-row">
+              <label for="checkpoints-enabled">File checkpoints</label>
+              <input id="checkpoints-enabled" class="switch" type="checkbox">
             </div>
-            <span class="provider-message" id="checkpoints-status"></span>
+            <p class="settings-row-help">Snapshots the working directory before the first file-changing tool of each turn, so a turn's edits can be undone from the <i class="fas fa-clock-rotate-left"></i> menu in the chat header. Requires git. Files excluded by <code>.gitignore</code> are not snapshotted.</p>
+            <span class="provider-message settings-row-help" id="checkpoints-status"></span>
           </section>
         </div>
 
@@ -684,115 +680,114 @@
 
         </div>
 
-        <!-- Tab: Profile -->
+        <!-- Tab: Profile (About you, spec 8.1): one Name, Role and Project context
+             write both the prompt template variables and the TELOS profile. -->
         <div class="settings-tab-content" data-tab="profile">
           <section class="template-variables-card">
-            <h3>Prompt Template Variables</h3>
-            <p>These values are injected into agent prompt templates at runtime.</p>
-            <div class="template-variables-grid">
+            <h3>About you</h3>
+            <p class="settings-row-help">What King Louie knows about you. New chats and agent runs use it.</p>
+            <div class="settings-row">
               <label for="template-name-input">Name</label>
               <input id="template-name-input" class="provider-input" type="text" placeholder="Your name">
-
+            </div>
+            <div class="settings-row">
               <label for="template-role-input">Role</label>
               <input id="template-role-input" class="provider-input" type="text" placeholder="Your role">
-
-              <label for="template-preferences-input">Preferences</label>
+            </div>
+            <div class="settings-row is-stacked">
+              <label for="template-preferences-input">How you like replies</label>
               <textarea id="template-preferences-input" class="provider-input" rows="3" placeholder="Response and workflow preferences"></textarea>
-
-              <label for="template-project-context-input">Project Context</label>
-              <textarea id="template-project-context-input" class="provider-input" rows="4" placeholder="Current project context"></textarea>
             </div>
-            <div class="template-variables-actions">
-              <button id="save-template-variables-btn" type="button" class="btn btn-primary">Save Variables</button>
-              <span id="template-variables-status" class="provider-message">Not saved yet.</span>
-            </div>
-          </section>
-
-          <section class="template-variables-card">
-            <h3>User Profile (TELOS)</h3>
-            <p>Used as persistent user context for agents and profile command responses.</p>
-            <div class="template-variables-grid">
-              <label for="profile-name-input">Name</label>
-              <input id="profile-name-input" class="provider-input" type="text" placeholder="Your name">
-
-              <label for="profile-role-input">Role</label>
-              <input id="profile-role-input" class="provider-input" type="text" placeholder="Your role">
-
+            <div class="settings-row is-stacked">
               <label for="profile-goals-input">Goals (one per line)</label>
               <textarea id="profile-goals-input" class="provider-input" rows="4" placeholder="Primary goals"></textarea>
-
-              <label for="profile-preferences-input">Preferences (JSON)</label>
-              <textarea id="profile-preferences-input" class="provider-input" rows="4" placeholder='{"tone":"concise","style":"pragmatic"}'></textarea>
-
-              <label for="profile-project-context-input">Project Context</label>
-              <textarea id="profile-project-context-input" class="provider-input" rows="4" placeholder="Current project context"></textarea>
             </div>
-            <div class="template-variables-actions">
-              <button id="save-user-profile-btn" type="button" class="btn btn-primary">Save Profile</button>
-              <span id="user-profile-status" class="provider-message">Not saved yet.</span>
+            <div class="settings-row is-stacked">
+              <label for="template-project-context-input">Project context</label>
+              <textarea id="template-project-context-input" class="provider-input" rows="4" placeholder="Current project context"></textarea>
             </div>
+            <details class="settings-advanced">
+              <summary>Advanced</summary>
+              <div class="settings-row is-stacked">
+                <label for="profile-preferences-input">Preferences (JSON)</label>
+                <textarea id="profile-preferences-input" class="provider-input" rows="4" placeholder='{"tone":"concise","style":"pragmatic"}'></textarea>
+              </div>
+              <p class="settings-row-help">Saved only when it is a valid JSON object.</p>
+            </details>
           </section>
         </div>
 
         <!-- Tab: Voice -->
         <div class="settings-tab-content" data-tab="voice">
           <section class="template-variables-card">
-            <h3>Voice / TTS</h3>
-            <p>Configure optional speech output for chat responses, agents, and Telegram long responses.</p>
-            <div class="template-variables-grid">
-              <label class="inline-toggle" for="voice-enabled-input">
-                <input id="voice-enabled-input" type="checkbox">
-                <span>Enable voice output</span>
-              </label>
-
-              <label class="inline-toggle" for="voice-speak-chat-input">
-                <input id="voice-speak-chat-input" type="checkbox">
-                <span>Speak desktop chat responses automatically</span>
-              </label>
-
-              <label class="inline-toggle" for="voice-speak-agent-summary-input">
-                <input id="voice-speak-agent-summary-input" type="checkbox">
-                <span>Speak agent completion summaries</span>
-              </label>
-
-              <label class="inline-toggle" for="voice-telegram-long-input">
-                <input id="voice-telegram-long-input" type="checkbox">
-                <span>Send Telegram voice for long responses</span>
-              </label>
-
-              <label for="voice-engine-input">Engine</label>
-              <select id="voice-engine-input" class="provider-input">
-                <option value="system">System TTS</option>
-                <option value="elevenlabs">ElevenLabs</option>
-              </select>
-
-              <label for="voice-id-input">Voice ID / Voice Name</label>
-              <input id="voice-id-input" class="provider-input" type="text" placeholder="ElevenLabs voice ID or system voice name">
-
-              <label for="voice-speed-input">Speed</label>
-              <input id="voice-speed-input" class="provider-input" type="number" min="0.5" max="2" step="0.05" placeholder="1.0">
-
-              <label for="voice-stability-input">Stability (ElevenLabs)</label>
-              <input id="voice-stability-input" class="provider-input" type="number" min="0" max="1" step="0.05" placeholder="0.5">
-
-              <label for="voice-style-input">Style (ElevenLabs)</label>
-              <input id="voice-style-input" class="provider-input" type="number" min="0" max="1" step="0.05" placeholder="0.25">
-
-              <label for="voice-summary-max-input">Summary max chars</label>
-              <input id="voice-summary-max-input" class="provider-input" type="number" min="80" step="10" placeholder="260">
-
-              <label for="voice-telegram-min-input">Telegram min chars</label>
-              <input id="voice-telegram-min-input" class="provider-input" type="number" min="80" step="10" placeholder="500">
-
-              <label for="voice-elevenlabs-key-input">ElevenLabs API key</label>
-              <input id="voice-elevenlabs-key-input" class="provider-input" type="password" placeholder="Paste ElevenLabs API key to save securely">
+            <h3>Voice</h3>
+            <p class="settings-row-help">Speech output for chat replies, agent summaries and long Telegram replies.</p>
+            <div class="settings-row">
+              <label for="voice-enabled-input">Voice output</label>
+              <input id="voice-enabled-input" class="switch" type="checkbox">
+            </div>
+            <div id="voice-dependent-rows">
+              <div class="settings-row">
+                <label for="voice-speak-chat-input">Speak chat replies automatically</label>
+                <input id="voice-speak-chat-input" class="switch" type="checkbox">
+              </div>
+              <div class="settings-row">
+                <label for="voice-speak-agent-summary-input">Speak agent completion summaries</label>
+                <input id="voice-speak-agent-summary-input" class="switch" type="checkbox">
+              </div>
+              <div class="settings-row">
+                <label for="voice-telegram-long-input">Send Telegram voice for long replies</label>
+                <input id="voice-telegram-long-input" class="switch" type="checkbox">
+              </div>
+              <div class="settings-row">
+                <label for="voice-engine-input">Engine</label>
+                <select id="voice-engine-input" class="provider-input">
+                  <option value="system">This computer's voice</option>
+                  <option value="elevenlabs">ElevenLabs</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label for="voice-id-input" id="voice-id-label">Voice</label>
+                <span>
+                  <select id="voice-system-select" class="provider-input" aria-labelledby="voice-id-label" hidden></select>
+                  <input id="voice-id-input" class="provider-input" type="text" placeholder="Voice name (blank for the default)">
+                </span>
+              </div>
+              <div class="settings-row">
+                <label for="voice-speed-input">Speed</label>
+                <span class="unit-field"><input id="voice-speed-input" type="number" min="0.5" max="2" step="0.05" placeholder="1.0"><span class="unit">&times;</span></span>
+              </div>
+              <div class="settings-row">
+                <label for="voice-summary-max-input">Longest summary spoken</label>
+                <span class="unit-field"><input id="voice-summary-max-input" type="number" min="80" step="10" placeholder="260"><span class="unit">characters</span></span>
+              </div>
+              <div class="settings-row">
+                <label for="voice-telegram-min-input">Telegram voice from</label>
+                <span class="unit-field"><input id="voice-telegram-min-input" type="number" min="80" step="10" placeholder="500"><span class="unit">characters</span></span>
+              </div>
+              <div id="voice-elevenlabs-fields" hidden>
+                <p class="settings-section-label">ElevenLabs</p>
+                <div class="settings-row">
+                  <label for="voice-stability-input">Stability</label>
+                  <span class="unit-field"><input id="voice-stability-input" type="number" min="0" max="1" step="0.05" placeholder="0.5"></span>
+                </div>
+                <div class="settings-row">
+                  <label for="voice-style-input">Style</label>
+                  <span class="unit-field"><input id="voice-style-input" type="number" min="0" max="1" step="0.05" placeholder="0.25"></span>
+                </div>
+                <div class="settings-row">
+                  <label for="voice-elevenlabs-key-input">ElevenLabs API key</label>
+                  <span>
+                    <input id="voice-elevenlabs-key-input" class="provider-input" type="password" autocomplete="off" placeholder="Paste a key to save it securely">
+                    <button id="save-voice-key-btn" type="button" class="btn">Save key</button>
+                    <button id="clear-voice-key-btn" type="button" class="btn btn-danger">Remove key</button>
+                  </span>
+                </div>
+              </div>
             </div>
             <div class="template-variables-actions">
-              <button id="save-voice-settings-btn" type="button" class="btn btn-primary">Save Voice Settings</button>
-              <button id="save-voice-key-btn" type="button" class="btn">Save ElevenLabs Key</button>
-              <button id="clear-voice-key-btn" type="button" class="btn btn-danger">Clear ElevenLabs Key</button>
-              <button id="test-voice-btn" type="button" class="btn">Test Voice Connection</button>
-              <span id="voice-status" class="provider-message">Voice settings not saved yet.</span>
+              <button id="test-voice-btn" type="button" class="btn">Test voice</button>
+              <span id="voice-status" class="provider-message settings-row-help"></span>
             </div>
           </section>
         </div>
@@ -874,8 +869,8 @@
         <div class="settings-tab-content" data-tab="history">
           <section class="template-variables-card">
             <h3>History and recall</h3>
-            <p>Each reply sees the recent messages plus excerpts found in the whole chat. Embeddings let recall find excerpts by meaning as well as by the words used.</p>
-            <div class="template-variables-grid">
+            <p class="settings-row-help">Each reply sees the recent messages plus excerpts found in the whole chat. Embeddings let recall find excerpts by meaning as well as by the words used.</p>
+            <div class="settings-row">
               <label for="history-embedder-kind">Embeddings</label>
               <select id="history-embedder-kind" class="provider-input">
                 <option value="local">On this computer (downloads a small model once)</option>
@@ -883,22 +878,24 @@
                 <option value="openai">OpenAI (sends chat text to OpenAI)</option>
                 <option value="none">Off (keyword search only)</option>
               </select>
-
+            </div>
+            <div class="settings-row">
               <label for="history-rerank-search">Rerank SearchHistory results</label>
-              <input id="history-rerank-search" type="checkbox">
-
+              <input id="history-rerank-search" class="switch" type="checkbox">
+            </div>
+            <div class="settings-row">
               <label for="history-rerank-kind">Reranker</label>
               <select id="history-rerank-kind" class="provider-input">
                 <option value="local">On this computer (cross-encoder)</option>
                 <option value="jev">typesafe.ai Jev (hosted, opt-in)</option>
               </select>
-
+            </div>
+            <div class="settings-row">
               <label for="history-rerank-jev-confirm">Allow sending to typesafe.ai</label>
-              <span>
-                <input id="history-rerank-jev-confirm" type="checkbox">
-                <span id="history-rerank-jev-note" class="provider-message">For every chat but a case chat, which is never sent, Jev sends your new message and about 100 excerpts of this chat to typesafe.ai each time it reranks.</span>
-              </span>
-
+              <input id="history-rerank-jev-confirm" class="switch" type="checkbox">
+            </div>
+            <p id="history-rerank-jev-note" class="settings-row-help">For every chat but a case chat, which is never sent, Jev sends your new message and about 100 excerpts of this chat to typesafe.ai each time it reranks.</p>
+            <div class="settings-row">
               <label for="history-jev-key">typesafe.ai key</label>
               <span>
                 <input id="history-jev-key" class="provider-input" type="password" autocomplete="off" spellcheck="false" placeholder="A saved key is never shown">
@@ -906,33 +903,36 @@
                 <button id="history-jev-key-clear-btn" type="button" class="btn">Remove key</button>
               </span>
             </div>
-            <p id="history-rerank-status" class="provider-message"></p>
-            <details class="history-advanced">
+            <p id="history-rerank-status" class="provider-message settings-row-help"></p>
+            <details class="history-advanced settings-advanced">
               <summary>Advanced</summary>
-              <div class="template-variables-grid">
+              <div class="settings-row" data-embedder-kind="local">
                 <label for="history-embedder-model">Local model</label>
                 <input id="history-embedder-model" class="provider-input" type="text" spellcheck="false">
-
+              </div>
+              <div class="settings-row" data-embedder-kind="ollama">
                 <label for="history-ollama-url">Ollama address</label>
                 <input id="history-ollama-url" class="provider-input" type="text" spellcheck="false">
-
+              </div>
+              <div class="settings-row" data-embedder-kind="ollama">
                 <label for="history-ollama-model">Ollama model</label>
                 <input id="history-ollama-model" class="provider-input" type="text" spellcheck="false">
-
+              </div>
+              <div class="settings-row" data-embedder-kind="openai">
                 <label for="history-openai-model">OpenAI model</label>
                 <input id="history-openai-model" class="provider-input" type="text" spellcheck="false">
-
+              </div>
+              <div class="settings-row">
                 <label for="history-rerank-turn">Rerank every turn (about 2 s a turn on a laptop CPU)</label>
-                <input id="history-rerank-turn" type="checkbox">
+                <input id="history-rerank-turn" class="switch" type="checkbox">
               </div>
             </details>
             <div class="template-variables-actions">
-              <button id="history-embedder-save-btn" type="button" class="btn btn-primary">Save</button>
               <button id="history-embedder-retry-btn" type="button" class="btn">Retry</button>
               <button id="history-embedder-rebuild-btn" type="button" class="btn btn-danger">Rebuild embeddings</button>
-              <span id="history-embedder-status" class="provider-message">Loading…</span>
+              <span id="history-embedder-status" class="provider-message settings-row-help">Loading&hellip;</span>
             </div>
-            <div id="history-keep-local-status" class="provider-message" hidden></div>
+            <div id="history-keep-local-status" class="provider-message settings-row-help" hidden></div>
           </section>
         </div>
 

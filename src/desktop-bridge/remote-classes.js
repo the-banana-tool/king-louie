@@ -31,7 +31,7 @@ const READ = [
   'history:excerpts', 'history:links.get', 'history:search', 'hooks:list', 'memory:list',
   'memory:recall', 'models:chatView', 'models:explain', 'models:kingLouie', 'models:local.list',
   'models:picker', 'models:profiles', 'models:status', 'models:usable', 'presence:status',
-  'settings:load', 'settings:mcpList', 'settings:vaultHeld', 'settings:vaultList',
+  'settings:listVoices', 'settings:load', 'settings:mcpList', 'settings:vaultHeld', 'settings:vaultList',
   'skill:checkDeps', 'skill:getPinned', 'skill:list', 'skill:listPinnable', 'tool:list',
   'tool:listPermissionRules', 'usage:getDaily', 'usage:getSession', 'workflow:get', 'workflow:list',
   'workflow:progress', 'bridge.status', 'bridge.checkPath', 'bridge.approvalsStatus'

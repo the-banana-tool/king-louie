@@ -1,68 +1,56 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
-const { launchApp, closeApp, evaluate, waitFor, click, fill, getValue, isVisible, openSettingsTab } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, fill, openSettingsTab } = require('./helpers');
 
-describe('E2E: Settings — Profile & Template Variables', () => {
+// About you (settings redesign §8.1): one Name, Role and Project context over the
+// template variables and the TELOS profile, saved as they change.
+describe('E2E: Settings — About you', () => {
   let ctx;
 
   before(async () => {
     ctx = await launchApp();
     await waitFor(ctx, `!!document.getElementById('user-input')`);
+    // TELOS starts empty on a fresh profile; the template has a name of its own.
+    await evaluate(ctx, `window.electron.settings.saveTemplateVariables({ templateVariables: { name: 'TestUser' } }).then(() => true)`);
     await openSettingsTab(ctx, 'profile');
   });
 
   after(async () => { await closeApp(ctx); });
 
-  it('has template name input', async () => {
-    const exists = await evaluate(ctx, `!!document.getElementById('template-name-input')`);
-    assert.ok(exists);
+  it('has one field per value and no Save buttons', async () => {
+    const shape = await evaluate(ctx, `(() => ({
+      fields: ['template-name-input', 'template-role-input', 'template-preferences-input', 'profile-goals-input',
+        'template-project-context-input', 'profile-preferences-input'].every((id) => !!document.getElementById(id)),
+      doubles: ['profile-name-input', 'profile-role-input', 'profile-project-context-input'].some((id) => !!document.getElementById(id)),
+      buttons: ['save-template-variables-btn', 'save-user-profile-btn'].some((id) => !!document.getElementById(id)),
+      jsonUnderAdvanced: !!document.querySelector('details.settings-advanced #profile-preferences-input')
+    }))()`);
+    assert.deepStrictEqual(shape, { fields: true, doubles: false, buttons: false, jsonUnderAdvanced: true });
   });
 
-  it('has template role input', async () => {
-    const exists = await evaluate(ctx, `!!document.getElementById('template-role-input')`);
-    assert.ok(exists);
+  it('shows the template name while TELOS has none', async () => {
+    await waitFor(ctx, `document.getElementById('template-name-input').value === 'TestUser'`);
   });
 
-  it('has template preferences textarea', async () => {
-    const exists = await evaluate(ctx, `!!document.getElementById('template-preferences-input')`);
-    assert.ok(exists);
+  it('a new name is written to both stores', async () => {
+    await fill(ctx, '#template-name-input', 'Lakeside Owner');
+    await new Promise((r) => setTimeout(r, 1000));
+    const stored = await evaluate(ctx, `window.electron.settings.load().then(({ data: s }) => ({
+      template: s.templateVariables.name, telos: s.userProfile.name
+    }))`);
+    assert.deepStrictEqual(stored, { template: 'Lakeside Owner', telos: 'Lakeside Owner' });
+    const header = await evaluate(ctx, `document.getElementById('settings-save-state').textContent`);
+    assert.strictEqual(header, 'Saved');
   });
 
-  it('has template project context textarea', async () => {
-    const exists = await evaluate(ctx, `!!document.getElementById('template-project-context-input')`);
-    assert.ok(exists);
-  });
-
-  it('has save template variables button', async () => {
-    const exists = await evaluate(ctx, `!!document.getElementById('save-template-variables-btn')`);
-    assert.ok(exists);
-  });
-
-  it('can fill and save template variables', async () => {
-    await fill(ctx, '#template-name-input', 'TestUser');
-    await fill(ctx, '#template-role-input', 'Developer');
-    await click(ctx, '#save-template-variables-btn');
-    await new Promise((r) => setTimeout(r, 500));
-
-    const status = await evaluate(ctx, `
-      document.getElementById('template-variables-status')?.textContent || ''
-    `);
-    // Should show success or at least not show an error
-    assert.ok(!status.includes('error') && !status.includes('Error'),
-      `save should succeed. Status: "${status}"`);
-  });
-
-  it('has user profile fields', async () => {
-    const name = await evaluate(ctx, `!!document.getElementById('profile-name-input')`);
-    const role = await evaluate(ctx, `!!document.getElementById('profile-role-input')`);
-    const goals = await evaluate(ctx, `!!document.getElementById('profile-goals-input')`);
-    assert.ok(name, 'profile name should exist');
-    assert.ok(role, 'profile role should exist');
-    assert.ok(goals, 'profile goals should exist');
-  });
-
-  it('has save profile button', async () => {
-    const exists = await evaluate(ctx, `!!document.getElementById('save-user-profile-btn')`);
-    assert.ok(exists);
+  it('Preferences (JSON) that does not parse is not saved and says so', async () => {
+    await fill(ctx, '#profile-preferences-input', '{not json');
+    await new Promise((r) => setTimeout(r, 1000));
+    const out = await evaluate(ctx, `window.electron.settings.load().then(({ data: s }) => ({
+      prefs: s.userProfile.preferences,
+      error: document.querySelector('.settings-tab-content[data-tab="profile"] .settings-field-error')?.textContent || ''
+    }))`);
+    assert.deepStrictEqual(out.prefs, {});
+    assert.match(out.error, /^Not saved: /);
   });
 });

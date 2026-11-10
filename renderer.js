@@ -183,15 +183,8 @@ const dom = {
   templateRoleInput: document.getElementById('template-role-input'),
   templatePreferencesInput: document.getElementById('template-preferences-input'),
   templateProjectContextInput: document.getElementById('template-project-context-input'),
-  saveTemplateVariablesBtn: document.getElementById('save-template-variables-btn'),
-  templateVariablesStatus: document.getElementById('template-variables-status'),
-  profileNameInput: document.getElementById('profile-name-input'),
-  profileRoleInput: document.getElementById('profile-role-input'),
   profileGoalsInput: document.getElementById('profile-goals-input'),
   profilePreferencesInput: document.getElementById('profile-preferences-input'),
-  profileProjectContextInput: document.getElementById('profile-project-context-input'),
-  saveUserProfileBtn: document.getElementById('save-user-profile-btn'),
-  userProfileStatus: document.getElementById('user-profile-status'),
   notificationsEnabledInput: document.getElementById('notifications-enabled-input'),
   notificationsUiToastEnabledInput: document.getElementById('notifications-ui-toast-enabled-input'),
   notificationsNtfyEnabledInput: document.getElementById('notifications-ntfy-enabled-input'),
@@ -207,13 +200,15 @@ const dom = {
   voiceTelegramLongInput: document.getElementById('voice-telegram-long-input'),
   voiceEngineInput: document.getElementById('voice-engine-input'),
   voiceIdInput: document.getElementById('voice-id-input'),
+  voiceSystemSelect: document.getElementById('voice-system-select'),
+  voiceDependentRows: document.getElementById('voice-dependent-rows'),
+  voiceElevenLabsFields: document.getElementById('voice-elevenlabs-fields'),
   voiceSpeedInput: document.getElementById('voice-speed-input'),
   voiceStabilityInput: document.getElementById('voice-stability-input'),
   voiceStyleInput: document.getElementById('voice-style-input'),
   voiceSummaryMaxInput: document.getElementById('voice-summary-max-input'),
   voiceTelegramMinInput: document.getElementById('voice-telegram-min-input'),
   voiceElevenLabsKeyInput: document.getElementById('voice-elevenlabs-key-input'),
-  saveVoiceSettingsBtn: document.getElementById('save-voice-settings-btn'),
   saveVoiceKeyBtn: document.getElementById('save-voice-key-btn'),
   clearVoiceKeyBtn: document.getElementById('clear-voice-key-btn'),
   testVoiceBtn: document.getElementById('test-voice-btn'),
@@ -4371,6 +4366,33 @@ function flushSettingsAutosaves() {
   return settingsAutosaves.flushAll();
 }
 
+// A failed save's error, beside its field (spec §7.1, Review Focus 1): the header's
+// indicator can be overwritten by another field's Saved, so the row keeps its own.
+// One error per row, just below it; an empty message removes it. Text only.
+function setSettingsFieldError(field, message) {
+  if (!field) return;
+  const row = field.closest('.settings-row') || field;
+  const next = row.nextElementSibling;
+  let el = next && next.classList.contains('settings-field-error') ? next : null;
+  if (!message) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('p');
+    el.className = 'settings-field-error';
+    el.setAttribute('role', 'alert');
+    row.insertAdjacentElement('afterend', el);
+  }
+  el.dataset.for = field.id || '';
+  el.textContent = String(message);
+}
+
+function clearSettingsFieldErrors(container) {
+  if (!container) return;
+  container.querySelectorAll('.settings-field-error').forEach((el) => el.remove());
+}
+
 function setSettingsDrawer(open) {
   if (!open) flushSettingsAutosaves();
   dom.settingsDrawer.hidden = !open;
@@ -4589,29 +4611,62 @@ async function refreshHistoryEmbedderStatus() {
   return out;
 }
 
+// What the pane last saved (or loaded): a refused save puts the fields back to it.
+let historyStored = null;
+let historyLastField = null;
+
+// The embedder's own fields are shown only for the embedder chosen (§5.8 rule 4).
+function paintHistoryPane() {
+  const kind = document.getElementById('history-embedder-kind')?.value;
+  document.querySelectorAll('.settings-tab-content[data-tab="history"] [data-embedder-kind]').forEach((row) => {
+    row.hidden = row.dataset.embedderKind !== kind;
+  });
+}
+
+function applyHistoryFields(payload) {
+  if (!payload) return;
+  const set = (id, prop, value) => {
+    const el = document.getElementById(id);
+    if (el) el[prop] = value;
+  };
+  set('history-embedder-kind', 'value', payload.embedder.kind);
+  set('history-embedder-model', 'value', payload.embedder.model);
+  set('history-ollama-url', 'value', payload.embedder.ollama.baseUrl);
+  set('history-ollama-model', 'value', payload.embedder.ollama.model);
+  set('history-openai-model', 'value', payload.embedder.openai.model);
+  set('history-rerank-search', 'checked', Boolean(payload.rerank.search));
+  set('history-rerank-turn', 'checked', Boolean(payload.rerank.enabled));
+  set('history-rerank-kind', 'value', payload.rerank.kind);
+  set('history-rerank-jev-confirm', 'checked', Boolean(payload.confirmJev));
+  paintHistoryPane();
+}
+
 async function loadHistorySettings() {
   const out = await refreshHistoryEmbedderStatus();
   if (out && out.ok && out.settings) {
     const e = out.settings.embedder;
-    document.getElementById('history-embedder-kind').value = e.kind;
-    document.getElementById('history-embedder-model').value = e.model;
-    document.getElementById('history-ollama-url').value = e.ollama.baseUrl;
-    document.getElementById('history-ollama-model').value = e.ollama.model;
-    document.getElementById('history-openai-model').value = e.openai.model;
-    document.getElementById('history-rerank-search').checked = Boolean(out.settings.rerank.search);
-    document.getElementById('history-rerank-turn').checked = Boolean(out.settings.rerank.enabled);
     const kind = out.settings.rerank.kind === 'jev' ? 'jev' : 'local';
-    document.getElementById('history-rerank-kind').value = kind;
-    document.getElementById('history-rerank-jev-confirm').checked = kind === 'jev';
+    historyStored = {
+      embedder: {
+        kind: e.kind,
+        model: e.model,
+        ollama: { baseUrl: e.ollama.baseUrl, model: e.ollama.model },
+        openai: { model: e.openai.model }
+      },
+      rerank: { search: Boolean(out.settings.rerank.search), enabled: Boolean(out.settings.rerank.enabled), kind },
+      // Ticked on load when Jev is the saved choice, so unticking it is refused.
+      confirmJev: kind === 'jev'
+    };
+    applyHistoryFields(historyStored);
   }
   stopHistoryStatusPoll();
   historyStatusTimer = setInterval(() => { refreshHistoryEmbedderStatus().catch(() => {}); }, 2000);
 }
 
-async function saveHistorySettings() {
-  const el = document.getElementById('history-embedder-status');
+// The whole pane as the one save call takes it.
+function historyPayloadFromForm() {
   const val = (id) => document.getElementById(id).value.trim();
-  const out = await window.electron.history.saveEmbedder({
+  return {
     embedder: {
       kind: document.getElementById('history-embedder-kind').value,
       model: val('history-embedder-model'),
@@ -4624,15 +4679,21 @@ async function saveHistorySettings() {
       kind: document.getElementById('history-rerank-kind').value
     },
     // Jev sends excerpts to typesafe.ai: the host refuses any save with
-    // Jev chosen unless this box is ticked (it is ticked on load when Jev is
-    // the saved choice, so unticking it and saving is refused).
+    // Jev chosen unless this box is ticked.
     confirmJev: document.getElementById('history-rerank-jev-confirm').checked
-  });
-  el.textContent = out && out.ok
-    ? historyEmbedderStatusText(out.status, out.progress)
-    : `Not saved: ${(out && out.error) || 'unknown error'}`;
+  };
+}
+
+// The auto-save's save call: the host's refusal (Jev without the box ticked, say)
+// comes back as the save error, and the fields go back to what was stored.
+async function saveHistorySettings(payload) {
+  const out = await window.electron.history.saveEmbedder(payload);
+  if (!out || !out.ok) return { ok: false, error: (out && out.error) || 'unknown error' };
+  historyStored = payload;
+  document.getElementById('history-embedder-status').textContent = historyEmbedderStatusText(out.status, out.progress);
   const rerankEl = document.getElementById('history-rerank-status');
-  if (rerankEl && out && out.ok) rerankEl.textContent = historyRerankStatusText(out.jev);
+  if (rerankEl) rerankEl.textContent = historyRerankStatusText(out.jev);
+  return { ok: true };
 }
 
 // The typesafe.ai key: sent once, the field cleared at once, never read
@@ -4669,11 +4730,37 @@ async function runHistoryEmbedderAction(call) {
   await refreshHistoryEmbedderStatus();
 }
 
+function onHistorySaveState(state, info) {
+  const pane = document.querySelector('.settings-tab-content[data-tab="history"]');
+  if (state === 'error') {
+    applyHistoryFields(historyStored);
+    setSettingsFieldError(historyLastField || document.getElementById('history-embedder-kind'), `Not saved: ${info.error}`);
+  } else if (state === 'saved') {
+    clearSettingsFieldErrors(pane);
+  }
+}
+
 function wireHistorySettings() {
   const on = (id, fn) => document.getElementById(id)?.addEventListener('click', () => {
     fn().catch((err) => settingsLog.warn(`history settings: ${err.message}`));
   });
-  on('history-embedder-save-btn', saveHistorySettings);
+  // Settings redesign §5.8 rule 1: every field saves as it changes, through the one call.
+  const saver = registerSettingsAutosave('history.recall', { save: saveHistorySettings, onState: onHistorySaveState });
+  for (const id of ['history-embedder-kind', 'history-rerank-search', 'history-rerank-kind', 'history-rerank-jev-confirm', 'history-rerank-turn']) {
+    const el = document.getElementById(id);
+    el?.addEventListener('change', () => {
+      historyLastField = el;
+      paintHistoryPane();
+      saver.change(historyPayloadFromForm(), { immediate: true });
+    });
+  }
+  for (const id of ['history-embedder-model', 'history-ollama-url', 'history-ollama-model', 'history-openai-model']) {
+    const el = document.getElementById(id);
+    el?.addEventListener('input', () => {
+      historyLastField = el;
+      saver.change(historyPayloadFromForm());
+    });
+  }
   on('history-jev-key-save-btn', saveHistoryJevKey);
   on('history-jev-key-clear-btn', clearHistoryJevKey);
   on('history-embedder-retry-btn', () => runHistoryEmbedderAction(() => window.electron.history.retryEmbedder()));
@@ -4975,38 +5062,9 @@ function renderSettings() {
   // (it disables itself if git is missing). Ask it directly.
   refreshCheckpointToggle();
 
-  const templateVariables = appState.settings.templateVariables || {};
-  if (dom.templateNameInput) dom.templateNameInput.value = templateVariables.name || '';
-  if (dom.templateRoleInput) dom.templateRoleInput.value = templateVariables.role || '';
-  if (dom.templatePreferencesInput) dom.templatePreferencesInput.value = templateVariables.preferences || '';
-  if (dom.templateProjectContextInput) dom.templateProjectContextInput.value = templateVariables.projectContext || '';
-
-  if (dom.templateVariablesStatus) {
-    dom.templateVariablesStatus.textContent = 'Template variables loaded.';
-    dom.templateVariablesStatus.classList.remove('error');
-  }
-
-  const userProfile = appState.settings.userProfile || {};
-  if (dom.profileNameInput) dom.profileNameInput.value = userProfile.name || '';
-  if (dom.profileRoleInput) dom.profileRoleInput.value = userProfile.role || '';
-  if (dom.profileGoalsInput) {
-    const goals = Array.isArray(userProfile.goals) ? userProfile.goals : [];
-    dom.profileGoalsInput.value = goals.join('\n');
-  }
-  if (dom.profilePreferencesInput) {
-    dom.profilePreferencesInput.value =
-      userProfile.preferences && typeof userProfile.preferences === 'object'
-        ? JSON.stringify(userProfile.preferences, null, 2)
-        : '';
-  }
-  if (dom.profileProjectContextInput) {
-    dom.profileProjectContextInput.value = userProfile.projectContext || '';
-  }
-
-  if (dom.userProfileStatus) {
-    dom.userProfileStatus.textContent = 'User profile loaded.';
-    dom.userProfileStatus.classList.remove('error');
-  }
+  // About you (§8.1): one field per value, over both stores.
+  applyAboutYouFields();
+  clearSettingsFieldErrors(document.querySelector('.settings-tab-content[data-tab="profile"]'));
 
   const notifications = appState.settings.notifications || {};
   const thresholds = notifications.thresholdsMs || {};
@@ -5023,25 +5081,10 @@ function renderSettings() {
     dom.notificationsStatus.classList.remove('error');
   }
 
-  const voice = appState.settings.voice || {};
-  if (dom.voiceEnabledInput) dom.voiceEnabledInput.checked = voice.enabled === true;
-  if (dom.voiceSpeakChatInput) dom.voiceSpeakChatInput.checked = voice.speakChatResponses === true;
-  if (dom.voiceSpeakAgentSummaryInput) dom.voiceSpeakAgentSummaryInput.checked = voice.speakAgentSummary !== false;
-  if (dom.voiceTelegramLongInput) dom.voiceTelegramLongInput.checked = voice.telegramVoiceForLongResponses === true;
-  if (dom.voiceEngineInput) dom.voiceEngineInput.value = String(voice.engine || 'system');
-  if (dom.voiceIdInput) dom.voiceIdInput.value = String(voice.voiceId || '');
-  if (dom.voiceSpeedInput) dom.voiceSpeedInput.value = String(Number(voice.speed || 1));
-  if (dom.voiceStabilityInput) dom.voiceStabilityInput.value = String(Number(voice.stability || 0.5));
-  if (dom.voiceStyleInput) dom.voiceStyleInput.value = String(Number(voice.style || 0.25));
-  if (dom.voiceSummaryMaxInput) dom.voiceSummaryMaxInput.value = String(Number(voice.summaryMaxChars || 260));
-  if (dom.voiceTelegramMinInput) dom.voiceTelegramMinInput.value = String(Number(voice.telegramMinChars || 500));
-
-  if (dom.voiceStatus) {
-    dom.voiceStatus.textContent = voice.hasElevenLabsKey
-      ? 'Voice settings loaded. ElevenLabs key is saved.'
-      : 'Voice settings loaded. ElevenLabs key is not saved.';
-    dom.voiceStatus.classList.remove('error');
-  }
+  if (dom.voiceStatus) dom.voiceStatus.classList.remove('error');
+  applyVoiceFields();
+  clearSettingsFieldErrors(document.querySelector('.settings-tab-content[data-tab="voice"]'));
+  loadSystemVoices();
 
   const hooks = appState.settings.hooks || {};
   const loadedHooks = Array.isArray(hooks.loaded) ? hooks.loaded : [];
@@ -6345,107 +6388,116 @@ async function handleReloadHooks() {
   }
 }
 
-function collectTemplateVariablesFromForm() {
+// About you (settings redesign §8.1). Two stores stay: the prompt template
+// variables and the TELOS profile. Name, Role and Project context show the TELOS
+// value when it has one, else the template's, and a change writes both stores.
+// "How you like replies" is the template's preferences; Goals and the
+// Preferences JSON are TELOS's, the JSON saved only when it parses.
+let aboutYouLastField = null;
+
+function aboutYouDisplay() {
+  const tv = appState.settings.templateVariables || {};
+  const up = appState.settings.userProfile || {};
+  const pick = (telos, template) => (String(telos || '').trim() ? String(telos) : String(template || ''));
+  const prefs = up.preferences && typeof up.preferences === 'object' && !Array.isArray(up.preferences) ? up.preferences : {};
   return {
-    name: String(dom.templateNameInput?.value || '').trim(),
-    role: String(dom.templateRoleInput?.value || '').trim(),
-    preferences: String(dom.templatePreferencesInput?.value || '').trim(),
-    projectContext: String(dom.templateProjectContextInput?.value || '').trim()
+    name: pick(up.name, tv.name),
+    role: pick(up.role, tv.role),
+    projectContext: pick(up.projectContext, tv.projectContext),
+    replies: String(tv.preferences || ''),
+    goals: Array.isArray(up.goals) ? up.goals.join('\n') : '',
+    preferencesJson: Object.keys(prefs).length ? JSON.stringify(prefs, null, 2) : ''
   };
 }
 
-async function handleSaveTemplateVariables() {
-  if (!dom.saveTemplateVariablesBtn) return;
-
-  dom.saveTemplateVariablesBtn.disabled = true;
-  if (dom.templateVariablesStatus) {
-    dom.templateVariablesStatus.textContent = 'Saving...';
-    dom.templateVariablesStatus.classList.remove('error');
-  }
-
-  try {
-    const templateVariables = collectTemplateVariablesFromForm();
-    const result = await window.electron.settings.saveTemplateVariables({ templateVariables });
-
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to save template variables.');
-    }
-
-    appState.settings.templateVariables = {
-      ...(result.templateVariables || templateVariables)
-    };
-
-    if (dom.templateVariablesStatus) {
-      dom.templateVariablesStatus.textContent = 'Template variables saved. New runs use updated values.';
-      dom.templateVariablesStatus.classList.remove('error');
-    }
-  } catch (error) {
-    if (dom.templateVariablesStatus) {
-      dom.templateVariablesStatus.textContent = `Error: ${error.message || 'Unable to save template variables.'}`;
-      dom.templateVariablesStatus.classList.add('error');
-    }
-  } finally {
-    dom.saveTemplateVariablesBtn.disabled = false;
-  }
+function applyAboutYouFields() {
+  const shown = aboutYouDisplay();
+  if (dom.templateNameInput) dom.templateNameInput.value = shown.name;
+  if (dom.templateRoleInput) dom.templateRoleInput.value = shown.role;
+  if (dom.templateProjectContextInput) dom.templateProjectContextInput.value = shown.projectContext;
+  if (dom.templatePreferencesInput) dom.templatePreferencesInput.value = shown.replies;
+  if (dom.profileGoalsInput) dom.profileGoalsInput.value = shown.goals;
+  if (dom.profilePreferencesInput) dom.profilePreferencesInput.value = shown.preferencesJson;
 }
 
-function collectUserProfileFromForm() {
-  const goals = String(dom.profileGoalsInput?.value || '')
-    .split(/\r?\n/)
-    .map((goal) => goal.trim())
-    .filter(Boolean);
-
-  const rawPreferences = String(dom.profilePreferencesInput?.value || '').trim();
-  let preferences = {};
-  if (rawPreferences) {
-    const parsed = JSON.parse(rawPreferences);
+// { ok, value } or { ok: false, error }: blank is an empty object.
+function parseProfilePreferences(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { ok: true, value: {} };
+  try {
+    const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Preferences must be valid JSON object syntax.');
+      return { ok: false, error: 'Preferences must be a JSON object.' };
     }
-    preferences = parsed;
+    return { ok: true, value: parsed };
+  } catch {
+    return { ok: false, error: 'Preferences must be valid JSON.' };
   }
+}
 
+// Both stores in full, from the page. A Preferences JSON that does not parse keeps
+// the stored one.
+function aboutYouFromForm() {
+  const text = (el) => String(el?.value || '').trim();
+  const name = text(dom.templateNameInput);
+  const role = text(dom.templateRoleInput);
+  const projectContext = text(dom.templateProjectContextInput);
+  const parsed = parseProfilePreferences(dom.profilePreferencesInput?.value);
+  const stored = (appState.settings.userProfile || {}).preferences;
   return {
-    name: String(dom.profileNameInput?.value || '').trim(),
-    role: String(dom.profileRoleInput?.value || '').trim(),
-    goals,
-    preferences,
-    projectContext: String(dom.profileProjectContextInput?.value || '').trim()
+    templateVariables: { name, role, preferences: text(dom.templatePreferencesInput), projectContext },
+    profile: {
+      name,
+      role,
+      goals: String(dom.profileGoalsInput?.value || '').split(/\r?\n/).map((g) => g.trim()).filter(Boolean),
+      preferences: parsed.ok ? parsed.value : (stored && typeof stored === 'object' ? stored : {}),
+      projectContext
+    }
   };
 }
 
-async function handleSaveUserProfile() {
-  if (!dom.saveUserProfileBtn) return;
+async function saveAboutYou(snapshot) {
+  const tv = await window.electron.settings.saveTemplateVariables({ templateVariables: snapshot.templateVariables });
+  if (!tv?.ok) return { ok: false, error: tv?.error || 'Could not save.' };
+  appState.settings.templateVariables = { ...(tv.templateVariables || snapshot.templateVariables) };
+  const up = await window.electron.settings.saveUserProfile({ profile: snapshot.profile });
+  if (!up?.ok) return { ok: false, error: up?.error || 'Could not save.' };
+  appState.settings.userProfile = { ...(up.userProfile || snapshot.profile) };
+  return { ok: true };
+}
 
-  dom.saveUserProfileBtn.disabled = true;
-  if (dom.userProfileStatus) {
-    dom.userProfileStatus.textContent = 'Saving...';
-    dom.userProfileStatus.classList.remove('error');
+function onAboutYouState(state, info) {
+  const pane = document.querySelector('.settings-tab-content[data-tab="profile"]');
+  if (state === 'error') {
+    applyAboutYouFields();
+    setSettingsFieldError(aboutYouLastField || dom.templateNameInput, `Not saved: ${info.error}`);
+  } else if (state === 'saved') {
+    clearSettingsFieldErrors(pane);
+    const parsed = parseProfilePreferences(dom.profilePreferencesInput?.value);
+    if (!parsed.ok) setSettingsFieldError(dom.profilePreferencesInput, `Not saved: ${parsed.error}`);
   }
+}
 
-  try {
-    const profile = collectUserProfileFromForm();
-    const result = await window.electron.settings.saveUserProfile({ profile });
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to save user profile.');
-    }
-
-    appState.settings.userProfile = {
-      ...(result.userProfile || profile)
-    };
-
-    if (dom.userProfileStatus) {
-      dom.userProfileStatus.textContent = 'User profile saved. New agent runs include it in context.';
-      dom.userProfileStatus.classList.remove('error');
-    }
-  } catch (error) {
-    if (dom.userProfileStatus) {
-      dom.userProfileStatus.textContent = `Error: ${error.message || 'Unable to save user profile.'}`;
-      dom.userProfileStatus.classList.add('error');
-    }
-  } finally {
-    dom.saveUserProfileBtn.disabled = false;
+function wireAboutYou() {
+  const saver = registerSettingsAutosave('profile.aboutYou', { save: saveAboutYou, onState: onAboutYouState });
+  const fields = [dom.templateNameInput, dom.templateRoleInput, dom.templatePreferencesInput, dom.profileGoalsInput, dom.templateProjectContextInput];
+  for (const el of fields) {
+    el?.addEventListener('input', () => {
+      aboutYouLastField = el;
+      saver.change(aboutYouFromForm());
+    });
   }
+  const prefs = dom.profilePreferencesInput;
+  prefs?.addEventListener('input', () => {
+    const parsed = parseProfilePreferences(prefs.value);
+    if (!parsed.ok) {
+      setSettingsFieldError(prefs, `Not saved: ${parsed.error}`);
+      return;
+    }
+    setSettingsFieldError(prefs, '');
+    aboutYouLastField = prefs;
+    saver.change(aboutYouFromForm());
+  });
 }
 
 function collectNotificationsFromForm() {
@@ -6505,60 +6557,176 @@ async function handleSaveNotifications() {
   }
 }
 
-function collectVoiceFromForm() {
-  const toNumber = (value, fallback) => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  };
+// Voice (settings redesign §5.8): each field saves as it changes. saveVoice merges
+// what it is given into the stored settings, so a field sends only itself.
+const VOICE_FIELDS = [
+  { key: 'enabled', dom: 'voiceEnabledInput', kind: 'switch', shown: (v) => v.enabled === true },
+  { key: 'speakChatResponses', dom: 'voiceSpeakChatInput', kind: 'switch', shown: (v) => v.speakChatResponses === true },
+  { key: 'speakAgentSummary', dom: 'voiceSpeakAgentSummaryInput', kind: 'switch', shown: (v) => v.speakAgentSummary !== false },
+  { key: 'telegramVoiceForLongResponses', dom: 'voiceTelegramLongInput', kind: 'switch', shown: (v) => v.telegramVoiceForLongResponses === true },
+  { key: 'engine', dom: 'voiceEngineInput', kind: 'select', shown: (v) => (String(v.engine || '').toLowerCase() === 'elevenlabs' ? 'elevenlabs' : 'system') },
+  { key: 'voiceId', dom: 'voiceIdInput', kind: 'text', shown: (v) => String(v.voiceId || '') },
+  { key: 'speed', dom: 'voiceSpeedInput', kind: 'number', shown: (v) => String(Number(v.speed || 1)) },
+  { key: 'stability', dom: 'voiceStabilityInput', kind: 'number', shown: (v) => String(Number(v.stability || 0.5)) },
+  { key: 'style', dom: 'voiceStyleInput', kind: 'number', shown: (v) => String(Number(v.style || 0.25)) },
+  { key: 'summaryMaxChars', dom: 'voiceSummaryMaxInput', kind: 'chars', shown: (v) => String(Number(v.summaryMaxChars || 260)) },
+  { key: 'telegramMinChars', dom: 'voiceTelegramMinInput', kind: 'chars', shown: (v) => String(Number(v.telegramMinChars || 500)) }
+];
 
-  return {
-    enabled: Boolean(dom.voiceEnabledInput?.checked),
-    speakChatResponses: Boolean(dom.voiceSpeakChatInput?.checked),
-    speakAgentSummary: Boolean(dom.voiceSpeakAgentSummaryInput?.checked),
-    telegramVoiceForLongResponses: Boolean(dom.voiceTelegramLongInput?.checked),
-    engine: String(dom.voiceEngineInput?.value || 'system').toLowerCase() === 'elevenlabs' ? 'elevenlabs' : 'system',
-    voiceId: String(dom.voiceIdInput?.value || '').trim(),
-    speed: toNumber(dom.voiceSpeedInput?.value, 1),
-    stability: toNumber(dom.voiceStabilityInput?.value, 0.5),
-    style: toNumber(dom.voiceStyleInput?.value, 0.25),
-    summaryMaxChars: Math.max(80, Math.round(toNumber(dom.voiceSummaryMaxInput?.value, 260))),
-    telegramMinChars: Math.max(80, Math.round(toNumber(dom.voiceTelegramMinInput?.value, 500)))
-  };
+function applyVoiceField(field, voice) {
+  const el = dom[field.dom];
+  if (!el) return;
+  if (field.kind === 'switch') el.checked = field.shown(voice);
+  else el.value = field.shown(voice);
 }
 
-async function handleSaveVoiceSettings() {
-  if (!dom.saveVoiceSettingsBtn) return;
+function applyVoiceFields() {
+  const voice = appState.settings.voice || {};
+  for (const field of VOICE_FIELDS) applyVoiceField(field, voice);
+  paintVoicePane();
+}
 
-  dom.saveVoiceSettingsBtn.disabled = true;
-  if (dom.voiceStatus) {
-    dom.voiceStatus.textContent = 'Saving voice settings...';
-    dom.voiceStatus.classList.remove('error');
+// The value a field holds, or { invalid } for a number that is not one.
+function voiceFieldValue(field) {
+  const el = dom[field.dom];
+  if (field.kind === 'switch') return Boolean(el.checked);
+  if (field.kind === 'select') return el.value === 'elevenlabs' ? 'elevenlabs' : 'system';
+  if (field.kind === 'text') return String(el.value || '').trim();
+  const n = Number(el.value);
+  if (String(el.value).trim() === '' || !Number.isFinite(n)) return { invalid: 'Enter a number.' };
+  return field.kind === 'chars' ? Math.max(80, Math.round(n)) : n;
+}
+
+function setSettingsRowGreyed(row, greyed) {
+  row.classList.toggle('is-greyed', greyed);
+  row.querySelectorAll('input, select, button').forEach((control) => { control.disabled = greyed; });
+}
+
+// The voice's own control: this computer's voices in a list when the settings
+// live on this computer and it has some (§8.4), else the text field.
+function voiceUsesSystemList() {
+  const voices = appState.systemVoices;
+  return dom.voiceEngineInput?.value !== 'elevenlabs'
+    && voicesAreLocal(appState.desktopStatus)
+    && Array.isArray(voices) && voices.length > 0;
+}
+
+function fillVoiceSelect(voices, current) {
+  const select = dom.voiceSystemSelect;
+  if (!select) return;
+  const option = (value, label) => {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    return o;
+  };
+  const options = [option('', 'Default voice'), ...voices.map((v) => option(v, v))];
+  if (current && !voices.includes(current)) options.push(option(current, current));
+  select.replaceChildren(...options);
+  select.value = current;
+}
+
+// Only what applies (§5.8 rules 2 and 4): everything under Voice output greyed
+// until it is on, the two lengths until their switch is on, ElevenLabs's fields
+// only when it is the engine.
+function paintVoicePane() {
+  const on = Boolean(dom.voiceEnabledInput?.checked);
+  const elevenlabs = dom.voiceEngineInput?.value === 'elevenlabs';
+  if (dom.voiceElevenLabsFields) dom.voiceElevenLabsFields.hidden = !elevenlabs;
+  const useList = voiceUsesSystemList();
+  if (dom.voiceSystemSelect) {
+    dom.voiceSystemSelect.hidden = !useList;
+    if (useList) fillVoiceSelect(appState.systemVoices, String(dom.voiceIdInput?.value || '').trim());
   }
-
-  try {
-    const voice = collectVoiceFromForm();
-    const result = await window.electron.settings.saveVoice({ voice });
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to save voice settings.');
-    }
-
-    appState.settings.voice = {
-      ...(appState.settings.voice || {}),
-      ...(result.voice || voice)
-    };
-
-    if (dom.voiceStatus) {
-      dom.voiceStatus.textContent = 'Voice settings saved.';
-      dom.voiceStatus.classList.remove('error');
-    }
-  } catch (error) {
-    if (dom.voiceStatus) {
-      dom.voiceStatus.textContent = `Error: ${error.message || 'Unable to save voice settings.'}`;
-      dom.voiceStatus.classList.add('error');
-    }
-  } finally {
-    dom.saveVoiceSettingsBtn.disabled = false;
+  if (dom.voiceIdInput) {
+    dom.voiceIdInput.hidden = useList;
+    dom.voiceIdInput.placeholder = elevenlabs ? 'ElevenLabs voice ID' : 'Voice name (blank for the default)';
   }
+  dom.voiceDependentRows?.querySelectorAll('.settings-row').forEach((row) => {
+    let greyed = !on;
+    if (!greyed && row.contains(dom.voiceSummaryMaxInput)) greyed = !dom.voiceSpeakAgentSummaryInput?.checked;
+    if (!greyed && row.contains(dom.voiceTelegramMinInput)) greyed = !dom.voiceTelegramLongInput?.checked;
+    setSettingsRowGreyed(row, greyed);
+  });
+  if (dom.voiceStatus && !dom.voiceStatus.classList.contains('error')) {
+    const voice = appState.settings.voice || {};
+    dom.voiceStatus.textContent = elevenlabs
+      ? (voice.hasElevenLabsKey ? 'ElevenLabs key is saved.' : 'No ElevenLabs key is saved.')
+      : '';
+  }
+}
+
+// This computer's voices, asked once a session, only when they are the right
+// computer's (§8.4: a fleet node keeps the text field).
+let systemVoicesRequest = null;
+function loadSystemVoices() {
+  if (Array.isArray(appState.systemVoices) || systemVoicesRequest) return systemVoicesRequest;
+  if (!voicesAreLocal(appState.desktopStatus) || !window.electron?.settings?.listVoices) return null;
+  systemVoicesRequest = window.electron.settings.listVoices()
+    .then((out) => (out && out.ok && Array.isArray(out.voices) ? out.voices.filter((v) => typeof v === 'string' && v) : []))
+    .catch(() => [])
+    .then((voices) => {
+      appState.systemVoices = voices;
+      systemVoicesRequest = null;
+      paintVoicePane();
+    });
+  return systemVoicesRequest;
+}
+
+async function saveVoiceField(key, value) {
+  const result = await window.electron.settings.saveVoice({ voice: { [key]: value } });
+  if (!result?.ok) return { ok: false, error: result?.error || 'Could not save the voice setting.' };
+  appState.settings.voice = { ...(appState.settings.voice || {}), ...(result.voice || { [key]: value }) };
+  return { ok: true };
+}
+
+function wireVoiceFields() {
+  for (const field of VOICE_FIELDS) {
+    const el = dom[field.dom];
+    if (!el) continue;
+    // The voice's error goes beside whichever control is showing.
+    const shownControl = () => (field.key === 'voiceId' && voiceUsesSystemList() ? dom.voiceSystemSelect : el);
+    const saver = registerSettingsAutosave(`voice.${field.key}`, {
+      save: (value) => saveVoiceField(field.key, value),
+      onState: (state, info) => {
+        if (state === 'error') {
+          applyVoiceField(field, appState.settings.voice || {});
+          paintVoicePane();
+          setSettingsFieldError(shownControl(), `Not saved: ${info.error}`);
+        } else if (state === 'saved') {
+          setSettingsFieldError(shownControl(), '');
+        }
+      }
+    });
+    const immediate = field.kind === 'switch' || field.kind === 'select';
+    el.addEventListener(immediate ? 'change' : 'input', () => {
+      const value = voiceFieldValue(field);
+      if (value && typeof value === 'object' && value.invalid) {
+        setSettingsFieldError(el, value.invalid);
+        return;
+      }
+      setSettingsFieldError(el, '');
+      if (immediate) paintVoicePane();
+      saver.change(value, immediate ? { immediate: true } : undefined);
+    });
+    if (field.key === 'voiceId' && dom.voiceSystemSelect) {
+      dom.voiceSystemSelect.addEventListener('change', () => {
+        el.value = dom.voiceSystemSelect.value;
+        saver.change(el.value, { immediate: true });
+      });
+    }
+  }
+}
+
+// What Test voice sends: the page as it stands (a number that is not one, as stored).
+function collectVoiceFromForm() {
+  const stored = appState.settings.voice || {};
+  const voice = {};
+  for (const field of VOICE_FIELDS) {
+    const value = voiceFieldValue(field);
+    voice[field.key] = value && typeof value === 'object' ? Number(field.shown(stored)) : value;
+  }
+  return voice;
 }
 
 async function handleSaveElevenLabsKey() {
@@ -12515,6 +12683,10 @@ async function saveGeneralDefaults() {
       dom.generalDefaultsStatus.classList.remove('error');
     }
   } catch (err) {
+    // A failed save puts the switches back to what is stored (spec §7.1).
+    const stored = appState.settings.defaults || {};
+    if (dom.defaultAgentMode) dom.defaultAgentMode.checked = !!stored.agentMode;
+    if (dom.defaultSandboxMode) dom.defaultSandboxMode.checked = stored.sandboxMode !== false;
     if (dom.generalDefaultsStatus) {
       dom.generalDefaultsStatus.textContent = err.message || 'Failed to save defaults.';
       dom.generalDefaultsStatus.classList.add('error');
@@ -12914,17 +13086,7 @@ if (dom.providerList) {
   });
 }
 
-if (dom.saveTemplateVariablesBtn) {
-  dom.saveTemplateVariablesBtn.addEventListener('click', () => {
-    handleSaveTemplateVariables();
-  });
-}
-
-if (dom.saveUserProfileBtn) {
-  dom.saveUserProfileBtn.addEventListener('click', () => {
-    handleSaveUserProfile();
-  });
-}
+wireAboutYou();
 
 if (dom.saveNotificationsBtn) {
   dom.saveNotificationsBtn.addEventListener('click', () => {
@@ -12932,11 +13094,7 @@ if (dom.saveNotificationsBtn) {
   });
 }
 
-if (dom.saveVoiceSettingsBtn) {
-  dom.saveVoiceSettingsBtn.addEventListener('click', () => {
-    handleSaveVoiceSettings();
-  });
-}
+wireVoiceFields();
 
 if (dom.saveVoiceKeyBtn) {
   dom.saveVoiceKeyBtn.addEventListener('click', () => {
