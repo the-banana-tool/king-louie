@@ -12919,7 +12919,7 @@ function setTelegramKeyMessage(text, isError = false) {
 async function testTelegramToken() {
   try {
     const result = unwrapIpcResult(
-      await window.electron.settings.runLlmCommand({ command: 'telegram test' }),
+      await window.electron.settings.runLlmCommand({ command: '/llm telegram test' }),
       'Failed to test Telegram.'
     );
     appState.telegramTested = { ok: true, message: result.output || result.message || 'Test passed.' };
@@ -12945,7 +12945,7 @@ dom.saveTelegramTokenBtn?.addEventListener('click', async () => {
   dom.saveTelegramTokenBtn.disabled = true;
   try {
     unwrapIpcResult(
-      await window.electron.settings.runLlmCommand({ command: `telegram add ${token}` }),
+      await window.electron.settings.runLlmCommand({ command: `/llm telegram add ${token}` }),
       'Failed to save Telegram token.'
     );
     dom.channelTelegramTokenInput.value = '';
@@ -12953,7 +12953,8 @@ dom.saveTelegramTokenBtn?.addEventListener('click', async () => {
     setTelegramKeyMessage('Token saved.');
     await testTelegramToken();
   } catch (err) {
-    setTelegramKeyMessage(err.message || 'Error saving token.', true);
+    // A host error never repeats the token here, whatever it quotes.
+    setTelegramKeyMessage(String(err.message || 'Error saving token.').split(token).join('[token]'), true);
   } finally {
     dom.saveTelegramTokenBtn.disabled = false;
   }
@@ -12974,7 +12975,7 @@ dom.clearTelegramTokenBtn?.addEventListener('click', async () => {
   dom.clearTelegramTokenBtn.disabled = true;
   try {
     unwrapIpcResult(
-      await window.electron.settings.runLlmCommand({ command: 'telegram remove' }),
+      await window.electron.settings.runLlmCommand({ command: '/llm telegram remove' }),
       'Failed to clear Telegram token.'
     );
     appState.settings.telegram = { ...(appState.settings.telegram || {}), hasToken: false, bridgeActive: false };

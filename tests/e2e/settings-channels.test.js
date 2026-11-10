@@ -1,5 +1,7 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
+const fs = require('fs');
+const path = require('path');
 const { launchApp, closeApp, evaluate, waitFor, click, openSettingsTab } = require('./helpers');
 
 describe('E2E: Settings — Channels', () => {
@@ -30,6 +32,37 @@ describe('E2E: Settings — Channels', () => {
     assert.strictEqual(save, 'Save & test');
     assert.strictEqual(remove, 'Remove key');
     assert.strictEqual(row, true);
+  });
+
+  // The host takes only `/llm ...` commands (create-core runLlmCommand): without the
+  // prefix every Telegram button answered "Unknown local command".
+  it('sends the Telegram commands with the /llm prefix', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'renderer.js'), 'utf8');
+    const sent = [...src.matchAll(/runLlmCommand\(\{ command: (['`][^'`]*['`]) \}\)/g)].map((m) => m[1]).filter((c) => /telegram/.test(c));
+    assert.ok(sent.length >= 3, `found ${sent.length} Telegram commands`);
+    for (const c of sent) assert.match(c, /^['`]\/llm telegram /, c);
+  });
+
+  it('Save & test with a malformed token shows the host\'s Telegram error, and never the token', async () => {
+    // Too short for the host's format check, so nothing goes to Telegram.
+    const typed = '12345:ZQXW-short';
+    await evaluate(ctx, `(() => {
+      document.getElementById('telegram-key-toggle-btn').click();
+      document.getElementById('channel-telegram-token-input').value = ${JSON.stringify(typed)};
+      document.getElementById('save-telegram-token-btn').click();
+      return true;
+    })()`);
+    await waitFor(ctx, `(document.getElementById('telegram-key-message').textContent || '').length > 0`);
+    const out = JSON.parse(await evaluate(ctx, `JSON.stringify({
+      message: document.getElementById('telegram-key-message').textContent,
+      isError: document.getElementById('telegram-key-message').classList.contains('error'),
+      pill: document.getElementById('telegram-status-pill').textContent
+    })`));
+    assert.doesNotMatch(out.message, /Unknown local command/);
+    assert.match(out.message, /Telegram token format looks invalid/);
+    assert.strictEqual(out.isError, true);
+    assert.strictEqual(out.pill, 'No key');
+    assert.strictEqual(await evaluate(ctx, `document.body.innerHTML.includes('ZQXW')`), false, 'the typed value is not in the page');
   });
 
   it('has no Discord or Slack token controls (they never saved)', async () => {
