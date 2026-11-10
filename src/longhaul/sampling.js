@@ -130,4 +130,4 @@ function sampleQuestions(items, { size = items.length, seed = 1 } = {}) {
   return out;
 }
 
-module.exports = { ANCHOR_SENDERS, SPAN_RADIUS, planAuthoring, sampleQuestions };
+module.exports = { ANCHOR_SENDERS, SPAN_RADIUS, MIN_ANCHOR_CHARS, planAuthoring, sampleQuestions };
