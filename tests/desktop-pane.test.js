@@ -541,6 +541,26 @@ describe('pane wiring', () => {
     }
   });
 
+  it('Node & connection: the layout, every node string by textContent (settings redesign §5.7, §8.2)', () => {
+    const renderer = read('renderer.js');
+    const start = renderer.indexOf('function paintServicePane(');
+    const pane = renderer.slice(start, renderer.indexOf('async function fetchServiceModel(', start));
+    assert.ok(pane.length > 0);
+    for (const s of ['ADVANCED_SERVICE_ACTIONS', 'Phones & approvals', 'Move from this desktop\'s old profile', 'Switch to my node',
+      'leaveStandalone()', 'openDataFolder()', 'Restart node', 'Open data folder', 'switchToNodeAction(status)']) {
+      assert.ok(pane.includes(s), s);
+    }
+    assert.match(renderer, /const ADVANCED_SERVICE_ACTIONS = \['unpair', 'detach', 'standaloneOnce', 'pairCancel'\]/);
+    assert.doesNotMatch(pane, /innerHTML/);
+    const html = read('index.html');
+    const tab = html.slice(html.indexOf('data-tab="service"'), html.indexOf('</section>', html.indexOf('data-tab="service"')));
+    assert.match(tab, /<details[^>]*id="service-pane-advanced"/);
+    assert.match(tab, /<summary>Advanced<\/summary>/);
+    for (const id of ['service-pane-move', 'service-pane-advanced-actions', 'service-copy-request-btn']) assert.ok(tab.includes(`id="${id}"`), id);
+    // The pairing request and command sit inside Advanced.
+    assert.ok(tab.indexOf('id="service-pane-advanced"') < tab.indexOf('id="service-pane-request"'));
+  });
+
   it('renderer renders the pane from switchSettingsTab and subscribes once', () => {
     const renderer = read('renderer.js');
     assert.match(renderer, /async function renderServiceSection\(\)/);

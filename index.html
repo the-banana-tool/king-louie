@@ -1132,22 +1132,25 @@
 
         <!-- Tab: Local service (fleet stage 7) -->
         <div class="settings-tab-content" data-tab="service">
-          <section class="template-variables-card service-pane" id="service-pane">
-            <h3>Local service</h3>
-            <p>Use this app as the window onto a King Louie service running on this computer.</p>
+          <section class="service-pane" id="service-pane">
             <div class="service-pane-status" id="service-pane-status"></div>
-            <div class="service-pane-request" id="service-pane-request" hidden>
-              <label for="service-pair-request">Pairing request</label>
-              <div class="service-pane-row">
-                <code id="service-pair-request"></code>
-                <button class="btn btn-secondary btn-sm" id="service-copy-request-btn" type="button">Copy</button>
-              </div>
-              <label for="service-pair-command">Run as an administrator</label>
-              <code id="service-pair-command"></code>
-            </div>
             <div class="service-pane-actions" id="service-pane-actions"></div>
             <div class="service-pane-import" id="service-pane-import" hidden></div>
+            <div class="service-pane-card service-pane-move" id="service-pane-move" hidden></div>
             <div class="service-pane-approvals" id="service-pane-approvals" hidden></div>
+            <details class="service-pane-advanced" id="service-pane-advanced" hidden>
+              <summary>Advanced</summary>
+              <div class="service-pane-advanced-actions" id="service-pane-advanced-actions"></div>
+              <div class="service-pane-request" id="service-pane-request" hidden>
+                <label for="service-pair-request">Pairing request</label>
+                <div class="service-pane-row">
+                  <code id="service-pair-request"></code>
+                  <button class="btn btn-secondary btn-sm" id="service-copy-request-btn" type="button">Copy</button>
+                </div>
+                <label for="service-pair-command">Run as an administrator</label>
+                <code id="service-pair-command"></code>
+              </div>
+            </details>
           </section>
         </div>
       </div>

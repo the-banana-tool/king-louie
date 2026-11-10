@@ -14690,7 +14690,7 @@ const serviceLog = createLogger('desktop-service');
 const setupLog = createLogger('desktop-setup');
 const servicePaneState = {
   detachArmed: false, detachArmToken: null, detachArmedAt: null, busy: false, error: null,
-  pendingNodeId: null, lastView: null, lastModel: null, lastStatus: null
+  pendingNodeId: null, lastView: null, lastModel: null, lastStatus: null, shownRequest: null
 };
 let serviceRenderToken = 0;
 let serviceLastConnection = null;
@@ -14705,7 +14705,29 @@ function serviceLinesInto(el, lines) {
 }
 
 function disableServiceActionButtons() {
-  document.querySelectorAll('#service-pane-actions button, #service-pane-import button, #service-pane-status button').forEach((btn) => { btn.disabled = true; });
+  document.querySelectorAll('#service-pane-actions button, #service-pane-import button, #service-pane-status button, #service-pane-move button, #service-pane-advanced-actions button').forEach((btn) => { btn.disabled = true; });
+}
+
+// Node & connection (settings redesign §5.7, §8.2): these go under the collapsed
+// Advanced, with the pairing request and command; every other action is primary.
+const ADVANCED_SERVICE_ACTIONS = ['unpair', 'detach', 'standaloneOnce', 'pairCancel'];
+
+function serviceActionButton(id, label, className, call) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = `service-action-${id}`;
+  btn.className = className;
+  btn.textContent = label;
+  btn.disabled = servicePaneState.busy;
+  btn.addEventListener('click', () => { runServiceAction(id, call).catch((err) => serviceLog.warn('service action failed', { action: id, error: err && err.message })); });
+  return btn;
+}
+
+function serviceSectionLabel(text) {
+  const label = document.createElement('div');
+  label.className = 'settings-section-label';
+  label.textContent = text;
+  return label;
 }
 
 // The one place that actually writes the pane's DOM from a model. Pure with
@@ -14732,9 +14754,45 @@ function paintServicePane(model, status) {
   servicePaneState.pendingNodeId = (status.pendingPair && status.pendingPair.service && status.pendingPair.service.nodeId) || null;
 
   const statusEl = document.getElementById('service-pane-status');
-  const lines = [...model.lines];
-  if (servicePaneState.detachArmed && model.detachWarning) lines.push(model.detachWarning);
-  serviceLinesInto(statusEl, lines);
+  const actionsEl = document.getElementById('service-pane-actions');
+  const moveEl = document.getElementById('service-pane-move');
+  const approvalsEl = document.getElementById('service-pane-approvals');
+  const advancedEl = document.getElementById('service-pane-advanced');
+  const advancedActionsEl = document.getElementById('service-pane-advanced-actions');
+  const requestBox = document.getElementById('service-pane-request');
+  statusEl.replaceChildren();
+  actionsEl.replaceChildren();
+  moveEl.replaceChildren();
+  approvalsEl.replaceChildren();
+  advancedActionsEl.replaceChildren();
+
+  // A remote node's tab (attach stage 3): its name and version, nothing else.
+  if (model.kind === 'remote') {
+    const name = status.name || (status.service && status.service.nodeName) || (status.node && status.node.name) || 'Remote node';
+    const version = (status.service && status.service.version) || status.version || null;
+    serviceHeadlineInto(statusEl, name, version ? [`Version ${version}`] : []);
+    moveEl.hidden = true;
+    approvalsEl.hidden = true;
+    advancedEl.hidden = true;
+    markUnavailableTabs(status.unavailableTabs || []);
+    return;
+  }
+
+  // 1, 2: the first line is the headline, the rest are rows.
+  serviceHeadlineInto(statusEl, model.lines[0] || '', model.lines.slice(1));
+  const switchAction = switchToNodeAction(status);
+  if (switchAction === 'leave-standalone') {
+    const p = document.createElement('p');
+    p.className = 'notice-info service-pane-standalone';
+    p.textContent = 'This window was opened on its own for one session, so your node is not connected to it. Changes made here stay in this desktop\'s old profile.';
+    statusEl.appendChild(p);
+  }
+  if (model.view === 'attached-connected') {
+    const p = document.createElement('p');
+    p.className = 'settings-row-help service-pane-saved-on-node';
+    p.textContent = 'Everything in Settings is saved on the node. Closing this window does not stop it.';
+    statusEl.appendChild(p);
+  }
   if (servicePaneState.error) {
     const p = document.createElement('p');
     p.className = 'service-pane-error';
@@ -14763,34 +14821,105 @@ function paintServicePane(model, status) {
     statusEl.appendChild(row);
   }
 
-  const requestBox = document.getElementById('service-pane-request');
+  // 7: a --kl-standalone-once window's one main action; the model's own buttons
+  // become plain ones beside it.
+  const primaryClass = switchAction === 'leave-standalone' ? 'btn btn-secondary btn-sm' : 'btn btn-primary btn-sm';
+  if (switchAction === 'leave-standalone') {
+    actionsEl.appendChild(serviceActionButton('leaveStandalone', 'Switch to my node', 'btn btn-primary btn-sm', () => window.electron.desktop.leaveStandalone()));
+  }
+
+  // 6: a personal node, attached and connected: Restart node and Open data folder.
+  // Restart is the model's nodeRestart (its label when it offers one, which says
+  // the restart updates the node), else the same call under the fixed label.
+  const pairedService = (status.pairing && status.pairing.service) || {};
+  const personalConnected = model.view === 'attached-connected' && pairedService.hosting === 'personal';
+  const offered = model.actions.find((a) => a.id === 'nodeRestart');
+  if (personalConnected) {
+    actionsEl.appendChild(serviceActionButton('nodeRestart', offered ? offered.label : 'Restart node', 'btn btn-secondary btn-sm'));
+    actionsEl.appendChild(serviceActionButton('openDataFolder', 'Open data folder', 'btn btn-secondary btn-sm', () => window.electron.desktop.openDataFolder()));
+  }
+
+  // 3, 4: primary actions; Import… in its own card; the four Advanced ones below.
+  const advanced = [];
+  let importAction = null;
+  for (const action of model.actions) {
+    if (ADVANCED_SERVICE_ACTIONS.includes(action.id)) { advanced.push(action); continue; }
+    if (action.id === 'import') { importAction = action; continue; }
+    if (personalConnected && action.id === 'nodeRestart') continue;
+    const btn = serviceActionButton(action.id, action.label, primaryClass);
+    btn.disabled = Boolean(action.disabled) || servicePaneState.busy;
+    actionsEl.appendChild(btn);
+  }
+  actionsEl.hidden = actionsEl.childElementCount === 0;
+
+  moveEl.hidden = !importAction;
+  if (importAction) {
+    moveEl.appendChild(serviceSectionLabel("Move from this desktop's old profile"));
+    const help = document.createElement('p');
+    help.className = 'settings-row-help';
+    help.textContent = 'See what would move from this desktop\'s old profile into the node, then import it.';
+    moveEl.appendChild(help);
+    const btn = serviceActionButton('import', importAction.label, 'btn btn-secondary btn-sm');
+    btn.disabled = Boolean(importAction.disabled) || servicePaneState.busy;
+    moveEl.appendChild(btn);
+  }
+
+  // 5: the approvals and relay lines.
+  approvalsEl.hidden = !model.approvals;
+  if (model.approvals) {
+    approvalsEl.appendChild(serviceSectionLabel('Phones & approvals'));
+    for (const line of [...model.approvals.lines, `Change them on the service: ${model.approvals.commands.join(', ')}`]) {
+      const p = document.createElement('p');
+      p.className = 'settings-row';
+      p.textContent = line;
+      approvalsEl.appendChild(p);
+    }
+  }
+
+  // Advanced: the Detach warning beside its button, then the four actions and
+  // the pairing request. The <details> stays in the page, so its open state
+  // survives a repaint (an armed Detach stays in view); a new pairing request
+  // opens it, since that request is what the owner must copy.
+  if (servicePaneState.detachArmed && model.detachWarning) {
+    const warn = document.createElement('p');
+    warn.className = 'notice-warn service-pane-detach-warning';
+    warn.textContent = model.detachWarning;
+    advancedActionsEl.appendChild(warn);
+  }
+  for (const action of advanced) {
+    const danger = action.id === 'detach' || action.id === 'unpair';
+    const label = action.id === 'detach' && servicePaneState.detachArmed ? 'Detach anyway' : action.label;
+    const btn = serviceActionButton(action.id, label, danger ? 'btn btn-danger btn-sm' : 'btn btn-secondary btn-sm');
+    btn.disabled = Boolean(action.disabled) || servicePaneState.busy;
+    advancedActionsEl.appendChild(btn);
+  }
   requestBox.hidden = !model.request;
   if (model.request) {
     document.getElementById('service-pair-request').textContent = model.request;
     document.getElementById('service-pair-command').textContent = model.command || '';
     const copyBtn = document.getElementById('service-copy-request-btn');
     copyBtn.onclick = () => navigator.clipboard.writeText(model.request).catch((err) => serviceLog.warn('copying the pairing request failed', { error: err && err.message }));
+    if (servicePaneState.shownRequest !== model.request) advancedEl.open = true;
   }
-
-  const actionsEl = document.getElementById('service-pane-actions');
-  actionsEl.innerHTML = '';
-  for (const action of model.actions) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.id = `service-action-${action.id}`;
-    btn.className = action.id === 'detach' || action.id === 'unpair' ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
-    btn.textContent = action.id === 'detach' && servicePaneState.detachArmed ? 'Detach anyway' : action.label;
-    btn.disabled = Boolean(action.disabled) || servicePaneState.busy;
-    btn.addEventListener('click', () => { runServiceAction(action.id).catch((err) => serviceLog.warn('service action failed', { action: action.id, error: err && err.message })); });
-    actionsEl.appendChild(btn);
-  }
-
-  const approvalsEl = document.getElementById('service-pane-approvals');
-  approvalsEl.hidden = !model.approvals;
-  if (model.approvals) {
-    serviceLinesInto(approvalsEl, ['Approvals and relay', ...model.approvals.lines, `Change them on the service: ${model.approvals.commands.join(', ')}`]);
-  }
+  servicePaneState.shownRequest = model.request || null;
+  advancedEl.hidden = advanced.length === 0 && !model.request;
   markUnavailableTabs(status.unavailableTabs || []);
+}
+
+// The headline (bold) and the rows under it, every line by textContent.
+function serviceHeadlineInto(el, headline, rows) {
+  if (headline) {
+    const h = document.createElement('p');
+    h.className = 'service-pane-headline';
+    h.textContent = headline;
+    el.appendChild(h);
+  }
+  for (const line of rows) {
+    const p = document.createElement('p');
+    p.className = 'settings-row';
+    p.textContent = line;
+    el.appendChild(p);
+  }
 }
 
 // Fetches status + the pane's wording without touching the DOM, so callers
@@ -14884,7 +15013,9 @@ function armDetachWarning() {
   servicePaneState.detachArmedAt = Date.now();
 }
 
-async function runServiceAction(id) {
+// `call`, when given, is the action itself (Switch to my node, Open data folder):
+// it runs under the same busy guard, error line and repaint as the named ones.
+async function runServiceAction(id, call) {
   // A click that arrives while an earlier one is still in flight (including
   // during the final re-render below, which can take a few seconds) must
   // not act — the buttons are also disabled synchronously below, but a
@@ -14913,7 +15044,8 @@ async function runServiceAction(id) {
   const desktop = window.electron.desktop;
   try {
     let result = null;
-    if (id === 'pair') result = await desktop.pairStart();
+    if (typeof call === 'function') result = await call();
+    else if (id === 'pair') result = await desktop.pairStart();
     else if (id === 'pairConfirm') result = await desktop.pairConfirm(servicePaneState.pendingNodeId);
     else if (id === 'pairCancel') result = await desktop.pairCancel();
     else if (id === 'attach') result = await desktop.attach();

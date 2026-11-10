@@ -3621,6 +3621,53 @@ body {
   margin-top: 12px;
 }
 
+/* Node & connection (settings redesign §5.7): headline, rows, the move card,
+   Phones & approvals and the collapsed Advanced. Node strings are long or odd:
+   wrap them, never widen the page. */
+.service-pane .service-pane-headline {
+  font-size: var(--settings-fs-body);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.service-pane .settings-row {
+  display: block;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.service-pane .service-pane-card {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.service-pane .service-pane-card .settings-row-help {
+  margin: 4px 0 8px;
+}
+
+.service-pane .service-pane-advanced {
+  margin-top: 16px;
+}
+
+.service-pane .service-pane-advanced > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.service-pane .service-pane-advanced-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.service-pane .service-pane-detach-warning {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
 .service-pane .service-pane-error {
   color: var(--error);
   font-weight: 500;
