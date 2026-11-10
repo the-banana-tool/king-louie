@@ -65,7 +65,10 @@ body {
 }
 
 /* --- Shared button system ---------------------------------- */
-.btn {
+/* One button set: .btn (plain; .btn-secondary is the same look),
+   .btn-primary, .btn-danger, .btn-sm. */
+.btn,
+.btn-secondary {
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-default);
   background: var(--bg-elevated);
@@ -135,7 +138,13 @@ body {
 }
 
 .btn-sm {
-  padding: 3px 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+/* The renderer still emits .btn-xs; it is the small button. */
+.btn-xs {
+  padding: 3px 8px;
   font-size: 11px;
 }
 
@@ -1671,8 +1680,15 @@ body {
 }
 
 .settings-modal {
-  width: min(820px, 95vw);
-  height: min(90vh, 800px);
+  /* The settings type scale (spec §5.8 rule 6). Kept here, never in :root,
+     which tests/mobile-design-tokens.test.js mirrors into the phone apps. */
+  --settings-fs-title: 17px;
+  --settings-fs-section: 11px;
+  --settings-fs-body: 13px;
+  --settings-fs-help: 12px;
+
+  width: min(1100px, 96vw);
+  height: min(92vh, 860px);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
@@ -1680,6 +1696,24 @@ body {
   flex-direction: column;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
   overflow: hidden;
+}
+
+/* The settings drawer: a 220px sidebar beside the content, the header
+   across both. The setup wizard shares .settings-modal and stays a column. */
+#settings-drawer > .settings-modal {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+#settings-drawer > .settings-modal > .settings-header {
+  grid-column: 1 / -1;
+}
+
+/* An element hidden by the attribute stays hidden whatever display a
+   class gives it (spec §2 bug 7: empty headings on Local service). */
+.settings-modal [hidden] {
+  display: none !important;
 }
 
 .settings-header {
@@ -1693,7 +1727,7 @@ body {
 }
 
 .settings-header h2 {
-  font-size: 17px;
+  font-size: var(--settings-fs-title);
   color: var(--text-primary);
   display: flex;
   align-items: center;
@@ -1711,26 +1745,6 @@ body {
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   flex-shrink: 0;
-}
-
-.settings-nav-select {
-  width: 100%;
-  padding: 8px 32px 8px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-default);
-  font-size: 13px;
-  background: var(--bg-input) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E") no-repeat right 10px center;
-  color: var(--text-primary);
-  font-family: inherit;
-  cursor: pointer;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  appearance: none;
-}
-
-.settings-nav-select:focus {
-  outline: none;
-  border-color: var(--accent);
 }
 
 /* --- Settings tab content ---------------------------------- */
@@ -1777,6 +1791,340 @@ body {
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--accent);
+}
+
+/* --- Settings sidebar -------------------------------------- */
+.settings-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.settings-search {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--settings-fs-body);
+}
+
+.settings-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.settings-nav-group > h3,
+.settings-section-label {
+  font-size: var(--settings-fs-section);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.settings-nav-group > h3 {
+  padding: 6px 8px 4px;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--settings-fs-body);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-nav-item:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.settings-nav-item.is-active {
+  background: var(--accent-surface);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* --- Which machine a page edits ---------------------------- */
+.settings-where {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-help);
+}
+
+.settings-where > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-where.tone-node {
+  border-color: var(--success);
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.settings-where.tone-desktop {
+  border-color: var(--info);
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.settings-where.tone-dev {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.settings-where.tone-unreachable {
+  border-color: var(--border-strong);
+  background: var(--bg-overlay);
+  color: var(--text-muted);
+}
+
+/* --- Rows: label left, control right ----------------------- */
+.settings-section-label {
+  margin: 8px 0 2px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--settings-fs-body);
+  color: var(--text-primary);
+}
+
+.settings-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-row > :last-child:not(:first-child) {
+  flex-shrink: 0;
+}
+
+/* The one help colour (spec §5.8 rule 6). */
+.settings-row-help {
+  font-size: var(--settings-fs-help);
+  line-height: 1.45;
+  color: var(--text-muted);
+  font-weight: normal;
+}
+
+/* --- Switch: a styled checkbox ----------------------------- */
+.switch {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 34px;
+  height: 18px;
+  margin: 0;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-overlay);
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.switch::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  transition: transform var(--transition), background var(--transition);
+}
+
+.switch:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.switch:checked::before {
+  transform: translateX(16px);
+  background: var(--bg-sidebar-hdr);
+}
+
+.switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.switch:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* --- A small number field with its unit -------------------- */
+.unit-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-body);
+}
+
+.unit-field > input {
+  width: 72px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--settings-fs-body);
+  text-align: right;
+}
+
+.unit-field > input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.unit-field > .unit {
+  color: var(--text-muted);
+  font-size: var(--settings-fs-help);
+}
+
+/* --- Compact list rows, statuses, chips, notices ----------- */
+.settings-list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--settings-fs-body);
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.settings-list-row > .settings-list-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  font-size: var(--settings-fs-section);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-pill.is-working {
+  color: var(--success);
+  background: var(--success-bg);
+  border-color: var(--success);
+}
+
+.status-pill.is-failing {
+  color: var(--error);
+  background: var(--error-bg);
+  border-color: var(--error);
+}
+
+.status-pill.is-none {
+  color: var(--text-muted);
+  background: transparent;
+  border-color: var(--border-default);
+}
+
+.status-pill.is-untested {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-color: var(--warning);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-overlay);
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-section);
+  white-space: nowrap;
+}
+
+.chip.chip-provider {
+  color: var(--accent);
+  background: var(--accent-surface);
+}
+
+.chip.chip-free {
+  color: var(--success);
+  background: var(--success-bg);
+}
+
+.notice-warn,
+.notice-info {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid;
+  font-size: var(--settings-fs-help);
+  line-height: 1.45;
+}
+
+.notice-warn {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-color: var(--warning);
+}
+
+.notice-info {
+  color: var(--info);
+  background: var(--info-bg);
+  border-color: var(--info);
 }
 
 /* Template / Settings cards */
@@ -2047,7 +2395,7 @@ body {
   content: '';
   flex: 1;
   height: 1px;
-  background: var(--border);
+  background: var(--border-default);
 }
 
 .provider-oauth-connected {
@@ -2102,11 +2450,6 @@ body {
 .btn-oauth:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-.btn-sm {
-  padding: 4px 10px;
-  font-size: 11px;
 }
 
 /* --- Tool approval modal ----------------------------------- */
@@ -2238,7 +2581,7 @@ body {
   font-family: var(--font-mono, monospace);
   font-size: 12px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-default);
   border-radius: 4px;
   color: var(--text-primary);
   min-width: 0;
@@ -2332,11 +2675,6 @@ body {
   color: var(--error, #f44336);
   font-size: 13px;
   font-weight: 500;
-}
-
-.btn-sm {
-  padding: 4px 10px;
-  font-size: 12px;
 }
 
 /* --- Notice banner ----------------------------------------- */
@@ -2690,11 +3028,6 @@ body {
   font-size: 11px;
   color: var(--text-muted);
   font-weight: 600;
-}
-
-.btn-sm {
-  padding: 3px 8px;
-  font-size: 11px;
 }
 
 /* --- Scrollbars -------------------------------------------- */

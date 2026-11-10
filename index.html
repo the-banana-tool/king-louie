@@ -199,7 +199,7 @@
         <div class="wizard-progress" id="wizard-progress"></div>
         <div id="wizard-step-content"></div>
       </div>
-      <div class="settings-nav" style="display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--border);">
+      <div class="settings-nav" style="display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--border-default);">
         <button type="button" class="btn" id="wizard-back-btn" hidden>Back</button>
         <button type="button" class="btn" id="wizard-skip-step-btn" hidden>Skip</button>
         <button type="button" class="btn btn-primary" id="wizard-next-btn">Next</button>
@@ -424,7 +424,7 @@
 
           <section class="template-variables-card" id="models-custom-roles-card">
             <h3>Advanced: custom roles</h3>
-            <p class="provider-message error" id="models-custom-roles-warning">Use only if you know what you're doing. A custom role is a named job with its own list of models in each profile. A case role, a workflow task or SpawnAgent that names it runs on those models; a profile with none for it uses the fallback role. A role nothing names does nothing.</p>
+            <p class="settings-row-help" id="models-custom-roles-warning">Use only if you know what you're doing. A custom role is a named job with its own list of models in each profile. A case role, a workflow task or SpawnAgent that names it runs on those models; a profile with none for it uses the fallback role. A role nothing names does nothing.</p>
             <div class="provider-list" id="models-custom-role-list"></div>
             <div class="template-variables-grid">
               <label for="models-custom-role-id">Role id (lowercase letters, digits and dashes)</label>
@@ -536,7 +536,7 @@
         <div class="settings-tab-content" data-tab="channels">
           <section class="template-variables-card">
             <h3>Telegram</h3>
-            <p>Connect a Telegram bot for remote chat and notifications.</p>
+            <p class="settings-row-help">Connect a Telegram bot for remote chat and notifications.</p>
             <div class="template-variables-grid">
               <label for="channel-telegram-token-input">Bot Token</label>
               <input id="channel-telegram-token-input" class="provider-input" type="password" placeholder="Paste Telegram bot token">
@@ -551,7 +551,7 @@
 
           <section class="template-variables-card channel-access-card" data-channel="telegram">
             <h3>Telegram Access</h3>
-            <p class="channel-access-note">
+            <p class="channel-access-note settings-row-help">
               Only the ids listed below may message this bot. The list starts empty
               and an empty list refuses <em>everyone</em>, including you — send the
               bot a message, then add the id it replies with.
@@ -577,7 +577,7 @@
             </div>
 
             <h4>Approvals</h4>
-            <p class="channel-access-note">
+            <p class="channel-access-note settings-row-help">
               When a Telegram request needs a tool approval, the Approve/Deny card is
               sent <strong>here</strong> — never back to the chat that asked, which
               would let a sender approve their own commands. <strong>Until you set
@@ -596,7 +596,7 @@
 
           <section class="template-variables-card">
             <h3>Discord</h3>
-            <p>Connect a Discord bot for server-based interaction.</p>
+            <p class="settings-row-help">Connect a Discord bot for server-based interaction.</p>
             <div class="template-variables-grid">
               <label for="channel-discord-token-input">Bot Token</label>
               <input id="channel-discord-token-input" class="provider-input" type="password" placeholder="Paste Discord bot token">
@@ -618,7 +618,7 @@
 
           <section class="template-variables-card channel-access-card" data-channel="discord">
             <h3>Discord Access</h3>
-            <p class="channel-access-note">
+            <p class="channel-access-note settings-row-help">
               Only the ids listed below may message this bot. The list starts empty
               and an empty list refuses <em>everyone</em>, including you — send the
               bot a message, then add the id it replies with.
@@ -644,7 +644,7 @@
             </div>
 
             <h4>Approvals</h4>
-            <p class="channel-access-note">
+            <p class="channel-access-note settings-row-help">
               When a Discord request needs a tool approval, the Approve/Deny card is
               sent <strong>here</strong> — never back to the channel that asked, which
               would let a sender approve their own commands. <strong>Until you set
@@ -663,7 +663,7 @@
 
           <section class="template-variables-card">
             <h3>Slack</h3>
-            <p>Connect Slack for workspace-based interaction.</p>
+            <p class="settings-row-help">Connect Slack for workspace-based interaction.</p>
             <div class="template-variables-grid">
               <label for="channel-slack-app-token-input">App Token</label>
               <input id="channel-slack-app-token-input" class="provider-input" type="password" placeholder="xapp-...">
@@ -1054,7 +1054,7 @@
             <!-- New workflow form -->
             <div style="margin-top: 16px;">
               <label for="workflow-goal-input">Goal</label>
-              <textarea id="workflow-goal-input" rows="3" placeholder="Describe the outcome you want (e.g., 'Build a REST API for user authentication with tests and documentation')" style="width: 100%; resize: vertical; font-family: inherit; padding: 8px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px;"></textarea>
+              <textarea id="workflow-goal-input" rows="3" placeholder="Describe the outcome you want (e.g., 'Build a REST API for user authentication with tests and documentation')" style="width: 100%; resize: vertical; font-family: inherit; padding: 8px; background: var(--bg-elevated); color: var(--text-primary); border: 1px solid var(--border-default); border-radius: 6px;"></textarea>
               <div style="margin-top: 8px; display: flex; gap: 8px;">
                 <button id="workflow-plan-btn" type="button" class="btn">Plan Only</button>
                 <button id="workflow-run-btn" type="button" class="btn btn-primary">Plan & Execute</button>
