@@ -1,3 +1,11 @@
+// The boot task's launch (--kl-node-service): re-run as plain Node with no console and
+// exit with its code. Before electron, and before the single-instance claim.
+const nodeLauncher = require('./src/desktop-bridge/node-launcher');
+if (nodeLauncher.isNodeServiceLaunch(process.argv)) {
+  nodeLauncher.runNodeService({ argv: process.argv, execPath: process.execPath, env: process.env }).then((code) => process.exit(code));
+  return;
+}
+
 const { app, BrowserWindow, ipcMain, safeStorage, shell, protocol, net, Notification, dialog } = require('electron');
 require('./src/history/sqlite-warning').suppressSqliteExperimentalWarning();
 const os = require('os');
