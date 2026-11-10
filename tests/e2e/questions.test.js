@@ -1,7 +1,7 @@
 // tests/e2e/questions.test.js — management surfaces §3.5: the Questions
 // sidebar is gone (a case's questions are cards in its chat, see
 // question-cards.test.js), and the contact policy is edited at
-// Settings > Contact.
+// Settings › Contact ladder.
 // Run with: unset ELECTRON_RUN_AS_NODE && node --test tests/e2e/questions.test.js
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
@@ -47,7 +47,7 @@ describe('E2E: no questions sidebar; contact policy in Settings', { skip: gitAva
     assert.strictEqual(await evaluate(ctx, `!!document.querySelector('[data-question-id="q-0001"]')`), false);
   });
 
-  it('edits the contact policy at Settings > Contact as it changes, keeping an away set meanwhile', async () => {
+  it('edits the contact policy at Settings › Contact ladder as it changes, keeping an away set meanwhile', async () => {
     await openSettingsTab(ctx, 'contact');
     await waitFor(ctx, `!!document.querySelector('.settings-tab-content.active[data-tab="contact"] #contact-ladder-high')`, 20000);
     assert.strictEqual(await evaluate(ctx, `!!document.getElementById('contact-policy-save')`), false, 'saves as it changes');

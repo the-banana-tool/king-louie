@@ -1,4 +1,4 @@
-// Settings > Local service (fleet stage 7 §3.2, §3.7, §3.9): pairing, attach,
+// Settings › Node & connection (fleet stage 7 §3.2, §3.7, §3.9): pairing, attach,
 // detach, unpair, import. Mode switches persist and relaunch; handlers are
 // never swapped under a live core. The private key is sealed with safeStorage
 // and unsealed only for the moment of a signature.

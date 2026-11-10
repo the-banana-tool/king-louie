@@ -1,6 +1,6 @@
 // tests/e2e/local-private.test.js — local inference L1 (spec 2026-10-13
 // §15, plan Task 19), driven as the owner drives it: add a local server in
-// Settings → Models, mark a chat private through the confirmation, see a
+// Settings › Local servers, mark a chat private through the confirmation, see a
 // turn with only a hosted model refused (with "Open Models") and nothing
 // sent, place the local model in the profile, see the hosted model disabled
 // in the chat's picker, get a reply from the local model with a "local"
@@ -113,7 +113,7 @@ describe('E2E: a private chat answers only from a local model (local inference L
     if (userDataDir) fs.rmSync(userDataDir, { recursive: true, force: true });
   });
 
-  it('adds a local server in Settings → Models: this machine, probed, tools yes', async () => {
+  it('adds a local server in Settings › Local servers: this machine, probed, tools yes', async () => {
     await openLocalServers();
     await waitFor(ctx, `document.getElementById('models-local-list').textContent.includes('No local server yet.')`, 15000);
     await evaluate(ctx, `document.getElementById('models-local-add-btn').click(); true`);

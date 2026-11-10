@@ -85,12 +85,12 @@ describe('describeServicePane', () => {
   });
 
   it('summarizes an import report', () => {
-    const lines = describeImportReport({ counts: { new: 3, 'skip-present': 1, failed: 1 }, failures: [{ category: 'vault', key: 'github', error: 'Encryption unavailable in the service.' }], secretsMissing: [{ category: 'vault', key: 'github' }], attention: [], notes: ['1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'], skipped: [] });
+    const lines = describeImportReport({ counts: { new: 3, 'skip-present': 1, failed: 1 }, failures: [{ category: 'vault', key: 'github', error: 'Encryption unavailable in the service.' }], secretsMissing: [{ category: 'vault', key: 'github' }], attention: [], notes: ['1 cron job(s) were imported disabled; enable them in Settings › Scheduled jobs.'], skipped: [] });
     assert.deepStrictEqual(lines, [
       'new: 3, skip-present: 1, failed: 1',
       'Failed: Vault entry github — Encryption unavailable in the service.',
       'Secrets that did not arrive: Vault entry github',
-      '1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'
+      '1 cron job(s) were imported disabled; enable them in Settings › Scheduled jobs.'
     ]);
     assert.strictEqual(UNAVAILABLE_TAB_NOTICE, 'Managed by the local service; not available while attached.');
   });
@@ -278,7 +278,7 @@ describe('describeAttachedBanner', () => {
     const b = describeAttachedBanner({ view: 'attached-disconnected', connection: { error: 'E' }, node: null });
     assert.strictEqual(b.line, 'E');
     assert.deepStrictEqual(b.actions, [
-      { id: 'retry', label: 'Retry now' }, { id: 'standaloneOnce', label: 'Use standalone this time' }, { id: 'openServiceSettings', label: 'Local service settings' }
+      { id: 'retry', label: 'Retry now' }, { id: 'standaloneOnce', label: 'Use standalone this time' }, { id: 'openServiceSettings', label: 'Node & connection settings' }
     ]);
     assert.strictEqual(describeAttachedBanner({ view: 'attached-disconnected' }).line, 'The local King Louie service is not reachable.');
   });

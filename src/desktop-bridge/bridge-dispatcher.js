@@ -57,7 +57,7 @@ function windowSummary(name, label, card) {
   return [head, count, ...(card.runs ? [`runs: ${card.runs}`] : [])].join(' · ');
 }
 
-// Settings > Local service "Approvals and relay" (spec §3.9), read from F3's
+// Settings › Node & connection "Phones & approvals" (spec §3.9), read from F3's
 // startApprovals objects; { available: false } when there are none.
 function approvalsStatus({ approvals, dataDir }) {
   if (!approvals || !approvals.approverStore || !approvals.phoneApprover) return { available: false };

@@ -368,7 +368,7 @@ class Profiles {
     const unset = allowUnsetLocalOnly === true;
     const lost = (current.localOnly || []).filter((r) => !(next.localOnly || []).includes(r));
     if (lost.length && !unset) {
-      throw new ProfileError('LOCAL_ONLY_ONE_WAY_HERE', `${lost.join(', ')} ${lost.length === 1 ? 'is' : 'are'} local-only in "${current.name}". Turn local-only off with its own switch in Settings → Models.`);
+      throw new ProfileError('LOCAL_ONLY_ONE_WAY_HERE', `${lost.join(', ')} ${lost.length === 1 ? 'is' : 'are'} local-only in "${current.name}". Turn local-only off with its own switch in Settings › Model profiles.`);
     }
     this._checkName(next.name, id);
     this._checkEfforts(next);

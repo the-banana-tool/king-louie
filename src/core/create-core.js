@@ -2210,7 +2210,7 @@ function createCore(deps = {}) {
       const list = profiles.list();
       const defaultId = profiles.defaultId();
       if (!wanted) {
-        if (!list.length) return { ok: true, output: 'No model profiles yet. Add one in Settings → Models.' };
+        if (!list.length) return { ok: true, output: 'No model profiles yet. Add one in Settings › Model profiles.' };
         return {
           ok: true,
           output: [

@@ -1,4 +1,4 @@
-// The local `/llm …` command line (Settings > Providers). Shared by the
+// The local `/llm …` command line (Settings › Providers & keys). Shared by the
 // core, which runs it, and the desktop bridge, which refuses the channel
 // actions before they reach the core (fleet stage 7 §8: channels are not
 // proxied).

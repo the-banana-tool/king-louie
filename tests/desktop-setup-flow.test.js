@@ -866,7 +866,7 @@ describe('describeSetup: what the window draws at the form steps', () => {
 
   it('the provider line says where Ollama and local servers go', () => {
     const line = describeSetup(attachedUp(noKey)).lines.join(' ');
-    assert.match(line, /Ollama.*Settings, under API keys/);
+    assert.match(line, /Ollama.*Settings › Providers & keys/);
     assert.match(line, /Local servers .*service\.json/);
   });
 

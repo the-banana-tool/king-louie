@@ -1125,7 +1125,7 @@ work while attached appends it to `PROXIED_DOMAINS`).
   moved the read, not the holding). Private
   chats answer `PRIVATE_NO_LOCAL_MODEL` until a local server is in the admin block. No
   real install, migration or packaged run has been done.
-- **Pairing:** start from Settings > Local service, then run the command it shows
+- **Pairing:** start from Settings › Node & connection, then run the command it shows
   as root/Administrator: `king-louie-service desktop pair <request>`. On a
   personal node (`hosting: personal`) the pane's **Pair** runs `desktop pair
   <request> --yes --json --data-dir <A>` itself, as the owner, unelevated; the
@@ -1712,7 +1712,7 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   is set with the `set_away` tool (the contact host's `setAway` writes the
   stored policy's `away` field alone, validated as `setPolicy` validates
   it); the contact-policy editor (ladders, quiet hours,
-  breakthrough, digest, channel readiness) is Settings > Contact, and a
+  breakthrough, digest, channel readiness) is Settings › Contact ladder, and a
   save there re-reads `away` first, so it keeps one set meanwhile. The contact policy is data-dir
   settings in service mode too; only the owner and addresses are
   admin-only.
@@ -1735,7 +1735,7 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   host that is not currently holding the cases-root lease (a passive
   instance) refuses an inbound relay push with 503 and does not poll relay
   events or move the relay cursor, so the events wait for the active host
-  (which dedupes by event id); Settings > Contact names the lease holder.
+  (which dedupes by event id); Settings › Contact ladder names the lease holder.
 - Replies can trigger acks, and a spoofed owner number or From address is
   enough for SMS and email, so acks are budgeted in the router: at most one
   refusal ack (unknown token, unparsed, refused) per channel and sender per

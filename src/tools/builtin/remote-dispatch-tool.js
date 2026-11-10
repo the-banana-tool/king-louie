@@ -53,7 +53,7 @@ Actions:
     if (!meshTransport || !meshRemoteControl) {
       return {
         success: false,
-        error: 'Mesh networking is not enabled. Enable it in Settings > Mesh Network.'
+        error: 'Mesh networking is not enabled.'
       };
     }
 

@@ -98,7 +98,7 @@ describe('chat turns on profiles', () => {
   it('an empty main points the owner to Models', async () => {
     const h = chatHarness({ provider: {}, roles: { main: [] } });
     const result = await h.send({ agentMode: false });
-    assert.match(result.error, /main has no models in the profile "Test profile"\. Add one in Settings → Models/);
+    assert.match(result.error, /main has no models in the profile "Test profile"\. Add one in Settings › Model profiles/);
   });
 
   it('fails over along main on the turn\'s first call, to another provider', async () => {

@@ -15,7 +15,7 @@ const EMPTY_PROFILE = Object.freeze({ id: null, name: '(no profile)', kind: 'use
 
 class UnknownRoleError extends Error {
   constructor(role) {
-    super(`Unknown model role "${role}". Roles are main, worker, utility, vision, imageGeneration, or a custom role defined in Settings → Models → Advanced.`);
+    super(`Unknown model role "${role}". Roles are main, worker, utility, vision, imageGeneration, or a custom role defined in Settings › Model profiles › Advanced.`);
     this.name = 'UnknownRoleError';
     this.code = 'UNKNOWN_ROLE';
     this.role = role;
@@ -33,13 +33,13 @@ class NoUsableModelError extends Error {
     let message;
     if (code) {
       const why = skipped.length ? ` Skipped: ${describeSkipped(skipped)}.` : '';
-      message = `${refusalSubject(resolution.egress, role)} no local model it can use in the profile "${profileName}".${why} Add one in Settings → Models. Nothing was sent to a hosted model.`;
+      message = `${refusalSubject(resolution.egress, role)} no local model it can use in the profile "${profileName}".${why} Add one in Settings › Model profiles. Nothing was sent to a hosted model.`;
     } else if (override && skipped.length) {
       message = `The main model override ${R.targetLabel(skipped[0].target)} is not usable: ${skipped[0].reasons.join(' ')} Use the profile's main instead, or pick another model.`;
     } else if (!skipped.length) {
-      message = `${role} has no models in the profile "${profileName}". Add one in Settings → Models.`;
+      message = `${role} has no models in the profile "${profileName}". Add one in Settings › Model profiles.`;
     } else {
-      message = `No usable model for ${role} in the profile "${profileName}". Skipped: ${describeSkipped(skipped)}. Fix them in Settings → Models, or switch the model.`;
+      message = `No usable model for ${role} in the profile "${profileName}". Skipped: ${describeSkipped(skipped)}. Fix them in Settings › Model profiles, or switch the model.`;
     }
     super(message);
     this.name = 'NoUsableModelError';

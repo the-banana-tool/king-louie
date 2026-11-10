@@ -35,7 +35,7 @@ const PRIVATE_SKIP_CODES = Object.freeze([
   'PRIVATE_NO_LOCAL_MODEL', 'LOCAL_ONLY_ROLE_NO_MODEL', 'LOCAL_MODEL_UNAVAILABLE', 'PRIVATE_HOSTED_TARGET', 'PRIVATE_HOSTED_CALL'
 ]);
 
-// The refusals the renderer words and answers with a button to Settings →
+// The refusals the renderer words and answers with a button to Settings ›
 // Models (local inference spec 2026-10-13 §15).
 const OPEN_MODELS_CODES = Object.freeze(['PRIVATE_NO_LOCAL_MODEL', 'LOCAL_ONLY_ROLE_NO_MODEL', 'LOCAL_MODEL_UNAVAILABLE']);
 
@@ -1149,7 +1149,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         ...(error?.code === 'MAIN_OVERRIDE_UNUSABLE' ? { action: { kind: 'use-profile-main' } } : {}),
         ...(error?.code === 'NO_USABLE_MODEL' ? { action: { kind: 'open-models' } } : {}),
         // Local inference L1 (§13.6): a turn refused under the private mark
-        // or a local-only role names its code and offers Settings → Models.
+        // or a local-only role names its code and offers Settings › Model profiles.
         ...(OPEN_MODELS_CODES.includes(error?.code) ? { code: error.code, action: { kind: 'open-models' } } : {})
       });
       throw error;

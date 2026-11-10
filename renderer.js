@@ -10934,7 +10934,7 @@ function renderChatModels(view) {
     current.textContent = view.main.usable ? `Main: ${view.main.name}` : `Main: ${view.main.name} (not usable)`;
   } else {
     current.value = '__none__';
-    current.textContent = 'Main: none. Add one in Settings → Models';
+    current.textContent = 'Main: none. Add one in Settings › Model profiles';
   }
   main.appendChild(current);
   const privateNow = isPrivateChat(getActiveChat());
@@ -12283,7 +12283,7 @@ async function renderCheckpointsList() {
   if (!status.enabled) {
     const note = document.createElement('p');
     note.className = 'provider-message';
-    note.textContent = 'Checkpoints are off. Turn them on in Settings → General.';
+    note.textContent = 'Checkpoints are off. Turn them on in Settings › New chats.';
     dom.checkpointsList.appendChild(note);
     return;
   }
@@ -12457,7 +12457,7 @@ async function renderChatMcpToggles() {
   if (servers.length === 0) {
     const hint = document.createElement('div');
     hint.className = 'provider-message';
-    hint.textContent = 'No MCP servers configured. Add them in Settings → MCP Servers.';
+    hint.textContent = 'No MCP servers configured. Add them in Settings › MCP servers.';
     dom.chatMcpToggles.appendChild(hint);
     return;
   }

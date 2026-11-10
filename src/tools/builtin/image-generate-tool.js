@@ -21,7 +21,7 @@ async function resolveProvider(settings, providerOverride, context) {
 
   if (chosen === 'fal') {
     const apiKey = decryptSettingKey(imgSettings.fal?.apiKey, context, 'Fal');
-    if (!apiKey) throw new Error('Fal API key not configured. Add it in Settings > Providers.');
+    if (!apiKey) throw new Error('Fal API key not configured. Add it in Settings › Providers & keys.');
     const FalImageProvider = require('../../media/image-generation/fal-provider');
     return new FalImageProvider(apiKey);
   }
@@ -35,7 +35,7 @@ async function resolveProvider(settings, providerOverride, context) {
   if (!apiKey) {
     apiKey = decryptSettingKey(imgSettings.openai?.apiKey, context, 'OpenAI');
   }
-  if (!apiKey) throw new Error('OpenAI API key not configured. Add it in Settings > Providers.');
+  if (!apiKey) throw new Error('OpenAI API key not configured. Add it in Settings › Providers & keys.');
 
   const OpenAIImageProvider = require('../../media/image-generation/openai-provider');
   return new OpenAIImageProvider(apiKey);
@@ -99,7 +99,7 @@ async function roleTarget(params, context) {
   }
   if (!usable.length) {
     const why = skipped.map((s) => `${targetName(s.target)} (${s.reasons.join(' ')})`).join('; ');
-    return { error: `No usable image generation model in the profile "${models.profileName}": ${why}. Fix them in Settings → Models.` };
+    return { error: `No usable image generation model in the profile "${models.profileName}": ${why}. Fix them in Settings › Model profiles.` };
   }
   return { target: usable[0] };
 }
@@ -174,7 +174,7 @@ const ImageGenerateTool = new Tool({
         } catch (_) {
           apiKey = null;
         }
-        if (!apiKey) return { ok: false, error: `No ${chosen.target.provider} key is saved. Add it under API keys.` };
+        if (!apiKey) return { ok: false, error: `No ${chosen.target.provider} key is saved. Add it in Settings › Providers & keys.` };
         const create = typeof context?.createImageClient === 'function'
           ? context.createImageClient
           : (p, key) => IMAGE_CLIENTS[p](key);

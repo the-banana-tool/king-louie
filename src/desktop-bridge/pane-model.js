@@ -1,4 +1,4 @@
-// What Settings > Local service shows for each state (fleet stage 7 §3.9).
+// What Settings › Node & connection shows for each state (fleet stage 7 §3.9).
 // Pure, so the wording is tested in node; the preload exposes it to the renderer.
 const { MESSAGES, DEFAULT_DESKTOP_BRIDGE_PORT, PERSONAL_TASK_NAME } = require('./protocol');
 
@@ -287,7 +287,7 @@ function describeServicePane(status = {}) {
 // The banner over the chat while attached and not connected (§7.4), so
 // renderer.js holds no copy of the rules. Null: no banner. Action ids:
 // `retry`, `standaloneOnce`, `openServiceSettings` (also the Install… row:
-// it opens Settings > Local service, where the preview runs), `nodeStart`,
+// it opens Settings › Node & connection, where the preview runs), `nodeStart`,
 // `nodeRestart`.
 // The Models pane on a personal node (attach stage 2 §6.6, G-5). Local servers
 // come only from the admin block there, and on a personal node the owner is the
@@ -330,7 +330,7 @@ function describeAttachedBanner(status) {
     { id: 'retry', label: 'Retry now' },
     // C-1, C-3: on Windows a down node is started, not replaced.
     ...(s.platform === 'win32' ? [] : [{ id: 'standaloneOnce', label: 'Use standalone this time' }]),
-    { id: 'openServiceSettings', label: 'Local service settings' }
+    { id: 'openServiceSettings', label: 'Node & connection settings' }
   ];
   if (row && row.action) actions.push(row.action);
   const c = s.connection || {};

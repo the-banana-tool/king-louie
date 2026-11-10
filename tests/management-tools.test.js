@@ -807,7 +807,7 @@ describe('set_away', () => {
     assert.deepStrictEqual(Object.keys(before).sort(), ['quietHours']);
     await f.handler('mcp-stdio').call('set_away', { mode: 'email-only', until: LATER, quote: 'email only please' });
     assert.deepStrictEqual(f.policy(), { ...before, away: { mode: 'email-only', until: LATER } });
-    // Settings > Contact saves a ladder (keeping away, as its save does);
+    // Settings › Contact ladder saves a ladder (keeping away, as its save does);
     // the next set_away keeps the ladder and adds nothing else.
     const saved = f.host.context().setPolicy({ ...f.host.context().getPolicy().policy, batchDelaySec: 30 });
     assert.strictEqual(saved.ok, true, saved.error);

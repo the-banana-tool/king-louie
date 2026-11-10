@@ -787,7 +787,7 @@ describe('DesktopBridgeClient', () => {
     const { port } = await startServer({ devices: [] });
     const client = clientFor(port, device, { backoffMs: [20] });
     await assert.rejects(client.connect(), (err) => err.code === 'DEVICE_UNPAIRED'
-      && err.message === 'The service does not know this desktop. Pair again in Settings > Local service.');
+      && err.message === 'The service does not know this desktop. Pair again in Settings › Node & connection.');
     assert.strictEqual(client.status, 'failed');
     assert.strictEqual(client.nextRetryAt, null);
     client.close();

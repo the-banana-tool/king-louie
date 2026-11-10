@@ -154,7 +154,7 @@ describe('desktop controller', () => {
     const { controller } = controllerFor({ readBridgeFile: () => ({ ok: true, record: pairing.parseBridgeFile(JSON.stringify(record)) }) });
     await controller.pairStart();
     const out = await controller.pairConfirm({ nodeId: identity.nodeId });
-    assert.deepStrictEqual(out, { ok: false, code: 'DEVICE_UNPAIRED', error: 'The service does not know this desktop. Pair again in Settings > Local service.' });
+    assert.deepStrictEqual(out, { ok: false, code: 'DEVICE_UNPAIRED', error: 'The service does not know this desktop. Pair again in Settings › Node & connection.' });
     controller.dispose();
   });
 

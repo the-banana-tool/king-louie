@@ -1,4 +1,4 @@
-// Settings > Local service (fleet stage 7 §3.7). Always registered, so no host
+// Settings › Node & connection (fleet stage 7 §3.7). Always registered, so no host
 // ever registers these channels twice; without a desktop controller in the
 // context (the service's bridge dispatcher, the contract test) they refuse.
 const IPC = require('./constants');

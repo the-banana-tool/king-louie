@@ -154,7 +154,7 @@ describe('attached host', () => {
     client.goLive(SERVICE(['chat:load', 'chat:sendMessage', 'tool:approvalResponse']));
     assert.deepStrictEqual(await handlers.get('chat:load')({}), { ok: true, data: { channel: 'chat:load' } });
     assert.deepStrictEqual(await handlers.get('hooks:list')({}), {
-      ok: false, code: 'ATTACHED_UNAVAILABLE', error: 'Not available while attached to the local service. Detach in Settings > Local service to use it.'
+      ok: false, code: 'ATTACHED_UNAVAILABLE', error: 'Not available while attached to the local service. Detach in Settings › Node & connection to use it.'
     });
     assert.strictEqual((await handlers.get('settings:mcpList')({})).code, 'ATTACHED_UNAVAILABLE');
     assert.deepStrictEqual(await handlers.get('cron:list')({}), {
