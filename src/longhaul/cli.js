@@ -13,6 +13,7 @@ const COMMANDS = {
   run: require('./commands/run'),
   author: require('./commands/author'),
   embed: require('./commands/embed'),
+  'compaction-loss': require('./commands/compaction-loss'),
   verify: require('./commands/verify'),
   'spot-check': require('./commands/spot-check'),
   report: require('./commands/report')
