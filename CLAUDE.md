@@ -891,6 +891,102 @@ Electron build.
   $0 smoke run.
 - Smoke run of the answer stage (no models, no network, $0):
   `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models`.
+- The compaction-loss study (B4, spec §9; plan
+  `docs/superpowers/plans/2026-11-09-longhaul-b4-compaction-loss.md`):
+  `longhaul compaction-loss --sessions <id,...> --author-provider P
+  --author-model M --judge-provider P --judge-model M [--facts-per-window 10]
+  [--candidates 8] [--seed 1] [--embed-provider openai|local --embed-model M]
+  [--concurrency 6] [--max-usd 50] [--allow-unpriced] [--dry-run]
+  [--send-private] [--fake-models]` reads the imported sessions in
+  `LONGHAUL_HOME/sessions/` (`--concurrency`, 1 to 32, runs that many facts'
+  calls at once with the same records and cache keys as 1, recorded in
+  `config.json`, and progress goes to stderr as counts and money only).
+  Each `manifest.compactions` entry is a window (`compaction/windows.js`; an
+  empty one is skipped `empty-window`, a session with none `no-compactions`,
+  both in `config.json` `skipped`). Facts are sampled round-robin over
+  `user-said`, `tool-observed` and `decision` anchors inside the window
+  (`compaction/sample.js`), then three prompts (`compaction-fact-v1`,
+  `compaction-preserved-v1`, `compaction-needed-v1`): author one fact per
+  anchor, judge whether the summary kept it (`preserved`/`partial`/`lost`; the
+  judge sees the fact and the summary, never the window), judge whether a
+  later message needed it (`needed`/`not-needed`) from at most `--candidates`
+  later messages that match it (`compaction/matches.js`: BM25 over a temp
+  store in `tmp/kl-compaction-*`, only `seq > summarySeq`, the BM25 limit
+  raised until enough later messages are found and cosine taken after the
+  seq floor; no match is `not-needed` with `noCandidates: true` and no call).
+  A fact whose `evidenceSeq` is outside the window or the span the author was
+  shown, from a sender its kind does not take (`ANCHOR_SENDERS`), or whose
+  quote is not in that message is `rejected` (`evidence-outside-window`,
+  `evidence-outside-span`, `evidence-wrong-sender`, `quote-not-found`), never
+  judged.
+  `--embed-*` adds cosine hits fused with BM25, and needs the session's
+  complete `longhaul embed` cache for that model with kl-recall's chunking,
+  else it refuses `EMBEDDINGS_MISSING` (exit 2) before anything is sent; each
+  fact's query vector is embedded and charged, and kept in that cache; a
+  reply that is not one vector of the cache's dimension per query leaves
+  those facts lexical only, counted as `embedFailures` in `summary.json`. Priced,
+  capped, cached (`private/model-cache/compaction-*`) and stopped as `run`
+  is (`PRIVATE_SESSION`, `OVER_BUDGET`, `UNPRICED`, `QUOTA`, `AUTH`, exit 2;
+  at the cap, exit 1 with the rest as errors); a rerun pays only for misses.
+  `runs/<id>/` holds `config.json` (`kind: 'compaction-loss'`),
+  `records.jsonl` (ids, seqs, verdicts, cost), `summary.json`/`summary.md`
+  (per session and `all`: preserved, partial, lost, needed and
+  lost-and-needed rates over judged facts, the window-to-summary token ratio)
+  and `spend.json`; no text. Facts, quotes and reasons go to
+  `private/compaction/<runId>/facts.jsonl`. "Needed" sees only matching
+  messages, so lost-and-needed is a lower bound. Verification is mechanical
+  (the two rejections) plus the seeded 10% spot-check in
+  `private/spot-checks/<runId>.jsonl` (owner decision 2026-11-09), not a
+  `verify` pass over every fact: `longhaul spot-check --run <id>` shows the
+  fact, quote, evidence message and summary, and takes `y` (agree with both)
+  or two letters, summary `p`/`r`/`l` then need `n`/`u` (`lu`). `longhaul
+  report` over compaction runs writes `compaction-loss.csv`,
+  `compaction-loss.tex` and `report.md` (agreement per judge); a cohort mixing
+  run kinds is refused `MIXED_RUN_KINDS`, and `--public` still refuses private
+  sessions. Tests use hand-built sessions and scripted clients; `--fake-models`
+  gives fake author and judge models. Smoke run ($0; `LONGHAUL_HOME` outside
+  any git tree): copy `tests/fixtures/longhaul/sessions/synth-compacted` into
+  `$LONGHAUL_HOME/sessions/`, then
+  `node bin/longhaul.js compaction-loss --sessions synth-compacted --fake-models`.
+- Public converters (B2, spec §10.2; plan
+  `docs/superpowers/plans/2026-11-09-longhaul-b2-public-converters.md`):
+  `longhaul convert --source <nebius-swe-rebench|open-swe-traces> --input
+  <file.parquet|dir|file.jsonl> [--repo R] [--max-sessions 12]
+  [--target-tokens 500000] [--min-tokens 250000] [--seed 1] [--config C
+  --split S] [--dry-run] [--force]` reads a file the owner downloaded from
+  Hugging Face (`nebius/SWE-rebench-openhands-trajectories`,
+  `nvidia/Open-SWE-Traces`) with its own column names: parquet, or a
+  directory of parquet files in name order, through `hyparquet` (pinned
+  `1.31.5`, a devDependency, loaded with `await import`, one row group at a
+  time), or JSONL through `readJsonlLines`; any other extension is `USAGE`.
+  `open-swe-traces` needs `--config` and `--split` (owner choice `v2.0`,
+  `claudecode`); `nebius-swe-rebench` refuses them. `src/longhaul/converters/`
+  maps OpenAI-style messages (`openai-messages.js`: system messages dropped,
+  `reasoning_content` kept only as `meta.reasoningChars`, results paired by
+  `tool_call_id` or, for Open-SWE, by order; an unknown role is a `status`
+  message with `meta.unmapped`, bad arguments `parameters: { raw }`). Pass 1
+  plans; pass 2 assembles and validates every session, then writes. A row
+  that maps to no message or whose first is not `user` is not planned and is
+  reported as having no task prompt (`noTaskPrompt`). Each session joins one repository's trajectories (the
+  first per `instance_id`) up to `--target-tokens`; a part under
+  `--min-tokens` is reported too short and not written. It is `constructed:
+  true`, with `boundaries` (`{ fromSeq, toSeq, instanceId, trajectoryId }`,
+  contiguous, each starting at a `user` message; `validateManifest` checks
+  them), synthetic timestamps (`timestampsSynthetic: true`), `private: false`,
+  `license: 'CC-BY-4.0'` and `upstreamLicense` (the rows' shared SPDX id,
+  `NOASSERTION` when they differ, `unknown-upstream` when none has one, which
+  is every Nebius session until the release looks them up). Ids (`nr-`,
+  `os-`) are derived from the repo, part, config, split and token options; the
+  same input, options and converter version again are `unchanged`, anything
+  else over an id is `SESSION_EXISTS` (exit 2) until `--force`. An input under
+  `LONGHAUL_HOME/private/` is refused; no absolute path is recorded. A
+  question in a constructed session gets a computed `crossesBoundary` (its
+  evidence in more than one trajectory; `null` elsewhere, and the key is left
+  out of unconstructed sessions' question files); a stored value that differs
+  is `boundary-mismatch`, and run records carry it. Fixtures are invented rows
+  in `tests/fixtures/longhaul-converters/` (the parquet one is made from the
+  JSONL by `make-parquet.mjs`). Smoke run ($0):
+  `node bin/longhaul.js convert --source open-swe-traces --input tests/fixtures/longhaul-converters/open-swe-traces.parquet --config v2.0 --split claudecode --target-tokens 1000 --min-tokens 100`.
 
 ## Cases
 

@@ -95,3 +95,71 @@ describe('manifest and session files', () => {
     assert.match(sf.validateManifest(manifest, messages).join('\n'), /summarySeq 4 is not a compaction summary/);
   });
 });
+
+describe('constructed sessions and their boundaries', () => {
+  function twoTrajectories() {
+    return [
+      { id: 'm1', seq: 1, sender: 'user', text: 'task one', timestamp: at(1) },
+      { id: 'm2', seq: 2, sender: 'assistant', text: 'working', timestamp: at(2) },
+      { id: 'm3', seq: 3, sender: 'assistant', text: 'done', timestamp: at(3) },
+      { id: 'm4', seq: 4, sender: 'user', text: 'task two', timestamp: at(4) },
+      { id: 'm5', seq: 5, sender: 'assistant', text: 'working', timestamp: at(5) },
+      { id: 'm6', seq: 6, sender: 'assistant', text: 'done', timestamp: at(6) }
+    ];
+  }
+  const seg = (fromSeq, toSeq, n) => ({ fromSeq, toSeq, instanceId: `i-${n}`, trajectoryId: `t-${n}` });
+  function errorsFor(extra, messages = twoTrajectories()) {
+    const manifest = sf.buildManifest({ sessionId: 'C1', source: 'openhands', sourceRef: 'x', license: 'CC-BY-4.0', private: false, messages, extra });
+    return sf.validateManifest(manifest, messages);
+  }
+
+  it('accepts contiguous boundaries that each start at a user message', () => {
+    assert.deepStrictEqual(errorsFor({ constructed: true, boundaries: [seg(1, 3, 1), seg(4, 6, 2)] }), []);
+  });
+
+  it('refuses a gap between boundaries', () => {
+    const errors = errorsFor({ constructed: true, boundaries: [seg(1, 3, 1), seg(5, 6, 2)] });
+    assert.strictEqual(errors.length, 1);
+    assert.match(errors[0], /boundary 2 starts at 5, expected 4/);
+  });
+
+  it('refuses boundaries that stop before the last message', () => {
+    const errors = errorsFor({ constructed: true, boundaries: [seg(1, 3, 1)] });
+    assert.strictEqual(errors.length, 1);
+    assert.match(errors[0], /boundaries end at 3, the session has 6 messages/);
+  });
+
+  it('refuses a boundary whose first message is not user', () => {
+    const messages = twoTrajectories();
+    messages[3].sender = 'assistant';
+    const errors = errorsFor({ constructed: true, boundaries: [seg(1, 3, 1), seg(4, 6, 2)] }, messages);
+    assert.strictEqual(errors.length, 1);
+    assert.match(errors[0], /boundary 2 starts at 4, which is assistant, not user/);
+  });
+
+  it('refuses constructed that is not a boolean', () => {
+    const errors = errorsFor({ constructed: 'yes' });
+    assert.strictEqual(errors.length, 1);
+    assert.match(errors[0], /constructed must be true or false/);
+  });
+
+  it('refuses constructed: true with no boundaries', () => {
+    assert.match(errorsFor({ constructed: true }).join('\n'), /constructed session needs boundaries/);
+    assert.match(errorsFor({ constructed: true, boundaries: [] }).join('\n'), /constructed session needs boundaries/);
+  });
+
+  it('refuses boundaries on a session that is not constructed', () => {
+    const errors = errorsFor({ constructed: false, boundaries: [seg(1, 3, 1), seg(4, 6, 2)] });
+    assert.strictEqual(errors.length, 1);
+    assert.match(errors[0], /boundaries only belong to a constructed session/);
+  });
+
+  it('still loads the committed synthetic fixtures', async () => {
+    const root = path.join(__dirname, 'fixtures', 'longhaul', 'sessions');
+    for (const id of sf.listSessions(path.dirname(root))) {
+      const { manifest, messages } = await sf.loadSession(path.join(root, id));
+      assert.strictEqual(manifest.constructed, false);
+      assert.deepStrictEqual(sf.validateManifest(manifest, messages), []);
+    }
+  });
+});

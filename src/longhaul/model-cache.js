@@ -18,7 +18,10 @@ const log = createLogger('longhaul/model-cache');
 // rewrite, abstain-check and digest: the local adapters' calls (local
 // inference spec §11.1). The stage is part of every key, so a new one
 // changes none.
-const STAGES = Object.freeze(['answer', 'judge', 'summary', 'rewrite', 'abstain-check', 'digest']);
+const STAGES = Object.freeze([
+  'answer', 'judge', 'summary', 'rewrite', 'abstain-check', 'digest',
+  'compaction-fact', 'compaction-preserved', 'compaction-needed'
+]);
 const CACHE_VERSION = 1;
 const KEY_RE = /^[0-9a-f]{64}$/;
 const NO_HOOKS = Object.freeze({ beforeCall: () => 0, afterCall: () => {}, cancel: () => {} });
@@ -98,9 +101,24 @@ const resultOf = (entry, cached) => ({
 // to produce; spend.json has what this run paid). A miss asks the hooks
 // (the spend guard) first, retries 429/5xx/transport failures, settles the
 // spend, then stores the reply before returning it.
-async function cachedCall({ cache, stage, key, client, prompt, maxTokens, hooks = NO_HOOKS, retry = {}, meta = {}, clock = () => Date.now() }) {
+// inflight (a Map the caller owns) joins concurrent misses of one key into
+// one call, so a run with parallel calls makes the calls a serial run makes:
+// the later caller gets the reply as a hit, as it would from the cache.
+async function cachedCall({ cache, stage, key, client, prompt, maxTokens, hooks = NO_HOOKS, retry = {}, meta = {}, clock = () => Date.now(), inflight = null }) {
   const hit = cache.get(stage, key);
   if (hit) return resultOf(hit, true);
+  if (inflight) {
+    const id = `${stage}/${key}`;
+    const pending = inflight.get(id);
+    if (pending) return { ...(await pending), cached: true };
+    const call = cachedCall({ cache, stage, key, client, prompt, maxTokens, hooks, retry, meta, clock });
+    inflight.set(id, call);
+    try {
+      return await call;
+    } finally {
+      inflight.delete(id);
+    }
+  }
   const ticket = hooks.beforeCall({ stage, client, promptChars: prompt.length, maxTokens });
   const t0 = clock();
   let reply;

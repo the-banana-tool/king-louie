@@ -19,7 +19,7 @@ function checkReviewer(reviewer) {
 
 function createReview({ session, questions, reviewer, onSave, now = () => new Date() }) {
   checkReviewer(reviewer);
-  const { index } = session;
+  const { index, manifest } = session;
   const sessionId = session.manifest.sessionId;
   let current = questions.map((q) => (q.verifiedBy === undefined ? { ...q, verifiedBy: null } : q));
   // The review queue: the questions unverified at the start, in ask order.
@@ -34,7 +34,7 @@ function createReview({ session, questions, reviewer, onSave, now = () => new Da
 
   const find = (id) => current.find((q) => q.id === id) || null;
   const replace = (q) => { current = current.map((x) => (x.id === q.id ? q : x)); };
-  const errorsOf = (q) => validateQuestion(q, { index, sessionId });
+  const errorsOf = (q) => validateQuestion(q, { index, sessionId, manifest });
   const lookup = (id) => {
     const entry = byId.get(id);
     if (!entry) return { error: { ok: false, code: 'not-found', errors: [`no question ${JSON.stringify(id)} in this review`] } };
@@ -66,7 +66,7 @@ function createReview({ session, questions, reviewer, onSave, now = () => new Da
       if (error) return error;
       const errors = errorsOf(q);
       if (errors.length) return { ok: false, code: 'invalid', errors };
-      const accepted = { ...normalizeQuestion(q, index), verifiedBy: `human:${reviewer}` };
+      const accepted = { ...normalizeQuestion(q, index, manifest), verifiedBy: `human:${reviewer}` };
       replace(accepted);
       onSave(current, null);
       entry.status = 'accepted';
@@ -95,13 +95,14 @@ function createReview({ session, questions, reviewer, onSave, now = () => new Da
       if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return { ok: false, code: 'invalid', errors: ['fields: expected an object'] };
       const unknown = Object.keys(fields).filter((k) => !EDIT_FIELDS.includes(k));
       if (unknown.length) return { ok: false, code: 'invalid', errors: unknown.map((k) => `field: ${k} cannot be edited`) };
-      // distance is computed, never typed: drop the stored one so a moved
-      // askAtSeq or evidence list is not refused as a mismatch.
-      const { distance, ...rest } = q;
+      // distance and crossesBoundary are computed, never typed: drop the
+      // stored ones so a moved askAtSeq or evidence list is not refused as a
+      // mismatch.
+      const { distance, crossesBoundary, ...rest } = q;
       const next = { ...rest, ...fields, verifiedBy: null };
       const errors = errorsOf(next);
       if (errors.length) return { ok: false, code: 'invalid', errors };
-      const saved = normalizeQuestion(next, index);
+      const saved = normalizeQuestion(next, index, manifest);
       replace(saved);
       onSave(current, null);
       entry.status = 'edited';

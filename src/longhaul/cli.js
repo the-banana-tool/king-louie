@@ -9,10 +9,12 @@ const { UsageError } = require('./errors');
 const COMMANDS = {
   home: require('./commands/home'),
   import: require('./commands/import'),
+  convert: require('./commands/convert'),
   synth: require('./commands/synth'),
   run: require('./commands/run'),
   author: require('./commands/author'),
   embed: require('./commands/embed'),
+  'compaction-loss': require('./commands/compaction-loss'),
   verify: require('./commands/verify'),
   'spot-check': require('./commands/spot-check'),
   report: require('./commands/report')

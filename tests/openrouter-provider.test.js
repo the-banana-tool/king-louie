@@ -83,6 +83,37 @@ describe('OpenRouterProvider', () => {
     }
   });
 
+  it('sends provider routing preferences in every request when given, and none otherwise', async () => {
+    const originalFetch = global.fetch;
+    const bodies = [];
+    global.fetch = async (url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return {
+        ok: true,
+        json: async () => ({ choices: [{ message: { content: 'ok' } }], usage: {} }),
+        body: { getReader: () => ({ read: async () => ({ done: true }), releaseLock: () => {} }) }
+      };
+    };
+    try {
+      const prefs = { data_collection: 'deny' };
+      const routed = new OpenRouterProvider('or-test-key-min-length', { providerPreferences: prefs });
+      const msgs = [{ role: 'user', content: 'hi' }];
+      const tools = [{ name: 't', description: 'd', parameters: { type: 'object', properties: {} } }];
+      await routed.sendMessage(msgs, {});
+      await routed.sendMessageWithTools(msgs, tools, {});
+      await routed.streamMessage(msgs, {}, () => {}).catch(() => {});
+      await routed.streamMessageWithTools(msgs, tools, {}, () => {}).catch(() => {});
+      assert.strictEqual(bodies.length, 4);
+      for (const body of bodies) assert.deepStrictEqual(body.provider, prefs);
+
+      bodies.length = 0;
+      await new OpenRouterProvider('or-test-key-min-length').sendMessage(msgs, {});
+      assert.strictEqual('provider' in bodies[0], false);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
   it('handles API error gracefully', async () => {
     const provider = new OpenRouterProvider('invalid-key-so-it-passes-min-length');
 

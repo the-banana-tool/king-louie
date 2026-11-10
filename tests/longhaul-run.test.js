@@ -110,6 +110,38 @@ describe('runBenchmark', () => {
     for (const q of questions) assert.ok(!raw.includes(q.question), 'records carry ids and numbers, never text');
   });
 
+  it('writes crossesBoundary in each record: computed on a constructed session, null otherwise', async () => {
+    const home = setup();
+    const plain = await runBenchmark({ home, adapters: [firstEvidence], now: fixedNow, commit: 'x' });
+    assert.ok(readRecords(plain.dir).every((r) => r.crossesBoundary === null));
+
+    // Split synth-small into two trajectories at a user message between the
+    // two evidence pieces of its multi-hop question.
+    const dir = path.join(home.root, 'sessions', 'synth-small');
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
+    const messages = fs.readFileSync(path.join(dir, 'messages.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const questions = await readQuestions(questionsFile(home.root, 'synth-small'));
+    const multi = questions.find((q) => q.kind === 'multi-hop');
+    const [first, second] = multi.evidenceSeqs;
+    const split = messages.find((m) => m.sender === 'user' && m.seq > first && m.seq <= second).seq;
+    const boundaries = [
+      { fromSeq: 1, toSeq: split - 1, instanceId: 'i-1', trajectoryId: 't-1' },
+      { fromSeq: split, toSeq: messages.length, instanceId: 'i-2', trajectoryId: 't-2' }
+    ];
+    fs.writeFileSync(path.join(dir, 'manifest.json'), `${JSON.stringify({ ...manifest, constructed: true, boundaries }, null, 2)}\n`);
+
+    const out = await runBenchmark({ home, adapters: [firstEvidence], now: fixedNow, commit: 'x' });
+    const records = readRecords(out.dir);
+    const byId = new Map(records.map((r) => [r.questionId, r]));
+    assert.strictEqual(byId.get(multi.id).crossesBoundary, true);
+    assert.strictEqual(byId.get(questions.find((q) => q.kind === 'abstain').id).crossesBoundary, null);
+    for (const r of records) {
+      const q = questions.find((x) => x.id === r.questionId);
+      const expected = q.evidenceSeqs.length === 0 ? null : new Set(q.evidenceSeqs.map((s) => s < split)).size > 1;
+      assert.strictEqual(r.crossesBoundary, expected, r.questionId);
+    }
+  });
+
   it('refuses a question set that fails validation, naming the question, and writes no run', async () => {
     const home = setup();
     const file = questionsFile(home.root, 'synth-small');

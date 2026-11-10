@@ -23,7 +23,11 @@ const PROMPTS = Object.freeze({
   abstainCheck: 'abstain-check-v1.md',
   rerankPointwise: 'rerank-llm-pointwise-v1.md',
   rerankListwise: 'rerank-llm-listwise-v1.md',
-  digest: 'digest-v1.md'
+  digest: 'digest-v1.md',
+  // The compaction-loss study (benchmark spec §9).
+  compactionFact: 'compaction-fact-v1.md',
+  compactionPreserved: 'compaction-preserved-v1.md',
+  compactionNeeded: 'compaction-needed-v1.md'
 });
 const PLACEHOLDER = /\{\{(\w+)\}\}/g;
 

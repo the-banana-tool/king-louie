@@ -73,7 +73,7 @@ function parseField(type, raw) {
 
 async function verifyLoop({ session, questions, reviewer, input, output, onSave, now = () => new Date() }) {
   const review = createReview({ session, questions, reviewer, onSave, now });
-  const { index } = session;
+  const { index, manifest } = session;
   const sessionId = session.manifest.sessionId;
   const rl = readline.createInterface({ input, terminal: false });
   const lines = rl[Symbol.asyncIterator]();
@@ -114,7 +114,7 @@ async function verifyLoop({ session, questions, reviewer, input, output, onSave,
         const cmd = await ask('[a]ccept  [e]dit  [r]eject  [s]kip  [q]uit > ');
         if (cmd === null || cmd === 'q') { stopped = true; return result(); }
         if (cmd === 'a') {
-          const res = draft ? { ok: false, errors: validateQuestion(draft, { index, sessionId }) } : review.accept(id);
+          const res = draft ? { ok: false, errors: validateQuestion(draft, { index, sessionId, manifest }) } : review.accept(id);
           if (!res.ok) { output.write(`Cannot accept:\n  ${res.errors.join('\n  ')}\n`); continue; }
           decided = true;
         } else if (cmd === 'r') {

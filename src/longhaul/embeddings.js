@@ -281,14 +281,14 @@ function vectorIndexFor(cache, chunks, { sessionId, model, provider = 'openai' }
 
 // Top k chunks by cosine to q among those with seq < upToSeq, as
 // [{ chunkId, vectorRank, cosine }].
-function topByCosine(index, q, { upToSeq = Infinity, k = 50 } = {}) {
+function topByCosine(index, q, { upToSeq = Infinity, afterSeq = -Infinity, k = 50 } = {}) {
   const { dim, matrix, chunkIds, seqs, size } = index;
   let norm = 0;
   for (let d = 0; d < dim; d++) norm += q[d] * q[d];
   norm = Math.sqrt(norm) || 1;
   const scored = [];
   for (let i = 0; i < size; i++) {
-    if (!(seqs[i] < upToSeq)) continue;
+    if (!(seqs[i] < upToSeq) || !(seqs[i] > afterSeq)) continue;
     let dot = 0;
     const off = i * dim;
     for (let d = 0; d < dim; d++) dot += matrix[off + d] * q[d];

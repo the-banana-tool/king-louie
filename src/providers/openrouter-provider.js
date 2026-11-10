@@ -4,6 +4,12 @@ class OpenRouterProvider extends BaseLLMProvider {
   constructor(apiKey, options = {}) {
     super(apiKey, options);
     this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://openrouter.ai/api/v1');
+    this.providerPreferences = options.providerPreferences || null;
+  }
+
+  // OpenRouter's provider routing object (e.g. { data_collection: 'deny' }), sent on every request.
+  routing() {
+    return this.providerPreferences ? { provider: this.providerPreferences } : {};
   }
 
   getName() { return 'openrouter'; }
@@ -86,6 +92,7 @@ class OpenRouterProvider extends BaseLLMProvider {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
+        ...this.routing(),
         model: options.model || this.getDefaultModel(),
         messages: this.formatMessages(preparedMessages),
         temperature: options.temperature ?? 0.7,
@@ -108,6 +115,7 @@ class OpenRouterProvider extends BaseLLMProvider {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
+        ...this.routing(),
         model: requestedModel,
         messages: this.formatMessages(preparedMessages),
         tools: tools.map((tool) => ({
@@ -225,6 +233,7 @@ class OpenRouterProvider extends BaseLLMProvider {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
+        ...this.routing(),
         model: requestedModel,
         messages: this.formatMessages(preparedMessages),
         tools: tools.map((tool) => ({
@@ -326,6 +335,7 @@ class OpenRouterProvider extends BaseLLMProvider {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
+        ...this.routing(),
         model: requestedModel,
         messages: this.formatMessages(preparedMessages),
         temperature: options.temperature ?? 0.7,
