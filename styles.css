@@ -142,12 +142,6 @@ body {
   font-size: 11px;
 }
 
-/* The renderer still emits .btn-xs; it is the small button. */
-.btn-xs {
-  padding: 3px 8px;
-  font-size: 11px;
-}
-
 /* --- Layout ------------------------------------------------ */
 .container {
   display: flex;
@@ -2128,6 +2122,59 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A list row's name over its short detail, each cut with an ellipsis (Task 15). */
+.settings-list-row > .settings-list-name:has(> .settings-list-title) {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-list-title,
+.settings-list-detail {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-list-title {
+  font-weight: 600;
+}
+
+.settings-list-row > .btn,
+.settings-list-row > .switch {
+  flex-shrink: 0;
+}
+
+.settings-list-row.is-greyed {
+  opacity: 0.55;
+}
+
+.settings-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.models-local-card {
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 6px;
+}
+
+.models-local-card > .settings-list-row {
+  border-bottom: none;
+}
+
+.models-local-card > .provider-message,
+.models-local-card > .models-local-model {
+  padding: 0 10px;
+}
+
+.diagnostics-results {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: var(--settings-fs-help);
+  color: var(--text-secondary);
 }
 
 /* Providers & keys: one row per provider, opened in place (Task 10). */

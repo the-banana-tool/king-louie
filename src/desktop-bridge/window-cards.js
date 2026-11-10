@@ -110,7 +110,7 @@ const ARG_KEYS = Object.freeze({
   'cron:update': ['id', 'patch'],
   'history:embedder.save': ['embedder', 'rerank', 'confirmJev'],
   'history:jev.saveKey': ['key'],
-  'hooks:setEnabled': ['name', 'enabled'],
+  'hooks:setEnabled': ['hookId', 'name', 'enabled'],
   'hooks:setGlobalEnabled': ['enabled'],
   'memory:capture': ['type', 'content', 'source', 'metadata'],
   'models:saveCatalogSettings': ['fetch', 'refreshHours', 'overrides'],

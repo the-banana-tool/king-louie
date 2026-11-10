@@ -436,13 +436,13 @@
         <div class="settings-tab-content" data-tab="local-servers">
           <section class="template-variables-card" id="models-local-servers-card">
             <h3>Local servers</h3>
-            <p>A server you run on this computer or your own network: Ollama, LM Studio, llama.cpp, vLLM or any OpenAI-compatible server. Its models cost nothing and can run private chats.</p>
+            <p class="settings-row-help">A server you run on this computer or your own network: Ollama, LM Studio, llama.cpp, vLLM or any OpenAI-compatible server. Its models cost nothing and can run private chats.</p>
             <div class="provider-actions" id="models-local-actions">
-              <button type="button" class="btn btn-primary" id="models-local-add-btn"><i class="fas fa-plus"></i> Add a local server</button>
+              <button type="button" class="btn btn-primary" id="models-local-add-btn">Add a local server</button>
               <button type="button" class="btn" id="models-local-ollama-btn">Use this Ollama as a local server</button>
             </div>
-            <div class="provider-message" id="models-local-status"></div>
-            <div class="provider-list" id="models-local-list"></div>
+            <div class="provider-message settings-row-help" id="models-local-status"></div>
+            <div class="settings-list" id="models-local-list"></div>
             <div class="models-local-admin-block" id="models-local-admin-block" hidden></div>
             <div class="models-local-usage" id="models-local-usage"></div>
           </section>
@@ -451,75 +451,78 @@
         <!-- Tab: Vault -->
         <div class="settings-tab-content" data-tab="vault">
           <section class="template-variables-card">
-            <h3>Secure Vault</h3>
-            <p>Store sensitive credentials (passwords, API keys, credit card numbers, etc.) encrypted at rest. The agent retrieves these via the Vault tool when needed — values never sit in the conversation.</p>
+            <h3>Vault</h3>
+            <p class="settings-row-help">Passwords, keys and card numbers, encrypted on disk. An agent reads one through the Vault tool when it needs it; the value never sits in the chat.</p>
 
-            <div class="template-variables-actions" style="margin-top: 10px;">
-              <button id="vault-add-btn" type="button" class="btn btn-primary"><i class="fas fa-plus"></i> Add Secret</button>
-              <button id="vault-refresh-btn" type="button" class="btn"><i class="fas fa-sync-alt"></i> Refresh</button>
-              <span id="vault-status" class="provider-message"></span>
+            <div class="settings-list" id="vault-list"></div>
+
+            <div class="template-variables-actions">
+              <button id="vault-add-btn" type="button" class="btn btn-primary">Add a secret</button>
+              <button id="vault-refresh-btn" type="button" class="btn">Refresh</button>
+              <span id="vault-status" class="provider-message settings-row-help"></span>
             </div>
 
-            <div class="provider-list" id="vault-list"></div>
-
             <div class="vault-add-panel" id="vault-add-panel" hidden>
-              <h4>Add New Secret</h4>
-              <div class="template-variables-grid">
-                <label for="vault-add-key-input">Key Name</label>
-                <input id="vault-add-key-input" class="provider-input" type="text" placeholder='e.g., test_cc_number, signup_password'>
-
-                <label for="vault-add-value-input">Secret Value</label>
-                <input id="vault-add-value-input" class="provider-input" type="password" placeholder="Will be encrypted before saving">
+              <h4 id="vault-add-title">Add a secret</h4>
+              <div class="settings-row">
+                <label for="vault-add-key-input">Name</label>
+                <input id="vault-add-key-input" class="provider-input" type="text" placeholder="e.g., test_cc_number, signup_password">
               </div>
-              <div class="template-variables-actions" style="margin-top: 10px;">
-                <button id="vault-save-entry-btn" type="button" class="btn btn-primary"><i class="fas fa-lock"></i> Save Encrypted</button>
+              <div class="settings-row">
+                <label for="vault-add-value-input">Value</label>
+                <input id="vault-add-value-input" class="provider-input" type="password" autocomplete="off" placeholder="Encrypted before it is saved">
+              </div>
+              <div class="template-variables-actions">
+                <button id="vault-save-entry-btn" type="button" class="btn btn-primary">Save</button>
                 <button id="vault-cancel-entry-btn" type="button" class="btn">Cancel</button>
-                <span id="vault-add-status" class="provider-message"></span>
+                <span id="vault-add-status" class="provider-message settings-row-help"></span>
               </div>
             </div>
           </section>
         </div>
 
-        <!-- Tab: MCP Servers -->
+        <!-- Tab: MCP servers -->
         <div class="settings-tab-content" data-tab="mcp">
           <section class="template-variables-card">
-            <h3>MCP Servers</h3>
-            <p>Connect to Model Context Protocol servers to give agents extra tools (databases, APIs, file systems, etc.). Tokens in env values can reference vault keys as <code>${vault:my_key}</code> — those are expanded at connection time.</p>
+            <h3>MCP servers</h3>
+            <p class="settings-row-help">Model Context Protocol servers give agents more tools (databases, APIs, file systems). An environment value can name a vault key as <code>${vault:my_key}</code>; it is filled in when the server connects.</p>
 
-            <div class="template-variables-actions" style="margin-top: 10px;">
-              <button id="mcp-add-btn" type="button" class="btn btn-primary"><i class="fas fa-plus"></i> Add Server</button>
-              <button id="mcp-refresh-btn" type="button" class="btn"><i class="fas fa-sync-alt"></i> Refresh</button>
-              <button id="mcp-reload-all-btn" type="button" class="btn"><i class="fas fa-rotate"></i> Reconnect All</button>
-              <span id="mcp-status" class="provider-message"></span>
+            <div class="settings-list" id="mcp-list"></div>
+
+            <div class="template-variables-actions">
+              <button id="mcp-add-btn" type="button" class="btn btn-primary">Add a server</button>
+              <button id="mcp-refresh-btn" type="button" class="btn">Refresh</button>
+              <button id="mcp-reload-all-btn" type="button" class="btn">Reconnect all</button>
+              <span id="mcp-status" class="provider-message settings-row-help"></span>
             </div>
 
-            <div class="provider-list" id="mcp-list"></div>
-
             <div class="vault-add-panel" id="mcp-edit-panel" hidden>
-              <h4 id="mcp-edit-title">Add MCP Server</h4>
-              <div class="template-variables-grid">
-                <label for="mcp-name-input">Server Name</label>
+              <h4 id="mcp-edit-title">Add an MCP server</h4>
+              <div class="settings-row">
+                <label for="mcp-name-input">Name</label>
                 <input id="mcp-name-input" class="provider-input" type="text" placeholder="e.g., github, sqlite">
-
+              </div>
+              <div class="settings-row">
                 <label for="mcp-command-input">Command</label>
                 <input id="mcp-command-input" class="provider-input" type="text" placeholder="e.g., npx">
-
+              </div>
+              <div class="settings-row">
                 <label for="mcp-args-input">Arguments (comma-separated)</label>
                 <input id="mcp-args-input" class="provider-input" type="text" placeholder="e.g., -y, @modelcontextprotocol/server-github">
-
-                <label for="mcp-cwd-input">Working Directory (optional)</label>
-                <input id="mcp-cwd-input" class="provider-input" type="text" placeholder="Defaults to app cwd">
-
-                <label>Environment Variables</label>
-                <div id="mcp-env-list"></div>
               </div>
-              <div class="template-variables-actions" style="margin-top: 10px;">
-                <button id="mcp-env-add-btn" type="button" class="btn"><i class="fas fa-plus"></i> Add Env Var</button>
+              <div class="settings-row">
+                <label for="mcp-cwd-input">Working folder (optional)</label>
+                <input id="mcp-cwd-input" class="provider-input" type="text" placeholder="Defaults to the app's folder">
               </div>
-              <div class="template-variables-actions" style="margin-top: 10px;">
-                <button id="mcp-save-btn" type="button" class="btn btn-primary"><i class="fas fa-save"></i> Save &amp; Connect</button>
+              <p class="settings-section-label">Environment variables</p>
+              <div id="mcp-env-list"></div>
+              <div class="template-variables-actions">
+                <button id="mcp-env-add-btn" type="button" class="btn">Add a variable</button>
+              </div>
+              <div class="template-variables-actions">
+                <button id="mcp-save-btn" type="button" class="btn btn-primary">Save &amp; connect</button>
                 <button id="mcp-cancel-btn" type="button" class="btn">Cancel</button>
-                <span id="mcp-edit-status" class="provider-message"></span>
+                <span id="mcp-edit-status" class="provider-message settings-row-help"></span>
               </div>
             </div>
           </section>
@@ -796,34 +799,30 @@
           </section>
         </div>
 
-        <!-- Tab: Permissions -->
+        <!-- Tab: Permissions & hooks. The hooks pane is that page's second section
+             (data-section-tab="hooks"), left out where the host does not offer hooks. -->
         <div class="settings-tab-content" data-tab="permissions">
           <section class="template-variables-card">
-            <h3>Tool Permission Rules</h3>
-            <p>Pattern-based rules that auto-approve or block tool calls. Rules are evaluated first-match-wins: a matching rule short-circuits the per-tool approval prompt. Created via the approval dialog ("Always allow pattern") or manually below.</p>
-            <div id="permission-rules-list" class="provider-list"></div>
-            <div class="template-variables-actions" style="margin-top: 12px;">
-              <span id="permission-rules-status" class="provider-message"></span>
-            </div>
+            <h3>Permission rules</h3>
+            <p class="settings-row-help">Rules that allow or block a tool call without asking. The first rule that matches wins. A rule is made when you approve a call with "Always allow pattern".</p>
+            <div id="permission-rules-list" class="settings-list"></div>
+            <span id="permission-rules-status" class="provider-message settings-row-help"></span>
           </section>
         </div>
 
-        <!-- Hooks: a section of Permissions & hooks (merged in Task 15) -->
         <div class="settings-tab-content" data-tab="hooks" data-section-tab="hooks">
           <section class="template-variables-card">
-            <h3>Hook Management</h3>
-            <p>Manage loaded lifecycle hooks and enable/disable individual hook definitions.</p>
-            <div class="template-variables-grid">
-              <label class="inline-toggle" for="hooks-global-enabled-input">
-                <input id="hooks-global-enabled-input" type="checkbox">
-                <span>Enable hooks globally</span>
-              </label>
+            <h3>Hooks</h3>
+            <p class="settings-row-help">Scripts in the hooks folder that run at points in a turn, such as before a tool call.</p>
+            <div class="settings-row">
+              <label for="hooks-global-enabled-input">Hooks</label>
+              <input id="hooks-global-enabled-input" class="switch" type="checkbox">
             </div>
+            <div id="hooks-list" class="settings-list"></div>
             <div class="template-variables-actions">
-              <button id="reload-hooks-btn" type="button" class="btn">Reload Hooks</button>
-              <span id="hooks-status" class="provider-message">Hooks not loaded yet.</span>
+              <button id="reload-hooks-btn" type="button" class="btn">Reload hooks</button>
+              <span id="hooks-status" class="provider-message settings-row-help">Hooks not loaded yet.</span>
             </div>
-            <div class="provider-list" id="hooks-list"></div>
           </section>
         </div>
 
@@ -898,42 +897,46 @@
           </section>
         </div>
 
-        <!-- Tab: Scheduler -->
+        <!-- Tab: Scheduled jobs -->
         <div class="settings-tab-content" data-tab="scheduler">
           <section class="template-variables-card">
-            <h3>Cron Scheduler</h3>
-            <p>Manage scheduled agent tasks (Cron, Interval, or Once-off).</p>
-
-            <div class="template-variables-actions" style="margin-top: 10px;">
-              <button id="cron-refresh-btn" type="button" class="btn">Refresh Jobs</button>
-              <span id="cron-status" class="provider-message">Scheduler status unknown.</span>
+            <h3>Scheduled jobs</h3>
+            <p class="settings-row-help">Messages sent to an agent on a schedule: every so often, by a cron expression, or once at a set time.</p>
+            <div class="provider-list settings-list" id="cron-list"></div>
+            <div class="template-variables-actions">
+              <button id="cron-refresh-btn" type="button" class="btn">Refresh</button>
+              <span id="cron-status" class="provider-message settings-row-help">Scheduler status unknown.</span>
             </div>
-
-            <div class="provider-list" id="cron-list"></div>
-
-            <div class="cron-add-panel">
-              <h4>Add New Job</h4>
-              <div class="template-variables-grid">
-                <label for="cron-add-message-input">Agent Message (Prompt)</label>
-                <textarea id="cron-add-message-input" class="provider-input" rows="2" placeholder="e.g., Check weather..."></textarea>
-
-                <label for="cron-add-target-input">Session Target</label>
-                <input id="cron-add-target-input" class="provider-input" type="text" placeholder="e.g., main">
-
-                <label for="cron-add-kind-input">Schedule Kind</label>
-                <select id="cron-add-kind-input" class="provider-input">
-                  <option value="every">Interval (Every X ms)</option>
-                  <option value="cron">Cron Expression</option>
-                  <option value="at">Specific Time (At)</option>
-                </select>
-
-                <label for="cron-add-value-input">Schedule Value</label>
-                <input id="cron-add-value-input" class="provider-input" type="text" placeholder="e.g., 60000 or * * * * *">
-              </div>
-              <div class="template-variables-actions" style="margin-top: 10px;">
-                <button id="cron-add-btn" type="button" class="btn btn-primary">Add Job</button>
-                <span id="cron-add-status" class="provider-message"></span>
-              </div>
+          </section>
+          <section class="template-variables-card cron-add-panel">
+            <h3>New job</h3>
+            <div class="settings-row">
+              <label for="cron-add-message-input">Message</label>
+              <textarea id="cron-add-message-input" class="provider-input" rows="2" placeholder="e.g., Check the weather"></textarea>
+            </div>
+            <div class="settings-row">
+              <label for="cron-add-target-input">Session</label>
+              <input id="cron-add-target-input" class="provider-input" type="text" placeholder="e.g., main">
+            </div>
+            <div class="settings-row">
+              <label for="cron-add-kind-input">Schedule</label>
+              <select id="cron-add-kind-input" class="provider-input">
+                <option value="every">Every</option>
+                <option value="cron">Cron expression</option>
+                <option value="at">Once, at a time</option>
+              </select>
+            </div>
+            <div class="settings-row" id="cron-add-every-row">
+              <label for="cron-add-every-input">Interval</label>
+              <span class="unit-field"><input id="cron-add-every-input" type="number" min="1" step="1" placeholder="1"><select id="cron-add-every-unit" class="unit" aria-label="Interval unit"><option value="s">s</option><option value="min" selected>min</option><option value="h">h</option></select></span>
+            </div>
+            <div class="settings-row" id="cron-add-value-row" hidden>
+              <label for="cron-add-value-input">When</label>
+              <input id="cron-add-value-input" class="provider-input" type="text" placeholder="e.g., 0 9 * * 1-5">
+            </div>
+            <div class="template-variables-actions">
+              <button id="cron-add-btn" type="button" class="btn btn-primary">Add job</button>
+              <span id="cron-add-status" class="provider-message settings-row-help"></span>
             </div>
           </section>
         </div>
@@ -941,20 +944,22 @@
         <!-- Tab: Skills -->
         <div class="settings-tab-content" data-tab="skills">
           <section class="template-variables-card">
-            <h3>Install Skill</h3>
-            <p>Install a skill from a GitHub URL or a local directory path.</p>
-            <div class="skill-install-form">
-              <input type="text" class="skill-settings-input" id="skill-install-url" placeholder="https://github.com/user/repo or E:\path\to\skill">
-              <button type="button" class="btn btn-primary" id="skill-install-btn"><i class="fas fa-download"></i> Install</button>
+            <h3>Skills</h3>
+            <p class="settings-row-help">A skill adds commands. Turn one off to stop it handling commands; Remove deletes its files.</p>
+            <div id="skills-list" class="settings-list"></div>
+            <div class="template-variables-actions">
+              <button type="button" class="btn" id="skills-check-updates-btn">Check for updates</button>
+              <span class="provider-message settings-row-help" id="skills-status">Loading skills...</span>
             </div>
-            <div class="provider-message" id="skill-install-status"></div>
           </section>
           <section class="template-variables-card">
-            <h3>Loaded Skills</h3>
-            <p>Disable a skill to prevent it from handling commands. Remove to uninstall completely.</p>
-            <button type="button" class="btn btn-secondary" id="skills-check-updates-btn"><i class="fas fa-sync"></i> Check for updates</button>
-            <div id="skills-list"></div>
-            <div class="provider-message" id="skills-status">Loading skills...</div>
+            <h3>Install a skill</h3>
+            <p class="settings-row-help">From a GitHub URL or a folder on this computer.</p>
+            <div class="skill-install-form">
+              <input type="text" class="skill-settings-input" id="skill-install-url" placeholder="https://github.com/user/repo or E:\path\to\skill">
+              <button type="button" class="btn btn-primary" id="skill-install-btn">Install</button>
+            </div>
+            <div class="provider-message settings-row-help" id="skill-install-status"></div>
           </section>
         </div>
 
@@ -964,55 +969,55 @@
         <!-- Tab: Webhooks -->
         <div class="settings-tab-content" data-tab="webhooks">
           <section class="template-variables-card">
-            <h3>Webhook Ingress</h3>
-            <p>Receive external HTTP webhooks and route them to agent sessions. Compatible with GitHub, Slack, and Stripe signature formats.</p>
-            <div class="template-variables-grid">
+            <h3>Webhooks</h3>
+            <p class="settings-row-help">Addresses that take HTTP calls from other services and pass them to an agent. GitHub, Slack and Stripe signatures are checked.</p>
+            <div id="webhook-list" class="settings-list"></div>
+            <div class="provider-message settings-row-help" id="webhook-list-status">Loading webhooks...</div>
+          </section>
+          <section class="template-variables-card">
+            <h3>New webhook</h3>
+            <div class="settings-row">
               <label for="webhook-name-input">Name</label>
               <input type="text" class="provider-input" id="webhook-name-input" placeholder="e.g. GitHub Push">
-              <label for="webhook-template-input">Message Template</label>
+            </div>
+            <div class="settings-row">
+              <label for="webhook-template-input">Message template</label>
               <input type="text" class="provider-input" id="webhook-template-input" placeholder="{{repository.name}}: {{action}}">
             </div>
             <div class="template-variables-actions">
-              <button type="button" class="btn btn-primary" id="webhook-create-btn"><i class="fas fa-plus"></i> Create Webhook</button>
-              <span class="provider-message" id="webhook-status"></span>
+              <button type="button" class="btn btn-primary" id="webhook-create-btn">Create webhook</button>
+              <span class="provider-message settings-row-help" id="webhook-status"></span>
             </div>
-          </section>
-          <section class="template-variables-card">
-            <h3>Registered Webhooks</h3>
-            <div id="webhook-list"></div>
-            <div class="provider-message" id="webhook-list-status">Loading webhooks...</div>
           </section>
         </div>
 
-        <!-- Tab: System Apps -->
+        <!-- Tab: Apps on this computer -->
         <div class="settings-tab-content" data-tab="system-apps">
           <section class="template-variables-card">
-            <h3>System Apps</h3>
-            <p>Local applications discovered on your system. Agents will prefer these over generating content via LLM. Click <strong>Re-scan</strong> to refresh, or manually add apps in non-standard locations.</p>
-
-            <div class="template-variables-actions" style="margin-top: 10px;">
-              <button id="apps-rescan-btn" type="button" class="btn">Re-scan System</button>
-              <span id="apps-status" class="provider-message">Not scanned yet.</span>
+            <h3>Apps on this computer</h3>
+            <p class="settings-row-help">Programs found on this computer. Agents use them before making the same thing with a model. Scan again after installing one, or add one found nowhere standard.</p>
+            <div class="provider-list settings-list" id="apps-list"></div>
+            <div class="template-variables-actions">
+              <button id="apps-rescan-btn" type="button" class="btn">Scan again</button>
+              <span id="apps-status" class="provider-message settings-row-help">Not scanned yet.</span>
             </div>
-
-            <!-- Discovered apps list -->
-            <div class="provider-list" id="apps-list" style="margin-top: 16px;"></div>
           </section>
 
-          <!-- Add custom app form -->
-          <section class="template-variables-card" style="margin-top: 16px;">
-            <h3>Add Custom App</h3>
-            <p>Manually register an application that wasn't auto-detected.</p>
-            <div class="template-variables-grid">
+          <section class="template-variables-card">
+            <h3>Add an app</h3>
+            <div class="settings-row">
               <label for="app-add-id">App ID</label>
               <input type="text" class="provider-input" id="app-add-id" placeholder="e.g., my-tool" />
-
+            </div>
+            <div class="settings-row">
               <label for="app-add-description">Description</label>
-              <input type="text" class="provider-input" id="app-add-description" placeholder="e.g., My Custom Tool — does something useful" />
-
-              <label for="app-add-launch">Launch Command</label>
+              <input type="text" class="provider-input" id="app-add-description" placeholder="e.g., My tool, which does something useful" />
+            </div>
+            <div class="settings-row">
+              <label for="app-add-launch">Launch command</label>
               <input type="text" class="provider-input" id="app-add-launch" placeholder="e.g., C:\Program Files\MyTool\mytool.exe" />
-
+            </div>
+            <div class="settings-row">
               <label for="app-add-category">Category</label>
               <select class="provider-input" id="app-add-category">
                 <option value="custom">Custom</option>
@@ -1025,13 +1030,14 @@
                 <option value="browser">Browser</option>
                 <option value="utility">Utility</option>
               </select>
-
-              <label for="app-add-capabilities">Capabilities</label>
-              <input type="text" class="provider-input" id="app-add-capabilities" placeholder="e.g., spreadsheet, csv, data-analysis (comma-separated)" />
             </div>
-            <div class="template-variables-actions" style="margin-top: 10px;">
-              <button id="app-add-btn" type="button" class="btn btn-primary">Add App</button>
-              <span id="app-add-status" class="provider-message"></span>
+            <div class="settings-row">
+              <label for="app-add-capabilities">Capabilities</label>
+              <input type="text" class="provider-input" id="app-add-capabilities" placeholder="e.g., spreadsheet, csv (comma-separated)" />
+            </div>
+            <div class="template-variables-actions">
+              <button id="app-add-btn" type="button" class="btn btn-primary">Add app</button>
+              <span id="app-add-status" class="provider-message settings-row-help"></span>
             </div>
           </section>
         </div>
@@ -1039,16 +1045,16 @@
         <!-- Tab: Diagnostics -->
         <div class="settings-tab-content" data-tab="diagnostics">
           <section class="template-variables-card">
-            <h3>System Diagnostics</h3>
-            <p>Run health checks on all subsystems. You can also run <code>/fixit</code> in any chat.</p>
+            <h3>Diagnostics</h3>
+            <p class="settings-row-help">Checks every part of King Louie and says what is wrong. <code>/fixit</code> in any chat does the same.</p>
             <div class="template-variables-actions">
-              <button type="button" class="btn btn-primary" id="diagnostics-run-btn"><i class="fas fa-stethoscope"></i> Run Diagnostics</button>
-              <span class="provider-message" id="diagnostics-status"></span>
+              <button type="button" class="btn btn-primary" id="diagnostics-run-btn">Run diagnostics</button>
+              <span class="provider-message settings-row-help" id="diagnostics-status"></span>
             </div>
           </section>
-          <section class="template-variables-card">
+          <section class="template-variables-card" id="diagnostics-results-card" hidden>
             <h3>Results</h3>
-            <pre id="diagnostics-results" style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary);"></pre>
+            <pre id="diagnostics-results" class="diagnostics-results"></pre>
           </section>
         </div>
 

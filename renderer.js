@@ -233,6 +233,7 @@ const dom = {
   vaultRefreshBtn: document.getElementById('vault-refresh-btn'),
   vaultStatus: document.getElementById('vault-status'),
   vaultAddPanel: document.getElementById('vault-add-panel'),
+  vaultAddTitle: document.getElementById('vault-add-title'),
   vaultAddKeyInput: document.getElementById('vault-add-key-input'),
   vaultAddValueInput: document.getElementById('vault-add-value-input'),
   vaultSaveEntryBtn: document.getElementById('vault-save-entry-btn'),
@@ -263,6 +264,10 @@ const dom = {
   cronAddTargetInput: document.getElementById('cron-add-target-input'),
   cronAddKindInput: document.getElementById('cron-add-kind-input'),
   cronAddValueInput: document.getElementById('cron-add-value-input'),
+  cronAddEveryInput: document.getElementById('cron-add-every-input'),
+  cronAddEveryUnit: document.getElementById('cron-add-every-unit'),
+  cronAddEveryRow: document.getElementById('cron-add-every-row'),
+  cronAddValueRow: document.getElementById('cron-add-value-row'),
   chatPlanBtn: document.getElementById('chat-plan-btn'),
   workflowRefreshBtn: document.getElementById('workflow-refresh-btn'),
   workflowStatus: document.getElementById('workflow-status'),
@@ -367,6 +372,7 @@ const dom = {
   diagnosticsRunBtn: document.getElementById('diagnostics-run-btn'),
   diagnosticsStatus: document.getElementById('diagnostics-status'),
   diagnosticsResults: document.getElementById('diagnostics-results'),
+  diagnosticsResultsCard: document.getElementById('diagnostics-results-card'),
   wizardOverlay: document.getElementById('wizard-overlay'),
   wizardBody: document.getElementById('wizard-body'),
   wizardStepContent: document.getElementById('wizard-step-content'),
@@ -5054,6 +5060,126 @@ async function clearSearchImageKey(item) {
   renderSearchImageRows();
 }
 
+// ── Compact list rows (spec §5.8 rule 7) ───────────────────
+// A name, a short detail, a status pill where the list has one, and the row's actions
+// as small buttons on the row. Every string is set as text: names come from the node.
+const LIST_PILL_CLASS = Object.freeze({ ok: 'is-working', bad: 'is-failing', off: 'is-none', warn: 'is-untested' });
+
+function buildSettingsListRow({ name, detail = '', pill = null, controls = [], dataset = {}, nameTag = 'span' }) {
+  const row = document.createElement('div');
+  row.className = 'settings-list-row';
+  for (const [k, v] of Object.entries(dataset)) row.dataset[k] = String(v);
+  const text = document.createElement('span');
+  text.className = 'settings-list-name';
+  const title = document.createElement(nameTag);
+  title.className = 'settings-list-title';
+  title.textContent = String(name ?? '');
+  text.appendChild(title);
+  if (detail) {
+    const d = document.createElement('span');
+    d.className = 'settings-list-detail settings-row-help';
+    d.textContent = String(detail);
+    text.appendChild(d);
+  }
+  text.title = [name, detail].filter(Boolean).join('\n');
+  row.appendChild(text);
+  if (pill) {
+    const p = document.createElement('span');
+    p.className = `status-pill ${LIST_PILL_CLASS[pill.tone] || 'is-none'}`;
+    p.textContent = pill.text;
+    row.appendChild(p);
+  }
+  for (const control of controls) if (control) row.appendChild(control);
+  return row;
+}
+
+function listRowButton(label, dataset = {}, { danger = false, primary = false } = {}) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `btn btn-sm${danger ? ' btn-danger' : ''}${primary ? ' btn-primary' : ''}`;
+  btn.textContent = label;
+  for (const [k, v] of Object.entries(dataset)) btn.dataset[k] = String(v);
+  return btn;
+}
+
+// A row's on/off switch, saved as it is flipped (rules 1 and 2, §7.1). `save(enabled)`
+// resolves { ok, error? }; a failure puts the switch back and says why below the row.
+function listRowSwitch({ key, checked, label, save, onSaved }) {
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.className = 'switch';
+  input.checked = Boolean(checked);
+  input.setAttribute('aria-label', label);
+  const saver = registerSettingsAutosave(key, {
+    save,
+    onState: (state, info) => {
+      const row = input.closest('.settings-list-row') || input;
+      if (state === 'error') {
+        input.checked = info.saved !== undefined ? Boolean(info.saved) : !info.value;
+        setSettingsFieldError(row, `Not saved: ${info.error}`);
+      } else if (state === 'saved') {
+        setSettingsFieldError(row, '');
+        if (onSaved) onSaved(info.value);
+      }
+    }
+  });
+  input.addEventListener('change', () => saver.change(input.checked, { immediate: true }));
+  return input;
+}
+
+function listEmptyLine(text) {
+  const empty = document.createElement('div');
+  empty.className = 'provider-message settings-row-help';
+  empty.textContent = text;
+  return empty;
+}
+
+// A stored interval in the largest whole unit: 60000 -> "Every 1 min" (rule 3).
+function formatEveryMs(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return 'Unknown interval';
+  const { value, unit } = msToUnit(ms);
+  return `Every ${value} ${unit}`;
+}
+
+// The hooks section of Permissions & hooks, from the page's copy of the hooks.
+function paintHooksSection() {
+  const hooks = appState.settings.hooks || {};
+  const loadedHooks = Array.isArray(hooks.loaded) ? hooks.loaded : [];
+  if (dom.hooksGlobalEnabledInput) dom.hooksGlobalEnabledInput.checked = hooks.enabled !== false;
+  setSettingsFieldError(dom.hooksGlobalEnabledInput, '');
+  if (dom.hooksStatus) {
+    dom.hooksStatus.textContent = loadedHooks.length === 1 ? '1 hook loaded.' : `${loadedHooks.length} hooks loaded.`;
+    dom.hooksStatus.classList.remove('error');
+  }
+  renderHooksList(loadedHooks);
+}
+
+function renderHooksList(loadedHooks) {
+  if (!dom.hooksList) return;
+  dom.hooksList.textContent = '';
+  if (!loadedHooks.length) {
+    dom.hooksList.appendChild(listEmptyLine('No hooks found in the hooks folder.'));
+    return;
+  }
+  for (const hook of loadedHooks) {
+    const detail = [`${hook.event} · matcher: ${hook.matcher || '*'}`, hook.description || hook.handler || ''].filter(Boolean).join(' · ');
+    const toggle = listRowSwitch({
+      key: `hooks.enabled.${hook.name}`,
+      checked: hook.enabled !== false,
+      label: `Hook ${hook.name}`,
+      save: (enabled) => saveHookEnabled(hook.name, enabled)
+    });
+    dom.hooksList.appendChild(buildSettingsListRow({ name: hook.name, detail, controls: [toggle], dataset: { hookName: hook.name } }));
+  }
+  greyHookRows();
+}
+
+// Each hook depends on the global switch (rule 2): greyed while it is off.
+function greyHookRows() {
+  const off = dom.hooksGlobalEnabledInput ? !dom.hooksGlobalEnabledInput.checked : false;
+  dom.hooksList?.querySelectorAll('.settings-list-row').forEach((row) => setSettingsRowGreyed(row, off));
+}
+
 function renderSettings() {
   dom.settingsEncryptionAlert.hidden = appState.settings.encryptionAvailable;
 
@@ -5078,91 +5204,7 @@ function renderSettings() {
   clearSettingsFieldErrors(document.querySelector('.settings-tab-content[data-tab="voice"]'));
   loadSystemVoices();
 
-  const hooks = appState.settings.hooks || {};
-  const loadedHooks = Array.isArray(hooks.loaded) ? hooks.loaded : [];
-
-  if (dom.hooksGlobalEnabledInput) {
-    dom.hooksGlobalEnabledInput.checked = hooks.enabled !== false;
-  }
-
-  if (dom.hooksStatus) {
-    dom.hooksStatus.textContent = `Loaded ${loadedHooks.length} hook(s).`;
-    dom.hooksStatus.classList.remove('error');
-  }
-
-  if (dom.hooksList) {
-    dom.hooksList.innerHTML = '';
-
-    if (!loadedHooks.length) {
-      const empty = document.createElement('div');
-      empty.className = 'provider-message';
-      empty.textContent = 'No hooks discovered in hooks/ directory.';
-      dom.hooksList.appendChild(empty);
-    } else {
-      loadedHooks.forEach((hook) => {
-        const card = document.createElement('div');
-        card.className = 'provider-card';
-        card.dataset.hookName = hook.name;
-
-        const header = document.createElement('div');
-        header.className = 'provider-header';
-
-        const titleWrap = document.createElement('div');
-        titleWrap.className = 'provider-title-wrap';
-
-        const title = document.createElement('div');
-        title.className = 'provider-title';
-        title.textContent = hook.name;
-
-        const eventMeta = document.createElement('div');
-        eventMeta.className = 'provider-message';
-        eventMeta.textContent = `${hook.event} • matcher: ${hook.matcher || '*'}`;
-
-        titleWrap.appendChild(title);
-        titleWrap.appendChild(eventMeta);
-
-        const status = document.createElement('span');
-        status.className = 'provider-status';
-        if (hook.enabled !== false) {
-          status.classList.add('ok');
-          status.textContent = 'Enabled';
-        } else {
-          status.classList.add('error');
-          status.textContent = 'Disabled';
-        }
-
-        header.appendChild(titleWrap);
-        header.appendChild(status);
-
-        const description = document.createElement('div');
-        description.className = 'provider-message';
-        description.textContent = hook.description || hook.handler || 'No description provided.';
-
-        const actions = document.createElement('div');
-        actions.className = 'provider-actions';
-
-        const toggleBtn = document.createElement('button');
-        toggleBtn.type = 'button';
-        toggleBtn.dataset.action = 'toggle-hook';
-        toggleBtn.dataset.hookName = hook.name;
-        toggleBtn.dataset.nextEnabled = hook.enabled !== false ? 'false' : 'true';
-        toggleBtn.appendChild(faIcon(hook.enabled !== false ? 'fas fa-toggle-on' : 'fas fa-toggle-off'));
-        toggleBtn.appendChild(document.createTextNode(hook.enabled !== false ? ' Disable Hook' : ' Enable Hook'));
-        if (hook.enabled !== false) {
-          toggleBtn.className = 'btn btn-danger';
-        } else {
-          toggleBtn.className = 'btn btn-primary';
-        }
-
-        actions.appendChild(toggleBtn);
-
-        card.appendChild(header);
-        card.appendChild(description);
-        card.appendChild(actions);
-        dom.hooksList.appendChild(card);
-      });
-    }
-  }
+  paintHooksSection();
 
   if (dom.memoryStatus) {
     dom.memoryStatus.textContent = 'Memory settings ready.';
@@ -5218,75 +5260,30 @@ async function loadVaultEntries() {
 
 function renderVaultEntries(keys = []) {
   if (!dom.vaultList) return;
-  dom.vaultList.innerHTML = '';
+  dom.vaultList.textContent = '';
 
   if (keys.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'provider-message';
-    empty.textContent = 'No secrets stored in the vault.';
-    dom.vaultList.appendChild(empty);
+    dom.vaultList.appendChild(listEmptyLine('No secrets in the vault yet.'));
     return;
   }
 
-  keys.forEach((key) => {
-    const card = document.createElement('div');
-    card.className = 'provider-card';
-    card.dataset.vaultKey = key;
-
-    const header = document.createElement('div');
-    header.className = 'provider-header';
-
-    const titleWrap = document.createElement('div');
-    titleWrap.className = 'provider-title-wrap';
-
-    const title = document.createElement('div');
-    title.className = 'provider-title';
-    title.textContent = key;
-
-    const meta = document.createElement('div');
-    meta.className = 'provider-message';
-    meta.textContent = 'Encrypted • Click "Update" to change the value';
-
-    titleWrap.appendChild(title);
-    titleWrap.appendChild(meta);
-
-    const status = document.createElement('span');
-    status.className = 'provider-status ok';
-    status.textContent = 'Stored';
-
-    header.appendChild(titleWrap);
-    header.appendChild(status);
-
-    const actions = document.createElement('div');
-    actions.className = 'provider-actions';
-
-    const updateBtn = document.createElement('button');
-    updateBtn.type = 'button';
-    updateBtn.className = 'btn';
-    updateBtn.appendChild(faIcon('fas fa-pen'));
-    updateBtn.appendChild(document.createTextNode(' Update'));
-    updateBtn.dataset.action = 'update-vault';
-    updateBtn.dataset.vaultKey = key;
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type = 'button';
-    deleteBtn.className = 'btn btn-danger';
-    deleteBtn.appendChild(faIcon('fas fa-trash'));
-    deleteBtn.appendChild(document.createTextNode(' Delete'));
-    deleteBtn.dataset.action = 'delete-vault';
-    deleteBtn.dataset.vaultKey = key;
-
-    actions.appendChild(updateBtn);
-    actions.appendChild(deleteBtn);
-
-    card.appendChild(header);
-    card.appendChild(actions);
-    dom.vaultList.appendChild(card);
-  });
+  // Names only: a value never reaches the page.
+  for (const key of keys) {
+    dom.vaultList.appendChild(buildSettingsListRow({
+      name: key,
+      detail: 'Encrypted',
+      pill: { text: 'Stored', tone: 'ok' },
+      controls: [
+        listRowButton('Edit', { action: 'update-vault', vaultKey: key }),
+        listRowButton('Delete', { action: 'delete-vault', vaultKey: key }, { danger: true })
+      ],
+      dataset: { vaultKey: key }
+    }));
+  }
 }
 
 async function handleVaultDelete(key) {
-  if (!confirm(`Delete secret "${key}" from the vault?`)) return;
+  if (!(await showConfirmDialog(`Delete the secret "${key}" from the vault? This cannot be undone.`))) return;
   try {
     const result = await window.electron.settings.vaultDelete({ key });
     if (!result?.ok) throw new Error(result?.error || 'Delete failed');
@@ -5299,29 +5296,45 @@ async function handleVaultDelete(key) {
   }
 }
 
-async function handleVaultUpdate(key) {
-  const newValue = prompt(`Enter new value for "${key}" (leave blank to keep current):`);
-  if (newValue === null) return; // cancelled
-  const newKey = prompt(`Rename key? (leave as-is or type new name):`, key);
-  if (newKey === null) return;
+// The add form doubles as the edit form: null adds, a key edits that entry. Electron has
+// no window.prompt, so the old prompt() edit never ran.
+let vaultEditingKey = null;
 
-  try {
-    const payload = { oldKey: key, newKey: newKey || key };
-    if (newValue) payload.value = newValue;
-    const result = await window.electron.settings.vaultUpdate(payload);
-    if (!result?.ok) throw new Error(result?.error || 'Update failed');
-    await loadVaultEntries();
-  } catch (err) {
-    if (dom.vaultStatus) {
-      dom.vaultStatus.textContent = `Error: ${err.message}`;
-      dom.vaultStatus.classList.add('error');
-    }
+function openVaultPanel(key = null) {
+  vaultEditingKey = key;
+  if (dom.vaultAddTitle) dom.vaultAddTitle.textContent = key ? 'Edit secret' : 'Add a secret';
+  if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.value = key || '';
+  if (dom.vaultAddValueInput) {
+    dom.vaultAddValueInput.value = '';
+    dom.vaultAddValueInput.placeholder = key ? 'Leave blank to keep the stored value' : 'Encrypted before it is saved';
   }
+  if (dom.vaultAddStatus) {
+    dom.vaultAddStatus.textContent = '';
+    dom.vaultAddStatus.classList.remove('error');
+  }
+  if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = false;
+  if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.focus();
+}
+
+function closeVaultPanel() {
+  vaultEditingKey = null;
+  if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.value = '';
+  if (dom.vaultAddValueInput) dom.vaultAddValueInput.value = '';
+  if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = true;
+  if (dom.vaultAddStatus) {
+    dom.vaultAddStatus.textContent = '';
+    dom.vaultAddStatus.classList.remove('error');
+  }
+}
+
+function handleVaultUpdate(key) {
+  openVaultPanel(key);
 }
 
 async function handleVaultSave() {
   const key = dom.vaultAddKeyInput?.value?.trim();
   const value = dom.vaultAddValueInput?.value;
+  const editing = vaultEditingKey;
 
   if (!key) {
     if (dom.vaultAddStatus) {
@@ -5330,7 +5343,7 @@ async function handleVaultSave() {
     }
     return;
   }
-  if (!value) {
+  if (!value && !editing) {
     if (dom.vaultAddStatus) {
       dom.vaultAddStatus.textContent = 'Value is required.';
       dom.vaultAddStatus.classList.add('error');
@@ -5339,15 +5352,16 @@ async function handleVaultSave() {
   }
 
   try {
-    const result = await window.electron.settings.vaultStore({ key, value });
-    if (!result?.ok) throw new Error(result?.error || 'Save failed');
-    if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.value = '';
-    if (dom.vaultAddValueInput) dom.vaultAddValueInput.value = '';
-    if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = true;
-    if (dom.vaultAddStatus) {
-      dom.vaultAddStatus.textContent = '';
-      dom.vaultAddStatus.classList.remove('error');
+    let result;
+    if (editing) {
+      const payload = { oldKey: editing, newKey: key };
+      if (value) payload.value = value;
+      result = await window.electron.settings.vaultUpdate(payload);
+    } else {
+      result = await window.electron.settings.vaultStore({ key, value });
     }
+    if (!result?.ok) throw new Error(result?.error || 'Save failed');
+    closeVaultPanel();
     await loadVaultEntries();
   } catch (err) {
     if (dom.vaultAddStatus) {
@@ -5382,84 +5396,29 @@ function setMcpStatus(text, isError = false) {
 
 function renderMcpServers(servers = []) {
   if (!dom.mcpList) return;
-  dom.mcpList.innerHTML = '';
+  dom.mcpList.textContent = '';
 
   if (servers.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'provider-message';
-    empty.textContent = 'No MCP servers configured. Click "Add Server" to connect one.';
-    dom.mcpList.appendChild(empty);
+    dom.mcpList.appendChild(listEmptyLine('No MCP servers yet. Add one to give agents its tools.'));
     return;
   }
 
-  servers.forEach((s) => {
-    const card = document.createElement('div');
-    card.className = 'provider-card';
-    card.dataset.mcpName = s.name;
-
-    const header = document.createElement('div');
-    header.className = 'provider-header';
-
-    const titleWrap = document.createElement('div');
-    titleWrap.className = 'provider-title-wrap';
-
-    const title = document.createElement('div');
-    title.className = 'provider-title';
-    title.textContent = s.name;
-
-    const meta = document.createElement('div');
-    meta.className = 'provider-message';
+  for (const s of servers) {
     const cmdLine = `${s.command} ${(s.args || []).join(' ')}`.trim();
-    const toolsText = s.connected
-      ? `Connected • ${(s.tools || []).length} tool(s)`
-      : 'Disconnected';
-    meta.textContent = `${cmdLine} • ${toolsText}`;
-
-    titleWrap.appendChild(title);
-    titleWrap.appendChild(meta);
-
-    const status = document.createElement('span');
-    status.className = `provider-status ${s.connected ? 'ok' : 'error'}`;
-    status.textContent = s.connected ? 'Connected' : 'Offline';
-
-    header.appendChild(titleWrap);
-    header.appendChild(status);
-
-    const actions = document.createElement('div');
-    actions.className = 'provider-actions';
-
-    const reloadBtn = document.createElement('button');
-    reloadBtn.type = 'button';
-    reloadBtn.className = 'btn';
-    reloadBtn.appendChild(faIcon('fas fa-rotate'));
-    reloadBtn.appendChild(document.createTextNode(' Reconnect'));
-    reloadBtn.dataset.action = 'reload-mcp';
-    reloadBtn.dataset.mcpName = s.name;
-
-    const editBtn = document.createElement('button');
-    editBtn.type = 'button';
-    editBtn.className = 'btn';
-    editBtn.appendChild(faIcon('fas fa-pen'));
-    editBtn.appendChild(document.createTextNode(' Edit'));
-    editBtn.dataset.action = 'edit-mcp';
-    editBtn.dataset.mcpName = s.name;
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type = 'button';
-    deleteBtn.className = 'btn btn-danger';
-    deleteBtn.appendChild(faIcon('fas fa-trash'));
-    deleteBtn.appendChild(document.createTextNode(' Delete'));
-    deleteBtn.dataset.action = 'delete-mcp';
-    deleteBtn.dataset.mcpName = s.name;
-
-    actions.appendChild(reloadBtn);
-    actions.appendChild(editBtn);
-    actions.appendChild(deleteBtn);
-
-    card.appendChild(header);
-    card.appendChild(actions);
-    dom.mcpList.appendChild(card);
-  });
+    const tools = (s.tools || []).length;
+    const detail = s.connected ? `${tools} tool${tools === 1 ? '' : 's'} · ${cmdLine}` : cmdLine;
+    dom.mcpList.appendChild(buildSettingsListRow({
+      name: s.name,
+      detail,
+      pill: s.connected ? { text: 'Connected', tone: 'ok' } : { text: 'Offline', tone: 'bad' },
+      controls: [
+        listRowButton('Reconnect', { action: 'reload-mcp', mcpName: s.name }),
+        listRowButton('Edit', { action: 'edit-mcp', mcpName: s.name }),
+        listRowButton('Delete', { action: 'delete-mcp', mcpName: s.name }, { danger: true })
+      ],
+      dataset: { mcpName: s.name }
+    }));
+  }
 }
 
 async function getVaultKeysForAutocomplete() {
@@ -5537,7 +5496,7 @@ function collectMcpEnvFromForm() {
 function openMcpEditPanel(server = null) {
   mcpEditingName = server?.name || null;
   if (dom.mcpEditTitle) {
-    dom.mcpEditTitle.textContent = server ? `Edit "${server.name}"` : 'Add MCP Server';
+    dom.mcpEditTitle.textContent = server ? `Edit "${server.name}"` : 'Add an MCP server';
   }
   if (dom.mcpNameInput) dom.mcpNameInput.value = server?.name || '';
   if (dom.mcpCommandInput) dom.mcpCommandInput.value = server?.command || '';
@@ -5615,7 +5574,7 @@ async function handleMcpEdit(name) {
 }
 
 async function handleMcpDelete(name) {
-  if (!confirm(`Delete MCP server "${name}"? This will disconnect it immediately.`)) return;
+  if (!(await showConfirmDialog(`Delete the MCP server "${name}"? It disconnects at once.`))) return;
   try {
     const result = await window.electron.settings.mcpDelete({ name });
     if (!result?.ok) throw new Error(result?.error || 'Delete failed');
@@ -5653,126 +5612,45 @@ async function handleMcpReloadAll() {
 // ── Skills List ────────────────────────────────────────────
 
 function renderSkillCard(skill) {
-  const card = document.createElement('div');
-  card.className = 'provider-card';
-  card.dataset.skillId = skill.id;
-
-  const header = document.createElement('div');
-  header.className = 'provider-header';
-
-  const titleWrap = document.createElement('div');
-  titleWrap.className = 'provider-title-wrap';
-
-  const title = document.createElement('div');
-  title.className = 'provider-title';
-  title.textContent = skill.name;
-
-  const versionBadge = document.createElement('span');
-  versionBadge.className = 'active-provider-badge';
-  versionBadge.textContent = `v${skill.version || '?'}`;
-
-  titleWrap.appendChild(title);
-  titleWrap.appendChild(versionBadge);
-
-  if (skill._updateInfo?.updateAvailable) {
-    const updateBadge = document.createElement('span');
-    updateBadge.className = 'active-provider-badge skill-update-badge';
-    const remoteVer = skill._updateInfo.remoteVersion;
-    updateBadge.textContent = remoteVer ? `v${remoteVer} available` : 'Update available';
-    updateBadge.title = skill._updateInfo.behind
-      ? `${skill._updateInfo.behind} commit(s) behind`
-      : 'New version available';
-    titleWrap.appendChild(updateBadge);
-  }
-
-  const status = document.createElement('span');
-  status.className = 'provider-status';
-  if (skill.enabled !== false) {
-    status.classList.add('ok');
-    status.textContent = 'Enabled';
-  } else {
-    status.classList.add('error');
-    status.textContent = 'Disabled';
-  }
-
-  header.appendChild(titleWrap);
-  header.appendChild(status);
-
-  const desc = document.createElement('div');
-  desc.className = 'provider-message';
   const commands = (skill.commands || []).map((c) => `/${c}`).join(', ');
-  desc.textContent = `${skill.description || ''}${commands ? ` — Commands: ${commands}` : ''}`;
-
-  const actions = document.createElement('div');
-  actions.className = 'provider-actions';
-
-  const toggleBtn = document.createElement('button');
-  toggleBtn.type = 'button';
-  toggleBtn.dataset.action = 'toggle-skill';
-  toggleBtn.dataset.skillId = skill.id;
-  if (skill.enabled !== false) {
-    toggleBtn.className = 'btn btn-danger';
-    toggleBtn.dataset.nextEnabled = 'false';
-    toggleBtn.appendChild(faIcon('fas fa-toggle-on'));
-    toggleBtn.appendChild(document.createTextNode(' Disable'));
-  } else {
-    toggleBtn.className = 'btn btn-primary';
-    toggleBtn.dataset.nextEnabled = 'true';
-    toggleBtn.appendChild(faIcon('fas fa-toggle-off'));
-    toggleBtn.appendChild(document.createTextNode(' Enable'));
-  }
-  actions.appendChild(toggleBtn);
-
+  const detail = [`v${skill.version || '?'}`, skill.description || '', commands ? `Commands: ${commands}` : ''].filter(Boolean).join(' · ');
+  const update = skill._updateInfo?.updateAvailable ? skill._updateInfo : null;
+  const controls = [];
   if (Array.isArray(skill.settingsSchema) && skill.settingsSchema.length > 0) {
-    const settingsBtn = document.createElement('button');
-    settingsBtn.type = 'button';
-    settingsBtn.className = 'btn';
-    settingsBtn.dataset.action = 'open-skill-settings';
-    settingsBtn.dataset.skillId = skill.id;
-    settingsBtn.appendChild(faIcon('fas fa-gear'));
-    settingsBtn.appendChild(document.createTextNode(' Settings'));
-    actions.appendChild(settingsBtn);
+    controls.push(listRowButton('Settings', { action: 'open-skill-settings', skillId: skill.id }));
   }
-
-  if (skill._updateInfo?.updateAvailable) {
-    const updateBtn = document.createElement('button');
-    updateBtn.type = 'button';
-    updateBtn.className = 'btn btn-primary';
-    updateBtn.dataset.action = 'update-skill';
-    updateBtn.dataset.skillId = skill.id;
-    updateBtn.dataset.skillName = skill.name;
-    updateBtn.appendChild(faIcon('fas fa-download'));
-    updateBtn.appendChild(document.createTextNode(' Update'));
-    actions.appendChild(updateBtn);
+  if (update) {
+    controls.push(listRowButton('Update', { action: 'update-skill', skillId: skill.id, skillName: skill.name }, { primary: true }));
   }
-
   if (skill.skillPath) {
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.className = 'btn btn-danger';
-    removeBtn.dataset.action = 'remove-skill';
-    removeBtn.dataset.skillId = skill.id;
-    removeBtn.dataset.skillName = skill.name;
-    removeBtn.appendChild(faIcon('fas fa-trash'));
-    removeBtn.appendChild(document.createTextNode(' Remove'));
-    actions.appendChild(removeBtn);
+    controls.push(listRowButton('Remove', { action: 'remove-skill', skillId: skill.id, skillName: skill.name }, { danger: true }));
   }
-
-  card.appendChild(header);
-  card.appendChild(desc);
-  card.appendChild(actions);
-  return card;
+  controls.push(listRowSwitch({
+    key: `skills.enabled.${skill.id}`,
+    checked: skill.enabled !== false,
+    label: `Skill ${skill.name}`,
+    save: (enabled) => saveSkillEnabled(skill.id, enabled)
+  }));
+  const row = buildSettingsListRow({
+    name: skill.name,
+    detail,
+    pill: update ? { text: update.remoteVersion ? `v${update.remoteVersion} available` : 'Update available', tone: 'warn' } : null,
+    controls,
+    dataset: { skillId: skill.id }
+  });
+  if (update) {
+    const pill = row.querySelector('.status-pill');
+    if (pill) pill.title = update.behind ? `${update.behind} commit(s) behind` : 'New version available';
+  }
+  return row;
 }
 
 function renderSkillsList(skills) {
   if (!dom.skillsList) return;
-  dom.skillsList.innerHTML = '';
+  dom.skillsList.textContent = '';
 
   if (!skills || skills.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'provider-message';
-    empty.textContent = 'No skills loaded. Install one from a GitHub URL or local path above.';
-    dom.skillsList.appendChild(empty);
+    dom.skillsList.appendChild(listEmptyLine('No skills loaded. Install one from a GitHub URL or a folder above.'));
     if (dom.skillsStatus) {
       dom.skillsStatus.textContent = '';
     }
@@ -5789,17 +5667,13 @@ function renderSkillsList(skills) {
   }
 }
 
-async function toggleSkillEnabled(skillId, enabled) {
-  try {
-    const result = await window.electron.skill.setEnabled({ skillId, enabled });
-    if (result?.error) throw new Error(result.error);
-    await loadSkillSettingsTabs();
-  } catch (err) {
-    if (dom.skillsStatus) {
-      dom.skillsStatus.textContent = `Error: ${err.message}`;
-      dom.skillsStatus.classList.add('error');
-    }
-  }
+// A skill's switch: resolves { ok, error? } for the auto-saver, then repaints the list
+// and the skill pages the sidebar offers.
+async function saveSkillEnabled(skillId, enabled) {
+  const result = await window.electron.skill.setEnabled({ skillId, enabled: Boolean(enabled) });
+  if (!result || result.error || result.ok === false) return { ok: false, error: result?.error || 'Could not change the skill.' };
+  loadSkillSettingsTabs().catch((err) => settingsLog.warn(`reloading skills failed: ${err.message}`));
+  return { ok: true };
 }
 
 async function installSkill() {
@@ -6279,67 +6153,48 @@ async function handleClearMemory() {
   }
 }
 
-async function handleToggleHook(hookName, enabled) {
-  if (!hookName) return;
-
-  try {
-    const result = await window.electron.hooks.setEnabled({
-      name: hookName,
-      enabled: Boolean(enabled)
-    });
-
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to update hook state.');
-    }
-
-    appState.settings.hooks = {
-      ...(appState.settings.hooks || {}),
-      loaded: Array.isArray(result.hooks) ? result.hooks : (appState.settings.hooks?.loaded || [])
-    };
-
-    if (dom.hooksStatus) {
-      dom.hooksStatus.textContent = `Hook '${hookName}' ${enabled ? 'enabled' : 'disabled'}.`;
-      dom.hooksStatus.classList.remove('error');
-    }
-
-    renderSettings();
-  } catch (error) {
-    if (dom.hooksStatus) {
-      dom.hooksStatus.textContent = `Error: ${error.message || 'Unable to update hook.'}`;
-      dom.hooksStatus.classList.add('error');
-    }
-  }
+// One hook's switch (Permissions & hooks): preload requires hookId. Resolves { ok, error? }
+// for the auto-saver, and keeps the page's copy of the hooks in step without a repaint.
+async function saveHookEnabled(hookName, enabled) {
+  const result = await window.electron.hooks.setEnabled({ hookId: hookName, enabled: Boolean(enabled) });
+  if (!result?.ok) return { ok: false, error: result?.error || 'Could not change the hook.' };
+  appState.settings.hooks = {
+    ...(appState.settings.hooks || {}),
+    loaded: Array.isArray(result.hooks) ? result.hooks : (appState.settings.hooks?.loaded || [])
+  };
+  return { ok: true };
 }
 
-async function handleToggleHooksGlobal(enabled) {
-  try {
-    const result = await window.electron.hooks.setGlobalEnabled({ enabled: Boolean(enabled) });
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to update global hook setting.');
-    }
+async function saveHooksGlobal(enabled) {
+  const result = await window.electron.hooks.setGlobalEnabled({ enabled: Boolean(enabled) });
+  if (!result?.ok) return { ok: false, error: result?.error || 'Could not change the hooks setting.' };
+  appState.settings.hooks = {
+    ...(appState.settings.hooks || {}),
+    enabled: Boolean(result.enabled),
+    loaded: Array.isArray(result.hooks) ? result.hooks : (appState.settings.hooks?.loaded || [])
+  };
+  return { ok: true };
+}
 
-    appState.settings.hooks = {
-      ...(appState.settings.hooks || {}),
-      enabled: Boolean(result.enabled),
-      loaded: Array.isArray(result.hooks) ? result.hooks : (appState.settings.hooks?.loaded || [])
-    };
-
-    if (dom.hooksStatus) {
-      dom.hooksStatus.textContent = `Hooks are now ${result.enabled ? 'enabled' : 'disabled'} globally.`;
-      dom.hooksStatus.classList.remove('error');
+function wireHooksGlobalSwitch() {
+  const input = dom.hooksGlobalEnabledInput;
+  if (!input) return;
+  const saver = registerSettingsAutosave('hooks.enabled', {
+    save: saveHooksGlobal,
+    onState: (state, info) => {
+      if (state === 'error') {
+        input.checked = info.saved !== undefined ? Boolean(info.saved) : !info.value;
+        greyHookRows();
+        setSettingsFieldError(input, `Not saved: ${info.error}`);
+      } else if (state === 'saved') {
+        setSettingsFieldError(input, '');
+      }
     }
-
-    renderSettings();
-  } catch (error) {
-    if (dom.hooksGlobalEnabledInput) {
-      dom.hooksGlobalEnabledInput.checked = !Boolean(enabled);
-    }
-
-    if (dom.hooksStatus) {
-      dom.hooksStatus.textContent = `Error: ${error.message || 'Unable to update hook setting.'}`;
-      dom.hooksStatus.classList.add('error');
-    }
-  }
+  });
+  input.addEventListener('change', () => {
+    greyHookRows();
+    saver.change(input.checked, { immediate: true });
+  });
 }
 
 async function handleReloadHooks() {
@@ -6351,13 +6206,14 @@ async function handleReloadHooks() {
   }
 
   try {
-    const result = await window.electron.hooks.reload();
+    // The reply is wrapped ({ ok, data }): reading .hooks off it emptied the list.
+    const result = unwrapIpcResult(await window.electron.hooks.reload(), 'Unable to reload hooks.');
     appState.settings.hooks = {
       ...(appState.settings.hooks || {}),
       enabled: result?.enabled !== false,
       loaded: Array.isArray(result?.hooks) ? result.hooks : []
     };
-    renderSettings();
+    paintHooksSection();
   } catch (error) {
     if (dom.hooksStatus) {
       dom.hooksStatus.textContent = `Error: ${error.message || 'Unable to reload hooks.'}`;
@@ -7691,17 +7547,14 @@ async function loadSystemApps() {
 
 function renderSystemApps(apps = []) {
   if (!dom.appsList) return;
-  dom.appsList.innerHTML = '';
+  dom.appsList.textContent = '';
 
   if (apps.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'provider-message';
-    empty.textContent = 'No apps detected. Click "Re-scan System" to discover installed applications.';
-    dom.appsList.appendChild(empty);
+    dom.appsList.appendChild(listEmptyLine('No apps found. Scan again to look for installed programs.'));
     return;
   }
 
-  // Group by category
+  // Grouped by category. Every field is the scan's or the owner's: text only.
   const byCategory = {};
   apps.forEach(app => {
     const cat = app.category || 'other';
@@ -7710,49 +7563,25 @@ function renderSystemApps(apps = []) {
   });
 
   for (const [category, catApps] of Object.entries(byCategory)) {
-    const header = document.createElement('div');
-    header.style.cssText = 'font-weight: bold; margin-top: 12px; margin-bottom: 4px; text-transform: capitalize; color: var(--text-secondary);';
-    header.textContent = category;
+    const header = document.createElement('p');
+    header.className = 'settings-section-label';
+    header.textContent = category.charAt(0).toUpperCase() + category.slice(1);
     dom.appsList.appendChild(header);
 
-    catApps.forEach(app => {
-      const card = document.createElement('div');
-      card.className = 'provider-card';
-      card.dataset.appId = app.id;
-
-      const headerEl = document.createElement('div');
-      headerEl.className = 'provider-header';
-      headerEl.innerHTML = `<strong>${app.id}</strong>${app.custom ? ' <span style="color: #4a9eff; margin-left: 8px;">custom</span>' : ''}`;
-
-      const body = document.createElement('div');
-      body.className = 'provider-message';
-      body.innerHTML = `${app.description || ''}<br><span style="color: var(--text-secondary);">Launch: <code>${app.launchCmd}</code></span>`;
-
-      if (app.capabilities && app.capabilities.length) {
-        const caps = document.createElement('div');
-        caps.style.cssText = 'margin-top: 4px; color: var(--text-secondary);';
-        caps.textContent = `Capabilities: ${app.capabilities.join(', ')}`;
-        body.appendChild(caps);
-      }
-
-      card.appendChild(headerEl);
-      card.appendChild(body);
-
-      if (app.custom) {
-        const actions = document.createElement('div');
-        actions.className = 'provider-actions';
-        actions.style.marginTop = '6px';
-        const removeBtn = document.createElement('button');
-        removeBtn.className = 'btn btn-danger';
-        removeBtn.textContent = 'Remove';
-        removeBtn.dataset.action = 'remove-app';
-        removeBtn.dataset.appId = app.id;
-        actions.appendChild(removeBtn);
-        card.appendChild(actions);
-      }
-
-      dom.appsList.appendChild(card);
-    });
+    for (const app of catApps) {
+      const detail = [
+        app.description || '',
+        `Launch: ${app.launchCmd || ''}`,
+        app.capabilities && app.capabilities.length ? `Capabilities: ${app.capabilities.join(', ')}` : ''
+      ].filter(Boolean).join(' · ');
+      dom.appsList.appendChild(buildSettingsListRow({
+        name: app.id,
+        detail,
+        pill: app.custom ? { text: 'Custom', tone: 'off' } : null,
+        controls: app.custom ? [listRowButton('Remove', { action: 'remove-app', appId: app.id }, { danger: true })] : [],
+        dataset: { appId: app.id }
+      }));
+    }
   }
 }
 
@@ -7866,116 +7695,54 @@ async function loadCronJobs() {
   }
 }
 
+function cronScheduleText(schedule) {
+  if (schedule?.kind === 'at') return `At ${schedule.at}`;
+  if (schedule?.kind === 'every') return formatEveryMs(schedule.everyMs);
+  if (schedule?.kind === 'cron') return `Cron ${schedule.expr}`;
+  return 'Unknown schedule';
+}
+
 function renderCronJobs(jobs = []) {
   if (!dom.cronList) return;
-  dom.cronList.innerHTML = '';
+  dom.cronList.textContent = '';
 
   if (jobs.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'provider-message';
-    empty.textContent = 'No cron jobs configured.';
-    dom.cronList.appendChild(empty);
+    dom.cronList.appendChild(listEmptyLine('No scheduled jobs yet.'));
     return;
   }
 
-  jobs.forEach(job => {
-    const card = document.createElement('div');
-    card.className = 'provider-card';
-    card.dataset.jobId = job.id;
-
-    const header = document.createElement('div');
-    header.className = 'provider-header';
-
-    const titleWrap = document.createElement('div');
-    titleWrap.className = 'provider-title-wrap';
-
-    const title = document.createElement('div');
-    title.className = 'provider-title';
-    title.textContent = `Job: ${job.id}`;
-
-    const meta = document.createElement('div');
-    meta.className = 'provider-message';
-    const scheduleDesc = job.schedule?.kind === 'at' ? `At ${job.schedule.at}` :
-                         job.schedule?.kind === 'every' ? `Every ${job.schedule.everyMs}ms` :
-                         job.schedule?.kind === 'cron' ? `Cron ${job.schedule.expr}` : 'Unknown schedule';
-    meta.textContent = `Target: ${job.payload?.sessionTarget || 'local'} • ${scheduleDesc}`;
-
-    titleWrap.appendChild(title);
-    titleWrap.appendChild(meta);
-
-    const status = document.createElement('span');
-    status.className = 'provider-status';
-    if (job.enabled !== false) {
-      status.classList.add('ok');
-      status.textContent = 'Enabled';
-    } else {
-      status.classList.add('error');
-      status.textContent = 'Disabled';
-    }
-
-    header.appendChild(titleWrap);
-    header.appendChild(status);
-
-    const body = document.createElement('div');
-    body.className = 'provider-message';
-    body.textContent = job.payload?.message || '(no message)';
-
-    const stats = document.createElement('div');
-    stats.className = 'provider-message';
-    stats.textContent = `Errors: ${job.state?.consecutiveErrors || 0} • Next Run: ${job.nextRunAt ? formatTimestamp(job.nextRunAt) : 'None'}`;
-
-    const actions = document.createElement('div');
-    actions.className = 'provider-actions';
-
-    const toggleBtn = document.createElement('button');
-    toggleBtn.type = 'button';
-    toggleBtn.appendChild(faIcon(job.enabled !== false ? 'fas fa-toggle-on' : 'fas fa-toggle-off'));
-    toggleBtn.appendChild(document.createTextNode(job.enabled !== false ? ' Disable' : ' Enable'));
-    toggleBtn.className = job.enabled !== false ? 'btn btn-danger' : 'btn btn-primary';
-    toggleBtn.dataset.action = 'toggle-cron';
-    toggleBtn.dataset.jobId = job.id;
-    toggleBtn.dataset.nextEnabled = job.enabled !== false ? 'false' : 'true';
-
-    const runBtn = document.createElement('button');
-    runBtn.type = 'button';
-    runBtn.className = 'btn';
-    runBtn.appendChild(faIcon('fas fa-play'));
-    runBtn.appendChild(document.createTextNode(' Run Now'));
-    runBtn.dataset.action = 'run-cron';
-    runBtn.dataset.jobId = job.id;
-
-    const delBtn = document.createElement('button');
-    delBtn.type = 'button';
-    delBtn.className = 'btn btn-danger';
-    delBtn.appendChild(faIcon('fas fa-trash'));
-    delBtn.appendChild(document.createTextNode(' Delete'));
-    delBtn.dataset.action = 'delete-cron';
-    delBtn.dataset.jobId = job.id;
-
-    actions.appendChild(toggleBtn);
-    actions.appendChild(runBtn);
-    actions.appendChild(delBtn);
-
-    card.appendChild(header);
-    card.appendChild(body);
-    card.appendChild(stats);
-    card.appendChild(actions);
-
-    dom.cronList.appendChild(card);
-  });
+  for (const job of jobs) {
+    const errors = job.state?.consecutiveErrors || 0;
+    const detail = [
+      cronScheduleText(job.schedule),
+      `to ${job.payload?.sessionTarget || 'local'}`,
+      `next run ${job.nextRunAt ? formatTimestamp(job.nextRunAt) : 'none'}`,
+      errors ? `${errors} error${errors === 1 ? '' : 's'} in a row` : ''
+    ].filter(Boolean).join(' · ');
+    dom.cronList.appendChild(buildSettingsListRow({
+      name: job.payload?.message || `Job ${job.id}`,
+      detail,
+      controls: [
+        listRowButton('Run now', { action: 'run-cron', jobId: job.id }),
+        listRowButton('Delete', { action: 'delete-cron', jobId: job.id }, { danger: true }),
+        listRowSwitch({
+          key: `cron.enabled.${job.id}`,
+          checked: job.enabled !== false,
+          label: `Scheduled job ${job.id}`,
+          save: (enabled) => saveCronJobEnabled(job.id, enabled)
+        })
+      ],
+      dataset: { jobId: job.id }
+    }));
+  }
 }
 
-async function handleToggleCronJob(jobId, enabled) {
-  try {
-    const result = await window.electron.cron.update({ id: jobId, patch: { enabled } });
-    if (!result?.ok) throw new Error(result?.error || 'Failed to update job');
-    await loadCronJobs();
-  } catch (err) {
-    if (dom.cronStatus) {
-      dom.cronStatus.textContent = `Error: ${err.message}`;
-      dom.cronStatus.classList.add('error');
-    }
-  }
+// A job's switch: resolves { ok, error? } for the auto-saver.
+async function saveCronJobEnabled(jobId, enabled) {
+  const result = await window.electron.cron.update({ id: jobId, patch: { enabled: Boolean(enabled) } });
+  if (!result?.ok) return { ok: false, error: result?.error || 'Could not change the job.' };
+  loadCronJobs().catch(() => {});
+  return { ok: true };
 }
 
 async function handleRunCronJob(jobId) {
@@ -8018,7 +7785,7 @@ async function handleAddCronJob() {
     const message = dom.cronAddMessageInput?.value?.trim();
     const sessionTarget = dom.cronAddTargetInput?.value?.trim();
     const kind = dom.cronAddKindInput?.value;
-    const value = dom.cronAddValueInput?.value?.trim();
+    const value = kind === 'every' ? String(dom.cronAddEveryInput?.value || '').trim() : dom.cronAddValueInput?.value?.trim();
 
     if (!message || !value) {
       throw new Error('Message and schedule value are required.');
@@ -8026,8 +7793,10 @@ async function handleAddCronJob() {
 
     const schedule = { kind };
     if (kind === 'every') {
-      const ms = parseInt(value, 10);
-      if (isNaN(ms) || ms < 1000) throw new Error('Interval must be a number >= 1000 (ms).');
+      const amount = Number(value);
+      const unit = dom.cronAddEveryUnit?.value || 's';
+      const ms = Number.isFinite(amount) ? unitToMs(amount, unit) : NaN;
+      if (!Number.isFinite(ms) || ms < 1000) throw new Error('The interval must be at least 1 s.');
       schedule.everyMs = ms;
     } else if (kind === 'cron') {
       schedule.expr = value;
@@ -8049,6 +7818,7 @@ async function handleAddCronJob() {
     if (dom.cronAddMessageInput) dom.cronAddMessageInput.value = '';
     if (dom.cronAddTargetInput) dom.cronAddTargetInput.value = '';
     if (dom.cronAddValueInput) dom.cronAddValueInput.value = '';
+    if (dom.cronAddEveryInput) dom.cronAddEveryInput.value = '';
 
     if (dom.cronAddStatus) {
       dom.cronAddStatus.textContent = 'Job added successfully.';
@@ -8804,36 +8574,29 @@ function localModelLine(serverId, m, { readOnly }) {
 }
 
 function localServerCard(server, { readOnly }) {
+  // One compact row per server (rule 7): name, address, grade and its actions; the
+  // pinned addresses and the models below it.
   const card = document.createElement('div');
-  card.className = 'provider-card models-local-card';
+  card.className = 'models-local-card';
   card.dataset.serverId = server.id;
-  const header = document.createElement('div');
-  header.className = 'provider-header';
-  const title = document.createElement('div');
-  title.className = 'provider-title';
+  const head = document.createElement('div');
+  head.className = 'settings-list-row';
+  const text = document.createElement('span');
+  text.className = 'settings-list-name';
+  const title = document.createElement('span');
+  title.className = 'settings-list-title';
   title.textContent = server.name || server.id;
-  header.appendChild(title);
+  const address = document.createElement('span');
+  address.className = 'settings-list-detail settings-row-help';
+  address.textContent = `${server.baseUrl || ''} (${server.kind || 'server'})`;
+  text.append(title, address);
+  head.appendChild(text);
   const badge = document.createElement('span');
-  badge.className = server.grade === 'guarantee' ? 'active-provider-badge' : 'models-broken-badge';
+  badge.className = `status-pill ${server.grade === 'guarantee' ? 'is-working' : 'is-none'}`;
   badge.textContent = server.grade === 'guarantee' ? 'Private chats' : 'Cost only';
-  header.appendChild(badge);
-  card.appendChild(header);
-  const line = (text, cls = 'provider-message') => {
-    const el = document.createElement('div');
-    el.className = cls;
-    el.textContent = text;
-    card.appendChild(el);
-  };
-  line(`Address: ${server.baseUrl || ''} (${server.kind || 'server'})`);
-  const pinned = server.pinned && Array.isArray(server.pinned.addresses) ? server.pinned.addresses : [];
-  line(`Pinned to ${pinned.join(', ') || 'no address'}: ${localServerClassWords(server.pinned?.class)}.`);
-  line(`${localServerGradeText(server.grade)}.`);
-  if (server.problem) line(server.problem, 'provider-message error');
-  const models = Array.isArray(server.models) ? server.models : [];
-  for (const m of models) card.appendChild(localModelLine(server.id, m, { readOnly }));
-  const actions = document.createElement('div');
-  actions.className = 'provider-actions';
-  const button = (label, action, cls = 'btn') => {
+  head.appendChild(badge);
+  const actions = head;
+  const button = (label, action, cls = 'btn btn-sm') => {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = cls;
@@ -8845,9 +8608,20 @@ function localServerCard(server, { readOnly }) {
   actions.appendChild(button('List models', 'list'));
   if (!readOnly) {
     actions.appendChild(button('Check again', 'recheck'));
-    actions.appendChild(button('Remove', 'remove', 'btn btn-danger'));
+    actions.appendChild(button('Remove', 'remove', 'btn btn-sm btn-danger'));
   }
-  card.appendChild(actions);
+  card.appendChild(head);
+  const line = (value, cls = 'provider-message settings-row-help') => {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.textContent = value;
+    card.appendChild(el);
+  };
+  const pinned = server.pinned && Array.isArray(server.pinned.addresses) ? server.pinned.addresses : [];
+  line(`Pinned to ${pinned.join(', ') || 'no address'}: ${localServerClassWords(server.pinned?.class)}. ${localServerGradeText(server.grade)}.`);
+  if (server.problem) line(server.problem, 'provider-message error');
+  const models = Array.isArray(server.models) ? server.models : [];
+  for (const m of models) card.appendChild(localModelLine(server.id, m, { readOnly }));
   return card;
 }
 
@@ -12823,10 +12597,8 @@ if (dom.skillsList) {
   dom.skillsList.addEventListener('click', (e) => {
     const button = e.target.closest('button[data-action]');
     if (!button) return;
-    const { action, skillId, nextEnabled, skillName } = button.dataset;
-    if (action === 'toggle-skill' && skillId) {
-      toggleSkillEnabled(skillId, nextEnabled === 'true');
-    } else if (action === 'open-skill-settings' && skillId) {
+    const { action, skillId, skillName } = button.dataset;
+    if (action === 'open-skill-settings' && skillId) {
       switchSettingsTab(`skill-${skillId}`);
     } else if (action === 'update-skill' && skillId) {
       updateSkill(skillId, skillName);
@@ -13293,22 +13065,8 @@ if (dom.reloadHooksBtn) {
   });
 }
 
-if (dom.hooksGlobalEnabledInput) {
-  dom.hooksGlobalEnabledInput.addEventListener('change', (event) => {
-    handleToggleHooksGlobal(Boolean(event?.target?.checked));
-  });
-}
-
-if (dom.hooksList) {
-  dom.hooksList.addEventListener('click', (event) => {
-    const button = event.target.closest('button[data-action="toggle-hook"]');
-    if (!button) return;
-
-    const hookName = String(button.dataset.hookName || '').trim();
-    const enabled = String(button.dataset.nextEnabled || '').toLowerCase() === 'true';
-    handleToggleHook(hookName, enabled);
-  });
-}
+// The global switch and each hook's switch save as they are flipped (renderHooksList).
+wireHooksGlobalSwitch();
 
 if (dom.memoryRefreshBtn) {
   dom.memoryRefreshBtn.addEventListener('click', () => {
@@ -13356,19 +13114,11 @@ if (dom.cronRefreshBtn) {
 
 // ── Vault event listeners ──────────────────────────────────
 if (dom.vaultAddBtn) {
-  dom.vaultAddBtn.addEventListener('click', () => {
-    if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = false;
-    if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.focus();
-  });
+  dom.vaultAddBtn.addEventListener('click', () => openVaultPanel(null));
 }
 
 if (dom.vaultCancelEntryBtn) {
-  dom.vaultCancelEntryBtn.addEventListener('click', () => {
-    if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = true;
-    if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.value = '';
-    if (dom.vaultAddValueInput) dom.vaultAddValueInput.value = '';
-    if (dom.vaultAddStatus) { dom.vaultAddStatus.textContent = ''; dom.vaultAddStatus.classList.remove('error'); }
-  });
+  dom.vaultCancelEntryBtn.addEventListener('click', () => closeVaultPanel());
 }
 
 if (dom.vaultSaveEntryBtn) {
@@ -13426,6 +13176,19 @@ if (dom.cronAddBtn) {
   dom.cronAddBtn.addEventListener('click', () => handleAddCronJob());
 }
 
+// Only the field that applies (rule 4): an interval with its unit, or a cron
+// expression or time as text.
+function paintCronAddKind() {
+  const every = (dom.cronAddKindInput?.value || 'every') === 'every';
+  if (dom.cronAddEveryRow) dom.cronAddEveryRow.hidden = !every;
+  if (dom.cronAddValueRow) dom.cronAddValueRow.hidden = every;
+  if (dom.cronAddValueInput) dom.cronAddValueInput.placeholder = dom.cronAddKindInput?.value === 'at' ? 'e.g., 2026-12-01T09:00' : 'e.g., 0 9 * * 1-5';
+}
+if (dom.cronAddKindInput) {
+  dom.cronAddKindInput.addEventListener('change', paintCronAddKind);
+  paintCronAddKind();
+}
+
 if (dom.cronList) {
   dom.cronList.addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-action]');
@@ -13434,9 +13197,7 @@ if (dom.cronList) {
     const action = btn.dataset.action;
     const jobId = btn.dataset.jobId;
 
-    if (action === 'toggle-cron') {
-      handleToggleCronJob(jobId, btn.dataset.nextEnabled === 'true');
-    } else if (action === 'run-cron') {
+    if (action === 'run-cron') {
       handleRunCronJob(jobId);
     } else if (action === 'delete-cron') {
       handleDeleteCronJob(jobId);
@@ -13522,6 +13283,7 @@ if (dom.appsList) {
     const btn = e.target.closest('button[data-action]');
     if (!btn) return;
     if (btn.dataset.action === 'remove-app') {
+      if (!(await showConfirmDialog(`Remove the app "${btn.dataset.appId}"?`))) return;
       try {
         await window.electron.apps.remove(btn.dataset.appId);
         await loadSystemApps();
@@ -14032,38 +13794,33 @@ async function loadPermissionRules() {
       return;
     }
     const rules = result.rules || [];
-    container.innerHTML = '';
+    container.textContent = '';
     if (rules.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'provider-message';
-      empty.textContent = 'No permission rules configured yet. Approve a tool call with a pattern to create one.';
-      container.appendChild(empty);
+      container.appendChild(listEmptyLine('No rules yet. Approve a tool call with a pattern to make one.'));
+      if (status) status.textContent = '';
       return;
     }
+    const RULE_TONE = { allow: 'ok', deny: 'bad' };
     for (const rule of rules) {
-      const row = document.createElement('div');
-      row.className = 'provider-item permission-rule-row';
-      const label = document.createElement('span');
-      label.className = 'permission-rule-label';
-      const actionClass = rule.action === 'deny' ? 'badge-danger' : (rule.action === 'allow' ? 'badge-success' : 'badge-warn');
-      label.innerHTML = `<code>${rule.tool || '?'}</code> <code>${rule.pattern || '*'}</code> <span class="badge ${actionClass}">${rule.action || '?'}</span>`;
-      if (rule.source) {
-        const src = document.createElement('span');
-        src.className = 'permission-rule-source';
-        src.textContent = rule.source;
-        label.appendChild(document.createTextNode(' '));
-        label.appendChild(src);
-      }
-      const deleteBtn = document.createElement('button');
-      deleteBtn.type = 'button';
-      deleteBtn.className = 'btn btn-danger btn-xs';
-      deleteBtn.textContent = 'Remove';
-      deleteBtn.addEventListener('click', async () => {
-        await window.electron.tool.removePermissionRule(rule.tool, rule.pattern, rule.action);
+      // Tool, pattern and source are the store's: text only.
+      const remove = listRowButton('Remove', {}, { danger: true });
+      remove.addEventListener('click', async () => {
+        if (!(await showConfirmDialog(`Remove the rule ${rule.action || '?'} ${rule.tool || '?'} ${rule.pattern || '*'}?`))) return;
+        try {
+          unwrapIpcResult(await window.electron.tool.removePermissionRule(rule.tool, rule.pattern, rule.action), 'Unable to remove the rule.');
+        } catch (err) {
+          if (status) status.textContent = `Error: ${err.message}`;
+          return;
+        }
         loadPermissionRules();
       });
-      row.appendChild(label);
-      row.appendChild(deleteBtn);
+      const row = buildSettingsListRow({
+        name: `${rule.tool || '?'} ${rule.pattern || '*'}`,
+        detail: rule.source || '',
+        pill: { text: rule.action || '?', tone: RULE_TONE[rule.action] || 'warn' },
+        controls: [remove]
+      });
+      row.classList.add('permission-rule-row');
       container.appendChild(row);
     }
     if (status) status.textContent = `${rules.length} rule${rules.length === 1 ? '' : 's'}`;
@@ -14080,39 +13837,22 @@ async function loadWebhookList() {
     const result = unwrapIpcResult(await window.electron.webhook.list(), 'Unable to list webhooks.');
     const webhooks = Array.isArray(result) ? result : (result?.webhooks || []);
     if (!webhooks.length) {
-      dom.webhookList.innerHTML = '';
+      dom.webhookList.textContent = '';
       if (dom.webhookListStatus) dom.webhookListStatus.textContent = 'No webhooks registered.';
       return;
     }
     if (dom.webhookListStatus) dom.webhookListStatus.textContent = webhooks.some((wh) => wh.listening === false) ? WEBHOOK_LISTENER_DOWN : '';
-    dom.webhookList.innerHTML = '';
-    webhooks.forEach(wh => {
-      const row = document.createElement('div');
-      row.className = 'provider-card';
-      row.style.marginBottom = '8px';
-      // The name and the URL are the node's: text, never markup.
-      const line = document.createElement('div');
-      line.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
-      const info = document.createElement('div');
-      const name = document.createElement('strong');
-      name.textContent = wh.name;
-      const url = document.createElement('code');
-      url.style.cssText = 'font-size:0.8rem;color:var(--text-secondary);';
-      url.textContent = wh.url || wh.id;
-      info.append(name, document.createElement('br'), url);
-      const buttons = document.createElement('div');
-      buttons.style.cssText = 'display:flex;gap:4px;';
-      const remove = document.createElement('button');
-      remove.className = 'icon-button';
-      remove.dataset.action = 'delete-webhook';
-      remove.dataset.id = wh.id;
-      remove.title = 'Delete';
-      remove.appendChild(faIcon('fas fa-trash'));
-      buttons.appendChild(remove);
-      line.append(info, buttons);
-      row.appendChild(line);
-      dom.webhookList.appendChild(row);
-    });
+    dom.webhookList.textContent = '';
+    // The name and the URL are the node's: text, never markup.
+    for (const wh of webhooks) {
+      dom.webhookList.appendChild(buildSettingsListRow({
+        name: wh.name,
+        nameTag: 'strong',
+        detail: wh.url || wh.id,
+        controls: [listRowButton('Delete', { action: 'delete-webhook', id: wh.id, name: wh.name }, { danger: true })],
+        dataset: { webhookId: wh.id }
+      }));
+    }
   } catch (err) {
     if (dom.webhookListStatus) dom.webhookListStatus.textContent = `Error: ${err.message}`;
   }
@@ -14143,6 +13883,7 @@ if (dom.webhookList) {
     const btn = e.target.closest('button[data-action="delete-webhook"]');
     if (!btn) return;
     const id = btn.dataset.id;
+    if (!(await showConfirmDialog(`Delete the webhook "${btn.dataset.name || id}"? Its URL stops answering.`))) return;
     try {
       unwrapIpcResult(await window.electron.webhook.delete({ id }), 'Unable to delete the webhook.');
       loadWebhookList();
@@ -14161,6 +13902,8 @@ if (dom.diagnosticsRunBtn) {
       const result = await window.electron.diagnostics.run();
       if (dom.diagnosticsStatus) dom.diagnosticsStatus.textContent = result?.ok ? 'Complete.' : `Failed: ${result?.error || 'no answer'}`;
       if (dom.diagnosticsResults) dom.diagnosticsResults.textContent = result?.formatted || 'No results.';
+      // The Results card stays hidden until a run returns.
+      if (dom.diagnosticsResultsCard) dom.diagnosticsResultsCard.hidden = false;
     } catch (err) {
       if (dom.diagnosticsStatus) dom.diagnosticsStatus.textContent = `Error: ${err.message}`;
     }

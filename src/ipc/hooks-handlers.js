@@ -24,8 +24,9 @@ function registerHooksHandlers(ipcMain, context = {}) {
     };
   }));
 
-  ipcMain.handle(IPC.HOOKS_SET_ENABLED, wrapHandler(IPC.HOOKS_SET_ENABLED, async (_event, { name, enabled }) => {
-    const hook = setHookEnabled(name, enabled);
+  ipcMain.handle(IPC.HOOKS_SET_ENABLED, wrapHandler(IPC.HOOKS_SET_ENABLED, async (_event, { hookId, name, enabled }) => {
+    // preload requires hookId; `name` is what older callers sent.
+    const hook = setHookEnabled(hookId ?? name, enabled);
     return {
       ok: true,
       hook,

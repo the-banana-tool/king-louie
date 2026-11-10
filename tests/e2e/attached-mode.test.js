@@ -39,10 +39,12 @@ describe('E2E: attached mode', { timeout: 240000 }, () => {
       return {
         hooks: !!sidebar.querySelector('.settings-nav-item[data-tab="hooks"]'),
         permissions: !!sidebar.querySelector('.settings-nav-item[data-tab="permissions"]'),
-        hooksShown: document.querySelector('.settings-tab-content[data-tab="hooks"]').classList.contains('is-section')
+        hooksShown: document.querySelector('.settings-tab-content[data-tab="hooks"]').classList.contains('is-section'),
+        sectionHidden: [...document.querySelectorAll('[data-section-tab="hooks"]')].every((el) => el.hidden && getComputedStyle(el).display === 'none'),
+        rulesShown: getComputedStyle(document.querySelector('.settings-tab-content[data-tab="permissions"]')).display !== 'none'
       };
     })()`);
-    assert.deepStrictEqual(nav, { hooks: false, permissions: true, hooksShown: false });
+    assert.deepStrictEqual(nav, { hooks: false, permissions: true, hooksShown: false, sectionHidden: true, rulesShown: true });
   });
 
   it('shows the unreachable banner when the service dies and reconnects after a restart', async () => {

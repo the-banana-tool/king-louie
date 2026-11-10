@@ -313,6 +313,10 @@ describe('E2E: the setup view', { skip }, () => {
       assert.strictEqual(await evaluate(ctx, `document.querySelector('#webhook-list strong').textContent`), hook.name);
       assert.strictEqual(await evaluate(ctx, `document.body.dataset.pwned || null`), null);
       await evaluate(ctx, `document.querySelector('#webhook-list button[data-action="delete-webhook"]').click(); true`);
+      // A delete asks first, in the app's own dialog; the name in it is text too.
+      await waitFor(ctx, `!!document.querySelector('.rename-chat-modal')`);
+      assert.strictEqual(await evaluate(ctx, `document.querySelectorAll('.rename-chat-modal img').length`), 0);
+      await evaluate(ctx, `Array.from(document.querySelectorAll('.rename-chat-modal button')).find((b) => b.textContent === 'Confirm').click(); true`);
       await waitFor(ctx, `document.getElementById('webhook-list-status').textContent.includes('not reachable')`, 5000);
     });
 
