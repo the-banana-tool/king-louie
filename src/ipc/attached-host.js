@@ -48,6 +48,18 @@ function startAttachedHost(deps) {
   // fleet); served() still decides per channel from the handshake.
   const hosting = () => (state.pairing && state.pairing.service && state.pairing.service.hosting === 'personal' ? 'personal' : 'service');
   const routeOf = (channel) => classifyChannel(channel, { hosting: hosting() });
+  // The screen host serves only this machine's personal node: the local
+  // pairing record, on Windows, saying `hosting: personal` with its data dir.
+  // A remote entry (attach stage 3) is never one.
+  const screenHostFactory = deps.screenHostFactory || ((opts) => require('./screen-host').startScreenHost(opts));
+  let screenHost = null;
+  const screenHostDataDir = () => {
+    if (platform !== 'win32') return null;
+    const record = state.pairing;
+    if (!record || record.kind === 'remote') return null;
+    const svc = record.service;
+    return svc && svc.hosting === 'personal' && typeof svc.dataDir === 'string' && svc.dataDir ? svc.dataDir : null;
+  };
 
   async function providerReady() {
     if (!client.service || client.service.providersConfigured !== false) return true;
@@ -169,11 +181,28 @@ function startAttachedHost(deps) {
     // run the node first (once per launch) and then waits on this client's
     // own loop; a fleet pairing connects at once, as before.
     start() {
-      if (client) controller.startAttached().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
+      if (!client) return;
+      controller.startAttached().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
+      // Boot-node-tray Task 7: the local personal node's screen is served from
+      // this window's session. Never for a fleet pairing or a remote entry.
+      const dataDir = screenHostDataDir();
+      if (dataDir && !screenHost) {
+        try {
+          screenHost = screenHostFactory({ dataDir, platform });
+        } catch (err) {
+          log.warn(`the screen host did not start: ${err.message}`);
+        }
+      }
     },
+    screenHost: () => screenHost,
     async shutdown() {
       controller.dispose();
       if (client) client.close();
+      if (screenHost) {
+        const host = screenHost;
+        screenHost = null;
+        await host.stop().catch((err) => log.warn(`stopping the screen host failed: ${err.message}`));
+      }
     }
   };
 }

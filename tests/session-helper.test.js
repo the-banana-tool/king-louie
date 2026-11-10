@@ -443,6 +443,110 @@ describe('take ops', () => {
   });
 });
 
+// Boot-node-tray Task 7: the King Louie app serves its personal node's screen
+// with this loop, reading <dataDir>\session\personal-helper.json through
+// deps.readCopy instead of the fleet per-user file.
+describe('runSessionHelper with readCopy (the app as screen host)', () => {
+  const appDeps = { delays: [20, 20, 20], attachLog: false };
+  const pipe = () => (POSIX ? path.join(setup().base, 'p.sock') : `\\\\.\\pipe\\kl-helper-test-${crypto.randomBytes(6).toString('hex')}`);
+
+  it('runSessionHelper with readCopy connects with the file\'s endpoint, secret and node id', async () => {
+    const endpoint = pipe();
+    const secret = crypto.randomBytes(32);
+    const channel = await channelFor(endpoint, { secret });
+    const ac = new AbortController();
+    const states = [];
+    const ready = once(channel, 'ready');
+    const done = runSessionHelper({
+      signal: ac.signal,
+      deps: { ...appDeps, backend: fakeBackend([REPORT]), readCopy: async () => ({ endpoint, secret, nodeId: NODE_ID }), onState: (s) => states.push(s.connected) }
+    });
+    await ready;
+    assert.equal((await channel.request('foreground', {})).image, '/usr/bin/gedit');
+    ac.abort();
+    assert.equal(await done, 0);
+    assert.deepEqual(states, [true, false]);
+  });
+
+  it('a missing file is retried with backoff, never an exit (app before node)', async () => {
+    const endpoint = pipe();
+    const secret = crypto.randomBytes(32);
+    let reads = 0;
+    const readCopy = async () => {
+      reads += 1;
+      if (reads <= 3) { const e = new Error('ENOENT: no such file'); e.code = 'ENOENT'; throw e; }
+      return { endpoint, secret, nodeId: NODE_ID };
+    };
+    const ac = new AbortController();
+    cleanups.push(() => ac.abort());
+    let settled = false;
+    const done = runSessionHelper({ signal: ac.signal, deps: { ...appDeps, backend: fakeBackend([REPORT]), readCopy } }).then((c) => { settled = true; return c; });
+    // The file appears only after the helper has failed to read it three times.
+    while (reads < 3) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(settled, false);
+    const channel = await channelFor(endpoint, { secret });
+    await once(channel, 'ready');
+    assert.equal(reads, 4);
+    ac.abort();
+    assert.equal(await done, 0);
+  });
+
+  it('a node restart with a new endpoint and secret: re-read before each connect, reconnects', async () => {
+    const first = { endpoint: pipe(), secret: crypto.randomBytes(32) };
+    const second = { endpoint: pipe(), secret: crypto.randomBytes(32) };
+    let current = first;
+    let reads = 0;
+    const readCopy = async () => { reads += 1; return { endpoint: current.endpoint, secret: current.secret, nodeId: NODE_ID }; };
+    const a = await channelFor(first.endpoint, { secret: first.secret });
+    const ac = new AbortController();
+    cleanups.push(() => ac.abort());
+    let ready = once(a, 'ready');
+    runSessionHelper({ signal: ac.signal, deps: { ...appDeps, backend: fakeBackend([REPORT]), readCopy } });
+    await ready;
+    assert.equal(reads, 1);
+    // The node stops (its pipe goes) and starts again with a new pipe and key.
+    current = second;
+    const b = await channelFor(second.endpoint, { secret: second.secret });
+    ready = once(b, 'ready');
+    await a.stop();
+    await ready;
+    assert.equal(b.connected, true);
+    assert.ok(reads >= 2, 'read again before the new connect');
+  });
+
+  it('profileRoot reaches launch_browser, and wrapOp sees every op', async () => {
+    const launched = [];
+    const backend = { ...fakeBackend([REPORT]), launchBrowser: async (o) => { launched.push(o); return { port: 1 }; } };
+    const seen = [];
+    const ac = new AbortController();
+    let handle;
+    const connect = async ({ handleOp }) => {
+      handle = handleOp;
+      const { EventEmitter } = require('events');
+      const s = new EventEmitter();
+      s.close = () => s.emit('closed');
+      s.sendEvent = () => {};
+      return s;
+    };
+    const done = runSessionHelper({
+      signal: ac.signal,
+      deps: {
+        ...appDeps, backend, connect, profileRoot: 'C:\\kl\\data\\browser-profiles',
+        readCopy: async () => ({ endpoint: 'x', secret: Buffer.alloc(32), nodeId: NODE_ID }),
+        wrapOp: (h) => async (op, p, c) => { seen.push(op); return h(op, p, c); }
+      }
+    });
+    while (!handle) await new Promise((r) => setTimeout(r, 5));
+    const exe = fs.realpathSync.native(process.execPath);
+    await handle('launch_browser', { exe, profile: 'take' });
+    assert.deepEqual(seen, ['launch_browser']);
+    assert.equal(launched[0].profileRoot, 'C:\\kl\\data\\browser-profiles');
+    assert.equal(launched[0].profile, 'take');
+    ac.abort();
+    assert.equal(await done, 0);
+  });
+});
+
 describe('paths and selection', () => {
   it('backoff is 1, 2, 5, 10, 30 s', () => {
     assert.deepEqual(RECONNECT_DELAYS, [1000, 2000, 5000, 10000, 30000]);
