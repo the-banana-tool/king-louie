@@ -13,7 +13,9 @@ function createModelClient({ provider, model, env = process.env, options = {}, p
   if (!instance) {
     if (!provider) throw new UsageError('--provider is required.');
     try {
-      instance = ProviderFactory.fromEnv(provider, { env, options });
+      // LongHaul sends private sessions: OpenRouter may route only to providers that keep no prompts.
+      const providerOptions = provider === 'openrouter' ? { ...options, providerPreferences: { data_collection: 'deny' } } : options;
+      instance = ProviderFactory.fromEnv(provider, { env, options: providerOptions });
     } catch (err) {
       if (err.code === 'NO_PROVIDER_KEY' || err.code === 'UNKNOWN_PROVIDER' || /Invalid API key/.test(err.message)) throw new UsageError(err.message);
       throw err;
