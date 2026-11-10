@@ -43,7 +43,16 @@ describe('renderer: settings tabs for models M2', () => {
   it('builds the profile list, editor and picker from the models channels, as text', () => {
     assert.match(block('async function loadModelProfiles()'), /window\.electron\.models\.profiles\(\)/);
     const list = block('function renderModelProfileList()');
-    assert.match(list, /migration/);
+    // Migration notes are not shown on the card (settings redesign §5.4, bug 5).
+    assert.doesNotMatch(list, /models-migration-notes|migration\.notes/);
+    // Each role is a row of model chips with the provider, and a warning when it is empty.
+    const role = block('function renderProfileRoleRow(');
+    assert.match(role, /modelChip\(/);
+    assert.match(role, /roleStatus\(/);
+    assert.match(role, /chip-provider/);
+    assert.match(role, /notice-warn/);
+    assert.doesNotMatch(role, /innerHTML\s*=\s*(?!'')/);
+    assert.match(html, /<script src="renderer-helpers\/model-labels\.js"><\/script>[\s\S]*<script src="renderer\.js"/);
     const entry = block('function renderRoleEntry(role, entry, index, count)');
     assert.match(entry, /is-unusable/);
     assert.match(entry, /reasons\.join/);

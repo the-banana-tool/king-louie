@@ -151,6 +151,8 @@ const dom = {
   modelsCatalogOverrides: document.getElementById('models-catalog-overrides'),
   modelsSaveCatalogBtn: document.getElementById('models-save-catalog-btn'),
   modelsKlStatus: document.getElementById('models-kl-status'),
+  modelsKlSummary: document.getElementById('models-kl-summary'),
+  modelsKlDetail: document.getElementById('models-kl-detail'),
   modelsKlPicks: document.getElementById('models-kl-picks'),
   modelsKlProposal: document.getElementById('models-kl-proposal'),
   modelsKlAutoAccept: document.getElementById('models-kl-auto-accept'),
@@ -7799,6 +7801,8 @@ async function loadModelProfiles() {
     appState.modelProfiles = { profiles: result.profiles || [], broken: result.broken || [], defaultProfileId: result.defaultProfileId || null, customRoles: result.customRoles || [] };
     renderModelProfileList();
     renderCustomRoles();
+    // The suggestion's "Now" reads the default profile.
+    if (appState.kingLouie) renderKingLouie(appState.kingLouie);
   } catch (err) {
     setModelsStatus(err.message, true);
   }
@@ -7857,28 +7861,13 @@ function renderModelProfileList() {
     }
     card.appendChild(header);
 
-    const summary = document.createElement('div');
-    summary.className = 'provider-message';
-    const mainNames = (profile.roles?.main || []).map((e) => e.name);
-    const unusable = Object.values(profile.roles || {}).flat().filter((e) => !e.usable).length;
-    summary.textContent = `Main: ${mainNames.length ? mainNames.join(', ') : '(none)'}${unusable ? ` · ${unusable} model${unusable === 1 ? '' : 's'} not usable now` : ''}`;
-    card.appendChild(summary);
-    if (workerBorrowsFromMain(profile.roles)) card.appendChild(workerBorrowNotice());
+    // Every role in order, then the profile's custom roles (settings redesign
+    // §5.4). The profile's migration notes are not shown here (§2, bug 5).
+    const roles = profileStatusRoles(profile.roles);
+    const custom = Object.keys(profile.roles || {}).filter((r) => !MODEL_ROLE_ORDER.includes(r) && (profile.roles[r] || []).length);
+    for (const role of [...MODEL_ROLE_ORDER, ...custom]) card.appendChild(renderProfileRoleRow(profile, role, roles));
     // Local inference L1: the profile's local-only switches.
     card.appendChild(localOnlyRow(profile));
-
-    // The migration's notes (spec §13): which old model ids were mapped or kept.
-    const notes = profile.migration && Array.isArray(profile.migration.notes) ? profile.migration.notes : [];
-    if (notes.length) {
-      const ul = document.createElement('ul');
-      ul.className = 'models-migration-notes';
-      for (const note of notes) {
-        const li = document.createElement('li');
-        li.textContent = note;
-        ul.appendChild(li);
-      }
-      card.appendChild(ul);
-    }
 
     const actions = document.createElement('div');
     actions.className = 'provider-actions';
@@ -7899,6 +7888,126 @@ function renderModelProfileList() {
     card.appendChild(actions);
     list.appendChild(card);
   }
+}
+
+// A profile card's roles (settings redesign §5.4): the label and its job.
+const MODEL_ROLE_CARD = {
+  main: { label: 'Main', job: 'answers you' },
+  worker: { label: 'Worker', job: 'agents, tasks' },
+  utility: { label: 'Utility', job: 'titles, small jobs' },
+  vision: { label: 'Vision', job: 'optional' },
+  imageGeneration: { label: 'Image generation', job: 'optional' }
+};
+
+// The profile's roles in the shape roleStatus reads. `usable` is the
+// catalog and key verdict the host gave each entry.
+function profileStatusRoles(roles) {
+  const out = {};
+  for (const [role, list] of Object.entries(roles || {})) {
+    out[role] = (Array.isArray(list) ? list : []).filter(Boolean).map((e) => ({
+      provider: e.provider,
+      model: e.model,
+      name: e.name,
+      usable: e.usable !== false,
+      imageInput: e.imageInput === true
+    }));
+  }
+  return out;
+}
+
+function renderProfileRoleRow(profile, role, statusRoles) {
+  const row = document.createElement('div');
+  row.className = 'models-role-row';
+  row.dataset.role = role;
+  const head = document.createElement('div');
+  head.className = 'models-role-head';
+  const name = document.createElement('span');
+  name.className = 'models-role-name';
+  const custom = customRoleOf(role);
+  name.textContent = MODEL_ROLE_CARD[role]?.label || role;
+  const job = document.createElement('span');
+  job.className = 'settings-row-help';
+  job.textContent = MODEL_ROLE_CARD[role]?.job || custom?.description || 'custom role';
+  head.appendChild(name);
+  head.appendChild(job);
+  row.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'models-role-body';
+  const entries = (profile.roles || {})[role] || [];
+  if (entries.length) {
+    // The models in failover order; each names the provider it runs through.
+    const chips = document.createElement('div');
+    chips.className = 'models-role-chips';
+    const labels = appState.settings?.providers || {};
+    const servers = Object.fromEntries(appState.localServerNames || []);
+    for (const entry of entries) {
+      const shown = modelChip(entry, labels, servers);
+      const group = document.createElement('span');
+      group.className = `models-chip${shown.usable ? '' : ' is-unusable'}`;
+      if (!shown.usable && Array.isArray(entry.reasons) && entry.reasons.length) group.title = entry.reasons.join(' ');
+      const modelName = document.createElement('span');
+      modelName.className = 'chip models-chip-name';
+      modelName.textContent = shown.name;
+      group.appendChild(modelName);
+      const provider = document.createElement('span');
+      provider.className = 'chip chip-provider';
+      provider.textContent = shown.provider;
+      group.appendChild(provider);
+      if (shown.free) {
+        const free = document.createElement('span');
+        free.className = 'chip chip-free';
+        free.textContent = 'free';
+        group.appendChild(free);
+      }
+      chips.appendChild(group);
+    }
+    body.appendChild(chips);
+  }
+
+  const status = roleStatus(statusRoles, role);
+  if (status.state === 'warn') {
+    const notice = document.createElement('div');
+    notice.className = 'notice-warn models-role-warning';
+    const text = document.createElement('span');
+    text.textContent = status.message;
+    notice.appendChild(text);
+    // An empty role opens for editing from here (the King Louie profile
+    // changes only by accepting a proposal).
+    if (!entries.length && profile.kind !== 'king-louie') {
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'btn btn-sm';
+      edit.textContent = 'Edit';
+      edit.dataset.profileAction = 'edit';
+      edit.dataset.profileId = profile.id;
+      edit.dataset.profileRole = role;
+      notice.appendChild(edit);
+    }
+    body.appendChild(notice);
+  } else if (status.state === 'borrows' || status.state === 'off') {
+    const help = document.createElement('div');
+    help.className = 'settings-row-help';
+    help.textContent = status.message;
+    body.appendChild(help);
+  } else {
+    const unusable = entries.filter((e) => e && e.usable === false).length;
+    if (unusable) {
+      const help = document.createElement('div');
+      help.className = 'settings-row-help';
+      help.textContent = `${unusable} of these can't be used right now and ${unusable === 1 ? 'is' : 'are'} skipped.`;
+      body.appendChild(help);
+    }
+  }
+  // An empty worker borrows main (spec 2026-09-27 §6.4): delegated reading
+  // costs main's price.
+  if (role === 'worker' && workerBorrowsFromMain(profile.roles)) {
+    const notice = workerBorrowNotice();
+    notice.className = 'settings-row-help models-worker-borrow-notice';
+    body.appendChild(notice);
+  }
+  row.appendChild(body);
+  return row;
 }
 
 function openProfileEditor(profile) {
@@ -8662,6 +8771,16 @@ function formatCostEffect(effect) {
   return `${sign}$${Math.abs(effect.usd).toFixed(2)} a month (${effect.note})`;
 }
 
+// The suggestion's one line (settings redesign §5.4): the difference alone.
+function formatMonthlyDifference(effect) {
+  if (!effect || typeof effect.usd !== 'number') return 'no cost estimate yet';
+  if (effect.usd === 0) return 'about the same cost a month';
+  return `${effect.usd > 0 ? '+' : '−'}$${Math.abs(effect.usd).toFixed(2)} a month`;
+}
+
+// Whether the suggestion's detail is open (Review), across redraws.
+let klDetailOpen = false;
+
 // An empty worker borrows main's models (spec §6.4), so the explorer and
 // every other delegated read costs main's price and saves nothing (final
 // review I1). The chat leaves out its delegation guidance then; this says why.
@@ -8706,13 +8825,18 @@ function isStaleProposal(result) {
 
 function renderKingLouie(view) {
   if (!view || !dom.modelsKlStatus) return;
+  // Drawn again when the profiles load (for the default's "Now"); the tuning
+  // fields are filled only from a new view, so that keeps what is typed.
+  const freshView = appState.kingLouie !== view;
   appState.kingLouie = view;
   const s = view.settings || {};
-  if (dom.modelsKlAutoAccept) dom.modelsKlAutoAccept.checked = Boolean(s.autoAccept);
-  if (dom.modelsKlPreferLocal) dom.modelsKlPreferLocal.checked = Boolean(s.preferLocalUtility);
-  if (dom.modelsKlBand) dom.modelsKlBand.value = String(s.bandPoints ?? 3);
-  if (dom.modelsKlWorkerRatio) dom.modelsKlWorkerRatio.value = String(s.workerAgenticRatio ?? 0.8);
-  if (dom.modelsKlUtilityRatio) dom.modelsKlUtilityRatio.value = String(s.utilityIntelligenceRatio ?? 0.5);
+  if (freshView) {
+    if (dom.modelsKlAutoAccept) dom.modelsKlAutoAccept.checked = Boolean(s.autoAccept);
+    if (dom.modelsKlPreferLocal) dom.modelsKlPreferLocal.checked = Boolean(s.preferLocalUtility);
+    if (dom.modelsKlBand) dom.modelsKlBand.value = String(s.bandPoints ?? 3);
+    if (dom.modelsKlWorkerRatio) dom.modelsKlWorkerRatio.value = String(s.workerAgenticRatio ?? 0.8);
+    if (dom.modelsKlUtilityRatio) dom.modelsKlUtilityRatio.value = String(s.utilityIntelligenceRatio ?? 0.5);
+  }
 
   const p = view.proposal;
   if (view.unavailable) setKingLouieStatus(view.unavailable, true);
@@ -8734,10 +8858,44 @@ function renderKingLouie(view) {
     if (workerBorrowsFromMain(view.current || p?.roles)) dom.modelsKlPicks.appendChild(workerBorrowNotice());
   }
 
+  // One line with the monthly difference and Review; the detail opens on
+  // Review (settings redesign §5.4).
+  const reviewable = Boolean(p && !p.dismissed);
+  if (!reviewable) klDetailOpen = false;
+  if (dom.modelsKlSummary) {
+    dom.modelsKlSummary.textContent = '';
+    dom.modelsKlSummary.hidden = !reviewable;
+    if (reviewable) {
+      const roles = (p.changes || []).map((c) => roleShortName(c.role));
+      const line = document.createElement('span');
+      line.className = 'models-kl-summary-text';
+      line.textContent = `King Louie suggests other models${roles.length ? ` for ${roles.join(', ')}` : ''}: ${formatMonthlyDifference(p.costEffect)}.`;
+      const review = document.createElement('button');
+      review.type = 'button';
+      review.className = 'btn btn-sm';
+      review.id = 'models-kl-review-btn';
+      review.textContent = 'Review';
+      review.setAttribute('aria-expanded', String(klDetailOpen));
+      review.setAttribute('aria-controls', 'models-kl-detail');
+      review.addEventListener('click', () => {
+        klDetailOpen = !klDetailOpen;
+        review.setAttribute('aria-expanded', String(klDetailOpen));
+        if (dom.modelsKlDetail) dom.modelsKlDetail.hidden = !klDetailOpen;
+      });
+      dom.modelsKlSummary.appendChild(line);
+      dom.modelsKlSummary.appendChild(review);
+    }
+  }
+  if (dom.modelsKlDetail) dom.modelsKlDetail.hidden = !(reviewable && klDetailOpen);
+
   const box = dom.modelsKlProposal;
   if (!box) return;
   box.textContent = '';
   if (!p || p.dismissed) return;
+  // "Now" is what the default profile runs for the role today (bug 6: the
+  // King Louie profile's own role said "(none)" before the first Accept).
+  const { profiles: allProfiles = [], defaultProfileId: defaultId = null } = appState.modelProfiles || {};
+  const defaultRoles = allProfiles.find((x) => x.id === defaultId)?.roles || {};
   for (const change of p.changes || []) {
     const card = document.createElement('div');
     card.className = 'models-kl-change';
@@ -8747,7 +8905,7 @@ function renderKingLouie(view) {
     title.textContent = roleShortName(change.role);
     card.appendChild(title);
     const from = document.createElement('div');
-    from.textContent = `Now: ${targetsText(change.from)}`;
+    from.textContent = `Now (Default): ${targetsText(defaultRoles[change.role])}`;
     card.appendChild(from);
     const to = document.createElement('div');
     to.textContent = `Proposed: ${targetsText(change.to)}`;
@@ -8998,7 +9156,13 @@ if (dom.modelsProfileList) {
     const action = btn.dataset.profileAction;
     const profile = (appState.modelProfiles?.profiles || []).find((p) => p.id === id);
     try {
-      if (action === 'edit' && profile) openProfileEditor(profile);
+      if (action === 'edit' && profile) {
+        openProfileEditor(profile);
+        // A role's warning opens that role (settings redesign §5.4).
+        const role = btn.dataset.profileRole;
+        const block = role ? dom.modelsProfileEditor?.querySelector(`.models-role-block[data-role="${CSS.escape(role)}"]`) : null;
+        block?.scrollIntoView({ block: 'center' });
+      }
       if (action === 'duplicate') {
         const r = unwrapIpcResult(await window.electron.models.duplicateProfile(id), 'Unable to duplicate the profile.');
         setModelsStatus(`Created ${r.profile.name}.`);

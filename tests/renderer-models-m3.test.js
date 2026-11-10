@@ -38,9 +38,21 @@ describe('renderer: the per-role cost line', () => {
 
 describe('renderer: the King Louie profile (spec §7, §11)', () => {
   it('has its card and controls in the Models tab', () => {
-    for (const id of ['models-king-louie-card', 'models-kl-status', 'models-kl-picks', 'models-kl-proposal', 'models-kl-auto-accept', 'models-kl-prefer-local', 'models-kl-band', 'models-kl-worker-ratio', 'models-kl-utility-ratio', 'models-kl-save-btn', 'models-kl-duplicate-btn']) {
+    for (const id of ['models-king-louie-card', 'models-kl-status', 'models-kl-summary', 'models-kl-detail', 'models-advanced', 'models-kl-picks', 'models-kl-proposal', 'models-kl-auto-accept', 'models-kl-prefer-local', 'models-kl-band', 'models-kl-worker-ratio', 'models-kl-utility-ratio', 'models-kl-save-btn', 'models-kl-duplicate-btn']) {
       assert.match(html, new RegExp(`id="${id}"`), id);
     }
+  });
+
+  it('puts the catalog, custom roles and the suggestion tuning under a collapsed Advanced (§5.4)', () => {
+    const i = html.indexOf('<details id="models-advanced">');
+    const j = html.indexOf('</details>', i);
+    assert.ok(i > 0 && j > i, 'the Advanced section exists, collapsed');
+    const advanced = html.slice(i, j);
+    assert.match(advanced, /<summary>Advanced<\/summary>/);
+    for (const id of ['models-catalog-card', 'models-custom-roles-card', 'models-kl-band', 'models-kl-worker-ratio', 'models-kl-utility-ratio', 'models-kl-auto-accept', 'models-kl-prefer-local']) {
+      assert.match(advanced, new RegExp(`id="${id}"`), id);
+    }
+    assert.doesNotMatch(advanced, /id="models-kl-summary"|id="models-profile-list"/);
   });
 
   it('draws the view from the channels, as text, with no native dialogs', () => {
@@ -49,6 +61,13 @@ describe('renderer: the King Louie profile (spec §7, §11)', () => {
     assert.match(render, /window\.electron\.models\.acceptProposal\(/);
     assert.match(render, /window\.electron\.models\.dismissProposal\(/);
     assert.match(render, /models-kl-change/);
+    // One line with the monthly difference and Review; the detail opens on Review (§5.4).
+    assert.match(render, /modelsKlSummary/);
+    assert.match(render, /'Review'/);
+    assert.match(render, /modelsKlDetail\.hidden/);
+    // "Now" is the default profile's role, not the King Louie profile's (bug 6).
+    assert.match(render, /Now \(Default\): /);
+    assert.doesNotMatch(render, /`Now: /);
     assert.doesNotMatch(render, /innerHTML\s*=\s*(?!'')/);
     assert.doesNotMatch(render, /\bconfirm\(|\balert\(|\bprompt\(/);
     assert.match(src, /window\.electron\.models\.onProposalChanged\(/);

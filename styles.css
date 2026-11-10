@@ -3814,6 +3814,99 @@ div.models-picker-item.is-unusable { cursor: default; }
   margin: 0.15em 0;
 }
 
+/* Settings redesign §5.4: a profile card's roles, the suggestion's line and
+   the collapsed Advanced section. */
+.models-role-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 160px) 1fr;
+  gap: 4px 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--settings-fs-body);
+  color: var(--text-primary);
+}
+
+.models-role-head {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.models-role-name {
+  font-weight: 600;
+}
+
+.models-role-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.models-role-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+.models-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.models-chip .models-chip-name {
+  color: var(--text-primary);
+  font-size: var(--settings-fs-body);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+.models-chip.is-unusable {
+  opacity: 0.5;
+}
+
+.models-role-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.models-kl-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 6px 0;
+  font-size: var(--settings-fs-body);
+  color: var(--text-primary);
+}
+
+.models-kl-summary[hidden],
+.models-kl-detail[hidden] {
+  display: none;
+}
+
+#models-advanced {
+  margin-top: 16px;
+}
+
+#models-advanced > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-body);
+  margin-bottom: 8px;
+}
+
+@media (max-width: 520px) {
+  .models-role-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Models M3: custom roles (spec 2026-09-27 §6.2, §11). */
 .models-custom-role {
   display: flex;

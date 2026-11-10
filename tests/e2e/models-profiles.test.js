@@ -178,6 +178,33 @@ describe('E2E: profiles, the main switcher and Retry with…', () => {
     server.setHold(false);
   });
 
+  it('a profile card shows each role\'s models with their provider, and what an empty role does (settings redesign §5.4)', async () => {
+    await openSettingsTab(ctx, 'models');
+    await waitFor(ctx, `!!document.querySelector('#models-profile-list .models-profile-card[data-profile-id="p-local"] .models-role-row[data-role="utility"]')`);
+    const card = await evaluate(ctx, `(() => {
+      const c = document.querySelector('#models-profile-list .models-profile-card[data-profile-id="p-local"]');
+      const row = (r) => c.querySelector('.models-role-row[data-role="' + r + '"]');
+      return {
+        roles: [...c.querySelectorAll('.models-role-row')].map((el) => el.dataset.role),
+        utility: row('utility').textContent,
+        chips: [...c.querySelectorAll('.models-chip')].map((el) => ({
+          name: el.querySelector('.models-chip-name')?.textContent || '',
+          provider: el.querySelector('.chip-provider')?.textContent || ''
+        })),
+        migration: !!c.querySelector('.models-migration-notes')
+      };
+    })()`);
+    assert.deepStrictEqual(card.roles, ['main', 'worker', 'utility', 'vision', 'imageGeneration']);
+    assert.match(card.utility, /Uses (Worker|Main)'s models\./);
+    assert.ok(card.chips.length >= 1, 'main\'s model is a chip');
+    for (const chip of card.chips) assert.ok(chip.provider.trim().length > 0, `${chip.name} names its provider`);
+    assert.strictEqual(card.chips[0].name, 'test-model');
+    assert.match(card.chips[0].provider, /^Ollama/);
+    assert.strictEqual(card.migration, false);
+    await evaluate(ctx, `document.getElementById('close-settings-btn').click(); true`);
+    await waitFor(ctx, `document.getElementById('settings-drawer').hidden`);
+  });
+
   it('creates a profile in the Models tab', async () => {
     await openSettingsTab(ctx, 'models');
     await waitFor(ctx, `document.querySelectorAll('#models-profile-list .models-profile-card:not(.models-profile-broken)').length === 1`);

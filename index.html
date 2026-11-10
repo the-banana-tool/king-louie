@@ -373,11 +373,11 @@
           </section>
         </div>
 
-        <!-- Tab: Models (spec 2026-09-27 §11) -->
+        <!-- Tab: Models (spec 2026-09-27 §11; settings redesign §5.4) -->
         <div class="settings-tab-content" data-tab="models">
           <section class="template-variables-card" id="models-profiles-card">
             <h3>Profiles</h3>
-            <p>A profile assigns models to roles: main answers you, worker runs agents and delegated work, utility does small jobs. King Louie only uses models you place in a role, in the order you list them. A chat or case picks a profile; new chats use the default.</p>
+            <p class="settings-row-help">A profile assigns models to roles. King Louie only uses models you place in a role, in the order you list them. A chat or case picks a profile; new chats use the default.</p>
             <div class="provider-actions">
               <button type="button" class="btn btn-primary" id="models-new-profile-btn"><i class="fas fa-plus"></i> New profile</button>
               <span class="provider-message" id="models-profiles-status"></span>
@@ -388,10 +388,23 @@
 
           <section class="template-variables-card" id="models-king-louie-card">
             <h3>King Louie selected</h3>
-            <p>King Louie proposes models for each role from the models you can use, their prices and their scores. Nothing changes until you accept a proposal.</p>
+            <p class="settings-row-help">King Louie proposes models for each role from the models you can use, their prices and their scores. Nothing changes until you accept a proposal.</p>
             <div class="provider-message" id="models-kl-status">Reading the proposal…</div>
-            <div class="models-kl-picks" id="models-kl-picks"></div>
-            <div class="models-kl-proposal" id="models-kl-proposal"></div>
+            <div class="models-kl-summary" id="models-kl-summary" hidden></div>
+            <div class="models-kl-detail" id="models-kl-detail" hidden>
+              <div class="models-kl-picks" id="models-kl-picks"></div>
+              <div class="models-kl-proposal" id="models-kl-proposal"></div>
+              <div class="provider-actions">
+                <button type="button" class="btn" id="models-kl-duplicate-btn">Duplicate as my profile</button>
+              </div>
+            </div>
+          </section>
+
+          <details id="models-advanced">
+            <summary>Advanced</summary>
+
+          <section class="template-variables-card" id="models-kl-tuning-card">
+            <h3>King Louie's suggestions</h3>
             <div class="template-variables-grid">
               <label class="inline-toggle" for="models-kl-auto-accept">
                 <input id="models-kl-auto-accept" type="checkbox">
@@ -410,13 +423,11 @@
             </div>
             <div class="provider-actions">
               <button type="button" class="btn" id="models-kl-save-btn">Save these settings</button>
-              <button type="button" class="btn" id="models-kl-duplicate-btn">Duplicate as my profile</button>
             </div>
           </section>
-
           <section class="template-variables-card" id="models-catalog-card">
             <h3>Model catalog</h3>
-            <p>Prices and capabilities for every model come from a catalog bundled with King Louie and refreshed daily from models.dev.</p>
+            <p class="settings-row-help">Prices and capabilities for every model come from a catalog bundled with King Louie and refreshed daily from models.dev.</p>
             <div class="provider-message" id="models-catalog-status">Reading the catalog…</div>
             <div class="template-variables-grid">
               <label class="inline-toggle" for="models-catalog-fetch">
@@ -435,7 +446,7 @@
           </section>
 
           <section class="template-variables-card" id="models-custom-roles-card">
-            <h3>Advanced: custom roles</h3>
+            <h3>Custom roles</h3>
             <p class="settings-row-help" id="models-custom-roles-warning">Use only if you know what you're doing. A custom role is a named job with its own list of models in each profile. A case role, a workflow task or SpawnAgent that names it runs on those models; a profile with none for it uses the fallback role. A role nothing names does nothing.</p>
             <div class="provider-list" id="models-custom-role-list"></div>
             <div class="template-variables-grid">
@@ -465,6 +476,7 @@
               <span class="provider-message" id="models-custom-roles-status"></span>
             </div>
           </section>
+          </details>
         </div>
 
         <!-- Tab: Local servers (local inference L1) -->
@@ -1160,6 +1172,7 @@
   <script src="renderer-helpers/task-badge.js"></script>
   <script src="renderer-helpers/settings-nav.js"></script>
   <script src="renderer-helpers/settings-banner.js"></script>
+  <script src="renderer-helpers/model-labels.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>
