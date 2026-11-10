@@ -319,6 +319,39 @@ describe('what the task runs (attach stage 2 §6.8; read, never run)', () => {
     assert.strictEqual(task.dataDir, "C:\\o'brien\\data");
   });
 
+  const newXml = ({ app = 'C:\\Program Files\\King Louie\\King Louie.exe', entry = 'C:\\Program Files\\King Louie\\resources\\app.asar\\bin\\king-louie-service.js', dir = 'C:\\Users\\o\\AppData\\Local\\KingLouie\\node\\data' } = {}) => `<Task><Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers><Principals><Principal id="Author"><UserId>${ME}</UserId><LogonType>S4U</LogonType></Principal></Principals><Settings></Settings><Actions Context="Author"><Exec><Command>${app}</Command><Arguments>--kl-node-service "${entry}" run --data-dir "${dir}" --screen-host app</Arguments></Exec></Actions></Task>`;
+
+  it('reads program, entry and dataDir from the new action', () => {
+    const task = parseTaskXml(newXml());
+    assert.strictEqual(task.program, 'C:\\Program Files\\King Louie\\King Louie.exe');
+    assert.strictEqual(task.entry, 'C:\\Program Files\\King Louie\\resources\\app.asar\\bin\\king-louie-service.js');
+    assert.strictEqual(task.dataDir, 'C:\\Users\\o\\AppData\\Local\\KingLouie\\node\\data');
+    assert.strictEqual(parseTaskXml(newXml({ dir: 'C:\\d\\data\\\\' })).dataDir, 'C:\\d\\data\\');
+  });
+
+  it('still reads the old PowerShell action (an install from before this)', () => {
+    const task = parseTaskXml(xml());
+    assert.strictEqual(task.program, 'C:\\Program Files\\nodejs\\node.exe');
+    assert.strictEqual(task.entry, 'C:\\work\\k\\bin\\king-louie-service.js');
+    assert.strictEqual(task.dataDir, 'C:\\Users\\owner\\node\\data');
+  });
+
+  it('reports logonType S4U and boot true for the new task, InteractiveToken and false for the old', () => {
+    const fresh = parseTaskXml(newXml());
+    assert.strictEqual(fresh.logonType, 'S4U');
+    assert.strictEqual(fresh.boot, true);
+    const old = parseTaskXml(xml().replace('</UserId></Principal>', '</UserId><LogonType>InteractiveToken</LogonType></Principal>'));
+    assert.strictEqual(old.logonType, 'InteractiveToken');
+    assert.strictEqual(old.boot, false);
+  });
+
+  it('the new action: the app is the program, and a moved app is gone', async () => {
+    const app = 'C:\\Program Files\\King Louie\\King Louie.exe';
+    const out = await runnerOver(newXml(), { execPath: app, statFile: missing(app) }).queryTask({ me: ME });
+    assert.strictEqual(out.gone, app);
+    assert.strictEqual(out.runs, 'app');
+  });
+
   it('a removed checkout: node.exe stands, the entry is gone, and that is said', async () => {
     const entry = 'C:\\work\\k\\bin\\king-louie-service.js';
     const out = await runnerOver(xml(), { statFile: missing(entry) }).queryTask({ me: ME });

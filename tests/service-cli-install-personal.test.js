@@ -466,14 +466,15 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
   const RELAY_YAML = 'name: laptop\nprofile: agent\nhosting: personal\napprovers:\n  relay: wss://relay.example.com:8443\n';
   const argsOf = (xml) => /<Arguments>(.*)<\/Arguments>/.exec(xml)[1].replace(/&amp;/g, '&');
 
-  it('runAsNode: the task sets ELECTRON_RUN_AS_NODE, and the consent names the binary and what it means', async () => {
+  it('runAsNode: the task runs the app binary with --kl-node-service, and the consent names the binary and what it means', async () => {
     const s = setup();
     const d = deps(s, { runAsNode: true, nodePath: APP });
     const { code, t } = await run('install', s, d);
     assert.equal(code, 0, t.errors());
     assert.match(t.text(), /^ {2}binary: {5}C:\\Program Files\\King Louie\\King Louie\.exe, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed$/m);
     const write = d.executed.flat().find((step) => step.writeFile);
-    assert.match(argsOf(write.writeFile.content), /-Command \$env:ELECTRON_RUN_AS_NODE='1'; & 'C:\\Program Files\\King Louie\\King Louie\.exe' 'C:\\kl\\bin\\king-louie-service\.js' run --data-dir /);
+    assert.match(write.writeFile.content, /<Command>C:\\Program Files\\King Louie\\King Louie\.exe<\/Command>/);
+    assert.match(argsOf(write.writeFile.content), /^--kl-node-service "C:\\kl\\bin\\king-louie-service\.js" run --data-dir ".*" --screen-host app$/);
   });
 
   describe('the launcher a window-installed owner runs', () => {
@@ -662,7 +663,7 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
     assert.equal(code, 0, t.errors());
     assert.doesNotMatch(t.text(), /binary:/);
     const write = d.executed.flat().find((step) => step.writeFile);
-    assert.doesNotMatch(write.writeFile.content, /ELECTRON_RUN_AS_NODE/);
+    assert.doesNotMatch(write.writeFile.content, /ELECTRON_RUN_AS_NODE|powershell/i);
   });
 
   it('a node already running on the data dir: no /Run step, and it says the task starts it at the next logon', async () => {
@@ -694,31 +695,60 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
 });
 
 describe('renderPersonalTaskXml', () => {
-  it('renderPersonalTaskXml: LogonTrigger for the SID, InteractiveToken, LeastPrivilege, run --data-dir', () => {
-    const xml = renderPersonalTaskXml({ sid: SID, nodePath: 'C:\\Program Files\\nodejs\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\Users\\owner\\AppData\\Local\\KingLouie\\node\\data', env: { SystemRoot: 'C:\\Windows' } });
+  const APPEXE = 'C:\\Program Files\\King Louie\\King Louie.exe';
+  const ENTRY = 'C:\\Program Files\\King Louie\\resources\\app.asar\\bin\\king-louie-service.js';
+  const DIR = 'C:\\Users\\o\\AppData\\Local\\KingLouie\\node\\data';
+  const base = { sid: SID, appPath: APPEXE, entryPath: ENTRY, dataDir: DIR };
+  const render = (extra = {}) => renderPersonalTaskXml({ ...base, ...extra });
+
+  it('renders a boot trigger and a logon trigger for the SID', () => {
+    const xml = render();
     assert.match(xml, /<Description>King Louie personal node<\/Description>/);
+    assert.match(xml, /<BootTrigger><Enabled>true<\/Enabled><\/BootTrigger>/);
     assert.match(xml, /<LogonTrigger><Enabled>true<\/Enabled><UserId>S-1-5-21-1-2-3-1001<\/UserId><\/LogonTrigger>/);
-    assert.match(xml, /<LogonType>InteractiveToken<\/LogonType>/);
-    assert.match(xml, /<RunLevel>LeastPrivilege<\/RunLevel>/);
-    assert.match(xml, /<RestartOnFailure>/);
-    assert.match(xml, /<DisallowStartIfOnBatteries>false<\/DisallowStartIfOnBatteries>/);
-    assert.match(xml, /<StopIfGoingOnBatteries>false<\/StopIfGoingOnBatteries>/);
-    assert.match(xml, /<Command>C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe<\/Command>/);
-    assert.match(xml, /run --data-dir 'C:\\Users\\owner\\AppData\\Local\\KingLouie\\node\\data'/);
   });
 
-  it('runAsNode: true sets ELECTRON_RUN_AS_NODE before the call to the binary; without it, no variable is set', () => {
-    const base = { sid: SID, nodePath: 'C:\\Program Files\\King Louie\\King Louie.exe', entryPath: 'C:\\Program Files\\King Louie\\resources\\app.asar\\bin\\king-louie-service.js', dataDir: 'C:\\d\\data', env: { SystemRoot: 'C:\\Windows' } };
-    const argsOf = (xml) => /<Arguments>(.*)<\/Arguments>/.exec(xml)[1].replace(/&amp;/g, '&');
-    const call = "& 'C:\\Program Files\\King Louie\\King Louie.exe' 'C:\\Program Files\\King Louie\\resources\\app.asar\\bin\\king-louie-service.js' run --data-dir 'C:\\d\\data'";
-    assert.equal(argsOf(renderPersonalTaskXml({ ...base, runAsNode: true })), `-WindowStyle Hidden -NoProfile -NonInteractive -Command $env:ELECTRON_RUN_AS_NODE='1'; ${call}`);
-    assert.equal(argsOf(renderPersonalTaskXml(base)), `-WindowStyle Hidden -NoProfile -NonInteractive -Command ${call}`);
+  it('renders an S4U principal at LeastPrivilege', () => {
+    const xml = render();
+    assert.match(xml, /<LogonType>S4U<\/LogonType>/);
+    assert.doesNotMatch(xml, /InteractiveToken/);
+    assert.match(xml, /<RunLevel>LeastPrivilege<\/RunLevel>/);
+  });
+
+  it('renders the security descriptor letting the owner read and run', () => {
+    assert.match(render(), /<SecurityDescriptor>D:\(A;;FA;;;SY\)\(A;;FA;;;BA\)\(A;;GRGX;;;S-1-5-21-1-2-3-1001\)<\/SecurityDescriptor>/);
+  });
+
+  it('runs the app binary with no PowerShell', () => {
+    const xml = render();
+    assert.ok(xml.includes(`<Command>${APPEXE}</Command>`));
+    assert.ok(xml.includes(`<Arguments>--kl-node-service "${ENTRY}" run --data-dir "${DIR}" --screen-host app</Arguments>`));
+    assert.doesNotMatch(xml, /powershell/i);
+  });
+
+  it('keeps IgnoreNew, no battery stops, PT0S and RestartOnFailure PT1M x3', () => {
+    const xml = render();
+    assert.match(xml, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
+    assert.match(xml, /<DisallowStartIfOnBatteries>false<\/DisallowStartIfOnBatteries>/);
+    assert.match(xml, /<StopIfGoingOnBatteries>false<\/StopIfGoingOnBatteries>/);
+    assert.match(xml, /<ExecutionTimeLimit>PT0S<\/ExecutionTimeLimit>/);
+    assert.match(xml, /<RestartOnFailure><Interval>PT1M<\/Interval><Count>3<\/Count><\/RestartOnFailure>/);
+  });
+
+  it('orders the elements as the Task Scheduler schema does', () => {
+    const xml = render();
+    const at = (tag) => xml.indexOf(`<${tag}`);
+    assert.ok(at('RegistrationInfo') < at('Triggers') && at('Triggers') < at('Principals') && at('Principals') < at('Settings') && at('Settings') < at('Actions'));
+  });
+
+  it('doubles a trailing backslash so the closing quote stays a quote', () => {
+    // path.win32.resolve keeps the backslash only on a drive root.
+    assert.ok(render({ dataDir: 'D:\\' }).includes('--data-dir "D:\\\\" --screen-host app'));
   });
 
   it('refuses a malformed SID and a path with a double quote', () => {
-    const base = { sid: SID, nodePath: 'C:\\n\\node.exe', entryPath: 'C:\\kl\\e.js', dataDir: 'C:\\d\\data' };
-    assert.throws(() => renderPersonalTaskXml({ ...base, sid: 'owner' }));
-    assert.throws(() => renderPersonalTaskXml({ ...base, dataDir: 'C:\\d"\\data' }));
+    assert.throws(() => render({ sid: 'owner' }));
+    assert.throws(() => render({ dataDir: 'C:\d"\data' }));
   });
 });
 

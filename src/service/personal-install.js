@@ -13,7 +13,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { sanitizeWindowsPath, xmlEscape, executeSteps } = require('./installers');
-const { windowsSystemRoot, windowsSchtasksExe, windowsPowerShellExe } = require('../platform/windows-paths');
+const { windowsSystemRoot, windowsSchtasksExe } = require('../platform/windows-paths');
 const { ensurePrivateDir, personalDataDir, PERSONAL_CLI_FILE, PERSONAL_CLI_MARKER, isPersonalCli } = require('../platform/paths');
 const { parseYaml } = require('../platform/yaml');
 const { parseGuiConfig } = require('../gui/config');
@@ -34,26 +34,35 @@ const ALREADY_RUNNING = (pid) => `King Louie Node is already running (pid ${pid}
 const FFMPEG_LINE = 'ffmpeg is not on PATH: a take that records needs it. Install it as yourself: winget install Gyan.FFmpeg';
 const NO_CHROME_LINE = 'no chrome.exe found: takes and desktop apps are off; add gui.apps.chrome and gui.browser to node.yaml to turn them on';
 
-const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
+// A path in a command line CommandLineToArgvW reads: double quotes around it, and a
+// run of backslashes at its end doubled so the closing quote stays a quote
+// (sanitizeWindowsPath already refused a quote inside).
+const argQuote = (s) => `"${String(s).replace(/(\\+)$/, '$1$1')}"`;
 
-// runAsNode: nodePath is the desktop app's own binary (Electron), which runs
-// the entry as plain Node only with ELECTRON_RUN_AS_NODE set (desktop attach
-// spec §8, C-9); the task's PowerShell sets it before the call.
-function renderPersonalTaskXml({ sid, nodePath, entryPath, dataDir, runAsNode = false, env = process.env }) {
+// The boot task (boot-node-tray spec): a boot trigger and a logon trigger, S4U (no
+// password stored, no window), and a security descriptor that lets the owner read and
+// run it. The action is the installed app's own binary; --kl-node-service makes main.js
+// run the entry as the node's service, no PowerShell in between.
+function renderPersonalTaskXml({ sid, appPath, entryPath, dataDir }) {
   if (!SID_RE.test(String(sid))) throw new Error('the task needs the account\'s SID');
-  const node = sanitizeWindowsPath('nodePath', nodePath);
+  const app = sanitizeWindowsPath('appPath', appPath);
   const entry = sanitizeWindowsPath('entryPath', entryPath);
   const dir = sanitizeWindowsPath('dataDir', dataDir);
-  const prefix = runAsNode ? "$env:ELECTRON_RUN_AS_NODE='1'; " : '';
-  const args = `-WindowStyle Hidden -NoProfile -NonInteractive -Command ${prefix}& ${psQuote(node)} ${psQuote(entry)} run --data-dir ${psQuote(dir)}`;
+  const args = `--kl-node-service ${argQuote(entry)} run --data-dir ${argQuote(dir)} --screen-host app`;
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>King Louie personal node</Description></RegistrationInfo>
-  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${sid}</UserId></LogonTrigger></Triggers>
+  <RegistrationInfo>
+    <Description>King Louie personal node</Description>
+    <SecurityDescriptor>D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;${sid})</SecurityDescriptor>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger><Enabled>true</Enabled></BootTrigger>
+    <LogonTrigger><Enabled>true</Enabled><UserId>${sid}</UserId></LogonTrigger>
+  </Triggers>
   <Principals>
     <Principal id="Author">
       <UserId>${sid}</UserId>
-      <LogonType>InteractiveToken</LogonType>
+      <LogonType>S4U</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
@@ -61,12 +70,13 @@ function renderPersonalTaskXml({ sid, nodePath, entryPath, dataDir, runAsNode = 
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <Enabled>true</Enabled>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>${xmlEscape(windowsPowerShellExe(env))}</Command>
+      <Command>${xmlEscape(app)}</Command>
       <Arguments>${xmlEscape(args)}</Arguments>
     </Exec>
   </Actions>
@@ -437,7 +447,7 @@ async function install({ flags, io, c }) {
   const xmlPath = path.join(c.tmpDir, `king-louie-node-${crypto.randomBytes(6).toString('hex')}.xml`);
   const schtasks = windowsSchtasksExe(c.env);
   const steps = [
-    { description: 'write the logon task definition', writeFile: { path: xmlPath, content: `\ufeff${renderPersonalTaskXml({ sid: account.sid, nodePath: c.nodePath, entryPath: c.entryPath, dataDir, runAsNode: c.runAsNode, env: c.env })}`, mode: 0o600, encoding: 'utf16le' } },
+    { description: 'write the logon task definition', writeFile: { path: xmlPath, content: `\ufeff${renderPersonalTaskXml({ sid: account.sid, appPath: c.nodePath, entryPath: c.entryPath, dataDir })}`, mode: 0o600, encoding: 'utf16le' } },
     { description: `register the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Create', '/TN', PERSONAL_TASK_NAME, '/XML', xmlPath, '/F'] },
     { description: 'delete the temporary task definition', unlink: xmlPath, always: true, ignoreFailure: true }
   ];
