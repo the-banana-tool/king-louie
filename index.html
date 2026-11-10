@@ -306,70 +306,27 @@
         <!-- Tab: Providers -->
         <div class="settings-tab-content" data-tab="providers">
           <section class="template-variables-card" id="api-keys-card">
-            <h3>API keys</h3>
-            <p>Keys, Anthropic sign-in and the Ollama address, with each provider's last connection test. Which models King Louie uses is set under Models.</p>
+            <h3>Model providers</h3>
+            <p class="settings-row-help">One key per provider. Saving a key tests it. Which models King Louie uses is set under Model profiles.</p>
             <div class="provider-actions">
               <button type="button" class="btn" id="models-test-all-btn"><i class="fas fa-plug"></i> Test all</button>
             </div>
-          </section>
-          <div class="provider-list" id="provider-list"></div>
-
-          <section class="template-variables-card">
-            <h3>Brave Search</h3>
-            <p>API key for the Brave Search web search provider.</p>
-            <div class="template-variables-grid">
-              <label for="websearch-brave-key-input">Brave Search API Key</label>
-              <input id="websearch-brave-key-input" class="provider-input" type="password" placeholder="Brave Search API key">
-            </div>
-            <div class="template-variables-actions">
-              <button id="save-websearch-brave-btn" type="button" class="btn btn-primary">Save Key</button>
-              <button id="test-websearch-brave-btn" type="button" class="btn">Test Connection</button>
-              <button id="clear-websearch-brave-btn" type="button" class="btn btn-danger">Clear Key</button>
-              <span id="websearch-brave-status" class="provider-message">Not configured.</span>
-            </div>
+            <div class="notice-warn" id="providers-failing-banner" role="status" hidden></div>
+            <div class="provider-list key-row-list" id="provider-list"></div>
           </section>
 
-          <section class="template-variables-card">
-            <h3>Tavily</h3>
-            <p>API key for the Tavily web search provider.</p>
-            <div class="template-variables-grid">
-              <label for="websearch-tavily-key-input">Tavily API Key</label>
-              <input id="websearch-tavily-key-input" class="provider-input" type="password" placeholder="Tavily API key">
-            </div>
-            <div class="template-variables-actions">
-              <button id="save-websearch-tavily-btn" type="button" class="btn btn-primary">Save Key</button>
-              <button id="test-websearch-tavily-btn" type="button" class="btn">Test Connection</button>
-              <button id="clear-websearch-tavily-btn" type="button" class="btn btn-danger">Clear Key</button>
-              <span id="websearch-tavily-status" class="provider-message">Not configured.</span>
-            </div>
-          </section>
-
-          <section class="template-variables-card">
-            <h3>Image Generation</h3>
-            <p>Configure image generation providers. OpenAI (DALL-E) uses your existing OpenAI API key. Fal (Flux) requires a separate key.</p>
-            <div class="template-variables-grid">
-              <label for="imagegen-default-select">Default Provider</label>
+          <section class="template-variables-card" id="search-images-card">
+            <h3>Search &amp; images</h3>
+            <p class="settings-row-help">Keys for web search and image generation. OpenAI images use the OpenAI key above. These are tested only when you press Test, and the result shows until you close Settings.</p>
+            <div class="provider-list key-row-list" id="search-image-list"></div>
+            <div class="settings-list-row key-row-select">
+              <label class="settings-list-name" for="imagegen-default-select">Image provider</label>
               <select id="imagegen-default-select" class="provider-input">
                 <option value="openai">OpenAI (DALL-E)</option>
                 <option value="fal">Fal (Flux)</option>
               </select>
             </div>
-            <span id="imagegen-default-status" class="provider-message"></span>
-          </section>
-
-          <section class="template-variables-card">
-            <h3>Fal (Flux)</h3>
-            <p>API key for the Fal image generation provider (Flux models).</p>
-            <div class="template-variables-grid">
-              <label for="imagegen-fal-key-input">Fal API Key</label>
-              <input id="imagegen-fal-key-input" class="provider-input" type="password" placeholder="Fal API key">
-            </div>
-            <div class="template-variables-actions">
-              <button id="save-imagegen-fal-btn" type="button" class="btn btn-primary">Save Key</button>
-              <button id="test-imagegen-fal-btn" type="button" class="btn">Test Connection</button>
-              <button id="clear-imagegen-fal-btn" type="button" class="btn btn-danger">Clear Key</button>
-              <span id="imagegen-fal-status" class="provider-message">Not configured.</span>
-            </div>
+            <span id="imagegen-default-status" class="provider-message settings-row-help"></span>
           </section>
         </div>
 
@@ -1173,6 +1130,7 @@
   <script src="renderer-helpers/settings-nav.js"></script>
   <script src="renderer-helpers/settings-banner.js"></script>
   <script src="renderer-helpers/model-labels.js"></script>
+  <script src="renderer-helpers/key-rows.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

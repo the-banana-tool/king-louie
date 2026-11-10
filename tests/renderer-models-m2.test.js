@@ -40,6 +40,26 @@ describe('renderer: settings tabs for models M2', () => {
     assert.doesNotMatch(src, /switch inference tier/);
   });
 
+  it('draws Providers & keys as one row per provider with a status (settings redesign §5.5)', () => {
+    const card = block('function renderProviderCard(providerKey, provider)');
+    assert.match(card, /keyRowState\(/);
+    const row = block('function buildKeyRow(');
+    assert.match(row, /status-pill/);
+    assert.match(row, /settings-list-row/);
+    for (const fn of [card, row, block('function paintKeyRowStatus('), block('function renderSearchImageRow(')]) {
+      assert.doesNotMatch(fn, /innerHTML/, 'provider errors are set as text');
+    }
+    // Search and image results live in this visit's state, never stored (spec §8.5).
+    assert.match(block('async function testSearchImageKey(item)'), /appState\.keyTestResults\[item\.key\] =/);
+    assert.match(block('function openSettingsDrawer()'), /appState\.keyTestResults = \{\}/);
+    assert.match(html, /<script src="renderer-helpers\/key-rows\.js"><\/script>[\s\S]*<script src="renderer\.js"/);
+    for (const id of ['provider-list', 'search-image-list', 'providers-failing-banner', 'models-test-all-btn']) {
+      assert.match(html, new RegExp(`id="${id}"`), id);
+    }
+    // Saving always tests (spec §5.5).
+    assert.match(block('async function handleSaveProvider(providerKey)'), /handleTestProvider\(providerKey\)/);
+  });
+
   it('builds the profile list, editor and picker from the models channels, as text', () => {
     assert.match(block('async function loadModelProfiles()'), /window\.electron\.models\.profiles\(\)/);
     const list = block('function renderModelProfileList()');

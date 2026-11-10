@@ -13,11 +13,14 @@ const HIDDEN = '(hidden)';
 // What a remote window is shown of an MCP server's env value or argument.
 const shownToRemote = (value) => (typeof value === 'string' && VAULT_REFERENCE.test(value) ? value : HIDDEN);
 
-// A settings section with every stored key taken out, for a remote window.
+// A settings section with every stored key taken out, for a remote window. Where a
+// key was, `hasKey` says whether one is set, so the window can show its row's status.
 function withoutApiKeys(section) {
   if (Array.isArray(section)) return section.map(withoutApiKeys);
   if (!section || typeof section !== 'object') return section;
-  return Object.fromEntries(Object.entries(section).filter(([key]) => key !== 'apiKey').map(([key, value]) => [key, withoutApiKeys(value)]));
+  const out = Object.fromEntries(Object.entries(section).filter(([key]) => key !== 'apiKey').map(([key, value]) => [key, withoutApiKeys(value)]));
+  if (Object.prototype.hasOwnProperty.call(section, 'apiKey')) out.hasKey = Boolean(section.apiKey);
+  return out;
 }
 
 function registerSettingsHandlers(ipcMain, context = {}) {

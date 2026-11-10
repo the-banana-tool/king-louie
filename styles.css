@@ -2074,6 +2074,39 @@ body {
   white-space: nowrap;
 }
 
+/* Providers & keys: one row per provider, opened in place (Task 10). */
+.key-row-list {
+  gap: 0;
+}
+
+.key-row .settings-list-row > .key-row-name {
+  flex: 0 0 9.5em;
+}
+
+.key-row .key-row-reason {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-row-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.key-row-editor[hidden] {
+  display: none;
+}
+
+#providers-failing-banner {
+  margin: 8px 0;
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;

@@ -30,6 +30,10 @@ const appState = {
   pendingImages: [],
   pendingDocuments: [],
   activeResponses: new Set(),
+  // Providers & keys: search and image test results from this Settings visit
+  // (never stored, spec §8.5), and which key rows are open.
+  keyTestResults: {},
+  openKeyRows: new Set(),
   // Case ids with a turn running now (case:changed, what: 'turn').
   runningCaseTurns: new Set(),
   streamBuffers: new Map(),
@@ -334,23 +338,10 @@ const dom = {
   saveSlackTokensBtn: document.getElementById('save-slack-tokens-btn'),
   clearSlackTokensBtn: document.getElementById('clear-slack-tokens-btn'),
   slackChannelStatus: document.getElementById('slack-channel-status'),
-  websearchBraveKeyInput: document.getElementById('websearch-brave-key-input'),
-  websearchTavilyKeyInput: document.getElementById('websearch-tavily-key-input'),
-  saveWebsearchBraveBtn: document.getElementById('save-websearch-brave-btn'),
-  testWebsearchBraveBtn: document.getElementById('test-websearch-brave-btn'),
-  clearWebsearchBraveBtn: document.getElementById('clear-websearch-brave-btn'),
-  saveWebsearchTavilyBtn: document.getElementById('save-websearch-tavily-btn'),
-  testWebsearchTavilyBtn: document.getElementById('test-websearch-tavily-btn'),
-  clearWebsearchTavilyBtn: document.getElementById('clear-websearch-tavily-btn'),
-  websearchBraveStatus: document.getElementById('websearch-brave-status'),
-  websearchTavilyStatus: document.getElementById('websearch-tavily-status'),
+  searchImageList: document.getElementById('search-image-list'),
+  providersFailingBanner: document.getElementById('providers-failing-banner'),
   imagegenDefaultSelect: document.getElementById('imagegen-default-select'),
   imagegenDefaultStatus: document.getElementById('imagegen-default-status'),
-  imagegenFalKeyInput: document.getElementById('imagegen-fal-key-input'),
-  saveImagegenFalBtn: document.getElementById('save-imagegen-fal-btn'),
-  testImagegenFalBtn: document.getElementById('test-imagegen-fal-btn'),
-  clearImagegenFalBtn: document.getElementById('clear-imagegen-fal-btn'),
-  imagegenFalStatus: document.getElementById('imagegen-fal-status'),
   workingDirBtn: document.getElementById('working-dir-btn'),
   workingDirLabel: document.getElementById('working-dir-label'),
   exportChatBtn: document.getElementById('export-chat-btn'),
@@ -4681,6 +4672,9 @@ function closeMemoryPanel() {
 }
 
 function openSettingsDrawer() {
+  // A search or image test result lasts until Settings closes (spec §8.5).
+  appState.keyTestResults = {};
+  appState.openKeyRows = new Set();
   setSettingsDrawer(true);
   paintSettingsBanner(appState.desktopStatus || null);
   loadSettings();
@@ -4688,121 +4682,256 @@ function openSettingsDrawer() {
   switchSettingsTab(resolveInitialTab(readLastSettingsTab(), visibleSettingsGroups()));
 }
 
-function renderProviderCard(providerKey, provider) {
-  const card = document.createElement('div');
-  card.className = 'provider-card';
-  card.dataset.provider = providerKey;
+// One key row (settings redesign §5.5): name, status, reason and Edit/Add, which
+// opens the row in place. `kind` is 'model' or 'search'; a provider's error text
+// reaches the page only by textContent.
+function keyRowId(kind, key) {
+  return `${kind}:${key}`;
+}
 
-  const header = document.createElement('div');
-  header.className = 'provider-header';
+function keyRowButton(label, action, key, cls = 'btn btn-sm') {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = cls;
+  btn.textContent = label;
+  btn.dataset.action = action;
+  btn.dataset.provider = key;
+  return btn;
+}
 
-  const title = document.createElement('div');
-  title.className = 'provider-title';
-  title.textContent = provider.label;
+function paintKeyRowStatus(wrap, view) {
+  if (!wrap) return;
+  wrap.dataset.state = view.state;
+  const pill = wrap.querySelector('.status-pill');
+  if (pill) {
+    const look = KEY_ROW_PILL[view.state];
+    pill.className = `status-pill ${look.cls}`;
+    pill.textContent = look.text;
+  }
+  const reason = wrap.querySelector('.key-row-reason');
+  if (reason) {
+    reason.textContent = view.reason;
+    reason.title = view.reason;
+  }
+  const toggle = wrap.querySelector('button[data-action="toggle"]');
+  if (toggle) toggle.textContent = view.action;
+}
 
-  const titleWrap = document.createElement('div');
-  titleWrap.className = 'provider-title-wrap';
-  titleWrap.appendChild(title);
+function buildKeyRow({ kind, key, label, view, testable = false }) {
+  const wrap = document.createElement('div');
+  wrap.className = 'key-row';
+  wrap.dataset.kind = kind;
+  wrap.dataset.provider = key;
 
-  const status = document.createElement('span');
-  status.className = 'provider-status';
-  const statusView = providerStatusText(provider.status);
-  if (statusView.cls) status.classList.add(statusView.cls);
-  status.textContent = statusView.text;
-  if (provider.status?.checkedAt) status.title = `Last tested ${new Date(provider.status.checkedAt).toLocaleString()}`;
+  const line = document.createElement('div');
+  line.className = 'settings-list-row';
+  const name = document.createElement('span');
+  name.className = 'settings-list-name key-row-name';
+  name.textContent = label;
+  const pill = document.createElement('span');
+  pill.className = 'status-pill';
+  const reason = document.createElement('span');
+  reason.className = 'key-row-reason settings-row-help';
+  line.append(name, pill, reason);
+  if (testable && view.state !== 'no-key') line.appendChild(keyRowButton('Test', 'test', key));
+  line.appendChild(keyRowButton(view.action, 'toggle', key));
 
-  header.appendChild(titleWrap);
-  header.appendChild(status);
+  const editor = document.createElement('div');
+  editor.className = 'key-row-editor';
+  editor.hidden = !appState.openKeyRows.has(keyRowId(kind, key));
 
-  const controls = document.createElement('div');
-  controls.className = 'provider-controls';
+  wrap.append(line, editor);
+  paintKeyRowStatus(wrap, view);
+  return { wrap, editor };
+}
 
+function keyRowField(editor, { id, labelText, type = 'password', placeholder, dataset = {} }) {
   const label = document.createElement('label');
-  label.textContent = provider.hasToken
-    ? 'API token saved (replace to update)'
-    : 'API token';
-
+  label.className = 'settings-row-help';
+  label.textContent = labelText;
   const input = document.createElement('input');
   input.className = 'provider-input';
-  input.type = 'password';
-  input.placeholder = provider.hasToken ? '""""""""""""' : 'Paste API token';
-  input.dataset.provider = providerKey;
-
-  controls.appendChild(label);
-  controls.appendChild(input);
-
-  // The Ollama address (models.ollama.baseUrl, spec 2026-09-27 §5.4).
-  if (providerKey === 'ollama') {
-    const addressLabel = document.createElement('label');
-    addressLabel.textContent = 'Ollama address';
-    const addressInput = document.createElement('input');
-    addressInput.className = 'provider-input';
-    addressInput.type = 'text';
-    addressInput.dataset.ollamaUrl = 'true';
-    addressInput.value = appState.settings.ollamaBaseUrl || '';
-    addressInput.placeholder = 'http://127.0.0.1:11434';
-    controls.appendChild(addressLabel);
-    controls.appendChild(addressInput);
+  input.type = type;
+  input.autocomplete = 'off';
+  input.placeholder = placeholder;
+  if (id) {
+    input.id = id;
+    label.htmlFor = id;
   }
+  Object.assign(input.dataset, dataset);
+  editor.append(label, input);
+  return input;
+}
 
+function keyRowEditorEnd(editor, { key, hasKey, extra = [] }) {
   const actions = document.createElement('div');
   actions.className = 'provider-actions';
-
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'btn btn-primary';
-  saveBtn.type = 'button';
-  saveBtn.appendChild(faIcon('fas fa-floppy-disk'));
-  saveBtn.appendChild(document.createTextNode(' Save Token'));
-  saveBtn.dataset.action = 'save';
-  saveBtn.dataset.provider = providerKey;
-
-  const testBtn = document.createElement('button');
-  testBtn.type = 'button';
-  testBtn.className = 'btn';
-  testBtn.appendChild(faIcon('fas fa-plug'));
-  testBtn.appendChild(document.createTextNode(' Test Connection'));
-  testBtn.dataset.action = 'test';
-  testBtn.dataset.provider = providerKey;
-
-  const clearBtn = document.createElement('button');
-  clearBtn.type = 'button';
-  clearBtn.className = 'btn btn-danger';
-  clearBtn.appendChild(faIcon('fas fa-eraser'));
-  clearBtn.appendChild(document.createTextNode(' Clear Token'));
-  clearBtn.dataset.action = 'clear';
-  clearBtn.dataset.provider = providerKey;
-
-  actions.appendChild(saveBtn);
-  actions.appendChild(testBtn);
-  actions.appendChild(clearBtn);
-
-  if (providerKey === 'ollama') {
-    const addressBtn = document.createElement('button');
-    addressBtn.type = 'button';
-    addressBtn.className = 'btn';
-    addressBtn.appendChild(faIcon('fas fa-location-dot'));
-    addressBtn.appendChild(document.createTextNode(' Save address'));
-    addressBtn.dataset.action = 'save-ollama-url';
-    addressBtn.dataset.provider = providerKey;
-    actions.appendChild(addressBtn);
-  }
-
+  actions.appendChild(keyRowButton('Save & test', 'save', key, 'btn btn-primary btn-sm'));
+  for (const btn of extra) actions.appendChild(btn);
+  if (hasKey) actions.appendChild(keyRowButton('Remove key', 'clear', key, 'btn btn-danger btn-sm'));
   const message = document.createElement('div');
-  message.className = 'provider-message';
-  if (provider.status?.message) {
-    message.textContent = provider.status.message;
-    if (!provider.status.ok) {
-      message.classList.add('error');
-    }
+  message.className = 'provider-message settings-row-help';
+  editor.append(actions, message);
+}
+
+function toggleKeyRow(kind, key, container) {
+  const id = keyRowId(kind, key);
+  const wrap = container?.querySelector(`.key-row[data-provider="${key}"]`);
+  const editor = wrap?.querySelector('.key-row-editor');
+  if (!editor) return;
+  const open = editor.hidden;
+  editor.hidden = !open;
+  if (open) {
+    appState.openKeyRows.add(id);
+    editor.querySelector('input[type="password"]')?.focus();
   } else {
-    message.textContent = 'No connection test has been run yet.';
+    appState.openKeyRows.delete(id);
+  }
+}
+
+function renderProviderCard(providerKey, provider) {
+  const view = keyRowState({ hasKey: providerHasKey(providerKey, provider), status: provider.status });
+  const { wrap, editor } = buildKeyRow({ kind: 'model', key: providerKey, label: provider.label, view });
+
+  keyRowField(editor, {
+    labelText: providerKey === 'ollama' ? 'API key (a local Ollama needs none)' : 'API key',
+    placeholder: provider.hasToken ? 'A key is saved. Paste a new one to replace it.' : 'Paste API key',
+    dataset: { provider: providerKey }
+  });
+
+  // The Ollama address (models.ollama.baseUrl, spec 2026-09-27 §5.4).
+  const extra = [];
+  if (providerKey === 'ollama') {
+    const addressInput = keyRowField(editor, {
+      labelText: 'Ollama address',
+      type: 'text',
+      placeholder: 'http://127.0.0.1:11434',
+      dataset: { ollamaUrl: 'true' }
+    });
+    addressInput.value = appState.settings.ollamaBaseUrl || '';
+    extra.push(keyRowButton('Save address', 'save-ollama-url', providerKey));
   }
 
-  card.appendChild(header);
-  card.appendChild(controls);
-  card.appendChild(actions);
-  card.appendChild(message);
-  return card;
+  keyRowEditorEnd(editor, { key: providerKey, hasKey: Boolean(provider.hasToken), extra });
+  return wrap;
+}
+
+function paintProvidersFailingBanner() {
+  const banner = dom.providersFailingBanner;
+  if (!banner) return;
+  const n = failingCount(appState.settings.providers);
+  banner.hidden = n === 0;
+  banner.textContent = n ? failingBannerText(n) : '';
+}
+
+// Search and image keys (spec §8.5): a Test button per row, nothing tested on
+// open, the result kept in appState.keyTestResults until Settings closes.
+const SEARCH_IMAGE_KEYS = Object.freeze([
+  { key: 'brave', label: 'Brave Search', section: 'webSearch', inputId: 'websearch-brave-key-input' },
+  { key: 'tavily', label: 'Tavily', section: 'webSearch', inputId: 'websearch-tavily-key-input' },
+  { key: 'fal', label: 'Fal (Flux) images', section: 'imageGeneration', inputId: 'imagegen-fal-key-input' }
+]);
+
+function searchImageItem(key) {
+  return SEARCH_IMAGE_KEYS.find((item) => item.key === key) || null;
+}
+
+function searchImageEntry(item) {
+  const section = appState.settings[item.section] || (appState.settings[item.section] = {});
+  return section[item.key] || (section[item.key] = {});
+}
+
+// A local window gets the stored key; a remote one gets hasKey in its place.
+function searchImageHasKey(item) {
+  const entry = searchImageEntry(item);
+  return typeof entry.hasKey === 'boolean' ? entry.hasKey : Boolean(entry.apiKey);
+}
+
+function renderSearchImageRow(item) {
+  const hasKey = searchImageHasKey(item);
+  const view = keyRowState({ hasKey, status: null, tested: appState.keyTestResults[item.key] || null });
+  const { wrap, editor } = buildKeyRow({ kind: 'search', key: item.key, label: item.label, view, testable: true });
+  keyRowField(editor, {
+    id: item.inputId,
+    labelText: 'API key',
+    placeholder: hasKey ? 'A key is saved. Paste a new one to replace it.' : 'Paste API key',
+    dataset: { searchKey: item.key }
+  });
+  keyRowEditorEnd(editor, { key: item.key, hasKey });
+  return wrap;
+}
+
+function renderSearchImageRows() {
+  if (!dom.searchImageList) return;
+  dom.searchImageList.replaceChildren(...SEARCH_IMAGE_KEYS.map(renderSearchImageRow));
+}
+
+function setSearchImageMessage(key, message, isError = false) {
+  const el = dom.searchImageList?.querySelector(`.key-row[data-provider="${key}"] .provider-message`);
+  if (!el) return;
+  el.textContent = message;
+  el.classList.toggle('error', isError);
+}
+
+async function testSearchImageKey(item) {
+  setSearchImageMessage(item.key, 'Testing…');
+  try {
+    const call = item.section === 'webSearch'
+      ? window.electron.settings.testWebSearchKey({ provider: item.key })
+      : window.electron.settings.testImageGenKey({ provider: item.key });
+    const result = unwrapIpcResult(await call, `Failed to test ${item.label}.`);
+    appState.keyTestResults[item.key] = { ok: true, message: result?.message || 'Connection successful.' };
+  } catch (err) {
+    appState.keyTestResults[item.key] = { ok: false, error: err.message || 'Test failed.' };
+  }
+  const ok = appState.keyTestResults[item.key].ok;
+  if (ok) appState.openKeyRows.delete(keyRowId('search', item.key));
+  renderSearchImageRows();
+  return ok;
+}
+
+async function saveSearchImageKey(item) {
+  const input = document.getElementById(item.inputId);
+  const apiKey = input?.value?.trim() || '';
+  if (!apiKey) {
+    setSearchImageMessage(item.key, 'Paste a key first.', true);
+    return;
+  }
+  try {
+    const call = item.section === 'webSearch'
+      ? window.electron.settings.saveWebSearchKey({ provider: item.key, apiKey })
+      : window.electron.settings.saveImageGenKey({ provider: item.key, apiKey });
+    unwrapIpcResult(await call, `Failed to save the ${item.label} key.`);
+  } catch (err) {
+    setSearchImageMessage(item.key, err.message || 'Error saving key.', true);
+    return;
+  }
+  if (input) input.value = '';
+  const entry = searchImageEntry(item);
+  delete entry.apiKey;
+  entry.hasKey = true;
+  delete appState.keyTestResults[item.key];
+  renderSearchImageRows();
+  await testSearchImageKey(item);
+}
+
+async function clearSearchImageKey(item) {
+  if (!(await showConfirmDialog(`Remove the saved ${item.label} key?`))) return;
+  try {
+    const call = item.section === 'webSearch'
+      ? window.electron.settings.saveWebSearchKey({ provider: item.key, clear: true })
+      : window.electron.settings.saveImageGenKey({ provider: item.key, clear: true });
+    unwrapIpcResult(await call, `Failed to remove the ${item.label} key.`);
+  } catch (err) {
+    setSearchImageMessage(item.key, err.message || 'Error.', true);
+    return;
+  }
+  const entry = searchImageEntry(item);
+  delete entry.apiKey;
+  entry.hasKey = false;
+  delete appState.keyTestResults[item.key];
+  appState.openKeyRows.delete(keyRowId('search', item.key));
+  renderSearchImageRows();
 }
 
 function renderSettings() {
@@ -4984,6 +5113,8 @@ function renderSettings() {
   Object.entries(appState.settings.providers).forEach(([key, provider]) => {
     dom.providerList.appendChild(renderProviderCard(key, provider));
   });
+  paintProvidersFailingBanner();
+  renderSearchImageRows();
 
   renderCatalogSettings();
   loadVaultEntries();
@@ -5003,26 +5134,9 @@ function renderSettings() {
     }
   }
 
-  const webSearch = appState.settings.webSearch || {};
-  if (dom.websearchBraveStatus) {
-    dom.websearchBraveStatus.textContent = webSearch.brave?.apiKey
-      ? 'Key configured.'
-      : 'Not configured.';
-  }
-  if (dom.websearchTavilyStatus) {
-    dom.websearchTavilyStatus.textContent = webSearch.tavily?.apiKey
-      ? 'Key configured.'
-      : 'Not configured.';
-  }
-
   const imageGen = appState.settings.imageGeneration || {};
   if (dom.imagegenDefaultSelect) {
     dom.imagegenDefaultSelect.value = imageGen.defaultProvider || 'openai';
-  }
-  if (dom.imagegenFalStatus) {
-    dom.imagegenFalStatus.textContent = imageGen.fal?.apiKey
-      ? 'Key configured.'
-      : 'Not configured.';
   }
 }
 
@@ -7699,7 +7813,7 @@ function validateToken(providerKey, token) {
 }
 
 function setProviderMessage(providerKey, message, isError = false) {
-  const card = dom.providerList.querySelector(`.provider-card[data-provider="${providerKey}"]`);
+  const card = dom.providerList.querySelector(`.key-row[data-provider="${providerKey}"]`);
   if (!card) return;
   const messageEl = card.querySelector('.provider-message');
   if (!messageEl) return;
@@ -7717,25 +7831,15 @@ function updateProviderStatus(providerKey, status) {
 
 /* --- Models M1: catalog status, Test all, the Ollama address --- */
 
-function providerStatusText(status) {
-  if (status?.ok) return { text: 'Connected', cls: 'ok' };
-  if (status?.authFailed) return { text: 'Key rejected', cls: 'error' };
-  if (status) return { text: 'Error', cls: 'error' };
-  return { text: 'Not tested', cls: '' };
-}
-
-// A background retest (key saved, 401 during use) updates the badge only, so
-// a message the owner is reading on the card stays.
+// A background retest (key saved, 401 during use) updates the row's status and
+// the banner only, so a message the owner is reading in the open row stays.
 function updateProviderStatusBadge(providerKey) {
-  const card = dom.providerList?.querySelector(`.provider-card[data-provider="${providerKey}"]`);
-  const badge = card?.querySelector('.provider-status');
-  if (!badge) return;
-  const status = appState.settings?.providers?.[providerKey]?.status || null;
-  const view = providerStatusText(status);
-  badge.classList.remove('ok', 'error');
-  if (view.cls) badge.classList.add(view.cls);
-  badge.textContent = view.text;
-  badge.title = status?.checkedAt ? `Last tested ${new Date(status.checkedAt).toLocaleString()}` : '';
+  const row = dom.providerList?.querySelector(`.key-row[data-provider="${providerKey}"]`);
+  const provider = appState.settings?.providers?.[providerKey];
+  if (row && provider) {
+    paintKeyRowStatus(row, keyRowState({ hasKey: providerHasKey(providerKey, provider), status: provider.status || null }));
+  }
+  paintProvidersFailingBanner();
 }
 
 function formatCatalogStatus(status) {
@@ -11020,7 +11124,13 @@ async function handleSaveProvider(providerKey) {
   appState.settings.providers[providerKey].hasToken = result.hasToken;
   delete appState.settings.providers[providerKey].status;
   renderSettings();
-  setProviderMessage(providerKey, 'Token saved securely.');
+  setProviderMessage(providerKey, 'Key saved. Testing…');
+  // Saving always tests (spec §5.5); a key that works closes its row.
+  const status = await handleTestProvider(providerKey);
+  if (status?.ok) {
+    appState.openKeyRows.delete(keyRowId('model', providerKey));
+    renderSettings();
+  }
 }
 
 async function handleClearProvider(providerKey) {
@@ -11040,21 +11150,25 @@ async function handleClearProvider(providerKey) {
   appState.settings.providers[providerKey].hasToken = false;
   delete appState.settings.providers[providerKey].status;
   renderSettings();
-  setProviderMessage(providerKey, 'Token removed.');
+  setProviderMessage(providerKey, 'Key removed.');
+  // A row stays open after its key is removed, so the message is read in it.
 }
 
+// Returns the status it stored, for Save & test.
 async function handleTestProvider(providerKey) {
-  setProviderMessage(providerKey, 'Testing connection...');
+  setProviderMessage(providerKey, 'Testing connection…');
   const result = await window.electron.settings.testProvider({ provider: providerKey });
 
   if (!result.ok) {
-    updateProviderStatus(providerKey, result.status || { ok: false, message: result.error });
+    const status = result.status || { ok: false, message: result.error };
+    updateProviderStatus(providerKey, status);
     setProviderMessage(providerKey, result.error || 'Connection failed.', true);
-    return;
+    return status;
   }
 
   updateProviderStatus(providerKey, result.status);
   setProviderMessage(providerKey, result.status?.message || 'Connection successful.');
+  return result.status;
 }
 
 // Event Listeners
@@ -12687,144 +12801,19 @@ CHANNEL_ACCESS_CHANNELS.forEach((channel) => {
   }
 });
 
-/* --- Provider management: Web Search keys ------------------- */
-if (dom.saveWebsearchBraveBtn) {
-  dom.saveWebsearchBraveBtn.addEventListener('click', async () => {
-    const apiKey = dom.websearchBraveKeyInput?.value?.trim();
-    if (!apiKey) return;
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveWebSearchKey({ provider: 'brave', apiKey }),
-        'Failed to save Brave key.'
-      );
-      dom.websearchBraveKeyInput.value = '';
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = 'Key saved.';
-        dom.websearchBraveStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = err.message || 'Error saving key.';
-        dom.websearchBraveStatus.classList.add('error');
-      }
-    }
-  });
-}
-
-if (dom.testWebsearchBraveBtn) {
-  dom.testWebsearchBraveBtn.addEventListener('click', async () => {
-    dom.testWebsearchBraveBtn.disabled = true;
-    if (dom.websearchBraveStatus) {
-      dom.websearchBraveStatus.textContent = 'Testing Brave Search...';
-      dom.websearchBraveStatus.classList.remove('error');
-    }
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.testWebSearchKey({ provider: 'brave' }),
-        'Failed to test Brave Search.'
-      );
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = result.message || 'Connection successful.';
-        dom.websearchBraveStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = err.message || 'Test failed.';
-        dom.websearchBraveStatus.classList.add('error');
-      }
-    } finally {
-      dom.testWebsearchBraveBtn.disabled = false;
-    }
-  });
-}
-
-if (dom.clearWebsearchBraveBtn) {
-  dom.clearWebsearchBraveBtn.addEventListener('click', async () => {
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveWebSearchKey({ provider: 'brave', clear: true }),
-        'Failed to clear Brave key.'
-      );
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = 'Key cleared.';
-        dom.websearchBraveStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = err.message || 'Error.';
-        dom.websearchBraveStatus.classList.add('error');
-      }
-    }
-  });
-}
-
-if (dom.saveWebsearchTavilyBtn) {
-  dom.saveWebsearchTavilyBtn.addEventListener('click', async () => {
-    const apiKey = dom.websearchTavilyKeyInput?.value?.trim();
-    if (!apiKey) return;
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveWebSearchKey({ provider: 'tavily', apiKey }),
-        'Failed to save Tavily key.'
-      );
-      dom.websearchTavilyKeyInput.value = '';
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = 'Key saved.';
-        dom.websearchTavilyStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = err.message || 'Error saving key.';
-        dom.websearchTavilyStatus.classList.add('error');
-      }
-    }
-  });
-}
-
-if (dom.testWebsearchTavilyBtn) {
-  dom.testWebsearchTavilyBtn.addEventListener('click', async () => {
-    dom.testWebsearchTavilyBtn.disabled = true;
-    if (dom.websearchTavilyStatus) {
-      dom.websearchTavilyStatus.textContent = 'Testing Tavily...';
-      dom.websearchTavilyStatus.classList.remove('error');
-    }
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.testWebSearchKey({ provider: 'tavily' }),
-        'Failed to test Tavily.'
-      );
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = result.message || 'Connection successful.';
-        dom.websearchTavilyStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = err.message || 'Test failed.';
-        dom.websearchTavilyStatus.classList.add('error');
-      }
-    } finally {
-      dom.testWebsearchTavilyBtn.disabled = false;
-    }
-  });
-}
-
-if (dom.clearWebsearchTavilyBtn) {
-  dom.clearWebsearchTavilyBtn.addEventListener('click', async () => {
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveWebSearchKey({ provider: 'tavily', clear: true }),
-        'Failed to clear Tavily key.'
-      );
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = 'Key cleared.';
-        dom.websearchTavilyStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = err.message || 'Error.';
-        dom.websearchTavilyStatus.classList.add('error');
-      }
-    }
+/* --- Providers & keys: search and image key rows ---------------- */
+if (dom.searchImageList) {
+  dom.searchImageList.addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-action]');
+    const item = button && searchImageItem(button.dataset.provider);
+    if (!item) return;
+    const run = {
+      toggle: async () => toggleKeyRow('search', item.key, dom.searchImageList),
+      save: () => saveSearchImageKey(item),
+      test: () => testSearchImageKey(item),
+      clear: () => clearSearchImageKey(item)
+    }[button.dataset.action];
+    if (run) run().catch((err) => settingsLog.warn(`key row ${item.key}: ${err.message}`));
   });
 }
 
@@ -12850,76 +12839,6 @@ if (dom.imagegenDefaultSelect) {
   });
 }
 
-if (dom.saveImagegenFalBtn) {
-  dom.saveImagegenFalBtn.addEventListener('click', async () => {
-    const apiKey = dom.imagegenFalKeyInput?.value?.trim();
-    if (!apiKey) return;
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveImageGenKey({ provider: 'fal', apiKey }),
-        'Failed to save Fal key.'
-      );
-      dom.imagegenFalKeyInput.value = '';
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = 'Key saved.';
-        dom.imagegenFalStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = err.message || 'Error saving key.';
-        dom.imagegenFalStatus.classList.add('error');
-      }
-    }
-  });
-}
-
-if (dom.testImagegenFalBtn) {
-  dom.testImagegenFalBtn.addEventListener('click', async () => {
-    dom.testImagegenFalBtn.disabled = true;
-    if (dom.imagegenFalStatus) {
-      dom.imagegenFalStatus.textContent = 'Testing Fal...';
-      dom.imagegenFalStatus.classList.remove('error');
-    }
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.testImageGenKey({ provider: 'fal' }),
-        'Failed to test Fal.'
-      );
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = result.message || 'Connection successful.';
-        dom.imagegenFalStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = err.message || 'Test failed.';
-        dom.imagegenFalStatus.classList.add('error');
-      }
-    } finally {
-      dom.testImagegenFalBtn.disabled = false;
-    }
-  });
-}
-
-if (dom.clearImagegenFalBtn) {
-  dom.clearImagegenFalBtn.addEventListener('click', async () => {
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveImageGenKey({ provider: 'fal', clear: true }),
-        'Failed to clear Fal key.'
-      );
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = 'Key cleared.';
-        dom.imagegenFalStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = err.message || 'Error.';
-        dom.imagegenFalStatus.classList.add('error');
-      }
-    }
-  });
-}
-
 if (dom.providerList) {
   dom.providerList.addEventListener('click', (e) => {
     const button = e.target.closest('button[data-action]');
@@ -12927,14 +12846,14 @@ if (dom.providerList) {
     const { action, provider } = button.dataset;
     if (!provider) return;
 
+    if (action === 'toggle') {
+      toggleKeyRow('model', provider, dom.providerList);
+    }
     if (action === 'save') {
       handleSaveProvider(provider);
     }
     if (action === 'clear') {
       handleClearProvider(provider);
-    }
-    if (action === 'test') {
-      handleTestProvider(provider);
     }
     if (action === 'save-ollama-url') {
       handleSaveOllamaUrl();

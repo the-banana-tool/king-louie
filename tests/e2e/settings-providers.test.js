@@ -18,7 +18,7 @@ describe('E2E: Settings — Providers', () => {
     assert.ok(exists, 'provider-list should exist');
   });
 
-  it('renders provider cards for all 13 providers', async () => {
+  it('renders a row for each of the 13 providers', async () => {
     const text = await getText(ctx, '#provider-list');
     const expected = ['OpenAI', 'Anthropic', 'Groq', 'Mistral', 'Ollama', 'Gemini', 'OpenRouter',
       'xAI', 'DeepSeek', 'Qwen', 'Together', 'Fireworks', 'Cohere'];
@@ -35,7 +35,7 @@ describe('E2E: Settings — Providers', () => {
     assert.ok(count >= 12, `should have at least 12 token inputs, found ${count}`);
   });
 
-  it('each provider has a save button', async () => {
+  it('each provider has a Save & test button', async () => {
     const count = await evaluate(ctx, `
       document.querySelectorAll('#provider-list .btn-primary').length
     `);
@@ -47,6 +47,47 @@ describe('E2E: Settings — Providers', () => {
     const tavily = await evaluate(ctx, `!!document.getElementById('websearch-tavily-key-input')`);
     assert.ok(brave, 'Brave search key input should exist');
     assert.ok(tavily, 'Tavily search key input should exist');
+  });
+
+  it('a provider without a key shows No key and Add', async () => {
+    const row = await evaluate(ctx, `(() => {
+      const row = document.querySelector('#provider-list .key-row[data-provider="gemini"]');
+      return row && {
+        pill: row.querySelector('.status-pill').textContent,
+        toggle: row.querySelector('button[data-action="toggle"]').textContent,
+        open: !row.querySelector('.key-row-editor').hidden
+      };
+    })()`);
+    assert.deepStrictEqual(row, { pill: 'No key', toggle: 'Add', open: false });
+  });
+
+  it('clicking Add opens the row with the key input and Save & test', async () => {
+    await click(ctx, '#provider-list .key-row[data-provider="gemini"] button[data-action="toggle"]');
+    assert.ok(await isVisible(ctx, '#provider-list .key-row[data-provider="gemini"] .key-row-editor'), 'the row opens in place');
+    assert.ok(await isVisible(ctx, '#provider-list .key-row[data-provider="gemini"] input[data-provider="gemini"]'));
+    const save = await getText(ctx, '#provider-list .key-row[data-provider="gemini"] button[data-action="save"]');
+    assert.strictEqual(save, 'Save & test');
+    const remove = await evaluate(ctx, `!!document.querySelector('#provider-list .key-row[data-provider="gemini"] button[data-action="clear"]')`);
+    assert.strictEqual(remove, false, 'Remove key only where a key exists');
+  });
+
+  it('Brave without a key shows No key, and its row has Add and no Test', async () => {
+    const row = await evaluate(ctx, `(() => {
+      const row = document.querySelector('#search-image-list .key-row[data-provider="brave"]');
+      return row && {
+        pill: row.querySelector('.status-pill').textContent,
+        toggle: row.querySelector('button[data-action="toggle"]').textContent,
+        test: !!row.querySelector('button[data-action="test"]')
+      };
+    })()`);
+    assert.deepStrictEqual(row, { pill: 'No key', toggle: 'Add', test: false });
+  });
+
+  it('the image provider select sits with the search and image keys, and no banner shows with no failing key', async () => {
+    const inCard = await evaluate(ctx, `!!document.querySelector('#search-images-card #imagegen-default-select')`);
+    assert.ok(inCard);
+    const bannerHidden = await evaluate(ctx, `document.getElementById('providers-failing-banner').hidden`);
+    assert.strictEqual(bannerHidden, true);
   });
 
   it('clear provider button uses in-app confirm dialog', async () => {
