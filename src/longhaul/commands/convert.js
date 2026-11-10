@@ -29,6 +29,10 @@ function writeSummary(out, result, minTokens) {
   }
   if (result.duplicatesDropped) lines.push(`${result.duplicatesDropped} duplicate trajectories dropped (one per instance)`);
   if (result.badRows.length) lines.push(`${result.badRows.length} bad rows (${list(result.badRows, (b) => `line ${b.rowNo}`)})`);
+  if (result.noTaskPrompt.length) {
+    lines.push(`${result.noTaskPrompt.length} rows with no task prompt (no messages, or the first is not from the user): `
+      + `${list(result.noTaskPrompt, (b) => `line ${b.rowNo}`)}`);
+  }
   for (const line of lines) out.write(`${line}\n`);
 }
 

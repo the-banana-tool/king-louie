@@ -1,11 +1,7 @@
 'use strict';
 
 // Field names follow the Claude Code importer so messageText renders both alike.
-
-function asText(value) {
-  if (value === undefined || value === null) return '';
-  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-}
+const { asText } = require('../session-format');
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);

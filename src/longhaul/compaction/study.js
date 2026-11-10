@@ -5,13 +5,13 @@
 // Priced before the first call, capped by a spend guard, every reply cached.
 // runs/<id>/ holds ids, seqs, verdicts and numbers only; facts, quotes and
 // reasons go under LONGHAUL_HOME/private/.
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { loadSession, sessionDir, validateSessionId, messageText } = require('../session-format');
 const { compactionWindows, summaryText } = require('./windows');
 const { planWindowFacts } = require('./sample');
-const { authorFact, judgePreserved, judgeNeeded, SPAN_MESSAGE_CHARS } = require('./steps');
+const { authorFact, judgePreserved, judgeNeeded } = require('./steps');
+const { SPAN_MESSAGE_CHARS } = require('../author');
 const { openMatcher, factQueryText, factQueryId, MATCHER_CHUNK } = require('./matches');
 const { EmbeddingCache, cacheDir, embedHint, embedText, batches, priceTokens } = require('../embeddings');
 const { loadPrompt } = require('../prompts');
@@ -20,7 +20,7 @@ const { estimateCalls, checkBudget, SpendGuard, DEFAULT_MAX_USD } = require('../
 const { stopErrorFor } = require('../retry');
 const { writeFileAtomic, byCodeUnit } = require('../files');
 const { spotCheckFile, writeSpotCheckSample } = require('../answer-stage');
-const { gitCommit, removeStaleTmp } = require('../run');
+const { gitCommit, removeStaleTmp, newRunId } = require('../run');
 const { UsageError } = require('../errors');
 const { round8, fixed } = require('../format');
 const { createLogger } = require('../../logging');
@@ -36,11 +36,6 @@ const HEADER_EST_CHARS = 40;
 const EMBED_BATCH = 100;
 const TMP_PREFIX = 'kl-compaction-';
 const SPOT_ADAPTER = 'compaction-loss';
-
-// run.js's run id (RUN_ID_RE), which it does not export.
-function newRunId(date) {
-  return `${date.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${crypto.randomBytes(2).toString('hex')}`;
-}
 
 // A private session goes to a remote model only with --send-private;
 // checked before any client is built. Returns the private sessions that will be sent.
@@ -143,12 +138,21 @@ function summaryMarkdown(config, summary) {
     row('all', summary.all),
     '',
     'Rates are over judged facts. "Needed" sees only later messages that match the fact, so lost-and-needed is a lower bound.',
+    ...(summary.embedFailures ? ['', `${summary.embedFailures} fact queries were not embedded; those facts were matched lexically only.`] : []),
     ''
   ].join('\n');
 }
 
+// A reply that is not one finite vector of the cache's dimension per input.
+function badVectors(res, n, dim) {
+  const vectors = res?.vectors;
+  if (!Array.isArray(vectors) || vectors.length !== n) return true;
+  return vectors.some((v) => (!Array.isArray(v) && !ArrayBuffer.isView(v)) || v.length !== dim || !Array.prototype.every.call(v, Number.isFinite));
+}
+
 // Each fact's query vector, written to the session's embedding cache under
 // factQueryId so the matcher's semantic side finds it. Charged to the guard.
+// Returns how many queries were not embedded; those facts are matched lexically.
 async function embedQueries({ home, sessionId, embed, facts, hooks, catalog }) {
   const cache = EmbeddingCache.open(cacheDir(home.private, sessionId, embed.model));
   const seen = new Set();
@@ -174,11 +178,16 @@ async function embedQueries({ home, sessionId, embed, facts, hooks, catalog }) {
       failed += group.length;
       continue;
     }
-    const used = Number.isFinite(res.usage?.input) ? res.usage.input : 0;
+    const used = Number.isFinite(res?.usage?.input) ? res.usage.input : 0;
     hooks.afterCall(ticket, { inputTokens: used, outputTokens: 0, costUsd: embed.local ? 0 : priceTokens(embed.provider, embed.model, used, catalog) });
+    if (badVectors(res, group.length, cache.dim)) {
+      failed += group.length;
+      continue;
+    }
     group.forEach((g, j) => cache.addQuestion(g.id, g.query, res.vectors[j], { tokens: j === 0 ? used : 0 }));
   }
   if (failed) log.warn('fact queries not embedded; those facts are matched lexically', { sessionId, failed });
+  return failed;
 }
 
 async function runCompactionStudy({ home, sessionIds, clients, options = {}, deps = {} }) {
@@ -265,6 +274,7 @@ async function runCompactionStudy({ home, sessionIds, clients, options = {}, dep
   const facts = [];
   const spotRows = [];
   const step = { client: null, cache, hooks, retry };
+  let embedFailures = 0;
   try {
     for (const { id, session, windows } of sessions) {
       const authored = [];
@@ -297,7 +307,7 @@ async function runCompactionStudy({ home, sessionIds, clients, options = {}, dep
         writeSpend();
       }
 
-      if (embed && authored.length) await embedQueries({ home, sessionId: id, embed, facts: authored, hooks, catalog });
+      if (embed && authored.length) embedFailures += await embedQueries({ home, sessionId: id, embed, facts: authored, hooks, catalog });
       const matcher = authored.length ? await openMatcher({ home, sessionId: id, session, embed: embed ? { provider: embed.provider, model: embed.model } : null }) : null;
       try {
         for (const f of authored) {
@@ -357,7 +367,8 @@ async function runCompactionStudy({ home, sessionIds, clients, options = {}, dep
   const summary = {
     runId,
     sessions: Object.fromEntries(sessions.map(({ id, windows }) => [id, rates(records.filter((r) => r.sessionId === id), windows)])),
-    all: rates(records, sessions.flatMap((s) => s.windows))
+    all: rates(records, sessions.flatMap((s) => s.windows)),
+    embedFailures
   };
   writeFileAtomic(path.join(dir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
   writeFileAtomic(path.join(dir, 'summary.md'), summaryMarkdown(config, summary));

@@ -126,4 +126,39 @@ describe('openMatcher', () => {
       await m.release();
     }
   });
+  it('finds later matches when more than the first cut of hits are inside the window', async () => {
+    const messages = [];
+    for (let seq = 1; seq <= 70; seq++) {
+      let text = `filler ${seq} alpha beta gamma`;
+      if (seq <= 60) text = `${TOKEN} rotates, ${TOKEN} rotates nightly`;
+      if (seq === 65 || seq === 68) text = `later we noted ${TOKEN} once among many other words here today`;
+      messages.push(msg(seq, seq % 2 ? 'user' : 'assistant', text));
+    }
+    const session = { manifest: { sessionId: 'hand-crowd', private: false, license: 'test', messages: 70 }, messages, index: new SessionIndex(messages) };
+    const model = 'text-embedding-3-small';
+    const store = HistoryStore.open(':memory:', { chunkOptions: MATCHER_CHUNK });
+    store.createChat({ id: 'c', title: 't', messages: [] });
+    for (const { seq, ...message } of messages) store.appendMessage('c', message);
+    const chunks = store.chunksOfChat('c');
+    store.close();
+    const cache = EmbeddingCache.open(cacheDir(home.private, 'hand-crowd', model));
+    cache.init({ model, provider: 'openai', dim: 2, chunk: MATCHER_CHUNK, sessionId: 'hand-crowd' });
+    cache.append(
+      chunks.map((c) => ({ messageId: c.messageId, idx: c.idx, chars: c.text.length, truncated: false })),
+      chunks.map((c) => (c.seq <= 60 ? [1, 0] : c.seq === 65 || c.seq === 68 ? [0.8, 0.2] : [0, 1]))
+    );
+    const query = factQueryText(FACT, QUOTE);
+    cache.addQuestion(factQueryId(query), query, [1, 0]);
+
+    const m = await openMatcher({ home, sessionId: 'hand-crowd', session, embed: { provider: 'openai', model } });
+    try {
+      const out = await m.laterMatches(FACT, QUOTE, 62);
+      assert.deepEqual(out.messages.slice(0, 2).map((x) => x.seq).sort((a, b) => a - b), [65, 68]);
+      assert.ok(out.messages.every((x) => x.seq > 62));
+      assert.equal(out.lexical, 2);
+      assert.equal(out.semantic, 8);
+    } finally {
+      await m.release();
+    }
+  });
 });

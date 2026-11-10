@@ -169,6 +169,47 @@ describe('longhaul convert', () => {
     assert.equal(out.badRows[0].rowNo, 3);
   });
 
+  it('does not plan a row with no task prompt, counts it and writes the rest', async () => {
+    const dir = tmpDir();
+    const file = path.join(dir, 'no-prompt.jsonl');
+    const lines = fs.readFileSync(NEBIUS, 'utf8').split('\n').filter(Boolean);
+    const first = JSON.parse(lines[0]);
+    const assistantFirst = { ...first, instance_id: `${first.instance_id}-np`, trajectory: first.trajectory.filter((m) => m.role !== 'user') };
+    assert.equal(assistantFirst.trajectory.find((m) => m.role !== 'system').role, 'assistant');
+    const empty = { ...first, instance_id: `${first.instance_id}-empty`, trajectory: first.trajectory.filter((m) => m.role === 'system') };
+    fs.writeFileSync(file, `${[...lines, JSON.stringify(assistantFirst), JSON.stringify(empty)].join('\n')}\n`);
+    const n = lines.length;
+
+    const dry = await run(['convert', '--source', 'nebius-swe-rebench', '--input', file, ...SMALL, '--dry-run'], tmpHome().env);
+    assert.equal(dry.code, 0, dry.stderr);
+    assert.match(dry.stdout, new RegExp(`2 rows with no task prompt .*line ${n + 1}, line ${n + 2}`));
+
+    const { env, root } = tmpHome();
+    const r = await run(['convert', '--source', 'nebius-swe-rebench', '--input', file, ...SMALL], env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /2 rows with no task prompt/);
+    const all = await sessions(root);
+    assert.ok(all.length > 0);
+    for (const s of all) assert.ok(s.manifest.boundaries.every((b) => b.instanceId !== assistantFirst.instance_id));
+  });
+
+  it('refuses a session written by another converter version until --force, saying the converter changed', async () => {
+    const { env, root } = tmpHome();
+    const argv = ['convert', '--source', 'nebius-swe-rebench', '--input', NEBIUS, ...SMALL];
+    assert.equal((await run(argv, env)).code, 0);
+    const id = listSessions(root)[0];
+    const file = path.join(root, 'sessions', id, 'manifest.json');
+    const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, `${JSON.stringify({ ...manifest, converter: { ...manifest.converter, version: 0 } }, null, 2)}\n`);
+    const refused = await run(argv, env);
+    assert.equal(refused.code, 2);
+    assert.match(refused.stderr, new RegExp(`${id} was written by another converter version`));
+    assert.match(refused.stderr, /converter changed/);
+    const forced = await run([...argv, '--force'], env);
+    assert.equal(forced.code, 0, forced.stderr);
+    assert.match(forced.stdout, new RegExp(`^converted ${id}:`, 'm'));
+  });
+
   it('exits 1 when no row is usable', async () => {
     const { env } = tmpHome();
     const file = path.join(tmpDir(), 'bad.jsonl');

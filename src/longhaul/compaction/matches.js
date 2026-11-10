@@ -15,7 +15,9 @@ const log = createLogger('longhaul/compaction-matches');
 
 // The chunking kl-recall's store uses by default, so `longhaul embed`'s cache lines up.
 const MATCHER_CHUNK = Object.freeze({ ...mergeHistorySettings({ version: HISTORY_SETTINGS_VERSION }).chunk });
-const BM25_LIMIT = 50;
+// BM25 has no seq floor, so hits inside the window can fill a cut; each
+// limit is tried until k later messages are found or the hits run out.
+const BM25_LIMITS = Object.freeze([50, 200, 1000]);
 const COSINE_K = 50;
 
 const factQueryText = (fact, quote) => `${fact}\n${quote}`;
@@ -87,14 +89,26 @@ async function openMatcher({ home, sessionId, session, embed = null }) {
     throw err;
   }
 
+  let chunkTotal = null;
+  function lexicalLater(query, afterSeq, k) {
+    if (chunkTotal === null) chunkTotal = store.chunksOfChat(chatId).length;
+    const limits = [...BM25_LIMITS.filter((n) => n < chunkTotal), Math.max(chunkTotal, 1)];
+    let seqs = [];
+    for (const limit of limits) {
+      const hits = store.searchText(query, { chatIds: [chatId], limit });
+      seqs = laterSeqs(store.chunks(hits.map((h) => h.chunkId)), afterSeq);
+      if (seqs.length >= k || hits.length < limit) break;
+    }
+    return seqs;
+  }
+
   async function laterMatches(fact, quote, afterSeq, { k = 8 } = {}) {
     const query = factQueryText(fact, quote);
-    const hits = store.searchText(query, { chatIds: [chatId], limit: BM25_LIMIT });
-    const lexicalSeqs = laterSeqs(store.chunks(hits.map((h) => h.chunkId)), afterSeq);
+    const lexicalSeqs = lexicalLater(query, afterSeq, k);
     let semanticSeqs = [];
     const q = vec ? vec.cache.question(factQueryId(query), query) : null;
     if (q) {
-      const top = topByCosine(vec.index, q, { k: COSINE_K });
+      const top = topByCosine(vec.index, q, { afterSeq, k: COSINE_K });
       semanticSeqs = laterSeqs(store.chunks(top.map((t) => t.chunkId)), afterSeq);
     }
     const fused = [];

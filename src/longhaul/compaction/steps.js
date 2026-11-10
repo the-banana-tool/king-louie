@@ -8,15 +8,14 @@
 // detail, call }; a refused key or an exhausted quota throws, and stops the
 // run. Nothing here logs text: facts, quotes and reasons are private.
 const { loadPrompt, fillTemplate } = require('../prompts');
-const { KIND_RULES, parseReply } = require('../author');
+const { KIND_RULES, SPAN_MESSAGE_CHARS, clipRendered, parseReply } = require('../author');
+const { ANCHOR_SENDERS } = require('../sampling');
 const { cacheKey, cachedCall } = require('../model-cache');
-const { messageText, senderLabel } = require('../session-format');
+const { messageText } = require('../session-format');
 const { normalizeText, normalizeAnswer } = require('../scoring');
 const { callErrorCode, stopErrorFor } = require('../retry');
 const { sha256Text } = require('../files');
 
-// The same clip author.js applies to a span (it does not export it).
-const SPAN_MESSAGE_CHARS = 2000;
 const REASON_MAX = 300;
 const AUTHOR_MAX_TOKENS = 800;
 const JUDGE_MAX_TOKENS = 200;
@@ -27,14 +26,6 @@ const prompts = new Map();
 function prompt(name) {
   if (!prompts.has(name)) prompts.set(name, loadPrompt(name));
   return prompts.get(name);
-}
-
-function clipRendered(m) {
-  const text = messageText(m);
-  const body = text.length > SPAN_MESSAGE_CHARS
-    ? `${text.slice(0, SPAN_MESSAGE_CHARS)}\n[... ${text.length - SPAN_MESSAGE_CHARS} more characters]`
-    : text;
-  return `[#${m.seq} ${senderLabel(m)}]\n${body}`;
 }
 
 const oneLine = (v) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, REASON_MAX) : '');
@@ -79,7 +70,10 @@ async function authorFact({ session, window, item, client, cache, hooks, maxToke
   if (evidenceSeq < window.windowFromSeq || evidenceSeq > window.windowToSeq) {
     return fail('evidence-outside-window', call, String(evidenceSeq));
   }
-  if (!normalizeText(messageText(session.index.get(evidenceSeq))).includes(needle)) return fail('quote-not-found', call);
+  if (evidenceSeq < item.spanFrom || evidenceSeq > item.spanTo) return fail('evidence-outside-span', call, String(evidenceSeq));
+  const evidence = session.index.get(evidenceSeq);
+  if (!ANCHOR_SENDERS[item.kind]?.includes(evidence?.sender)) return fail('evidence-wrong-sender', call, String(evidence?.sender ?? null));
+  if (!normalizeText(messageText(evidence)).includes(needle)) return fail('quote-not-found', call);
   return { ok: true, value: { kind: item.kind, fact, quote, evidenceSeq }, call };
 }
 
@@ -115,4 +109,4 @@ async function judgeNeeded({ fact, candidates, sessionId, client, cache, hooks, 
   return { ok: true, value: { verdict, seqs, reason: oneLine(parsed.reason) }, call };
 }
 
-module.exports = { PRESERVED_VERDICTS, NEEDED_VERDICTS, SPAN_MESSAGE_CHARS, authorFact, judgePreserved, judgeNeeded };
+module.exports = { PRESERVED_VERDICTS, NEEDED_VERDICTS, authorFact, judgePreserved, judgeNeeded };

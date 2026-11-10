@@ -121,4 +121,4 @@ async function authorCandidates({ session, plan, client, sessionId, existing = [
   return { candidates, rejected, promptSha256 };
 }
 
-module.exports = { DEFAULT_PROMPT, KIND_RULES, fillPrompt, parseReply, authorCandidates, readAuthoringState };
+module.exports = { DEFAULT_PROMPT, KIND_RULES, SPAN_MESSAGE_CHARS, clipRendered, fillPrompt, parseReply, authorCandidates, readAuthoringState };

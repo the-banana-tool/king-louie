@@ -218,6 +218,29 @@ describe('longhaul compaction-loss', () => {
     assert.deepEqual(readJson(path.join(t.root, 'runs', runId, 'config.json')).embed, { provider: 'openai', model: 'text-embedding-3-small' });
   });
 
+  it('counts fact queries an embedder answered one vector short and goes on lexically', async () => {
+    const t = setup();
+    const values = { ...t.values, 'embed-provider': 'openai', 'embed-model': 'text-embedding-3-small', 'allow-unpriced': true };
+    const good = fakeEmbedder();
+    assert.equal(await COMMANDS.embed.run(t.ctx, { session: SID, provider: 'openai', model: 'text-embedding-3-small' }, [], { providerInstance: good }), 0);
+    const short = {
+      async embed(inputs, opts) {
+        const res = await good.embed(inputs, opts);
+        return { ...res, vectors: res.vectors.slice(1) };
+      }
+    };
+    assert.equal(await COMMANDS['compaction-loss'].run(t.ctx, values, [], { ...t.deps, embedder: short }), 0, t.ctx.stderr.text);
+    const cache = EmbeddingCache.open(cacheDir(t.home.private, SID, 'text-embedding-3-small'));
+    for (const fact of [A, B, C]) {
+      const q = factQueryText(fact, fact);
+      assert.equal(cache.question(factQueryId(q), q), null);
+    }
+    const [runId] = runDirs(t.root);
+    const summary = readJson(path.join(t.root, 'runs', runId, 'summary.json'));
+    assert.equal(summary.embedFailures, 3);
+    assert.ok(summary.all.judged > 0);
+  });
+
   it('runs end to end on synth-compacted with --fake-models, for $0', async () => {
     const { env, root } = tmpHome();
     ensureDirs(resolveHome(env));

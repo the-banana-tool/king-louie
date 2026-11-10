@@ -599,4 +599,4 @@ async function runAnswerStage(run, options) {
   }
 }
 
-module.exports = { runBenchmark, sigintHandler, gitCommit, removeStaleTmp, contextCapTokens, KL_TMP_PREFIX, RUN_ID_RE, ANSWER_PROMPT_OVERHEAD_TOKENS, RUN_STOP_CODES };
+module.exports = { runBenchmark, sigintHandler, gitCommit, removeStaleTmp, newRunId, contextCapTokens, KL_TMP_PREFIX, RUN_ID_RE, ANSWER_PROMPT_OVERHEAD_TOKENS, RUN_STOP_CODES };

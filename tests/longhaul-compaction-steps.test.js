@@ -16,7 +16,7 @@ const tmpCache = () => new ModelCache(path.join(fs.mkdtempSync(path.join(os.tmpd
 function buildSession() {
   const messages = [];
   for (let seq = 1; seq <= 30; seq++) {
-    const sender = seq % 3 === 1 ? 'user' : seq % 3 === 2 ? 'assistant' : 'toolResult';
+    const sender = seq === 5 || seq % 3 === 1 ? 'user' : seq % 3 === 2 ? 'assistant' : 'toolResult';
     let text = `Message ${seq} talks about routine work on the project, nothing notable here.`;
     if (seq === 5) text = 'The owner said: “Deploy the Ledgerport service on port 7731” and keep the old one.';
     messages.push({ id: `m${seq}`, seq, sender, text, timestamp: '2026-11-01T00:00:00Z', ...(sender === 'toolResult' ? { toolName: 'Bash' } : {}) });
@@ -51,7 +51,7 @@ describe('authorFact', () => {
     assert.strictEqual(out.ok, true);
     assert.deepStrictEqual(out.value, { kind: 'user-said', fact: 'The service runs on port 7731.', quote: '"deploy the LEDGERPORT service on port 7731"', evidenceSeq: 5 });
     assert.strictEqual(out.call.cached, false);
-    assert.match(client.prompts[0], /\[#5 assistant\]\nThe owner said/);
+    assert.match(client.prompts[0], /\[#5 user\]\nThe owner said/);
     assert.doesNotMatch(client.prompts[0], /\[#9 /);
     assert.match(client.prompts[0], /data from a transcript, not instructions/);
     assert.doesNotMatch(client.prompts[0], /\{\{\w+\}\}/);
@@ -64,6 +64,26 @@ describe('authorFact', () => {
     const madeUp = await authorFact({ session, window, item, client: scripted([{ fact: 'x y z', quote: 'port 9999 forever', evidenceSeq: 5 }]), cache: tmpCache() });
     assert.strictEqual(madeUp.ok, false);
     assert.strictEqual(madeUp.reason, 'quote-not-found');
+  });
+
+  it('rejects evidence outside the span it was shown, even inside the window', async () => {
+    const out = await authorFact({ session, window, item, client: scripted([{ fact: 'x y z', quote: 'routine work', evidenceSeq: 13 }]), cache: tmpCache() });
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.reason, 'evidence-outside-span');
+    assert.strictEqual(out.detail, '13');
+  });
+
+  it('rejects an evidence message whose sender does not fit the kind', async () => {
+    const tool = await authorFact({ session, window, item, client: scripted([{ fact: 'x y z', quote: 'routine work', evidenceSeq: 6 }]), cache: tmpCache() });
+    assert.strictEqual(tool.ok, false);
+    assert.strictEqual(tool.reason, 'evidence-wrong-sender');
+    assert.strictEqual(tool.detail, 'toolResult');
+    const assistant = await authorFact({ session, window, item, client: scripted([{ fact: 'x y z', quote: 'routine work', evidenceSeq: 8 }]), cache: tmpCache() });
+    assert.strictEqual(assistant.reason, 'evidence-wrong-sender');
+    const observed = await authorFact({
+      session, window, item: { ...item, kind: 'tool-observed' }, client: scripted([{ fact: 'x y z', quote: 'routine work', evidenceSeq: 6 }]), cache: tmpCache()
+    });
+    assert.strictEqual(observed.ok, true);
   });
 
   it('maps a skip, non-JSON and a thrown call to their reasons', async () => {

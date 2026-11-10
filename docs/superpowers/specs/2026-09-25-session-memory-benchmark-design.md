@@ -509,8 +509,9 @@ answer-stage runs.
 **Verification (owner decision 2026-11-09).** "With verification" in step 1
 and "the same verification loop" in step 3 mean mechanical checks plus the
 human spot-check, not a `verify` review of every fact: a fact whose evidence
-message is outside the window, or whose quote is not in that message, is
-rejected and counted, never judged; and a seeded 10% of the judged facts
+message is outside the window or the span the author was shown, comes from a
+sender the fact's kind does not take, or does not hold its quote, is rejected
+and counted, never judged; and a seeded 10% of the judged facts
 (at least one) goes to `longhaul spot-check`, where a person agrees with both
 judgments or gives both of their own. The report shows agreement per judge.
 
@@ -561,7 +562,9 @@ other three datasets above move to B4, with the release.
 
 - Every session is `constructed: true`, its `boundaries` one
   `{ fromSeq, toSeq, instanceId, trajectoryId }` per trajectory, contiguous
-  from seq 1 and each starting at the trajectory's task prompt.
+  from seq 1 and each starting at the trajectory's task prompt. A row with no
+  message, or whose first message is not `user`, has no task prompt: it is
+  left out of the plan and counted.
 - Sessions are public: `private: false`, `license: CC-BY-4.0` (both datasets'
   card license), and `upstreamLicense`, the repository's SPDX id from the row
   (`NOASSERTION` when the rows differ). The Nebius dataset has no per-row

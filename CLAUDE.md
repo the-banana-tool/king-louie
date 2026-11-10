@@ -908,14 +908,20 @@ Electron build.
   judge sees the fact and the summary, never the window), judge whether a
   later message needed it (`needed`/`not-needed`) from at most `--candidates`
   later messages that match it (`compaction/matches.js`: BM25 over a temp
-  store in `tmp/kl-compaction-*`, only `seq > summarySeq`; no match is
-  `not-needed` with `noCandidates: true` and no call). A fact whose
-  `evidenceSeq` is outside the window or whose quote is not in that message
-  is `rejected` (`evidence-outside-window`, `quote-not-found`), never judged.
+  store in `tmp/kl-compaction-*`, only `seq > summarySeq`, the BM25 limit
+  raised until enough later messages are found and cosine taken after the
+  seq floor; no match is `not-needed` with `noCandidates: true` and no call).
+  A fact whose `evidenceSeq` is outside the window or the span the author was
+  shown, from a sender its kind does not take (`ANCHOR_SENDERS`), or whose
+  quote is not in that message is `rejected` (`evidence-outside-window`,
+  `evidence-outside-span`, `evidence-wrong-sender`, `quote-not-found`), never
+  judged.
   `--embed-*` adds cosine hits fused with BM25, and needs the session's
   complete `longhaul embed` cache for that model with kl-recall's chunking,
   else it refuses `EMBEDDINGS_MISSING` (exit 2) before anything is sent; each
-  fact's query vector is embedded and charged, and kept in that cache. Priced,
+  fact's query vector is embedded and charged, and kept in that cache; a
+  reply that is not one vector of the cache's dimension per query leaves
+  those facts lexical only, counted as `embedFailures` in `summary.json`. Priced,
   capped, cached (`private/model-cache/compaction-*`) and stopped as `run`
   is (`PRIVATE_SESSION`, `OVER_BUDGET`, `UNPRICED`, `QUOTA`, `AUTH`, exit 2;
   at the cap, exit 1 with the rest as errors); a rerun pays only for misses.
@@ -956,7 +962,9 @@ Electron build.
   `reasoning_content` kept only as `meta.reasoningChars`, results paired by
   `tool_call_id` or, for Open-SWE, by order; an unknown role is a `status`
   message with `meta.unmapped`, bad arguments `parameters: { raw }`). Pass 1
-  plans; pass 2 writes. Each session joins one repository's trajectories (the
+  plans; pass 2 assembles and validates every session, then writes. A row
+  that maps to no message or whose first is not `user` is not planned and is
+  reported as having no task prompt (`noTaskPrompt`). Each session joins one repository's trajectories (the
   first per `instance_id`) up to `--target-tokens`; a part under
   `--min-tokens` is reported too short and not written. It is `constructed:
   true`, with `boundaries` (`{ fromSeq, toSeq, instanceId, trajectoryId }`,
@@ -966,8 +974,8 @@ Electron build.
   `NOASSERTION` when they differ, `unknown-upstream` when none has one, which
   is every Nebius session until the release looks them up). Ids (`nr-`,
   `os-`) are derived from the repo, part, config, split and token options; the
-  same input and options again are `unchanged`, anything else over an id is
-  `SESSION_EXISTS` (exit 2) until `--force`. An input under
+  same input, options and converter version again are `unchanged`, anything
+  else over an id is `SESSION_EXISTS` (exit 2) until `--force`. An input under
   `LONGHAUL_HOME/private/` is refused; no absolute path is recorded. A
   question in a constructed session gets a computed `crossesBoundary` (its
   evidence in more than one trajectory; `null` elsewhere, and the key is left

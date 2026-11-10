@@ -212,7 +212,7 @@ function listSessions(dataRoot) {
 
 module.exports = {
   SENDERS, SESSION_ID_RE, CHARS_PER_TOKEN,
-  estimateTokens, messageText, senderLabel, renderMessage, renderMessages,
+  estimateTokens, asText, messageText, senderLabel, renderMessage, renderMessages,
   SessionIndex, validateMessages, validateManifest, buildManifest,
   writeSession, loadSession, listSessions, sessionDir, validateSessionId
 };

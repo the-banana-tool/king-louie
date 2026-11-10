@@ -125,4 +125,4 @@ function sessionIdFor(converter, { repo, part, config = null, split = null, targ
   return `${converter.prefix}${hash}-${part}`;
 }
 
-module.exports = { planSessions, assembleSession, sessionIdFor };
+module.exports = { CONVERTER_VERSION, planSessions, assembleSession, sessionIdFor };
