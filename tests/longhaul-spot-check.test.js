@@ -4,7 +4,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const { Readable } = require('stream');
-const { reviewSpotChecks, agreement, readSpotChecks } = require('../src/longhaul/spot-check');
+const { reviewSpotChecks, agreement, compactionAgreement, readSpotChecks } = require('../src/longhaul/spot-check');
 const { spotCheckFile } = require('../src/longhaul/answer-stage');
 const { writeFileAtomic } = require('../src/longhaul/files');
 const { ensureDirs, resolveHome } = require('../src/longhaul/home');
@@ -67,6 +67,64 @@ describe('agreement', () => {
     const rows = [{ ...row(1, 'correct'), humanVerdict: 'correct' }, { ...row(2, 'correct'), humanVerdict: 'partial' }, row(3, 'incorrect')];
     assert.deepStrictEqual(agreement(rows), { sampled: 3, reviewed: 2, agreed: 1, rate: 0.5 });
     assert.deepStrictEqual(agreement([]), { sampled: 0, reviewed: 0, agreed: 0, rate: null });
+  });
+});
+
+const compactionRow = (i, preserved, needed) => ({
+  runId: 'R', kind: 'compaction-loss', sessionId: 'S', questionId: `S:0:${i}`, adapter: 'compaction-loss', factId: `S:0:${i}`, window: 0,
+  factKind: 'user-said', fact: `The deploy key is key-${i}.`, quote: `key-${i}`, evidenceSeq: i, summarySeq: 21,
+  preserved: { verdict: preserved, reason: 'summary names it' }, needed: { verdict: needed, seqs: needed === 'needed' ? [50] : [], reason: 'used later', noCandidates: false },
+  verdict: preserved, humanVerdict: null, reviewer: null
+});
+const texts = async (r) => ({ evidence: `please set key-${r.evidenceSeq} now`, summary: 'Summary: key chosen.' });
+
+describe('reviewSpotChecks, compaction-loss rows', () => {
+  it('shows the fact, quote, evidence, summary and both verdicts; y agrees with both', async () => {
+    const saves = [];
+    const out = sink();
+    const counts = await reviewSpotChecks({
+      rows: [compactionRow(3, 'preserved', 'not-needed')], reviewer: 'TT', input: input(['y']), output: out, textOf: texts, onSave: (rows) => saves.push(rows)
+    });
+    assert.deepStrictEqual(counts, { reviewed: 1, skipped: 0, stopped: false });
+    const [r] = saves.at(-1);
+    assert.deepStrictEqual([r.humanPreserved, r.humanNeeded, r.reviewer, r.humanVerdict], ['preserved', 'not-needed', 'human:TT', null]);
+    assert.match(out.text, /Fact: The deploy key is key-3\./);
+    assert.match(out.text, /Quote: key-3/);
+    assert.match(out.text, /Evidence #3:\nplease set key-3 now/);
+    assert.match(out.text, /Summary #21:\nSummary: key chosen\./);
+    assert.match(out.text, /Summary judge: preserved - summary names it/);
+    assert.match(out.text, /Needed judge: not-needed - used later/);
+  });
+
+  it('takes the reviewer\'s own two verdicts, refuses anything else, and saves after each', async () => {
+    const saves = [];
+    const out = sink();
+    const counts = await reviewSpotChecks({
+      rows: [compactionRow(3, 'preserved', 'needed'), compactionRow(4, 'lost', 'needed')], reviewer: 'TT',
+      input: input(['c', 'lx', 'lu', 's']), output: out, textOf: texts, onSave: (rows) => saves.push(rows)
+    });
+    assert.deepStrictEqual(counts, { reviewed: 1, skipped: 1, stopped: false });
+    assert.strictEqual(saves.length, 1);
+    assert.deepStrictEqual(saves[0].map((r) => [r.humanPreserved ?? null, r.humanNeeded ?? null]), [['lost', 'not-needed'], [null, null]]);
+    assert.match(out.text, /Type y, two letters \(p, r or l, then n or u\), s or q\./);
+  });
+
+  it('shows the looked-up texts as missing when there is no lookup', async () => {
+    const out = sink();
+    await reviewSpotChecks({ rows: [compactionRow(3, 'lost', 'needed')], reviewer: 'TT', input: input(['q']), output: out, onSave: () => {} });
+    assert.match(out.text, /Evidence #3:\n\(not available\)/);
+  });
+});
+
+describe('agreement, compaction-loss rows', () => {
+  it('counts a row agreed only when both of the reviewer\'s verdicts match, and each judge apart', () => {
+    const rows = [
+      { ...compactionRow(1, 'preserved', 'needed'), humanPreserved: 'preserved', humanNeeded: 'needed' },
+      { ...compactionRow(2, 'lost', 'needed'), humanPreserved: 'lost', humanNeeded: 'not-needed' },
+      compactionRow(3, 'lost', 'needed')
+    ];
+    assert.deepStrictEqual(agreement(rows), { sampled: 3, reviewed: 2, agreed: 1, rate: 0.5 });
+    assert.deepStrictEqual(compactionAgreement(rows), { sampled: 3, reviewed: 2, agreed: 1, rate: 0.5, preservedAgreed: 2, neededAgreed: 1 });
   });
 });
 
