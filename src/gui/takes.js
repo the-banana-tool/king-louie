@@ -92,14 +92,20 @@ async function closeOverCdp(browser) {
 class TakeManager {
   constructor({ leases, broker, store, guiConfig, registry = null, audit = null, clock = Date.now, timers = { setTimeout, clearTimeout },
     log = createLogger('gui/takes'), attachBrowser = attachPlaywright, closeBrowser = closeOverCdp,
-    findProcess = undefined, kill = undefined, hosting = 'service', dataDir = null, launchTakeBrowser = null, createBrowser = null } = {}) {
+    findProcess = undefined, kill = undefined, hosting = 'service', dataDir = null, screenHost = null, launchTakeBrowser = null, createBrowser = null } = {}) {
     Object.assign(this, { leases, broker, store, guiConfig, audit, clock, timers, log, attachBrowser, closeBrowser, hosting, dataDir });
     this.personal = hosting === 'personal';
-    // Step 2 of a start → the browser. Personal: { exe, profile, userDataPath }. Fleet:
-    // { exe, profile, ctx, setPid, checkEnded } (the helper's call, the pid it reports, and the
-    // check that the take did not end while the helper launched).
+    // A personal node started at boot (`--screen-host app`, boot-node-tray Task 6) is outside
+    // the owner's desktop: its take's Chrome is launched by the King Louie app in his session
+    // and attached over CDP, as a fleet node's is by the helper. Only a personal node run in
+    // his session launches the take's Chrome itself (`ownBrowser`).
+    this.screenHost = this.personal && screenHost === 'app' ? 'app' : null;
+    this.ownBrowser = this.personal && !this.screenHost;
+    // Step 2 of a start → the browser. Own browser: { exe, profile, userDataPath }. Fleet and
+    // screen host: { exe, profile, ctx, setPid, checkEnded } (the helper's call, the pid it
+    // reports, and the check that the take did not end while the helper launched).
     this.launchTakeBrowser = launchTakeBrowser
-      || (this.personal ? (req) => launchPersonalBrowser(req, { createBrowser }) : (req) => this._launchFleetBrowser(req));
+      || (this.ownBrowser ? (req) => launchPersonalBrowser(req, { createBrowser }) : (req) => this._launchFleetBrowser(req));
     // Personal: { browser, profile } a take kept open with keep_browser, outside the registry;
     // stopAll closes them (C-4).
     this.kept = new Set();
@@ -336,10 +342,11 @@ class TakeManager {
       // itself (personal).
       const exe = cfg.apps[cfg.browser].path;
       let launchReq;
-      if (this.personal) {
+      // Chrome locks a user-data dir to one process (C-3): checked again, the phone took time.
+      // A screen host opens the same <dataDir>/browser-profiles the chats do, so it is checked too.
+      if (this.personal) this._assertProfileFree(p.profile, t.browserKey);
+      if (this.ownBrowser) {
         if (!this.dataDir) throw new GuiError('browser_launch_failed', 'no data dir for the take\'s browser profile');
-        // Chrome locks a user-data dir to one process (C-3): checked again, the phone took time.
-        this._assertProfileFree(p.profile, t.browserKey);
         // The same directory the browser tools open for this profile name.
         launchReq = { exe, profile: p.profile, userDataPath: resolveProfileDir({ userDataPath: this.dataDir }, p.profile) };
       } else {
@@ -410,7 +417,7 @@ class TakeManager {
       this._safeUpdate(takeId, { state: 'live' });
       return {
         take_id: takeId, lease_id: lease.leaseId, granted_minutes: grantedMinutes, expires_at: expiresAt,
-        browser: { profile: p.profile, cdp: !this.personal },
+        browser: { profile: p.profile, cdp: !this.ownBrowser },
         recording: recording ? { path: recording.path, started_at: recording.started_at } : null
       };
     } catch (err) {
@@ -531,7 +538,7 @@ class TakeManager {
       await step('keep_awake off', () => this.broker.keepAwake(false, ctx));
     }
     let closedOverCdp = false;
-    if (t.browser && this.personal) {
+    if (t.browser && this.ownBrowser) {
       // C-4: Playwright launched it, so stop() ends Chrome. A kept one leaves the registry (no
       // tool reaches it) and is closed by stopAll.
       const browser = t.browser;

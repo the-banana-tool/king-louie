@@ -666,7 +666,8 @@ function fakeRunner({
     async inspectLocal(a = {}) { calls.push(['inspectLocal', a]); return { trust: trust(), node: runner.node }; },
     async detectPersonalNode(a = {}) { calls.push(['detectPersonalNode', a]); return runner.node; },
     task,
-    async queryTask(a) { calls.push(['queryTask', a]); return { state: runner.task }; },
+    taskFacts: {},
+    async queryTask(a) { calls.push(['queryTask', a]); return { state: runner.task, ...runner.taskFacts }; },
     async nodeRunning(a) { calls.push(['nodeRunning', a]); return runner.running ? { running: true, pid: 4242 } : { running: false, pid: null }; },
     async runTask() { calls.push(['runTask']); return { ok: true, ranAt: 1000 }; },
     async stopNode(a) {
@@ -1613,6 +1614,130 @@ describe('desktop controller: Install from the pane (§8)', () => {
 });
 
 // --- The node's hosting and the version gap (spec 2026-11-03 §6.8, §8, C-12).
+
+describe('desktop controller: the boot task install and the login-start setting (boot-node-tray task 9)', () => {
+  const DECLINED = 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.';
+
+  it('the window waits for the install CLI longer than the CLI waits for the UAC answer', () => {
+    const { INSTALL_CLI_TIMEOUT_MS } = require('../src/ipc/desktop-controller');
+    const { ELEVATE_TIMEOUT_MS } = require('../src/service/elevated-schtasks');
+    assert.strictEqual(ELEVATE_TIMEOUT_MS, 300000);
+    assert.strictEqual(INSTALL_CLI_TIMEOUT_MS, 330000);
+    assert.ok(INSTALL_CLI_TIMEOUT_MS > ELEVATE_TIMEOUT_MS);
+  });
+
+  it('a declined UAC prompt is NODE_INSTALL_DECLINED with the CLI sentence, for the press and the preview', async () => {
+    const runner = fakeRunner({ task: 'missing', cli: () => ({ code: 1, stdout: '', stderr: `${DECLINED}
+`, json: null }) });
+    const { controller, state } = controllerFor({ extra: { nodeRunner: runner } });
+    state.setPairing(personalPairing());
+    const out = await controller.nodeInstall({ confirmed: true });
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'NODE_INSTALL_DECLINED');
+    assert.strictEqual(out.message, DECLINED);
+    assert.deepStrictEqual(out.lines, [DECLINED]);
+    const preview = await controller.nodeInstallPreview();
+    assert.strictEqual(preview.code, 'NODE_INSTALL_DECLINED');
+    controller.dispose();
+  });
+
+  it('another failure of the CLI stays NODE_INSTALL_FAILED', async () => {
+    const runner = fakeRunner({ task: 'missing', cli: () => ({ code: 1, stdout: '', stderr: 'schtasks said no', json: null }) });
+    const { controller, state } = controllerFor({ extra: { nodeRunner: runner } });
+    state.setPairing(personalPairing());
+    assert.strictEqual((await controller.nodeInstall({ confirmed: true })).code, 'NODE_INSTALL_FAILED');
+    controller.dispose();
+  });
+
+  it('an earlier logon task (no BootTrigger) is read as taskKind logon and Install replaces it', async () => {
+    const runner = fakeRunner({ task: 'registered', cli: () => ({ code: 0, stdout: 'Registered.', stderr: '', json: null }) });
+    runner.taskFacts = { logonType: 'InteractiveToken', boot: false };
+    const { controller, state } = controllerFor({ extra: { nodeRunner: runner } });
+    state.setPairing(personalPairing());
+    const out = await controller.nodeInstall({ confirmed: true });
+    assert.strictEqual(out.ok, true);
+    assert.ok(runner.calls.some(([c]) => c === 'runCli'), 'the CLI ran over the old task');
+    assert.strictEqual((await controller.status()).node.taskKind, 'logon');
+    runner.taskFacts = { logonType: 'S4U', boot: true };
+    const again = await controller.nodeInstall({ confirmed: true });
+    assert.strictEqual(again.code, 'NODE_TASK_REGISTERED', 'a boot task is not installed over');
+    assert.strictEqual((await controller.status()).node.taskKind, 'boot');
+    controller.dispose();
+  });
+
+  function loginController({ on = false, readFails = false, setFails = false } = {}) {
+    const calls = [];
+    let current = on;
+    const runner = fakeRunner();
+    const made = controllerFor({
+      extra: {
+        platform: 'win32', nodeRunner: runner, appPath: 'C:\Program Files\King Louie\King Louie.exe',
+        loginStart: {
+          readLoginStart: () => { calls.push(['read']); if (readFails) throw new Error('reg failed'); return { on: current, command: current ? 'x' : null }; },
+          setLoginStart: (args) => { calls.push(['set', args]); if (setFails) throw new Error('Access is denied.'); current = args.on; }
+        }
+      }
+    });
+    made.state.setPairing(personalPairing());
+    return { ...made, calls };
+  }
+
+  it('status carries loginStart { on } on a personal node', async () => {
+    const { controller } = loginController({ on: true });
+    assert.deepStrictEqual((await controller.status()).loginStart, { on: true });
+    controller.dispose();
+  });
+
+  it('setLoginStart({ on }) writes with the app binary as appPath and reads the value back', async () => {
+    const { controller, calls } = loginController({ on: false });
+    const out = await controller.setLoginStart({ on: true });
+    assert.deepStrictEqual(out, { ok: true, on: true });
+    const set = calls.find(([c]) => c === 'set')[1];
+    assert.deepStrictEqual(set, { on: true, appPath: 'C:\Program Files\King Louie\King Louie.exe' });
+    assert.deepStrictEqual((await controller.loginStart()), { ok: true, on: true });
+    assert.deepStrictEqual((await controller.status()).loginStart, { on: true });
+    controller.dispose();
+  });
+
+  it('setLoginStart refuses a non-boolean and reports a write that fails', async () => {
+    const bad = loginController();
+    assert.strictEqual((await bad.controller.setLoginStart({ on: 'yes' })).code, 'INVALID_PARAMS');
+    assert.ok(!bad.calls.some(([c]) => c === 'set'));
+    bad.controller.dispose();
+    const failing = loginController({ setFails: true });
+    const out = await failing.controller.setLoginStart({ on: true });
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'LOGIN_START_FAILED');
+    assert.match(out.message, /Access is denied/);
+    failing.controller.dispose();
+  });
+
+  it('a read that fails leaves status.loginStart null and loginStart() a refusal', async () => {
+    const { controller } = loginController({ readFails: true });
+    assert.strictEqual((await controller.status()).loginStart, null);
+    assert.strictEqual((await controller.loginStart()).code, 'LOGIN_START_FAILED');
+    controller.dispose();
+  });
+
+  it('a failed read is retried on the next status', async () => {
+    let fail = true;
+    const made = controllerFor({ extra: { platform: 'win32', nodeRunner: fakeRunner(), loginStart: {
+      readLoginStart: () => { if (fail) throw new Error('reg failed'); return { on: true }; }, setLoginStart: () => {}
+    } } });
+    made.state.setPairing(personalPairing());
+    assert.strictEqual((await made.controller.status()).loginStart, null);
+    fail = false;
+    assert.deepStrictEqual((await made.controller.status()).loginStart, { on: true });
+    made.controller.dispose();
+  });
+
+  it('off Windows there is no setting', async () => {
+    const { controller } = controllerFor();
+    assert.strictEqual((await controller.loginStart()).code, 'NOT_WINDOWS');
+    assert.strictEqual((await controller.setLoginStart({ on: true })).code, 'NOT_WINDOWS');
+    controller.dispose();
+  });
+});
 
 describe('desktop controller: hosting and the version gap', () => {
   const fleetPairing = () => pairedRecord();

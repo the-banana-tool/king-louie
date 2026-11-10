@@ -922,3 +922,21 @@ describe('every plan category has the owner\'s words', () => {
     assert.strictEqual(categoryWord('constructor', true), 'constructor');
   });
 });
+
+describe('the install step says boot (boot-node-tray spec 5.5)', () => {
+  it('names the boot task, the one administrator prompt and that no password is stored', () => {
+    const answer = describeSetup(base({ node: { ...NODE, task: 'missing' } }));
+    const text = answer.lines.join(' ');
+    assert.match(text, /starts it at boot, before you sign in/);
+    assert.match(text, /one administrator prompt/);
+    assert.match(text, /No password is stored/);
+    assert.match(text, /signed in with King Louie in the tray/);
+    assert.doesNotMatch(text, /logon task/);
+  });
+
+  it('a declined prompt is the CLI sentence', () => {
+    const answer = describeSetup(base({ node: { ...NODE, task: 'missing' }, installResult: { ok: false, code: 'NODE_INSTALL_DECLINED', message: 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.', lines: [] } }));
+    assert.strictEqual(answer.error.code, 'NODE_INSTALL_DECLINED');
+    assert.strictEqual(answer.error.message, 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.');
+  });
+});

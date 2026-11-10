@@ -53,6 +53,7 @@
     ],
     "asarUnpack": [
       "examples/playbooks/**",
+      "src/session/backends/windows-worker.ps1",
       "node_modules/onnxruntime-node/**",
       "node_modules/sharp/**",
       "node_modules/@img/**"

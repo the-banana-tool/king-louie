@@ -116,6 +116,69 @@ describe('doctor: hosting', () => {
   });
 });
 
+describe('doctor: the boot task and the screen host (boot-node-tray task 9)', () => {
+  it('hosting: a boot task reads "personal (boot task, S4U; ..."; a logon task warns and says how to move to boot', async () => {
+    const s = setup({ hosting: 'personal' });
+    let { results } = await doctor(s, { personalOwner: owners('PC\owner'), queryTaskKind: () => 'boot' });
+    let row = results.find((r) => r.check === 'hosting');
+    assert.match(row.detail, /^personal \(boot task, S4U; runs as /);
+    assert.equal(row.warn, undefined);
+    ({ results } = await doctor(s, { personalOwner: owners('PC\owner'), queryTaskKind: () => 'logon' }));
+    row = results.find((r) => r.check === 'hosting');
+    assert.match(row.detail, /^personal \(logon task: run install --personal from King Louie to start at boot; runs as /);
+    assert.equal(row.warn, true);
+    assert.equal(row.ok, true);
+  });
+
+  it('hosting: a task that is not registered has no kind to report', async () => {
+    const s = setup({ hosting: 'personal' });
+    const { results } = await doctor(s, { personalOwner: owners('PC\owner'), queryTask: () => 'not registered', queryTaskKind: () => { throw new Error('not asked'); } });
+    assert.match(results.find((r) => r.check === 'hosting').detail, /^personal \(runs as /);
+  });
+
+  it('screen host: not used when the screen is in the node own process', async () => {
+    const s = setup({ hosting: 'personal' });
+    const { results } = await doctor(s, { personalOwner: owners('PC\owner') });
+    assert.deepEqual(results.find((r) => r.check === 'screen host'), { check: 'screen host', ok: true, detail: 'not used (screen in this process)' });
+    assert.equal(results.find((r) => r.check === 'session helper').detail, 'not used on a personal node (the GUI runs in-process)');
+  });
+
+  it('session helper: on a screen-host (boot) node it does not say the GUI runs in-process', async () => {
+    const s = setup({ hosting: 'personal' });
+    const helper = path.join(s.dataDir, 'session', 'personal-helper.json');
+    fs.mkdirSync(path.dirname(helper), { recursive: true });
+    fs.writeFileSync(helper, '{}');
+    const { results } = await doctor(s, { personalOwner: owners('PC\owner') });
+    const row = results.find((r) => r.check === 'session helper');
+    assert.doesNotMatch(row.detail, /in-process/);
+    assert.equal(row.detail, 'not used on a personal node (the King Louie app in your session is the screen host)');
+  });
+
+  it('screen host: not connected until the app connects, then connected', async () => {
+    const s = setup({ hosting: 'personal' });
+    fs.writeFileSync(path.join(s.dataDir, 'service.pid'), String(process.pid));
+    const record = (extra) => writeGuiStatus(s.dataDir, {
+      v: 1, pid: process.pid, hosting: 'personal', user: null, platform: null, capabilities: [], probes: [], limits: [], apps: [],
+      since: 'x', updated_at: new Date().toISOString(), lease: null, ...extra
+    });
+    record({ available: false, reason: 'screen_host_not_connected' });
+    let { results } = await doctor(s, { personalOwner: owners('PC\owner') });
+    assert.deepEqual(results.find((r) => r.check === 'screen host'), { check: 'screen host', ok: true, warn: true, detail: 'not connected: log in to Windows, or open King Louie' });
+    const helper = path.join(s.dataDir, 'session', 'personal-helper.json');
+    fs.mkdirSync(path.dirname(helper), { recursive: true });
+    fs.writeFileSync(helper, '{}');
+    record({ available: true, reason: undefined });
+    ({ results } = await doctor(s, { personalOwner: owners('PC\owner') }));
+    assert.deepEqual(results.find((r) => r.check === 'screen host'), { check: 'screen host', ok: true, detail: 'connected' });
+  });
+
+  it('screen host: no row on a fleet node', async () => {
+    const s = setup();
+    const { results } = await doctor(s);
+    assert.equal(rowIndex(results, 'screen host'), -1);
+  });
+});
+
 describe('doctor: the default schtasks read', () => {
   const { queryPersonalTask } = require('../src/service/doctor');
   it('maps exit 0 with a Status line to its state, and anything else to "not registered"', () => {

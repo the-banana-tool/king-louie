@@ -121,7 +121,7 @@ function loadProfile(profile) {
       // helper endpoint under a temp dir or a personal node's channel;
       // deps.personalOwner reaches assertPersonalOwner). runService passes
       // its own deps through, which are none outside tests.
-      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, localInference = null, caseChecks = null, adminUid, configDir, executors, webhooksOnDemand = false, deps = {} }) {
+      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, localInference = null, caseChecks = null, adminUid, configDir, executors, webhooksOnDemand = false, screenHost = null, deps = {} }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -184,6 +184,8 @@ function loadProfile(profile) {
           const { createGuiSubsystem, isJobOpen } = require('../gui');
           gui = createGuiSubsystem({
             nodeConfig, dataDir, configDir: cfgDir, cipher: servicePorts.cipher, approvals, hosting,
+            // `run --screen-host app` (boot-node-tray D-3): the screen through the King Louie app.
+            screenHost,
             // R-F5-7, late-bound: the core and the fleet node are built after
             // this. Until both exist, and for any job neither knows, no job
             // is open (fail closed).
@@ -458,7 +460,9 @@ function ensureWorkspace(dataDir) {
 // deps: tests only, handed to the profile's start as they are; also
 // deps.startProfile (in place of loadProfile(profile).start) and
 // deps.stopRequest (watchStopRequest's options: the interval).
-async function runService({ dataDir: requestedDataDir, profile: profileOverride, signal, stdout = process.stdout, adminUid, deps = {} }) {
+// screenHost: 'app' from `run --screen-host app` (a personal node started at
+// boot; boot-node-tray plan D-3), else null.
+async function runService({ dataDir: requestedDataDir, profile: profileOverride, signal, stdout = process.stdout, adminUid, screenHost = null, deps = {} }) {
   // A node installed from the desktop runs the app's binary with this set, so
   // that the binary runs as Node. It has done that job by now. Left here, an
   // MCP server, a hook or a model's shell would inherit it, and an Electron
@@ -504,7 +508,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
       const startProfile = deps.startProfile || ((opts) => loadProfile(profile).start(opts));
-      running = await startProfile({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, webhooksOnDemand: config.webhooksOnDemand === true, serviceConfig: config, deps });
+      running = await startProfile({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, localInference: config.localInference, caseChecks: config.caseChecks, adminUid, executors: config.executors, webhooksOnDemand: config.webhooksOnDemand === true, serviceConfig: config, screenHost, deps });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

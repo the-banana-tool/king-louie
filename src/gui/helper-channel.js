@@ -46,10 +46,16 @@ function recorderPath(recorder) {
 }
 
 class HelperChannel extends EventEmitter {
-  constructor({ endpoint, readSecret, readMtime = () => null, platform = process.platform, audit = null, clock = Date.now,
+  // shared: true (a fleet node) opens the endpoint to every local account,
+  // since the helper is another account than the service. false (a personal
+  // node's screen host, plan D-2) keeps the default security, which on Windows
+  // is not owner-only (the default pipe DACL gives Everyone read): the key in
+  // personal-helper.json is the boundary; elsewhere the socket is 0600.
+  // netImpl: tests only.
+  constructor({ endpoint, readSecret, readMtime = () => null, platform = process.platform, audit = null, clock = Date.now, shared = true, netImpl = net,
     log = createLogger('gui/channel'), handshakeMs = 5000, pingMs = 10000, silenceMs = 30000, duplicatePingMs = 5000, maxUnauthenticated = 4 } = {}) {
     super();
-    Object.assign(this, { endpoint, readSecret, readMtime, platform, audit, clock, log, handshakeMs, pingMs, silenceMs, duplicatePingMs, maxUnauthenticated });
+    Object.assign(this, { endpoint, readSecret, readMtime, platform, audit, clock, shared: shared !== false, netImpl, log, handshakeMs, pingMs, silenceMs, duplicatePingMs, maxUnauthenticated });
     this.server = null;
     this.unauth = new Set();
     this.all = new Set();
@@ -76,14 +82,14 @@ class HelperChannel extends EventEmitter {
         if (err.code !== 'ENOENT') throw err;
       }
     }
-    this.server = net.createServer((socket) => this._onSocket(socket));
+    this.server = this.netImpl.createServer((socket) => this._onSocket(socket));
     await new Promise((resolve, reject) => {
       this.server.once('error', reject);
-      const options = this.platform === 'win32' ? { path: this.endpoint, readableAll: true, writableAll: true } : { path: this.endpoint };
+      const options = this.platform === 'win32' && this.shared ? { path: this.endpoint, readableAll: true, writableAll: true } : { path: this.endpoint };
       this.server.listen(options, () => { this.server.off('error', reject); resolve(); });
     });
     // The helper is another account: the protocol, not the mode, is the boundary.
-    if (this.platform !== 'win32') fs.chmodSync(this.endpoint, 0o666);
+    if (this.platform !== 'win32') fs.chmodSync(this.endpoint, this.shared ? 0o666 : 0o600);
   }
 
   async stop() {

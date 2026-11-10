@@ -1080,9 +1080,10 @@ where you are the only user and the administrator, and where you want a
 Claude Code session on the same machine to drive King Louie (demo takes,
 `docs/driving-king-louie.md`), that boundary only separates you from
 yourself. A **personal node** is the same service run another way: in your
-own login session, as you, started by a logon task, with one fact in place
+own account, started at boot by a scheduled task, with one fact in place
 of the account checks: the process is the account that owns its data dir and
-its config dir. `examples/personal/node.yaml` is the file it ends up with.
+its config dir. Screens, input and your saved browser logins come from the
+King Louie app, which starts at login into the tray (below). `examples/personal/node.yaml` is the file it ends up with.
 
 Choose it when the machine is yours alone and runs Windows. Keep the fleet
 layout (sections 3 to 7) for a machine someone else administers or other
@@ -1097,16 +1098,15 @@ its `service.json`), and the phone app.
 
 ### Install
 
-From a **normal, unelevated** PowerShell, with the `node.exe` you want the
-service to run under (the logon task runs that same `node.exe` on the same
-`king-louie-service.js`). Run it from the checkout you keep: the task pins
-this checkout's path and `node.exe`, so a checkout or worktree removed later
-leaves a task that cannot start.
-
-```powershell
-& 'C:\Program Files\nodejs\node.exe' <checkout>\bin\king-louie-service.js install --personal --dry-run
-& 'C:\Program Files\nodejs\node.exe' <checkout>\bin\king-louie-service.js install --personal
-```
+Install the King Louie app, then use **Install** in its setup view (or Settings
+> Local service > **Install…**). Windows asks once, with a UAC prompt, to
+register the task; nothing is stored but the task (no password). The
+command behind it is the app's own `king-louie-service install --personal`,
+which refuses to run from a checkout with `node.exe` (the task runs the app's
+binary, so the node runs the app's version), refuses an account that is not in
+Administrators, and refuses an already elevated prompt. Decline the UAC prompt
+and nothing changes (`NODE_INSTALL_DECLINED`). The `--dry-run` form prints the
+plan without the prompt.
 
 The full form is
 `king-louie-service install --personal [--data-dir DIR] [--browser PATH] [--provider P] [--model M] [--dry-run] [--yes]`.
@@ -1114,14 +1114,15 @@ Before it asks anything it prints what it will do:
 
 - the account it runs as (name and SID), the data dir (default
   `%LOCALAPPDATA%\KingLouie\node\data`), the config dir beside it
-  (`%LOCALAPPDATA%\KingLouie\node\config`) and the logon task's name,
+  (`%LOCALAPPDATA%\KingLouie\node\config`) and the task's name,
   `KingLouie Node`;
 - what that means: the service runs as this account and **the owner account
   is the trust boundary**. Anything running as you can drive the node as a
   local `mcp` client and can change its approver set, and a shell the phone
   approves can do anything you can;
-- that it is a logon task: after a reboot the node is down until you log in
-  (the phones show "Could not confirm" for it and a take cannot start);
+- that the task starts at boot, before you log in, so the phones confirm the
+  node after a reboot. Until you log in (or open King Louie) the screen tools
+  and your saved browser logins are not available;
 - the files it will write, and the `node.yaml` itself.
 
 Then it asks `[y/N]`. Off a terminal it needs `--yes` and refuses without
@@ -1155,16 +1156,26 @@ it. `--dry-run` prints the steps and changes nothing. On `y` it:
    the remedy, `winget install Gyan.FFmpeg` (a warning only: a take that
    records is refused `recorder_missing` later). The node looks for ffmpeg
    when it starts, so restart it after installing one;
-4. registers the logon task `KingLouie Node` for your SID (at logon, in your
-   interactive session, least privilege, restarted on failure, no battery
-   limits). On a first run it does **not** start it, because there is no
-   relay yet; `pair` starts it. A later run registers the task again and
+4. registers the task `KingLouie Node` through one elevated `schtasks` step
+   (the UAC prompt): boot and logon triggers, run as you with the S4U logon
+   type (no stored password, least privilege, restarted on failure, no
+   battery limits), and a security descriptor that lets your account run,
+   query and stop it but not change it, so the window's Start and Restart
+   need no prompt. The action is the app's binary with `--kl-node-service`
+   (it runs as Node, with no console window), `run --data-dir <dir>
+   --screen-host app`. It also turns on the app's start at login (the
+   `King Louie` value under your `HKCU` Run key, `"<app>" --kl-tray`). On a
+   first run it does **not** start the task, because there is no
+   relay yet; `pair` starts it. A later run registers the task again (an
+   older logon task is replaced in place, keeping `node.yaml`, the pairing
+   and the phones) and
    starts it only when the kept `node.yaml` loads with `hosting: personal`
    and `approvers.relay` set; otherwise it says which of those is missing
    and leaves the task stopped.
 
 It refuses: from an elevated prompt (the files would be Administrators-owned
-and the start's owner check would then refuse them); while a fleet node is
+and the start's owner check would then refuse them); from anything but the
+installed app; for an account that is not an administrator; while a fleet node is
 installed (the `KingLouie` scheduled task exists: run `uninstall` and
 `session uninstall` first; nothing is migrated, and the personal node is a
 new node with a new identity); while `%ProgramData%\KingLouie\config` holds
@@ -1235,11 +1246,34 @@ schtasks /Run /TN "KingLouie Node"
 ```
 
 `stop` asks the node to shut down, waits up to 30 seconds (`--timeout S`)
-for it to exit, says "stopped" only once it has, and then ends the logon
+for it to exit, says "stopped" only once it has, and then ends the
 task so it reads Ready. If the node is still there after the timeout it
 says so; `king-louie-service stop --force` then kills it. Do not use
-`schtasks /End` on its own: it ends only the task's hidden PowerShell
-window and leaves the node running.
+`schtasks /End` on its own: it ends only the task's wrapper process and may
+leave the node running.
+
+### King Louie in the tray
+
+The app starts at login (the `King Louie` Run value, `--kl-tray`) hidden in the
+tray when it is attached to a personal node, and is the node's **screen host**:
+it connects to the node over a named pipe, using the key the node wrote to
+`<data dir>\session\personal-helper.json`, and serves the screenshots, input,
+windows, recordings and take browsers the node asks for, in your session. Until
+it connects, GUI tools refuse `capability_unavailable` with the reason
+`screen_host_not_connected` (`King Louie is not running in your session: log
+in, or open King Louie`), and a chat's browser tool refuses saved profiles with
+`screen_host_missing` (`Saved logins are available after you log in`); an
+ephemeral browser still works, headless. Closing the
+window hides it to the tray; **Quit** from the tray asks first while a take
+records. The tray shows the node's state in its tooltip and a menu line (one
+icon). **Settings > Local service** has **Start King Louie when I log in**; an
+older logon task reads `King Louie Node starts when you log in. Install again
+to start at boot.`
+
+A development copy of the app or service uses its own `--data-dir` (and
+profile): a second `run` on a data dir whose pidfile names a live service is
+refused. To test the real path, build the installer from a worktree
+(`npm run build:win`) and install it.
 
 ### Check it
 
@@ -1256,12 +1290,13 @@ configuration: `personal (runs as <user>; the owner account is the trust
 boundary); task KingLouie Node: <state>`, a failure when the owner check does
 not hold and a warning when the task is not registered. Its identity-record
 row says `recorded identity: not used on a personal node`, and its session
-helper row `session helper: not used on a personal node (the GUI runs
-in-process)`. `king-louie-service session status` prints `hosting: personal`
+helper row `session helper: not used on a personal node`. A `screen host`
+row says `connected` or `not connected: log in to Windows, or open King Louie`.
+The `hosting` row also tells a boot task from an older logon task. `king-louie-service session status` prints `hosting: personal`
 first and `helper: not used on a personal node; the GUI runs in the service`,
-then the capabilities, probes and leases as on a fleet node. The node must
-run in your interactive session (the logon task's) for screenshots and input;
-started from a remote or non-interactive shell its capabilities list neither.
+then the capabilities, probes and leases as on a fleet node. Screenshots and
+input need the screen host (the King Louie app in your session, below); a node
+started by hand in your own session serves the screen itself.
 
 What a personal node does **not** have, on purpose:
 
@@ -1478,7 +1513,7 @@ terminal, without the app:
    fleet's exclusions: no model profiles, channels, hooks or MCP servers. Secrets
    are listed `needs-desktop`: the command line never reads them, because only
    the desktop app can unseal them.
-3. `king-louie-service install --personal`: it registers the logon task and, with the
+3. `king-louie-service install --personal` (from the installed app): it registers the boot task and, with the
    relay or front door already paired, starts it.
 4. Open the desktop app, **Settings > Local service**, **Pair**, then **Import…** for the
    secrets. What step 2 copied plans as already present.
@@ -1526,26 +1561,34 @@ node's browser jobs start with fresh profiles; add the logins with
 ### Uninstall
 
 `king-louie-service uninstall --personal [--data-dir DIR] [--dry-run] [--yes]`
-stops the node the way `king-louie-service stop` does, then ends and
-deletes the logon task, after a `[y/N]` (`--yes` off a terminal). A node
-that does not stop in time leaves the task registered; stop it with
-`stop --force` and run uninstall again.
+deletes the boot task through the same elevated step (a second UAC prompt),
+then stops the node the way `king-louie-service stop` does, and turns off the
+app's start at login, after a `[y/N]` (`--yes` off a terminal). Declining the
+prompt changes nothing: `Windows did not remove the task: the administrator
+prompt was declined. The node is still installed and running.` A node that
+does not stop in time after the task is gone is named with `stop --force`. An
+older logon task is stopped first and then ended and deleted without a prompt;
+there a node that does not stop leaves the task registered.
 The data dir and the config dir stay, with the node's identity, chats and
 vault; delete them yourself to remove the node. When the task is not
 registered it says so, removes nothing and exits 0.
 
 ### Known limits
 
-- After a reboot the node is down until you log in (a Windows Update restart
-  while you are away included): the phones show "Could not confirm" for it
-  and a take cannot start. Automatic logon is your own choice and not part
-  of this.
+- After a reboot the node starts at boot, but screen work (takes, computer use)
+  and saved browser logins wait until you log in and King Louie is in the tray.
+  The S4U task has no network credentials: shares that need your Windows
+  sign-in fail.
+- Updating King Louie while the boot task's node runs is unverified: the
+  installer may need the node stopped, or a reboot, before the node runs the
+  new version (check the version row afterwards).
+- A take that ends with `keep_browser` while the app is the screen host is not
+  recorded as holding its profile: the next start on that profile fails
+  `browser_launch_failed` until you close that Chrome window.
 - The owner account is the trust boundary: anything running as you can
   drive the node through `mcp` and change its approver set, and a shell the
   phone approves can do anything you can. The deny list covers the file
   tools only.
-- Attached, the node is still down from a reboot until you log in; the
-  desktop app then starts it at launch.
 - A node you started by hand in a terminal stops when that terminal closes;
   the app then offers **Start King Louie Node**, which starts the logon
   task, not the terminal.
@@ -1566,16 +1609,26 @@ registered it says so, removes nothing and exits 0.
 - A node older than the app shows a row in Settings > Local service and the banner. A node
   that runs the app's binary gets **Restart King Louie Node to update it**, never automatic.
   A node installed from a checkout runs from that folder, so a restart changes nothing:
-  update the folder, then restart it. A logon task whose program is gone (a checkout
+  update the folder, then restart it. A task whose program is gone (a checkout
   removed, the app moved) is said on screen, and **Install…** registers it again. The installer stops a node
   running the app's binary, so a turn in progress is lost: quit the app before updating.
-  Uninstalling the app removes the logon task and keeps the data dir.
+  Uninstalling the app removes the task and keeps the data dir.
 - `npm run start:standalone` from a checkout can poll the same bot as the node.
 - A node installed from the desktop app runs the app's binary and version:
   uninstalling or moving the app leaves a task that cannot start.
-- The logon task pins the checkout and `node.exe` install ran from: run
-  `install --personal` from the checkout you keep, since a removed checkout
-  or worktree leaves a task that cannot start.
+- Start at boot (S4U): the node has no network credentials, so shares and
+  intranet sites that need your Windows sign-in fail from it; the internet and
+  the relay are unaffected. Before you log in the node is up but the screen
+  tools and saved logins wait.
+- The screen host's pipe is not owner-only (Windows' default gives Everyone
+  read); the key in `session\personal-helper.json`, which only your account
+  reads, is the boundary. Another local account can hold the pipe's
+  unauthenticated slots and keep the tray app from connecting.
+- Task Scheduler ending the task's wrapper may leave the node running; use
+  `king-louie-service stop`, which finds it by its pidfile.
+- The real boot path (reboot before login, the UAC prompt, S4U) is verified
+  only by the owner's checklist,
+  `docs/superpowers/plans/2026-11-09-boot-node-tray-manual-checks.md`.
 - The start's owner check reads owners only, not access lists: a data dir on
   a drive whose ACL lets other accounts write passes it. Keep the default
   `%LOCALAPPDATA%` location, or check the ACL yourself.

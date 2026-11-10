@@ -50,8 +50,13 @@ function attachHelperLog({ platform, env, log }) {
 
 function sleep(ms, signal) {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    if (signal) signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+    if (signal && signal.aborted) { resolve(); return; }
+    const onAbort = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
   });
 }
 
@@ -69,21 +74,39 @@ async function runSessionHelper({ env = process.env, platform = process.platform
     || ((options) => checkUserCopyTrust({ ...options, alsoTrustCurrentUser: deps.trustCurrentUserAsOwner === true }));
   const connect = deps.connect || connectToService;
   const delays = deps.delays || RECONNECT_DELAYS;
+  // deps.readCopy (the King Louie app serving its personal node, boot-node-tray
+  // Task 7): an async () => ({ endpoint, secret, nodeId }) that replaces the
+  // fleet per-user file and its owner check. The app can start before the
+  // node, and a node restart writes a new file, so a failed read waits and
+  // tries again instead of ending the helper.
+  const readCopy = typeof deps.readCopy === 'function' ? deps.readCopy : null;
+  // deps.onState({ connected }): told when a session connects and when it closes.
+  const onState = typeof deps.onState === 'function' ? deps.onState : () => {};
   let file;
-  try {
-    file = sessionFile || env.KL_SESSION_FILE || defaultSessionFile({ platform, env });
-    await checkTrust({ path: file, platform, env });
-    readUserCopy({ path: file, ...readOptions });
-  } catch (err) {
-    log.error(`${err.message}`);
-    if (logFile) logFile.close();
-    return 1;
+  if (!readCopy) {
+    try {
+      file = sessionFile || env.KL_SESSION_FILE || defaultSessionFile({ platform, env });
+      await checkTrust({ path: file, platform, env });
+      readUserCopy({ path: file, ...readOptions });
+    } catch (err) {
+      log.error(`${err.message}`);
+      if (logFile) logFile.close();
+      return 1;
+    }
   }
+  const readOnce = readCopy || (async () => {
+    // Again before every connection: the file is re-read each time.
+    await checkTrust({ path: file, platform, env });
+    return readUserCopy({ path: file, ...readOptions });
+  });
+  // deps.profileRoot: where launch_browser keeps profiles (the app passes the
+  // node's <dataDir>\browser-profiles).
+  const profileRoot = deps.profileRoot || null;
 
   let backend = deps.backend;
   if (backend === undefined) {
     const name = (deps.selectBackend || defaultSelect)({ platform, env });
-    backend = name ? loadBackend(name, { env, log }) : null;
+    backend = name ? loadBackend(name, { env, log, ...(profileRoot ? { profileRoot } : {}) }) : null;
   }
   if (backend && typeof backend.requestPermissions === 'function') {
     await backend.requestPermissions().catch((err) => log.warn(`permission prompt failed: ${err.message}`));
@@ -95,45 +118,31 @@ async function runSessionHelper({ env = process.env, platform = process.platform
   const recorder = Object.freeze({ ffmpeg });
   const withRecorder = (r) => ({ ...r, recorder });
   let report = withRecorder(backend ? await safeProbe(backend, log) : NO_BACKEND_REPORT('no desktop session was found for this helper (no display, or Wayland without portals)'));
-  const handleOp = createOpHandler(backend, { platform, recorder });
+  const baseHandleOp = createOpHandler(backend, { platform, recorder, ...(profileRoot ? { profileRoot } : {}) });
+  // deps.wrapOp(handleOp) -> handleOp: the caller watches the ops (the app's
+  // tray shows a recording).
+  const handleOp = typeof deps.wrapOp === 'function' ? deps.wrapOp(baseHandleOp) : baseHandleOp;
   const recordingGuard = createRecordingGuard({ backend, log, ...(deps.timers ? { timers: deps.timers } : {}) });
   let attempt = 0;
   let exitCode = 0;
+  let waitLogged = false;
+  let connectFailLogged = false;
 
   while (!(signal && signal.aborted)) {
-    let copy;
+    let copy = null;
     try {
-      // Again before every connection: the file is re-read each time.
-      await checkTrust({ path: file, platform, env });
-      copy = readUserCopy({ path: file, ...readOptions });
+      copy = await readOnce();
     } catch (err) {
-      log.error(err.message);
-      exitCode = 1;
-      break;
+      if (!readCopy) {
+        log.error(err.message);
+        exitCode = 1;
+        break;
+      }
+      // Once per run of failures, not on every retry; by code where there is one.
+      if (!waitLogged) log.info(`waiting for the node's screen file (${(err && err.code) || (err && err.message) || 'unreadable'})`);
+      waitLogged = true;
     }
-    try {
-      const session = await connect({
-        endpoint: copy.endpoint, secret: copy.secret, nodeId: copy.nodeId, user: os.userInfo().username, platform,
-        pid: process.pid, helperVersion: HELPER_VERSION, probeReport: report, handleOp, log
-      });
-      attempt = 0;
-      recordingGuard.connected();
-      log.info('connected to the King Louie service');
-      const watch = startSessionWatch(backend, {
-        report, recorder, log, emit: (k, p) => session.sendEvent(k, p), reprobeMs: deps.reprobeMs, lockPollMs: deps.lockPollMs
-      });
-      await new Promise((resolve) => {
-        session.once('closed', resolve);
-        if (signal) signal.addEventListener('abort', () => { session.close('logout'); resolve(); }, { once: true });
-      });
-      watch.stop();
-      report = watch.current();
-      // A recording outlives a short drop; 30 s without the service ends it.
-      recordingGuard.disconnected();
-      if (!(signal && signal.aborted)) log.warn('the service connection closed; reconnecting');
-    } catch (err) {
-      log.warn(`not connected: ${err.message}`);
-    }
+    if (copy) await serveOnce(copy);
     if (signal && signal.aborted) break;
     await sleep(delays[Math.min(attempt, delays.length - 1)], signal);
     attempt += 1;
@@ -142,6 +151,52 @@ async function runSessionHelper({ env = process.env, platform = process.platform
   if (backend && typeof backend.stop === 'function') await backend.stop().catch(() => {});
   if (logFile) logFile.close();
   return exitCode;
+
+  // One connection, from connect to close. Never throws.
+  async function serveOnce(copy) {
+    try {
+      const session = await connect({
+        endpoint: copy.endpoint, secret: copy.secret, nodeId: copy.nodeId, user: os.userInfo().username, platform,
+        pid: process.pid, helperVersion: HELPER_VERSION, probeReport: report, handleOp, log
+      });
+      // An abort while connect was pending: its listener would never fire on
+      // an already-aborted signal, so close now and wait for nothing.
+      if (signal && signal.aborted) {
+        session.close('logout');
+        return;
+      }
+      attempt = 0;
+      waitLogged = false;
+      connectFailLogged = false;
+      recordingGuard.connected();
+      onState({ connected: true });
+      log.info('connected to the King Louie service');
+      const watch = startSessionWatch(backend, {
+        report, recorder, log, emit: (k, p) => session.sendEvent(k, p), reprobeMs: deps.reprobeMs, lockPollMs: deps.lockPollMs
+      });
+      await new Promise((resolve) => {
+        const onAbort = () => { session.close('logout'); resolve(); };
+        session.once('closed', () => {
+          // Removed on a normal close, so listeners do not pile up across reconnects.
+          if (signal) signal.removeEventListener('abort', onAbort);
+          resolve();
+        });
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+      });
+      watch.stop();
+      report = watch.current();
+      // A recording outlives a short drop; 30 s without the service ends it.
+      recordingGuard.disconnected();
+      onState({ connected: false });
+      if (!(signal && signal.aborted)) log.warn('the service connection closed; reconnecting');
+    } catch (err) {
+      // With readCopy (the app waiting for its node) once per run of
+      // failures, then debug; the fleet helper warns every time, as before.
+      if (readCopy && connectFailLogged) log.debug(`not connected: ${err.message}`);
+      else log.warn(`not connected: ${err.message}`);
+      connectFailLogged = true;
+    }
+  }
 }
 
 module.exports = { runSessionHelper, defaultSessionFile, helperLogDir, RECONNECT_DELAYS, HELPER_VERSION };

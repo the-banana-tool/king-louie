@@ -256,6 +256,66 @@ describe('take ops', () => {
     assert.equal(findFfmpeg({ platform: 'linux', env, isFile: () => true }), null, 'Windows only in D1');
   });
 
+  // Boot-node-tray Task 6: the King Louie app serving a personal node's screen keeps the
+  // profiles in the node's <dataDir>\browser-profiles; the host configures it, never the wire.
+  it('createOpHandler passes profileRoot to backend.launchBrowser; the op wire is unchanged', async () => {
+    const calls = [];
+    const backend = { launchBrowser: async (a) => { calls.push(a); return { pid: 1, cdp: { port: 9222, path: '/devtools/browser/x' } }; } };
+    const realpath = (p) => p;
+    const root = 'C:\\Users\\alice\\AppData\\Local\\KingLouie\\node\\data\\browser-profiles';
+    const handle = createOpHandler(backend, { platform: 'win32', realpath, profileRoot: root });
+    const exe = 'C:\\x\\chrome.exe';
+    await handle('launch_browser', { exe, profile: 'king-louie', args: ['--a'] });
+    // A profileRoot on the wire is not a launch_browser param: ignored, the host's stands.
+    await handle('launch_browser', { exe, profile: 'demo', profileRoot: 'C:\\evil', profile_root: 'C:\\evil' });
+    assert.deepEqual(calls, [
+      { exe, profile: 'king-louie', args: ['--a'], profileRoot: root },
+      { exe, profile: 'demo', args: [], profileRoot: root }
+    ]);
+    // No host profileRoot: the backend's own default (no key at all).
+    const plain = createOpHandler(backend, { platform: 'win32', realpath });
+    await plain('launch_browser', { exe, profile: 'demo', profileRoot: 'C:\\evil' });
+    assert.deepEqual(calls.at(-1), { exe, profile: 'demo', args: [] });
+  });
+
+  it('the Windows backend puts the profile under profileRoot when given', async () => {
+    const { EventEmitter } = require('events');
+    const { createWindowsBackend } = require('../src/session/backends/windows');
+    const pathWin = require('path').win32;
+    const LOCALAPPDATA = 'C:\\Users\\alice\\AppData\\Local';
+    const spawned = [];
+    const spawnImpl = (file, args) => {
+      const child = new EventEmitter();
+      child.pid = 4242;
+      child.unref = () => {};
+      child.kill = () => true;
+      spawned.push({ file, args });
+      setImmediate(() => child.emit('spawn'));
+      return child;
+    };
+    const reads = [];
+    const make = (opts = {}) => createWindowsBackend({
+      env: { LOCALAPPDATA }, spawnImpl, unlink: async () => {}, mkdir: async () => {},
+      readFile: async (p) => { reads.push(p); return '9222\n/devtools/browser/abc\n'; }, ...opts
+    });
+    const root = 'D:\\kl\\data\\browser-profiles';
+    const exe = 'C:\\x\\chrome.exe';
+    // Per call (what createOpHandler passes) and as a backend option (what loadBackend passes).
+    await make().launchBrowser({ exe, profile: 'demo', profileRoot: root });
+    await make({ profileRoot: root }).launchBrowser({ exe, profile: 'king-louie' });
+    // Neither: the user's own %LOCALAPPDATA%\KingLouie\browser-profiles, as before.
+    await make().launchBrowser({ exe, profile: 'demo' });
+    assert.equal(spawned[0].args[0], `--user-data-dir=${pathWin.join(root, 'demo')}`);
+    assert.equal(spawned[1].args[0], `--user-data-dir=${pathWin.join(root, 'king-louie')}`);
+    assert.equal(spawned[2].args[0], `--user-data-dir=${pathWin.join(LOCALAPPDATA, 'KingLouie', 'browser-profiles', 'demo')}`);
+    assert.equal(reads[0], pathWin.join(root, 'demo', 'DevToolsActivePort'));
+    // A root that is not an absolute drive path is refused before anything is spawned.
+    for (const bad of ['relative\\dir', '\\\\server\\share', 7]) {
+      await assert.rejects(make().launchBrowser({ exe, profile: 'demo', profileRoot: bad }), (e) => e.code === 'invalid_params', String(bad));
+    }
+    assert.equal(spawned.length, 3);
+  });
+
   it('launch_browser re-resolves the browser exe as launch does', async () => {
     const backend = { launchBrowser: async () => { throw new Error('not reached'); } };
     const handle = createOpHandler(backend, { platform: 'win32', realpath: () => 'C:\\elsewhere\\chrome.exe' });
@@ -380,6 +440,196 @@ describe('take ops', () => {
     failing.disconnected();
     await t.advance(30_000);
     await failing.stop();
+  });
+});
+
+// Boot-node-tray Task 7: the King Louie app serves its personal node's screen
+// with this loop, reading <dataDir>\session\personal-helper.json through
+// deps.readCopy instead of the fleet per-user file.
+describe('runSessionHelper with readCopy (the app as screen host)', () => {
+  const appDeps = { delays: [20, 20, 20], attachLog: false };
+  const pipe = () => (POSIX ? path.join(setup().base, 'p.sock') : `\\\\.\\pipe\\kl-helper-test-${crypto.randomBytes(6).toString('hex')}`);
+
+  it('runSessionHelper with readCopy connects with the file\'s endpoint, secret and node id', async () => {
+    const endpoint = pipe();
+    const secret = crypto.randomBytes(32);
+    const channel = await channelFor(endpoint, { secret });
+    const ac = new AbortController();
+    const states = [];
+    const ready = once(channel, 'ready');
+    const done = runSessionHelper({
+      signal: ac.signal,
+      deps: { ...appDeps, backend: fakeBackend([REPORT]), readCopy: async () => ({ endpoint, secret, nodeId: NODE_ID }), onState: (s) => states.push(s.connected) }
+    });
+    await ready;
+    assert.equal((await channel.request('foreground', {})).image, '/usr/bin/gedit');
+    ac.abort();
+    assert.equal(await done, 0);
+    assert.deepEqual(states, [true, false]);
+  });
+
+  it('a missing file is retried with backoff, never an exit (app before node)', async () => {
+    const endpoint = pipe();
+    const secret = crypto.randomBytes(32);
+    let reads = 0;
+    const readCopy = async () => {
+      reads += 1;
+      if (reads <= 3) { const e = new Error('ENOENT: no such file'); e.code = 'ENOENT'; throw e; }
+      return { endpoint, secret, nodeId: NODE_ID };
+    };
+    const ac = new AbortController();
+    cleanups.push(() => ac.abort());
+    let settled = false;
+    const done = runSessionHelper({ signal: ac.signal, deps: { ...appDeps, backend: fakeBackend([REPORT]), readCopy } }).then((c) => { settled = true; return c; });
+    // The file appears only after the helper has failed to read it three times.
+    while (reads < 3) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(settled, false);
+    const channel = await channelFor(endpoint, { secret });
+    await once(channel, 'ready');
+    assert.equal(reads, 4);
+    ac.abort();
+    assert.equal(await done, 0);
+  });
+
+  it('a node restart with a new endpoint and secret: re-read before each connect, reconnects', async () => {
+    const first = { endpoint: pipe(), secret: crypto.randomBytes(32) };
+    const second = { endpoint: pipe(), secret: crypto.randomBytes(32) };
+    let current = first;
+    let reads = 0;
+    const readCopy = async () => { reads += 1; return { endpoint: current.endpoint, secret: current.secret, nodeId: NODE_ID }; };
+    const a = await channelFor(first.endpoint, { secret: first.secret });
+    const ac = new AbortController();
+    let ready = once(a, 'ready');
+    const done = runSessionHelper({ signal: ac.signal, deps: { ...appDeps, backend: fakeBackend([REPORT]), readCopy } });
+    await ready;
+    assert.equal(reads, 1);
+    // The node stops (its pipe goes) and starts again with a new pipe and key.
+    current = second;
+    const b = await channelFor(second.endpoint, { secret: second.secret });
+    ready = once(b, 'ready');
+    await a.stop();
+    await ready;
+    assert.equal(b.connected, true);
+    assert.ok(reads >= 2, 'read again before the new connect');
+    ac.abort();
+    assert.equal(await done, 0);
+  });
+
+  it('an abort while connect is pending ends the helper once connect resolves', async () => {
+    const { EventEmitter } = require('events');
+    let releaseConnect;
+    let session;
+    const connect = () => new Promise((resolve) => {
+      releaseConnect = () => {
+        session = new EventEmitter();
+        session.closedWith = null;
+        session.close = (why) => { session.closedWith = why; session.emit('closed'); };
+        session.sendEvent = () => {};
+        resolve(session);
+      };
+    });
+    const ac = new AbortController();
+    const states = [];
+    const done = runSessionHelper({
+      signal: ac.signal,
+      deps: { ...appDeps, backend: fakeBackend([REPORT]), connect, onState: (s) => states.push(s.connected), readCopy: async () => ({ endpoint: 'x', secret: Buffer.alloc(32), nodeId: NODE_ID }) }
+    });
+    while (!releaseConnect) await new Promise((r) => setTimeout(r, 5));
+    ac.abort();
+    releaseConnect();
+    assert.equal(await done, 0);
+    assert.equal(session.closedWith, 'logout');
+    assert.deepEqual(states, [], 'never reported connected');
+  });
+
+  it('abort listeners do not pile up across reconnects', async () => {
+    const { EventEmitter } = require('events');
+    const ac = new AbortController();
+    // Counts the listeners on the signal as the helper adds and removes them.
+    let live = 0;
+    const add = ac.signal.addEventListener.bind(ac.signal);
+    const remove = ac.signal.removeEventListener.bind(ac.signal);
+    const wrapped = new Map();
+    ac.signal.addEventListener = (type, fn, opts) => {
+      if (type !== 'abort') return add(type, fn, opts);
+      live += 1;
+      const w = (...a) => { live -= 1; wrapped.delete(fn); return fn(...a); };
+      wrapped.set(fn, w);
+      return add(type, w, opts);
+    };
+    ac.signal.removeEventListener = (type, fn, opts) => {
+      const w = wrapped.get(fn);
+      if (type === 'abort' && w) { live -= 1; wrapped.delete(fn); return remove(type, w, opts); }
+      return remove(type, fn, opts);
+    };
+    let connects = 0;
+    const counts = [];
+    const N = 6;
+    const connect = async () => {
+      connects += 1;
+      counts.push(live);
+      const s = new EventEmitter();
+      s.close = () => s.emit('closed');
+      s.sendEvent = () => {};
+      // Each session closes on its own shortly after it connects.
+      if (connects < N) setTimeout(() => s.close(), 5);
+      return s;
+    };
+    const done = runSessionHelper({
+      signal: ac.signal,
+      deps: { ...appDeps, delays: [5], backend: fakeBackend([REPORT]), connect, readCopy: async () => ({ endpoint: 'x', secret: Buffer.alloc(32), nodeId: NODE_ID }) }
+    });
+    while (connects < N) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(new Set(counts).size, 1, `listener count stayed flat: ${counts.join(',')}`);
+    ac.abort();
+    assert.equal(await done, 0);
+  });
+
+  it('with readCopy, a connect that keeps failing warns once, then logs at debug', async () => {
+    const lines = { warn: 0, debug: 0 };
+    const log = { info() {}, error() {}, trace() {}, warn: () => { lines.warn += 1; }, debug: () => { lines.debug += 1; }, child() { return this; } };
+    let tries = 0;
+    const ac = new AbortController();
+    const connect = async () => { tries += 1; if (tries >= 4) setImmediate(() => ac.abort()); throw new Error('ENOENT pipe'); };
+    const done = runSessionHelper({
+      signal: ac.signal,
+      deps: { ...appDeps, delays: [5], log, backend: fakeBackend([REPORT]), connect, readCopy: async () => ({ endpoint: 'x', secret: Buffer.alloc(32), nodeId: NODE_ID }) }
+    });
+    assert.equal(await done, 0);
+    assert.equal(lines.warn, 1);
+    assert.ok(lines.debug >= 3);
+  });
+
+  it('profileRoot reaches launch_browser, and wrapOp sees every op', async () => {
+    const launched = [];
+    const backend = { ...fakeBackend([REPORT]), launchBrowser: async (o) => { launched.push(o); return { port: 1 }; } };
+    const seen = [];
+    const ac = new AbortController();
+    let handle;
+    const connect = async ({ handleOp }) => {
+      handle = handleOp;
+      const { EventEmitter } = require('events');
+      const s = new EventEmitter();
+      s.close = () => s.emit('closed');
+      s.sendEvent = () => {};
+      return s;
+    };
+    const done = runSessionHelper({
+      signal: ac.signal,
+      deps: {
+        ...appDeps, backend, connect, profileRoot: 'C:\\kl\\data\\browser-profiles',
+        readCopy: async () => ({ endpoint: 'x', secret: Buffer.alloc(32), nodeId: NODE_ID }),
+        wrapOp: (h) => async (op, p, c) => { seen.push(op); return h(op, p, c); }
+      }
+    });
+    while (!handle) await new Promise((r) => setTimeout(r, 5));
+    const exe = fs.realpathSync.native(process.execPath);
+    await handle('launch_browser', { exe, profile: 'take' });
+    assert.deepEqual(seen, ['launch_browser']);
+    assert.equal(launched[0].profileRoot, 'C:\\kl\\data\\browser-profiles');
+    assert.equal(launched[0].profile, 'take');
+    ac.abort();
+    assert.equal(await done, 0);
   });
 });
 

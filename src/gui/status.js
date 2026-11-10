@@ -26,6 +26,8 @@ function remedyFor(reason) {
   if (reason === 'session_file_invalid') return SESSION_FILE_REMEDY;
   if (reason === 'node_identity_unrecorded') return NODE_IDENTITY_REMEDY;
   if (reason === 'node_identity_invalid') return NODE_IDENTITY_INVALID_REMEDY;
+  // A personal node started at boot, before the King Louie app connected.
+  if (reason === 'screen_host_not_connected') return 'log in to Windows, or open King Louie';
   return GUI_START_REMEDY;
 }
 

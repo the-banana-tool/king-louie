@@ -177,5 +177,8 @@ function parseApp(id, value, { platform, invalid, checkKeys, warnings }) {
 const GUI_ENABLE_LINES = 'gui:\n  enabled: true';
 // What an administrator adds to node.yaml to turn takes on.
 const TAKE_ENABLE_LINES = 'gui:\n  take:\n    enabled: true';
+// What turns a browser on when node.yaml names none (install --personal's
+// "no chrome.exe found" line, and a saved profile on a boot-started node).
+const NO_BROWSER_REMEDY = 'add gui.apps.chrome and gui.browser to node.yaml to turn them on';
 
-module.exports = { parseGuiConfig, GUI_KEYS, GUI_DEFAULTS, APP_ID_RE, GUI_ENABLE_LINES, TAKE_ENABLE_LINES };
+module.exports = { parseGuiConfig, GUI_KEYS, GUI_DEFAULTS, APP_ID_RE, GUI_ENABLE_LINES, TAKE_ENABLE_LINES, NO_BROWSER_REMEDY };

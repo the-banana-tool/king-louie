@@ -1407,6 +1407,8 @@ contextBridge.exposeInMainWorld(
       // skip: the step the Skip was pressed on, or nothing to finish.
       setupFinish: (payload = {}) => ipcRenderer.invoke('desktop:setupFinish', payload && typeof payload.skip === 'string' ? { skip: payload.skip } : {}),
       nodeRestart: () => ipcRenderer.invoke('desktop:nodeRestart'),
+      loginStart: () => ipcRenderer.invoke('desktop:loginStart'),
+      setLoginStart: (payload = {}) => ipcRenderer.invoke('desktop:setLoginStart', { on: Boolean(payload && payload.on === true) }),
       restartLater: () => ipcRenderer.invoke('desktop:restartLater'),
       importPlan: () => ipcRenderer.invoke('desktop:importPlan'),
       importApply: () => ipcRenderer.invoke('desktop:importApply'),
