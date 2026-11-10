@@ -73,10 +73,53 @@ describe('runElevatedSchtasks', () => {
     assert.strictEqual(r.code, 'UAC_DECLINED');
   });
 
+  it('maps Win32 error 1223 to UAC_DECLINED', async () => {
+    const byCode = await runElevatedSchtasks(['/x'], { execFile: async () => { const e = new Error('x'); e.code = 1223; throw e; }, env: ENV });
+    assert.strictEqual(byCode.code, 'UAC_DECLINED');
+    const byText = await runElevatedSchtasks(['/x'], { execFile: async () => { const e = new Error('x'); e.stderr = 'error: 1223'; throw e; }, env: ENV });
+    assert.strictEqual(byText.code, 'UAC_DECLINED');
+  });
+
   it('maps other failures and unparseable output to SCHTASKS_FAILED', async () => {
     const thrown = await runElevatedSchtasks(['/x'], { execFile: async () => { throw new Error('nope'); }, env: ENV });
     assert.strictEqual(thrown.code, 'SCHTASKS_FAILED');
     const garbage = await runElevatedSchtasks(['/x'], { execFile: async () => ({ stdout: 'hello' }), env: ENV });
     assert.strictEqual(garbage.code, 'SCHTASKS_FAILED');
+  });
+});
+
+describe('the elevation script in real Windows PowerShell (never elevates)', { skip: process.platform !== 'win32' }, () => {
+  it('delivers each argument to the launched process intact', () => {
+    const fs = require('fs');
+    const os = require('os');
+    const { execFileSync } = require('child_process');
+    const { buildElevateScript } = require('../src/service/elevated-schtasks');
+    const { windowsPowerShellExe } = require('../src/platform/windows-paths');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-elev-'));
+    const out = path.join(dir, 'argv.json');
+    try {
+      const testArgs = [
+        String.raw`C:\Program Files\A B\task.xml`,
+        'KingLouie Node $(evil)',
+        String.raw`C:\A B` + '\u005c',
+        'say "hi" there',
+        String.raw`back\\"slash`,
+        'ends\\',
+        'plain',
+        '/TN',
+        ''
+      ];
+      const child = "require('fs').writeFileSync(process.env.KL_OUT, JSON.stringify(process.argv.slice(1)))";
+      const blob = Buffer.from(JSON.stringify([process.execPath, '-e', child, ...testArgs]), 'utf8').toString('base64');
+      const stdout = execFileSync(
+        windowsPowerShellExe(process.env),
+        ['-NoProfile', '-NonInteractive', '-Command', buildElevateScript({ elevate: false }), blob],
+        { encoding: 'utf8', windowsHide: true, timeout: 60000, env: { ...process.env, KL_OUT: out } }
+      );
+      assert.strictEqual(stdout.trim(), '0');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(out, 'utf8')), testArgs);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
