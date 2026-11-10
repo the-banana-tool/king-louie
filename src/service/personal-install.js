@@ -1,13 +1,13 @@
 // `install --personal` and `uninstall --personal` (personal node spec
-// 2026-10-25-personal-node-design.md §8): the service in the owner's own
-// login session, as the owner, installed by one unelevated command. It
-// writes the config dir and node.yaml as the owner (nothing here runs
-// elevated, so nothing is handed between accounts) and registers a logon
-// task for the owner's SID through the same schtasks path the session
-// helper's login start uses (src/session/autostart.js).
+// 2026-10-25-personal-node-design.md §8; boot-node-tray spec 2026-11-09 §5.1):
+// the service as the owner, started at boot by an S4U task. It writes the config
+// dir and node.yaml as the owner, unelevated; only the schtasks /Create (and the
+// /Delete at uninstall) runs elevated, through one UAC prompt
+// (elevated-schtasks.js), from an XML written into the owner's config dir. It
+// runs only from the installed app (the task runs the app's binary) and turns on
+// the app's start at login (src/desktop-bridge/login-start.js).
 //
 // CLI output goes to stdout/stderr on purpose; everything else logs via createLogger.
-const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -18,6 +18,7 @@ const { ensurePrivateDir, personalDataDir, PERSONAL_CLI_FILE, PERSONAL_CLI_MARKE
 const { parseYaml } = require('../platform/yaml');
 const { parseGuiConfig } = require('../gui/config');
 const { shown } = require('./commands/io');
+const { LOGIN_START_VALUE, loginStartCommand } = require('../desktop-bridge/login-start');
 
 const PERSONAL_TASK_NAME = 'KingLouie Node';
 const FLEET_TASK_NAME = 'KingLouie';
@@ -28,9 +29,19 @@ const FRONT_DOOR_PIN = 'front-door.json';
 const NOTHING_PAIRED = `${NODE_YAML} has no approvers.relay and there is no ${FRONT_DOOR_PIN} yet: pair (wss://<relay> or https://mcp.<domain>) writes one and starts the task`;
 
 const TRUST_LINE = 'the service will run as this account; the owner account is the trust boundary: anything running as you can drive it as a local mcp client and change its approver set, and a shell the phone approves can do anything you can';
-const REBOOT_LINE = 'a logon task: after a reboot the node is down until you log in (the phones show "Could not confirm" and a take cannot start)';
+// Boot-node-tray spec §5.5: what the boot task means, said before the question.
+const BOOT_LINES = [
+  'one Windows administrator prompt registers it; the node itself never runs elevated',
+  'screen work (takes, computer use) needs you logged in with King Louie in the tray',
+  'saved browser logins are used only after you log in'
+];
+const NOT_THE_APP = 'install --personal runs from the installed King Louie app: open King Louie and use Install, or run its king-louie-service command';
+const NOT_AN_ADMINISTRATOR = 'the boot task needs an administrator account: your account is not in Administrators';
+const TASK_XML_FILE = 'king-louie-node-task.xml';
+const DECLINED = (what) => `Windows did not ${what} the task: the administrator prompt was declined. Nothing else changed.`;
+const ELEVATED_FAILED = (what, r) => `Windows did not ${what} the task: ${r.message}`;
 const BINARY_LINE = (bin) => `binary:     ${bin}, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed`;
-const ALREADY_RUNNING = (pid) => `King Louie Node is already running (pid ${pid}); the task starts it at your next logon.`;
+const ALREADY_RUNNING = (pid) => `King Louie Node is already running (pid ${pid}); the task starts it at the next boot.`;
 const FFMPEG_LINE = 'ffmpeg is not on PATH: a take that records needs it. Install it as yourself: winget install Gyan.FFmpeg';
 const NO_CHROME_LINE = 'no chrome.exe found: takes and desktop apps are off; add gui.apps.chrome and gui.browser to node.yaml to turn them on';
 
@@ -114,6 +125,10 @@ function renderServiceCli({ nodePath, entryPath }) {
   ].join('\r\n');
 }
 
+const loginStartText = (appPath) => `HKCU Run "${LOGIN_START_VALUE}" = ${loginStartCommand(appPath)}`;
+const errText = (err) => (err && err.message ? err.message : String(err));
+// The elevated step's refusal, one line: declined, or what schtasks said.
+const elevatedRefusal = (what, r) => (r && r.code === 'UAC_DECLINED' ? DECLINED(what) : ELEVATED_FAILED(what, r || { message: 'it gave no answer.' }));
 const cliLeftLine = (file) => `${shown(file, 400)} is left where it is: King Louie did not write it.`;
 
 function defaultWhoAmI(env) {
@@ -137,13 +152,15 @@ function defaultFindChrome(env) {
   return null;
 }
 
-// The data dir the registered task runs, read from its XML: a node installed with
-// --data-dir is stopped where it is, whoever asks with no --data-dir (the uninstaller).
-function defaultTaskDataDir(env) {
+// The registered task, read from its XML (parseTaskXml), or null: its data dir, so a
+// node installed with --data-dir is stopped where it is whoever asks with no
+// --data-dir (the uninstaller), and its logon type, so the S4U boot task is deleted
+// through the elevated step and an older logon task as before.
+function defaultTaskInfo(env) {
   const { parseTaskXml, decodeOutput } = require('../desktop-bridge/personal-node');
   try {
     const xml = execFileSync(windowsSchtasksExe(env), ['/Query', '/TN', PERSONAL_TASK_NAME, '/XML', 'ONE'], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 30000 });
-    return parseTaskXml(decodeOutput(xml)).dataDir;
+    return parseTaskXml(decodeOutput(xml));
   } catch {
     return null;
   }
@@ -247,10 +264,14 @@ function resolveDeps(deps, io) {
     fleetInstalled: deps.fleetInstalled || (() => defaultFleetInstalled(env)),
     startable: deps.startable || defaultStartable,
     taskRegistered: deps.taskRegistered || (() => taskExists(env, PERSONAL_TASK_NAME)),
-    taskDataDir: deps.taskDataDir || (() => defaultTaskDataDir(env)),
+    taskInfo: deps.taskInfo || (() => defaultTaskInfo(env)),
+    taskDataDir: deps.taskDataDir || (() => { const info = defaultTaskInfo(env); return info ? info.dataDir : null; }),
+    isAdministratorsMember: deps.isAdministratorsMember || (() => require('./commands/admin-check').isAdministratorsMember({ env })),
+    elevated: deps.elevated || ((args) => require('./elevated-schtasks').runElevatedSchtasks(args, { env })),
+    setLoginStart: deps.setLoginStart || ((opts) => require('../desktop-bridge/login-start').setLoginStart(opts, { env })),
+    readLoginStart: deps.readLoginStart || (() => require('../desktop-bridge/login-start').readLoginStart({ env })),
     exists: deps.exists || fs.existsSync,
     hostname: deps.hostname || os.hostname,
-    tmpDir: deps.tmpDir || os.tmpdir(),
     execute: deps.execute || ((steps) => executeSteps(steps, { io })),
     runningServicePid: deps.runningServicePid || ((dir) => require('./commands/io').runningServicePid(dir)),
     stopNode: deps.stopNode || ((dir) => require('./commands/stop').runStopCommand({ dataDir: dir, io })),
@@ -373,6 +394,12 @@ async function install({ flags, io, c }) {
   // Files an elevated prompt made would be Administrators-owned, and the
   // start's owner check (§6) would then refuse them.
   if (c.isAdmin()) return refuse(io, 'install --personal runs as you, not elevated: open a normal prompt');
+  // The boot task runs the installed app's binary (boot-node-tray spec §5.6, C-13):
+  // from a checkout's node.exe there is no app to run.
+  if (!c.runAsNode) return refuse(io, NOT_THE_APP);
+  // S4U needs "Log on as a batch job", which Administrators have, and the one prompt
+  // elevates the owner's own token (C-11).
+  if (!c.isAdministratorsMember()) return refuse(io, NOT_AN_ADMINISTRATOR);
   const fleet = c.fleetInstalled() || {};
   if (fleet.task || fleet.marker) return refuse(io, fleetRefusal(fleet));
   if (!flags.dataDir) return refuse(io, 'LOCALAPPDATA is not set, so there is no default data dir: pass --data-dir DIR');
@@ -417,15 +444,16 @@ async function install({ flags, io, c }) {
     `  account:    ${shown(account.user)} (${shown(account.sid)})`,
     `  data dir:   ${dataDir}`,
     `  config dir: ${configDir}`,
-    `  logon task: ${PERSONAL_TASK_NAME}`,
-    ...(c.runAsNode ? [`  ${BINARY_LINE(c.nodePath)}`] : []),
+    `  boot task:  ${PERSONAL_TASK_NAME} (starts at boot as you; no password is stored)`,
+    `  ${BINARY_LINE(c.nodePath)}`,
     `  ${TRUST_LINE}`,
-    `  ${REBOOT_LINE}`,
+    ...BOOT_LINES.map((l) => `  ${l}`),
     'It will write:',
     existing ? `  ${yamlPath} (exists: install keeps it)` : `  ${yamlPath}`,
     `  ${dataDir} and ${configDir} (created when missing)`,
-    `  the logon task "${PERSONAL_TASK_NAME}" (registered again when it exists)`,
-    ...(c.runAsNode ? [`  ${cliPath} (the king-louie-service command for this node)`] : []),
+    `  the boot task "${PERSONAL_TASK_NAME}" (it replaces the task of that name when there is one)`,
+    `  ${cliPath} (the king-louie-service command for this node)`,
+    `  the "${LOGIN_START_VALUE}" start-at-login entry (King Louie starts in the tray when you log in)`,
     ''
   ].join('\n'));
   if (!existing) {
@@ -444,22 +472,28 @@ async function install({ flags, io, c }) {
   if (runningPid) io.stdout.write(`${ALREADY_RUNNING(runningPid)}\n`);
   if (leftover) io.stdout.write(`${fleetData} exists but no fleet config file is beside it: every command ignores it, and it may be removed.\n`);
 
-  const xmlPath = path.join(c.tmpDir, `king-louie-node-${crypto.randomBytes(6).toString('hex')}.xml`);
+  // The XML goes in the owner's own config dir (private, created below), not the
+  // shared temp dir, so nothing unelevated but the owner can change it between
+  // writing and the elevated registration.
+  const xmlPath = path.join(configDir, TASK_XML_FILE);
   const schtasks = windowsSchtasksExe(c.env);
-  const steps = [
-    { description: 'write the logon task definition', writeFile: { path: xmlPath, content: `\ufeff${renderPersonalTaskXml({ sid: account.sid, appPath: c.nodePath, entryPath: c.entryPath, dataDir })}`, mode: 0o600, encoding: 'utf16le' } },
-    { description: `register the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Create', '/TN', PERSONAL_TASK_NAME, '/XML', xmlPath, '/F'] },
-    { description: 'delete the temporary task definition', unlink: xmlPath, always: true, ignoreFailure: true }
-  ];
+  const createArgs = ['/Create', '/TN', PERSONAL_TASK_NAME, '/XML', xmlPath, '/F'];
+  const writeXml = { description: 'write the boot task definition', writeFile: { path: xmlPath, content: `\ufeff${renderPersonalTaskXml({ sid: account.sid, appPath: c.nodePath, entryPath: c.entryPath, dataDir })}`, mode: 0o600, encoding: 'utf16le' } };
+  const removeXml = { description: 'delete the task definition', unlink: xmlPath, always: true, ignoreFailure: true };
+  const after = [];
   // With none, the owner has only a harder command to type; no reason to stop.
   // A file of that name it did not write stays; its own older one is replaced.
-  const cliForeign = c.runAsNode && c.exists(cliPath) && !isPersonalCli(cliPath);
+  const cliForeign = c.exists(cliPath) && !isPersonalCli(cliPath);
   if (cliForeign) io.stdout.write(`${cliLeftLine(cliPath)}\n`);
-  if (c.runAsNode && !cliForeign) steps.push({ description: 'write the king-louie-service command', writeFile: { path: cliPath, content: renderServiceCli({ nodePath: c.nodePath, entryPath: c.entryPath }) }, ignoreFailure: true });
-  if (relay && !runningPid) steps.push({ description: `start the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Run', '/TN', PERSONAL_TASK_NAME] });
+  if (!cliForeign) after.push({ description: 'write the king-louie-service command', writeFile: { path: cliPath, content: renderServiceCli({ nodePath: c.nodePath, entryPath: c.entryPath }) }, ignoreFailure: true });
+  if (relay && !runningPid) after.push({ description: `start the boot task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Run', '/TN', PERSONAL_TASK_NAME] });
 
   if (flags.dryRun) {
-    await executeSteps(steps, { dryRun: true, io });
+    await executeSteps([writeXml], { dryRun: true, io });
+    io.stdout.write(`[dry-run] register the boot task "${PERSONAL_TASK_NAME}" through one administrator prompt: ${[schtasks, ...createArgs].join(' ')}\n`);
+    await executeSteps([removeXml], { dryRun: true, io });
+    io.stdout.write(`[dry-run] turn on the "${LOGIN_START_VALUE}" start-at-login entry: ${loginStartText(c.nodePath)}\n`);
+    await executeSteps(after, { dryRun: true, io });
     return 0;
   }
   if (!flags.yes && (await c.confirm('Install the personal node? [y/N] ')) !== true) {
@@ -473,12 +507,31 @@ async function install({ flags, io, c }) {
     fs.writeFileSync(yamlPath, yaml, { mode: 0o600, flag: 'wx' });
     io.stdout.write(`wrote ${yamlPath}\n`);
   }
-  await c.execute(steps);
+  let registered;
+  try {
+    await c.execute([writeXml]);
+    io.stdout.write(`register the boot task "${PERSONAL_TASK_NAME}": Windows asks for an administrator's yes\n`);
+    registered = await c.elevated(createArgs);
+  } finally {
+    await c.execute([removeXml]);
+  }
+  if (!registered || !registered.ok) {
+    io.stderr.write(`${elevatedRefusal('register', registered)}\n`);
+    return 1;
+  }
+  // The task is registered; a start at login that cannot be set is said, not a failure.
+  try {
+    c.setLoginStart({ on: true, appPath: c.nodePath });
+    io.stdout.write(`King Louie now starts in the tray when you log in (the "${LOGIN_START_VALUE}" start-at-login entry).\n`);
+  } catch (err) {
+    io.stdout.write(`warning: the "${LOGIN_START_VALUE}" start-at-login entry was not set (${shown(errText(err))}): King Louie will not start in the tray at login until it is.\n`);
+  }
+  await c.execute(after);
   io.stdout.write(runningPid
-    ? `The logon task "${PERSONAL_TASK_NAME}" is registered; it was not started again.\n`
+    ? `The boot task "${PERSONAL_TASK_NAME}" is registered; it was not started again.\n`
     : relay
-    ? `The logon task "${PERSONAL_TASK_NAME}" is registered and started.\n`
-    : `The logon task "${PERSONAL_TASK_NAME}" is registered and not started: ${start.why}.\n`);
+    ? `The boot task "${PERSONAL_TASK_NAME}" is registered and started.\n`
+    : `The boot task "${PERSONAL_TASK_NAME}" is registered and not started: ${start.why}.\n`);
   // Whether --data-dir must be spelled out is what the CLI would pick now
   // that the data dir exists.
   const defaultDir = require('../platform/paths').defaultServiceDataDir({ platform: 'win32', env: c.env, exists: c.exists });
@@ -486,9 +539,29 @@ async function install({ flags, io, c }) {
   return 0;
 }
 
+// Turn the start at login off at uninstall; a failure is said, never a reason to stop.
+function loginStartOff(io, c) {
+  try {
+    c.setLoginStart({ on: false });
+    io.stdout.write(`The "${LOGIN_START_VALUE}" start-at-login entry is off.\n`);
+  } catch (err) {
+    io.stdout.write(`warning: the "${LOGIN_START_VALUE}" start-at-login entry was not removed (${shown(errText(err))}).\n`);
+  }
+}
+
+function loginStartIsOn(c) {
+  try {
+    return Boolean(c.readLoginStart().on);
+  } catch {
+    return false;
+  }
+}
+
+// Also run by the NSIS uninstaller (build/installer.nsh), from the app, and from a
+// checkout for an older logon task, so it has no not-the-app refusal.
 async function uninstall({ flags, io, c }) {
   if (!flags.dryRun && !flags.yes && !c.isTTY()) {
-    return refuse(io, 'Refusing to remove the personal node\'s logon task without confirmation on a non-interactive terminal; pass --yes.');
+    return refuse(io, 'Refusing to remove the personal node\'s task without confirmation on a non-interactive terminal; pass --yes.');
   }
   const named = flags.dataDir || c.taskDataDir() || personalDataDir({ platform: 'win32', env: c.env });
   if (!named) return refuse(io, 'LOCALAPPDATA is not set, so there is no default data dir: pass --data-dir DIR');
@@ -500,50 +573,71 @@ async function uninstall({ flags, io, c }) {
     ? [{ description: 'delete the king-louie-service command', unlink: cliPath, ignoreFailure: true }]
     : [];
   if (cliThere && !cliOurs) io.stdout.write(`${cliLeftLine(cliPath)}\n`);
+  const loginOn = loginStartIsOn(c);
+  const loginDry = `[dry-run] turn off the "${LOGIN_START_VALUE}" start-at-login entry\n`;
   if (!c.taskRegistered()) {
-    if (!cliSteps.length) {
-      io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered: nothing to remove. The data dir stays as it is.\n`);
+    if (!cliSteps.length && !loginOn) {
+      io.stdout.write(`The task "${PERSONAL_TASK_NAME}" is not registered: nothing to remove. The data dir stays as it is.\n`);
       return 0;
     }
-    io.stdout.write(`The logon task "${PERSONAL_TASK_NAME}" is not registered. The data dir stays as it is.\n`);
+    io.stdout.write(`The task "${PERSONAL_TASK_NAME}" is not registered. The data dir stays as it is.\n`);
     if (flags.dryRun) {
       await executeSteps(cliSteps, { dryRun: true, io });
+      if (loginOn) io.stdout.write(loginDry);
       return 0;
     }
-    if (!flags.yes && (await c.confirm(`Remove ${cliPath}? [y/N] `)) !== true) {
+    const what = [cliSteps.length ? cliPath : null, loginOn ? `the "${LOGIN_START_VALUE}" start-at-login entry` : null].filter(Boolean).join(' and ');
+    if (!flags.yes && (await c.confirm(`Remove ${what}? [y/N] `)) !== true) {
       io.stderr.write('Not removing without confirmation. Nothing was removed.\n');
       return 1;
     }
-    await c.execute(cliSteps);
+    if (cliSteps.length) await c.execute(cliSteps);
+    if (loginOn) loginStartOff(io, c);
     return 0;
   }
+  const info = c.taskInfo() || {};
+  // The S4U boot task is deleted elevated (its descriptor lets the owner read and
+  // run it, nothing more); an older InteractiveToken logon task is the owner's own.
+  const boot = info.logonType === 'S4U';
   const schtasks = windowsSchtasksExe(c.env);
-  const steps = [
+  const deleteArgs = ['/Delete', '/TN', PERSONAL_TASK_NAME, '/F'];
+  const steps = boot ? cliSteps : [
     // Already stopped (or never started) is not a reason to stop here.
     { description: `end the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/End', '/TN', PERSONAL_TASK_NAME], ignoreFailure: true },
-    { description: `delete the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, '/Delete', '/TN', PERSONAL_TASK_NAME, '/F'] },
+    { description: `delete the logon task "${PERSONAL_TASK_NAME}"`, run: [schtasks, ...deleteArgs] },
     ...cliSteps
   ];
   const stays = `The data dir ${dataDir} stays, and so does the config dir beside it: the node's identity, chats and vault are in them. Delete them yourself to remove the node.`;
-  // `schtasks /End` kills only the PowerShell wrapper and leaves node.exe
-  // running, so the node is stopped first, the way `stop` stops it.
+  // Ending a task never stops the node itself (an old logon task's /End kills only
+  // its PowerShell wrapper), so the node is stopped first, the way `stop` stops it.
   if (flags.dryRun) {
     io.stdout.write(`  stop the node running on ${dataDir}, if any (${require('./commands/stop').stopCommandText(dataDir)})\n`);
+    if (boot) io.stdout.write(`[dry-run] delete the boot task "${PERSONAL_TASK_NAME}" through one administrator prompt: ${[schtasks, ...deleteArgs].join(' ')}\n`);
     await executeSteps(steps, { dryRun: true, io });
+    io.stdout.write(loginDry);
     io.stdout.write(`${stays}\n`);
     return 0;
   }
-  if (!flags.yes && (await c.confirm(`Remove the logon task "${PERSONAL_TASK_NAME}"? [y/N] `)) !== true) {
+  if (!flags.yes && (await c.confirm(`Remove the task "${PERSONAL_TASK_NAME}"? [y/N] `)) !== true) {
     io.stderr.write('Not removing without confirmation. Nothing was removed.\n');
     return 1;
   }
   if (c.runningServicePid(dataDir)) {
     if ((await c.stopNode(dataDir)) !== 0) {
-      io.stderr.write(`The node on ${dataDir} did not stop, so the logon task was not removed. Stop it (${require('./commands/stop').stopCommandText(dataDir)} --force), then run this again.\n`);
+      io.stderr.write(`The node on ${dataDir} did not stop, so the task was not removed. Stop it (${require('./commands/stop').stopCommandText(dataDir)} --force), then run this again.\n`);
       return 1;
     }
   }
-  await c.execute(steps);
+  if (boot) {
+    io.stdout.write(`delete the boot task "${PERSONAL_TASK_NAME}": Windows asks for an administrator's yes\n`);
+    const removed = await c.elevated(deleteArgs);
+    if (!removed || !removed.ok) {
+      io.stderr.write(`${elevatedRefusal('remove', removed)}\n`);
+      return 1;
+    }
+  }
+  if (steps.length) await c.execute(steps);
+  loginStartOff(io, c);
   io.stdout.write(`${stays}\n`);
   return 0;
 }
