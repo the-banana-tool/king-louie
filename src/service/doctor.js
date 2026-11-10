@@ -52,7 +52,7 @@ function identityMatchRow({ seen, platform, acl = null }) {
   return { check, ok: true, detail: `${base} (public keys compared; owners read). Not checked here: who can change the record (${why}; run doctor from an elevated prompt); ${privateHalf}; ${probe}` };
 }
 
-// The personal node's logon task, as `schtasks /Query` reports it (by
+// The personal node's task, as `schtasks /Query` reports it (by
 // absolute path): its Status line when the query exits 0 and the task is
 // Ready or Running, else "not registered".
 function queryPersonalTask({ env = process.env, execFileSync = require('child_process').execFileSync } = {}) {
@@ -68,9 +68,25 @@ function queryPersonalTask({ env = process.env, execFileSync = require('child_pr
   return m ? m[1] : 'not registered';
 }
 
+// Which kind of task is registered, from its XML: 'boot' (a BootTrigger, S4U) or
+// 'logon' (the earlier kind, started when the owner logs in); null when it cannot
+// be read. The XML is UTF-16, so the query reads bytes.
+function queryPersonalTaskKind({ env = process.env, execFileSync = require('child_process').execFileSync } = {}) {
+  const { windowsSchtasksExe } = require('../platform/windows-paths');
+  const { PERSONAL_TASK_NAME } = require('./personal-install');
+  const { parseTaskXml, decodeOutput } = require('../desktop-bridge/personal-node');
+  try {
+    const out = execFileSync(windowsSchtasksExe(env), ['/Query', '/TN', PERSONAL_TASK_NAME, '/XML', 'ONE'], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 30000 });
+    return parseTaskXml(decodeOutput(out)).boot ? 'boot' : 'logon';
+  } catch {
+    return null;
+  }
+}
+
 // doctor's "hosting" row on a personal node: the start log's words, with the
 // owner check (PASS only when this account owns the data and config dirs)
-// and the logon task's state (a warning when it is not registered).
+// and the task's state (a warning when it is not registered, or is the earlier
+// logon task, which starts the node only when the owner logs in).
 function personalHostingRow({ dataDir, configDir, platform, deps }) {
   const { checkPersonalOwner } = require('./personal-host');
   const { adminConfigDir } = require('../platform/paths');
@@ -80,9 +96,26 @@ function personalHostingRow({ dataDir, configDir, platform, deps }) {
   // The owner names and the account name are system-supplied text: one plain line each.
   if (!owner.ok) return { check: 'hosting', ok: false, detail: shown(owner.problem) };
   const task = deps.queryTask ? deps.queryTask() : (platform === 'win32' ? queryPersonalTask() : 'not registered');
-  const row = { check: 'hosting', ok: true, detail: `personal (runs as ${shown(require('os').userInfo().username)}; the owner account is the trust boundary); task ${PERSONAL_TASK_NAME}: ${task}` };
-  if (task === 'not registered') row.warn = true;
+  const kind = task === 'not registered' ? null : (deps.queryTaskKind ? deps.queryTaskKind() : (platform === 'win32' && !deps.queryTask ? queryPersonalTaskKind() : null));
+  const lead = kind === 'boot' ? 'boot task, S4U; '
+    : kind === 'logon' ? 'logon task: run install --personal from King Louie to start at boot; ' : '';
+  const row = { check: 'hosting', ok: true, detail: `personal (${lead}runs as ${shown(require('os').userInfo().username)}; the owner account is the trust boundary); task ${PERSONAL_TASK_NAME}: ${task}` };
+  if (task === 'not registered' || kind === 'logon') row.warn = true;
   return row;
+}
+
+// doctor's "screen host" row on a personal node: whether the King Louie app in the
+// owner's session is connected as the screen host, read from the running service's
+// status record. Not in screen-host mode (no helper file, no record saying so) it
+// is not used.
+function screenHostRow({ dataDir }) {
+  const { readGuiStatusRecord } = require('../gui/status');
+  const { helperFilePath } = require('../gui/personal-screen-host');
+  const record = readGuiStatusRecord({ dataDir });
+  const hostMode = fs.existsSync(helperFilePath(dataDir)) || Boolean(record && record.reason === 'screen_host_not_connected');
+  if (!hostMode) return { check: 'screen host', ok: true, detail: 'not used (screen in this process)' };
+  if (record && record.available === true) return { check: 'screen host', ok: true, detail: 'connected' };
+  return { check: 'screen host', ok: true, warn: true, detail: 'not connected: log in to Windows, or open King Louie' };
 }
 
 // (default root). The CLI never passes it; tests pass their own euid so the
@@ -90,7 +123,8 @@ function personalHostingRow({ dataDir, configDir, platform, deps }) {
 // Async: the approval checks wait for the approver store to load.
 // deps.identityRecord: tests only (how a temp dir's identity record is read).
 // deps.personalOwner: options for checkPersonalOwner (tests: the owner read);
-// deps.queryTask: () => 'Ready' | 'Running' | 'not registered' (tests: no schtasks).
+// deps.queryTask: () => 'Ready' | 'Running' | 'not registered' (tests: no schtasks);
+// deps.queryTaskKind: () => 'boot' | 'logon' | null.
 async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, configDir = null, deps = {} }) {
   const results = [];
   const major = Number(process.versions.node.split('.')[0]);
@@ -185,6 +219,7 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
   // whose status record still says when desktop apps are off.
   if (personal) {
     results.push({ check: 'session helper', ok: true, detail: 'not used on a personal node (the GUI runs in-process)' });
+    results.push(screenHostRow({ dataDir }));
     const { readGuiStatusRecord, remedyFor } = require('../gui/status');
     const { shown } = require('./commands/io');
     const record = readGuiStatusRecord({ dataDir });
@@ -434,4 +469,4 @@ async function approvalChecks({ dataDir, platform, adminUid = 0, configDir = nul
   return out;
 }
 
-module.exports = { runDoctor, identityMatchRow, queryPersonalTask };
+module.exports = { runDoctor, identityMatchRow, queryPersonalTask, queryPersonalTaskKind };

@@ -52,7 +52,8 @@ describe('Electron import boundary', () => {
       'service/personal-install.js', // renderPersonalTaskXml sets it in the task
       'service/commands/session.js', // the fleet's helper, for real Node
       'session/autostart.js', // the same, its child's env is written out in full
-      'session/backends/macos.js' // reports the path on the probe
+      'session/backends/macos.js', // reports the path on the probe
+      'ipc/desktop-controller.js' // the login-start Run value starts the app binary: it records the path
     ]);
     const missing = [];
     for (const file of walk(SRC)) {

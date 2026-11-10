@@ -14667,6 +14667,27 @@ function paintServicePane(model, status) {
     actionsEl.appendChild(btn);
   }
 
+  // The login-start toggle is drawn from the pane model's row alone.
+  const loginStartEl = document.getElementById('service-pane-login-start');
+  loginStartEl.hidden = !model.loginStart;
+  if (model.loginStart) {
+    const box = document.getElementById('service-login-start');
+    document.getElementById('service-login-start-label').textContent = model.loginStart.label;
+    box.checked = model.loginStart.on === true;
+    box.disabled = servicePaneState.busy;
+    box.onchange = () => {
+      box.disabled = true;
+      window.electron.desktop.setLoginStart({ on: box.checked })
+        .then((result) => {
+          if (result && result.ok === false) {
+            servicePaneState.error = result.message || result.error || result.code;
+          }
+        })
+        .catch((err) => serviceLog.warn('setting login start failed', { error: err && err.message }))
+        .finally(() => { renderServiceSection().catch(() => {}); });
+    };
+  }
+
   const approvalsEl = document.getElementById('service-pane-approvals');
   approvalsEl.hidden = !model.approvals;
   if (model.approvals) {

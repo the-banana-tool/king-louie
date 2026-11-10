@@ -35,14 +35,15 @@ const own = (table, key) => (typeof key === 'string' && Object.hasOwn(table, key
 // NODE_START_TIMEOUT has no line here: the controller words it from its own
 // wait (the seconds), and the pane shows that message.
 const NODE_LINES = {
-  NODE_TASK_MISSING: 'King Louie Node has no logon task on this computer, so this app cannot start it.',
-  NODE_TASK_DISABLED: `The logon task "${PERSONAL_TASK_NAME}" is disabled in Task Scheduler. Enable it there to let this app start the node.`,
-  NODE_TASK_OTHER_ACCOUNT: `The logon task "${PERSONAL_TASK_NAME}" belongs to another account; this app does not run it.`,
-  NODE_TASK_PROGRAM_GONE: 'King Louie Node\'s logon task runs a program that is no longer there, so the node cannot start. Install registers the task again from this app.',
+  NODE_TASK_MISSING: 'King Louie Node has no boot task on this computer, so this app cannot start it.',
+  NODE_TASK_DISABLED: `The boot task "${PERSONAL_TASK_NAME}" is disabled in Task Scheduler. Enable it there to let this app start the node.`,
+  NODE_TASK_OTHER_ACCOUNT: `The boot task "${PERSONAL_TASK_NAME}" belongs to another account; this app does not run it.`,
+  NODE_TASK_PROGRAM_GONE: 'King Louie Node\'s boot task runs a program that is no longer there, so the node cannot start. Install registers the task again from this app.',
   NOT_RUNNING: 'King Louie Node is not running.',
   STARTING: 'Starting King Louie Node…'
 };
 const TASK_CODES = { missing: 'NODE_TASK_MISSING', disabled: 'NODE_TASK_DISABLED', 'other-account': 'NODE_TASK_OTHER_ACCOUNT' };
+const INSTALL_DECLINED_LINE = 'Windows did not register the task: the administrator prompt was declined. Nothing else changed.';
 const START_FAILED = (line) => `King Louie Node stopped while starting: ${plain(line)}`;
 const RUN_FAILED = (message) => `King Louie Node could not be started: ${plain(message)}`;
 const STOP_FAILED = (message) => `King Louie Node could not be stopped: ${plain(message)}`;
@@ -86,9 +87,24 @@ function personalNode(s) {
 function isPersonal(s) {
   return Boolean(personalNode(s) || (s.pairing && s.pairing.service && s.pairing.service.hosting === 'personal'));
 }
+// An existing task of the earlier kind: it starts the node when the owner logs in
+// (a logon trigger, InteractiveToken), not at boot. The controller reads it off the
+// task's XML as `taskKind: 'logon'`; installing again replaces it with the boot task.
+function oldLogonTask(s) {
+  const n = personalNode(s);
+  return Boolean(n && n.taskKind === 'logon' && (n.task === 'registered' || n.task === 'disabled'));
+}
+const OLD_TASK_LINE = 'King Louie Node starts when you log in. Install again to start at boot.';
 function installOffered(s) {
   const n = personalNode(s);
-  return Boolean(n && (n.task === 'missing' || n.programGone));
+  return Boolean(n && (n.task === 'missing' || n.programGone || oldLogonTask(s)));
+}
+// The "Start King Louie when I log in" row (spec 2026-11-09 §5.4): only on a
+// personal node, and only once the controller has read the setting.
+const LOGIN_START_LABEL = 'Start King Louie when I log in';
+function loginStartRow(s) {
+  if (!personalNode(s) || !s.loginStart || typeof s.loginStart.on !== 'boolean') return null;
+  return { on: s.loginStart.on, label: LOGIN_START_LABEL };
 }
 function errorText(error) {
   if (!error) return '';
@@ -99,6 +115,7 @@ function errorText(error) {
 function refusalLine(error) {
   const code = error && error.code;
   const text = errorText(error);
+  if (code === 'NODE_INSTALL_DECLINED') return INSTALL_DECLINED_LINE;
   if (code === 'PAIR_ELEVATED') return PAIR_ELEVATED_LINE;
   if (code === 'PAIR_COMMAND_FAILED') return /^Pairing did not finish/.test(text) ? plain(text) : `Pairing did not finish: ${plain(text)}`;
   if (code === 'NODE_START_FAILED') return START_FAILED(text);
@@ -115,7 +132,7 @@ function refusalLine(error) {
 function disconnectedRow(n, { install }) {
   const err = n.startError;
   // §6.8: first, whatever a start said: /Run would succeed and start nothing.
-  if (n.programGone) return { line: `King Louie Node's logon task runs ${plain(n.programGone)}, which is no longer there, so the node cannot start. Install registers the task again from this app.`, action: install };
+  if (n.programGone) return { line: `King Louie Node's boot task runs ${plain(n.programGone)}, which is no longer there, so the node cannot start. Install registers the task again from this app.`, action: install };
   if (err && err.code === 'NODE_START_FAILED') return { line: START_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
   if (err && err.code === 'NODE_START_TIMEOUT') return { line: plain(errorText(err)), action: null };
   if (err && err.code === 'NODE_TASK_RUN_FAILED') return { line: RUN_FAILED(errorText(err)), action: { id: 'nodeStart', label: 'Start King Louie Node' } };
@@ -277,8 +294,13 @@ function describeServicePane(status = {}) {
       actions.push({ id: 'pair', label: 'Pair' });
     }
   }
+  if (oldLogonTask(s) && s.view !== 'pairing' && s.view !== 'attached-starting') {
+    lines.push(OLD_TASK_LINE);
+    if (!actions.some((a) => a.id === INSTALL_ACTION.id)) actions.push(INSTALL_ACTION);
+  }
   return {
     view: s.view || 'unpaired', lines, actions, request, command,
+    loginStart: s.view === 'pairing' ? null : loginStartRow(s),
     detachWarning: s.detachWarning || null, approvals: describeApprovals(s),
     serviceCommand: describeServiceCommand(s)
   };

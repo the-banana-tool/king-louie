@@ -202,7 +202,7 @@ function createPersonalNodeRunner(deps = {}) {
     }
     if (typeof sid !== 'string' || !sid.trim()) return { state: 'unknown' };
     if (task.userId.toUpperCase() !== sid.trim().toUpperCase()) return { state: 'other-account', userId: shown(task.userId) };
-    return { state: task.enabled ? 'registered' : 'disabled', ...await taskProgramFacts(task) };
+    return { state: task.enabled ? 'registered' : 'disabled', logonType: task.logonType, boot: task.boot === true, ...await taskProgramFacts(task) };
   }
 
   // What the task runs, read and never run (attach stage 2 §6.8). `/Run` succeeds for

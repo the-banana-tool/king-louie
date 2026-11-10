@@ -395,6 +395,16 @@ describe('queryTask (C-10: the task XML, never the localised text)', () => {
     return { execFile, r: createPersonalNodeRunner({ platform: 'win32', env: ENV, execFile, ...extra }) };
   };
 
+  it('says whether the task is the boot task or the earlier logon task (logonType, boot)', async () => {
+    const withTriggers = (principal, trigger) => fixture('enabled').replace(/<LogonType>[^<]*<\/LogonType>/, principal).replace('</Task>', `<Triggers>${trigger}</Triggers></Task>`);
+    const boot = await runner(() => ({ stdout: withTriggers('<LogonType>S4U</LogonType>', '<BootTrigger><Enabled>true</Enabled></BootTrigger>') })).r.queryTask({ me: ME });
+    assert.strictEqual(boot.boot, true);
+    assert.strictEqual(boot.logonType, 'S4U');
+    const logon = await runner(() => ({ stdout: withTriggers('<LogonType>InteractiveToken</LogonType>', '<LogonTrigger><Enabled>true</Enabled></LogonTrigger>') })).r.queryTask({ me: ME });
+    assert.strictEqual(logon.boot, false);
+    assert.strictEqual(logon.logonType, 'InteractiveToken');
+  });
+
   it('queries the one task as XML, by schtasks\'s absolute path, with no shell', async () => {
     const { execFile, r } = runner(() => ({ stdout: fixture('enabled') }));
     assert.strictEqual((await r.queryTask({ me: ME })).state, 'registered');

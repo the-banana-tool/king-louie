@@ -131,7 +131,41 @@ describe('describeServicePane: personal node', () => {
     assert.strictEqual(odd.lines[0], 'King Louie Node "laptop-01 [hidden or control characters removed]" runs on this computer as you.');
   });
 
-  it('unpaired with no logon task: Install… beside Pair', () => {
+  it('loginStart row: only on a personal node, from the controller value, label from the model', () => {
+    const on = describeServicePane({ view: 'unpaired', node: node(), loginStart: { on: true } });
+    assert.deepStrictEqual(on.loginStart, { on: true, label: 'Start King Louie when I log in' });
+    const off = describeServicePane({ view: 'attached-connected', node: node(), loginStart: { on: false } });
+    assert.deepStrictEqual(off.loginStart, { on: false, label: 'Start King Louie when I log in' });
+    assert.strictEqual(describeServicePane({ view: 'unpaired', node: node() }).loginStart, null, 'not read: no row');
+    assert.strictEqual(describeServicePane({ view: 'unpaired', loginStart: { on: true }, bridge: { ok: true } }).loginStart, null, 'no personal node: no row');
+    assert.strictEqual(describeServicePane({ view: 'pairing', node: node(), loginStart: { on: true }, pendingPair: { request: 'r', command: 'c', service: null } }).loginStart, null);
+  });
+
+  it('an earlier logon task says so and offers Install again, in the views that show the node', () => {
+    for (const view of ['unpaired', 'paired', 'attached-connected', 'attached-disconnected']) {
+      const m = describeServicePane({ view, node: node({ taskKind: 'logon' }), pairing: personalPairing });
+      assert.ok(m.lines.includes('King Louie Node starts when you log in. Install again to start at boot.'), view);
+      assert.strictEqual(m.actions.filter((a) => a.id === 'nodeInstallPreview').length, 1, view);
+    }
+    const boot = describeServicePane({ view: 'paired', node: node({ taskKind: 'boot' }) });
+    assert.ok(!boot.lines.some((l) => /Install again/.test(l)));
+    assert.ok(!ids(boot).includes('nodeInstallPreview'));
+  });
+
+  it('the renderer draws the toggle from the model row alone, with textContent', () => {
+    const renderer = read('renderer.js');
+    assert.match(renderer, /model\.loginStart/);
+    assert.match(renderer, /getElementById\('service-login-start-label'\)\.textContent = model\.loginStart\.label/);
+    assert.match(read('index.html'), /id="service-login-start" type="checkbox"/);
+    assert.match(read('preload.js'), /setLoginStart: \(payload = \{\}\) => ipcRenderer\.invoke\('desktop:setLoginStart'/);
+  });
+
+  it('NODE_INSTALL_DECLINED is worded as the CLI says it', () => {
+    const m = describeInstallResult({ ok: false, code: 'NODE_INSTALL_DECLINED', message: 'ignored', lines: [] });
+    assert.strictEqual(m.error, 'Windows did not register the task: the administrator prompt was declined. Nothing else changed.');
+  });
+
+  it('unpaired with no boot task: Install… beside Pair', () => {
     const m = describeServicePane({ view: 'unpaired', node: node({ task: 'missing' }) });
     assert.deepStrictEqual(m.actions, [{ id: 'pair', label: 'Pair' }, { id: 'nodeInstallPreview', label: 'Install…' }]);
   });
@@ -173,9 +207,9 @@ describe('describeServicePane: personal node', () => {
     assert.deepStrictEqual(lineFor({ code: 'PAIR_COMMAND_FAILED', message: 'Pairing did not finish: timed out' }), ['Pairing did not finish: timed out']);
     assert.deepStrictEqual(lineFor({ code: 'PAIR_SERVICE_CHANGED', error: 'The service changed since you started pairing.' }), ['The service changed since you started pairing.']);
     assert.deepStrictEqual(lineFor({ code: 'BRIDGE_FILE_UNTRUSTED', message: 'C:\\x\\config\\desktop-bridge.json is a junction or link' }), ['C:\\x\\config\\desktop-bridge.json is a junction or link']);
-    assert.deepStrictEqual(lineFor({ code: 'NODE_TASK_MISSING' }), ['King Louie Node has no logon task on this computer, so this app cannot start it.']);
-    assert.deepStrictEqual(lineFor({ code: 'NODE_TASK_DISABLED' }), ['The logon task "KingLouie Node" is disabled in Task Scheduler. Enable it there to let this app start the node.']);
-    assert.deepStrictEqual(lineFor({ code: 'NODE_TASK_OTHER_ACCOUNT' }), ['The logon task "KingLouie Node" belongs to another account; this app does not run it.']);
+    assert.deepStrictEqual(lineFor({ code: 'NODE_TASK_MISSING' }), ['King Louie Node has no boot task on this computer, so this app cannot start it.']);
+    assert.deepStrictEqual(lineFor({ code: 'NODE_TASK_DISABLED' }), ['The boot task "KingLouie Node" is disabled in Task Scheduler. Enable it there to let this app start the node.']);
+    assert.deepStrictEqual(lineFor({ code: 'NODE_TASK_OTHER_ACCOUNT' }), ['The boot task "KingLouie Node" belongs to another account; this app does not run it.']);
     // The controller words the timeout from its own wait; the pane holds no copy of the number.
     assert.deepStrictEqual(lineFor({ code: 'NODE_START_TIMEOUT', message: 'King Louie Node did not answer within 90 seconds.' }), ['King Louie Node did not answer within 90 seconds.']);
     assert.deepStrictEqual(lineFor({ code: 'NODE_START_FAILED', message: 'service failed to start: port in use' }), ['King Louie Node stopped while starting: service failed to start: port in use']);
@@ -224,13 +258,13 @@ describe('describeServicePane: personal node', () => {
     assert.strictEqual(timeout.lines[0], 'King Louie Node did not answer within 60 seconds.');
     assert.deepStrictEqual(ids(timeout), STANDARD_DISCONNECTED);
     const missing = at({ task: 'missing' });
-    assert.strictEqual(missing.lines[0], 'King Louie Node has no logon task on this computer, so this app cannot start it.');
+    assert.strictEqual(missing.lines[0], 'King Louie Node has no boot task on this computer, so this app cannot start it.');
     assert.deepStrictEqual(missing.actions.slice(3), [{ id: 'nodeInstallPreview', label: 'Install…' }]);
     const disabled = at({ task: 'disabled' });
-    assert.strictEqual(disabled.lines[0], 'The logon task "KingLouie Node" is disabled in Task Scheduler. Enable it there to let this app start the node.');
+    assert.strictEqual(disabled.lines[0], 'The boot task "KingLouie Node" is disabled in Task Scheduler. Enable it there to let this app start the node.');
     assert.deepStrictEqual(ids(disabled), STANDARD_DISCONNECTED);
     const other = at({ task: 'other-account' });
-    assert.strictEqual(other.lines[0], 'The logon task "KingLouie Node" belongs to another account; this app does not run it.');
+    assert.strictEqual(other.lines[0], 'The boot task "KingLouie Node" belongs to another account; this app does not run it.');
     assert.deepStrictEqual(ids(other), STANDARD_DISCONNECTED);
     const taskCode = at({ task: 'unknown', startError: { code: 'NODE_TASK_DISABLED' } });
     assert.strictEqual(taskCode.lines[0], disabled.lines[0]);

@@ -41,17 +41,19 @@ const HELP = `Usage:
 
 "stop" asks the service running on the data dir to shut down and waits up to
 --timeout seconds (default 30) for it to exit; with --force it then kills
-it. On a personal node it also ends the logon task.
+it. On a personal node it also ends the boot task.
 
 A chat channel with an empty allowlist refuses every sender, and a channel
 approval is denied unless "channel approval" names an owner chat that is not
 the chat the request came from.
 
-"install --personal" sets up a personal node: the service runs in your own
-login session, as you, from a logon task ("KingLouie Node"), with its data
-dir under %LOCALAPPDATA%\KingLouie\node (Windows only). Run it from a
-normal, unelevated prompt. "uninstall --personal" removes the task and
-leaves the data dir.
+"install --personal" sets up a personal node: the service runs under your
+own account, as you, from a boot task ("KingLouie Node", S4U: no password
+is stored), with its data dir under %LOCALAPPDATA%\KingLouie\node (Windows
+only). Run it from the installed King Louie app, not an elevated prompt; it
+asks for administrator approval once (UAC) to register the task. Screen work
+needs you signed in with King Louie in the tray. "uninstall --personal"
+removes the task and leaves the data dir.
 
 "import --case" copies one case (by directory name or case id) and its chats
 from the desktop profile, with the node stopped. On a personal node
