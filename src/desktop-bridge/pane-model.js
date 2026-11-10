@@ -92,7 +92,8 @@ function isPersonal(s) {
 // task's XML as `taskKind: 'logon'`; installing again replaces it with the boot task.
 function oldLogonTask(s) {
   const n = personalNode(s);
-  return Boolean(n && n.taskKind === 'logon' && (n.task === 'registered' || n.task === 'disabled'));
+  // Registered only: Install refuses a disabled task (NODE_TASK_DISABLED), so none is offered.
+  return Boolean(n && n.taskKind === 'logon' && n.task === 'registered');
 }
 const OLD_TASK_LINE = 'King Louie Node starts when you log in. Install again to start at boot.';
 function installOffered(s) {

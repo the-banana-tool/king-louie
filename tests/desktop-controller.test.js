@@ -1711,6 +1711,18 @@ describe('desktop controller: the boot task install and the login-start setting 
     controller.dispose();
   });
 
+  it('a failed read is retried on the next status', async () => {
+    let fail = true;
+    const made = controllerFor({ extra: { platform: 'win32', nodeRunner: fakeRunner(), loginStart: {
+      readLoginStart: () => { if (fail) throw new Error('reg failed'); return { on: true }; }, setLoginStart: () => {}
+    } } });
+    made.state.setPairing(personalPairing());
+    assert.strictEqual((await made.controller.status()).loginStart, null);
+    fail = false;
+    assert.deepStrictEqual((await made.controller.status()).loginStart, { on: true });
+    made.controller.dispose();
+  });
+
   it('off Windows there is no setting', async () => {
     const { controller } = controllerFor();
     assert.strictEqual((await controller.loginStart()).code, 'NOT_WINDOWS');

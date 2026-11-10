@@ -160,6 +160,14 @@ describe('describeServicePane: personal node', () => {
     assert.match(read('preload.js'), /setLoginStart: \(payload = \{\}\) => ipcRenderer\.invoke\('desktop:setLoginStart'/);
   });
 
+  it('a disabled earlier logon task shows no Install offer (Install would refuse it)', () => {
+    for (const view of ['unpaired', 'paired', 'attached-connected', 'attached-disconnected']) {
+      const m = describeServicePane({ view, node: node({ taskKind: 'logon', task: 'disabled' }), pairing: personalPairing });
+      assert.ok(!ids(m).includes('nodeInstallPreview'), view);
+      assert.ok(!m.lines.some((l) => /Install again/.test(l)), view);
+    }
+  });
+
   it('NODE_INSTALL_DECLINED is worded as the CLI says it', () => {
     const m = describeInstallResult({ ok: false, code: 'NODE_INSTALL_DECLINED', message: 'ignored', lines: [] });
     assert.strictEqual(m.error, 'Windows did not register the task: the administrator prompt was declined. Nothing else changed.');

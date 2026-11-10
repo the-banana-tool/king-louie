@@ -557,7 +557,8 @@ function createDesktopController({
   }
   async function loginStartValue() {
     if (platform !== 'win32') return null;
-    if (loginStartCache === undefined) readLoginStartNow();
+    // A failed read (null) is tried again on the next status, so the toggle comes back.
+    if (loginStartCache === undefined || loginStartCache === null) readLoginStartNow();
     return loginStartCache;
   }
   async function loginStart() {

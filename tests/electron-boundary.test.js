@@ -65,6 +65,14 @@ describe('Electron import boundary', () => {
     assert.deepStrictEqual(missing, []);
   });
 
+  // The controller is exempt above only because it records the path (the login-start
+  // Run value). Nothing there may run it.
+  it('the desktop controller never spawns or execs process.execPath', () => {
+    const code = fs.readFileSync(path.join(SRC, 'ipc', 'desktop-controller.js'), 'utf8').split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    assert.doesNotMatch(code, /(?:spawn|spawnSync|execFile|execFileSync|exec|execSync|fork)\w*\s*\([^)]*process\.execPath/);
+    assert.doesNotMatch(code, /process\.execPath\s*,\s*\[/);
+  });
+
   // fork runs process.execPath without naming it, so the scan above cannot see it.
   it('whatever forks sets ELECTRON_RUN_AS_NODE itself', () => {
     const FORKS = /(?:\{[^}]*\bfork\b[^}]*\}\s*=\s*require\(\s*['"](?:node:)?child_process['"]\s*\))|(?:child_?[pP]rocess\.fork\()/;
