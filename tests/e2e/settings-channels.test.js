@@ -18,20 +18,28 @@ describe('E2E: Settings — Channels', () => {
     assert.ok(exists);
   });
 
-  it('has Discord token input and toggles', async () => {
-    const token = await evaluate(ctx, `!!document.getElementById('channel-discord-token-input')`);
-    const enabled = await evaluate(ctx, `!!document.getElementById('channel-discord-enabled-input')`);
-    assert.ok(token, 'Discord token input should exist');
-    assert.ok(enabled, 'Discord enabled toggle should exist');
+  it('the Telegram token is a key row with Save & test and Remove key', async () => {
+    const out = await evaluate(ctx, `JSON.stringify({
+      pill: document.querySelector('#telegram-key-row .status-pill')?.textContent,
+      save: document.getElementById('save-telegram-token-btn')?.textContent,
+      remove: document.getElementById('clear-telegram-token-btn')?.textContent,
+      row: !!document.querySelector('#telegram-key-row > .settings-list-row')
+    })`);
+    const { pill, save, remove, row } = JSON.parse(out);
+    assert.strictEqual(pill, 'No key');
+    assert.strictEqual(save, 'Save & test');
+    assert.strictEqual(remove, 'Remove key');
+    assert.strictEqual(row, true);
   });
 
-  it('has Slack token inputs and toggles', async () => {
-    const app = await evaluate(ctx, `!!document.getElementById('channel-slack-app-token-input')`);
-    const bot = await evaluate(ctx, `!!document.getElementById('channel-slack-bot-token-input')`);
-    const enabled = await evaluate(ctx, `!!document.getElementById('channel-slack-enabled-input')`);
-    assert.ok(app, 'Slack app token should exist');
-    assert.ok(bot, 'Slack bot token should exist');
-    assert.ok(enabled, 'Slack enabled toggle should exist');
+  it('has no Discord or Slack token controls (they never saved)', async () => {
+    for (const id of [
+      'save-slack-tokens-btn', 'clear-slack-tokens-btn', 'channel-slack-app-token-input', 'channel-slack-bot-token-input',
+      'channel-slack-enabled-input', 'channel-slack-mention-input', 'save-discord-token-btn', 'clear-discord-token-btn',
+      'channel-discord-token-input', 'channel-discord-enabled-input', 'channel-discord-mention-input'
+    ]) {
+      assert.strictEqual(await evaluate(ctx, `!!document.getElementById(${JSON.stringify(id)})`), false, id);
+    }
   });
 
   it('has an access-control pane for Telegram and Discord', async () => {
@@ -61,6 +69,10 @@ describe('E2E: Settings — Channels', () => {
       })()
     `);
     await waitFor(ctx, `document.getElementById('channel-telegram-users-list').textContent.includes('1234509876')`);
+    assert.strictEqual(
+      await evaluate(ctx, `!!document.querySelector('#channel-telegram-users-list .settings-list-row .settings-list-name')`),
+      true, 'an allowed id is a list row'
+    );
     const state = await evaluate(ctx, `
       window.electron.channels.getAccess({ channel: 'telegram' }).then((r) => JSON.stringify(r.data.users))
     `);
@@ -119,14 +131,5 @@ describe('E2E: Settings — Channels', () => {
     assert.strictEqual(defaultPolicy, 'deny');
     const hasAllowAll = await evaluate(ctx, `typeof window.electron.channels.allowEveryone`);
     assert.strictEqual(hasAllowAll, 'undefined');
-  });
-
-  it('has save and clear buttons for each channel', async () => {
-    const saveTelegram = await evaluate(ctx, `!!document.getElementById('save-telegram-token-btn')`);
-    const saveDiscord = await evaluate(ctx, `!!document.getElementById('save-discord-token-btn')`);
-    const saveSlack = await evaluate(ctx, `!!document.getElementById('save-slack-tokens-btn')`);
-    assert.ok(saveTelegram, 'save telegram button should exist');
-    assert.ok(saveDiscord, 'save discord button should exist');
-    assert.ok(saveSlack, 'save slack button should exist');
   });
 });

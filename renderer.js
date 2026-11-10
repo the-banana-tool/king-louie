@@ -192,8 +192,7 @@ const dom = {
   notificationsToastThresholdInput: document.getElementById('notifications-toast-threshold-input'),
   notificationsExternalThresholdInput: document.getElementById('notifications-external-threshold-input'),
   notificationsNtfyTopicInput: document.getElementById('notifications-ntfy-topic-input'),
-  saveNotificationsBtn: document.getElementById('save-notifications-btn'),
-  notificationsStatus: document.getElementById('notifications-status'),
+  notificationsDependentRows: document.getElementById('notifications-dependent-rows'),
   voiceEnabledInput: document.getElementById('voice-enabled-input'),
   voiceSpeakChatInput: document.getElementById('voice-speak-chat-input'),
   voiceSpeakAgentSummaryInput: document.getElementById('voice-speak-agent-summary-input'),
@@ -320,19 +319,10 @@ const dom = {
   testTelegramBtn: document.getElementById('test-telegram-btn'),
   clearTelegramTokenBtn: document.getElementById('clear-telegram-token-btn'),
   telegramChannelStatus: document.getElementById('telegram-channel-status'),
-  channelDiscordTokenInput: document.getElementById('channel-discord-token-input'),
-  channelDiscordEnabledInput: document.getElementById('channel-discord-enabled-input'),
-  channelDiscordMentionInput: document.getElementById('channel-discord-mention-input'),
-  saveDiscordTokenBtn: document.getElementById('save-discord-token-btn'),
-  clearDiscordTokenBtn: document.getElementById('clear-discord-token-btn'),
-  discordChannelStatus: document.getElementById('discord-channel-status'),
-  channelSlackAppTokenInput: document.getElementById('channel-slack-app-token-input'),
-  channelSlackBotTokenInput: document.getElementById('channel-slack-bot-token-input'),
-  channelSlackEnabledInput: document.getElementById('channel-slack-enabled-input'),
-  channelSlackMentionInput: document.getElementById('channel-slack-mention-input'),
-  saveSlackTokensBtn: document.getElementById('save-slack-tokens-btn'),
-  clearSlackTokensBtn: document.getElementById('clear-slack-tokens-btn'),
-  slackChannelStatus: document.getElementById('slack-channel-status'),
+  telegramStatusPill: document.getElementById('telegram-status-pill'),
+  telegramKeyToggleBtn: document.getElementById('telegram-key-toggle-btn'),
+  telegramKeyEditor: document.getElementById('telegram-key-editor'),
+  telegramKeyMessage: document.getElementById('telegram-key-message'),
   searchImageList: document.getElementById('search-image-list'),
   providersFailingBanner: document.getElementById('providers-failing-banner'),
   imagegenDefaultSelect: document.getElementById('imagegen-default-select'),
@@ -4800,6 +4790,7 @@ function closeMemoryPanel() {
 function openSettingsDrawer() {
   // A search or image test result lasts until Settings closes (spec §8.5).
   appState.keyTestResults = {};
+  appState.telegramTested = null;
   appState.openKeyRows = new Set();
   setSettingsDrawer(true);
   paintSettingsBanner(appState.desktopStatus || null);
@@ -5076,20 +5067,8 @@ function renderSettings() {
   applyAboutYouFields();
   clearSettingsFieldErrors(document.querySelector('.settings-tab-content[data-tab="profile"]'));
 
-  const notifications = appState.settings.notifications || {};
-  const thresholds = notifications.thresholdsMs || {};
-  if (dom.notificationsEnabledInput) dom.notificationsEnabledInput.checked = notifications.enabled !== false;
-  if (dom.notificationsUiToastEnabledInput) dom.notificationsUiToastEnabledInput.checked = notifications.uiToast?.enabled !== false;
-  if (dom.notificationsNtfyEnabledInput) dom.notificationsNtfyEnabledInput.checked = notifications.ntfy?.enabled === true;
-  if (dom.notificationsTelegramLongTaskInput) dom.notificationsTelegramLongTaskInput.checked = notifications.telegram?.longTaskNotice !== false;
-  if (dom.notificationsToastThresholdInput) dom.notificationsToastThresholdInput.value = Math.round((Number(thresholds.toast || 30000)) / 1000);
-  if (dom.notificationsExternalThresholdInput) dom.notificationsExternalThresholdInput.value = Math.round((Number(thresholds.external || 120000)) / 1000);
-  if (dom.notificationsNtfyTopicInput) dom.notificationsNtfyTopicInput.value = String(notifications.ntfy?.topic || '');
-
-  if (dom.notificationsStatus) {
-    dom.notificationsStatus.textContent = 'Notification settings loaded.';
-    dom.notificationsStatus.classList.remove('error');
-  }
+  applyNotificationFields();
+  clearSettingsFieldErrors(document.querySelector('.settings-tab-content[data-tab="notifications"]'));
 
   if (dom.voiceStatus) dom.voiceStatus.classList.remove('error');
   applyVoiceFields();
@@ -5202,19 +5181,7 @@ function renderSettings() {
   loadVaultEntries();
   loadMcpServers();
 
-  const telegram = appState.settings.telegram || {};
-  if (dom.telegramChannelStatus) {
-    if (telegram.bridgeActive) {
-      dom.telegramChannelStatus.textContent = 'Bridge active.';
-      dom.telegramChannelStatus.classList.remove('error');
-    } else if (telegram.hasToken) {
-      dom.telegramChannelStatus.textContent = 'Token saved. Bridge not active.';
-      dom.telegramChannelStatus.classList.remove('error');
-    } else {
-      dom.telegramChannelStatus.textContent = 'Not configured.';
-      dom.telegramChannelStatus.classList.remove('error');
-    }
-  }
+  paintTelegramKeyRow();
 
   const imageGen = appState.settings.imageGeneration || {};
   if (dom.imagegenDefaultSelect) {
@@ -6514,61 +6481,177 @@ function wireAboutYou() {
   });
 }
 
-function collectNotificationsFromForm() {
-  const toastSeconds = Math.max(0, Number(dom.notificationsToastThresholdInput?.value || 30));
-  const externalSeconds = Math.max(toastSeconds, Number(dom.notificationsExternalThresholdInput?.value || 120));
+// Notifications (settings redesign §5.8): one saver for the page. The host merges
+// what it is given over the stored settings one level deep, so every save sends the
+// whole object. Thresholds are seconds on the page and milliseconds in the store.
+const NOTIFICATION_SWITCHES = [
+  { dom: 'notificationsEnabledInput', shown: (n) => n.enabled !== false },
+  { dom: 'notificationsUiToastEnabledInput', shown: (n) => n.uiToast?.enabled !== false },
+  { dom: 'notificationsNtfyEnabledInput', shown: (n) => n.ntfy?.enabled === true },
+  { dom: 'notificationsTelegramLongTaskInput', shown: (n) => n.telegram?.longTaskNotice !== false }
+];
+let notificationsLastField = null;
 
+function storedNotificationThresholdsMs() {
+  const t = (appState.settings.notifications || {}).thresholdsMs || {};
+  return { toast: Number(t.toast || 30000), external: Number(t.external || 120000) };
+}
+
+function applyNotificationField(el) {
+  if (!el) return;
+  const n = appState.settings.notifications || {};
+  const ms = storedNotificationThresholdsMs();
+  delete el.dataset.invalid;
+  const sw = NOTIFICATION_SWITCHES.find((f) => dom[f.dom] === el);
+  if (sw) el.checked = sw.shown(n);
+  else if (el === dom.notificationsToastThresholdInput) el.value = String(ms.toast / 1000);
+  else if (el === dom.notificationsExternalThresholdInput) el.value = String(ms.external / 1000);
+  else if (el === dom.notificationsNtfyTopicInput) el.value = String(n.ntfy?.topic || '');
+}
+
+function notificationFieldEls() {
+  return [
+    ...NOTIFICATION_SWITCHES.map((f) => dom[f.dom]),
+    dom.notificationsToastThresholdInput, dom.notificationsExternalThresholdInput, dom.notificationsNtfyTopicInput
+  ].filter(Boolean);
+}
+
+function applyNotificationFields() {
+  notificationFieldEls().forEach(applyNotificationField);
+  paintNotificationsPane();
+}
+
+// Only what applies (§5.8 rule 2): everything greyed while notifications are off,
+// the toast's threshold until the toast is on, the topic until ntfy is on, and the
+// ntfy and Telegram threshold until one of them is on.
+function paintNotificationsPane() {
+  const on = Boolean(dom.notificationsEnabledInput?.checked);
+  const toast = Boolean(dom.notificationsUiToastEnabledInput?.checked);
+  const ntfy = Boolean(dom.notificationsNtfyEnabledInput?.checked);
+  const telegram = Boolean(dom.notificationsTelegramLongTaskInput?.checked);
+  dom.notificationsDependentRows?.querySelectorAll('.settings-row').forEach((row) => {
+    let greyed = !on;
+    if (!greyed && row.contains(dom.notificationsToastThresholdInput)) greyed = !toast;
+    if (!greyed && row.contains(dom.notificationsNtfyTopicInput)) greyed = !ntfy;
+    if (!greyed && row.contains(dom.notificationsExternalThresholdInput)) greyed = !ntfy && !telegram;
+    setSettingsRowGreyed(row, greyed);
+  });
+}
+
+function notificationSeconds(el) {
+  const raw = String(el?.value ?? '').trim();
+  const n = Number(raw);
+  return raw === '' || !Number.isFinite(n) || n < 0 ? null : n;
+}
+
+// A threshold field's milliseconds, or the stored value while the field holds one
+// that cannot be saved.
+function notificationThresholdMs(el, storedMs) {
+  if (!el || el.dataset.invalid) return storedMs;
+  const n = notificationSeconds(el);
+  return n === null ? storedMs : unitToMs(n, 's');
+}
+
+function notificationThresholdsMs() {
+  const stored = storedNotificationThresholdsMs();
+  return {
+    toast: notificationThresholdMs(dom.notificationsToastThresholdInput, stored.toast),
+    external: notificationThresholdMs(dom.notificationsExternalThresholdInput, stored.external)
+  };
+}
+
+// Why a threshold field's value cannot be saved, or ''. The host keeps ntfy and
+// Telegram no sooner than the toast (external >= toast); the page says so instead of
+// letting the host change the number silently.
+function notificationThresholdProblem(el) {
+  const n = notificationSeconds(el);
+  if (n === null) return 'Not saved: enter a number of seconds, 0 or more.';
+  const stored = storedNotificationThresholdsMs();
+  const ms = unitToMs(n, 's');
+  if (el === dom.notificationsToastThresholdInput) {
+    const external = notificationThresholdMs(dom.notificationsExternalThresholdInput, stored.external);
+    if (ms > external) return `Not saved: the toast comes before ntfy and Telegram, so this must be at most ${external / 1000} s.`;
+  } else {
+    const toast = notificationThresholdMs(dom.notificationsToastThresholdInput, stored.toast);
+    if (ms < toast) return `Not saved: ntfy and Telegram are told no sooner than the toast, so this must be at least ${toast / 1000} s.`;
+  }
+  return '';
+}
+
+function notificationsFromForm() {
   return {
     enabled: Boolean(dom.notificationsEnabledInput?.checked),
-    thresholdsMs: {
-      toast: Math.round(toastSeconds * 1000),
-      external: Math.round(externalSeconds * 1000)
-    },
-    uiToast: {
-      enabled: Boolean(dom.notificationsUiToastEnabledInput?.checked)
-    },
+    thresholdsMs: notificationThresholdsMs(),
+    uiToast: { enabled: Boolean(dom.notificationsUiToastEnabledInput?.checked) },
     ntfy: {
       enabled: Boolean(dom.notificationsNtfyEnabledInput?.checked),
       topic: String(dom.notificationsNtfyTopicInput?.value || '').trim()
     },
-    telegram: {
-      longTaskNotice: Boolean(dom.notificationsTelegramLongTaskInput?.checked)
-    }
+    telegram: { longTaskNotice: Boolean(dom.notificationsTelegramLongTaskInput?.checked) }
   };
 }
 
-async function handleSaveNotifications() {
-  if (!dom.saveNotificationsBtn) return;
+async function saveNotificationsValue(notifications) {
+  const result = await window.electron.settings.saveNotifications({ notifications });
+  if (!result?.ok) return { ok: false, error: result?.error || 'Could not save the notification settings.' };
+  appState.settings.notifications = { ...(result.notifications || notifications) };
+  return { ok: true };
+}
 
-  dom.saveNotificationsBtn.disabled = true;
-  if (dom.notificationsStatus) {
-    dom.notificationsStatus.textContent = 'Saving...';
-    dom.notificationsStatus.classList.remove('error');
+function wireNotificationFields() {
+  const pane = () => document.querySelector('.settings-tab-content[data-tab="notifications"]');
+  const saver = registerSettingsAutosave('notifications', {
+    save: saveNotificationsValue,
+    onState: (state, info) => {
+      const field = notificationsLastField;
+      if (state === 'error') {
+        applyNotificationFields();
+        clearSettingsFieldErrors(pane());
+        setSettingsFieldError(field, `Not saved: ${info.error}`);
+      } else if (state === 'saved' && field && !field.dataset.invalid) {
+        setSettingsFieldError(field, '');
+        if (document.activeElement !== field) applyNotificationField(field);
+      }
+    }
+  });
+  const thresholds = [dom.notificationsToastThresholdInput, dom.notificationsExternalThresholdInput].filter(Boolean);
+  for (const f of NOTIFICATION_SWITCHES) {
+    const el = dom[f.dom];
+    el?.addEventListener('change', () => {
+      notificationsLastField = el;
+      setSettingsFieldError(el, '');
+      paintNotificationsPane();
+      saver.change(notificationsFromForm(), { immediate: true });
+    });
   }
-
-  try {
-    const notifications = collectNotificationsFromForm();
-    const result = await window.electron.settings.saveNotifications({ notifications });
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to save notification settings.');
-    }
-
-    appState.settings.notifications = {
-      ...(result.notifications || notifications)
-    };
-
-    if (dom.notificationsStatus) {
-      dom.notificationsStatus.textContent = 'Notification settings saved.';
-      dom.notificationsStatus.classList.remove('error');
-    }
-  } catch (error) {
-    if (dom.notificationsStatus) {
-      dom.notificationsStatus.textContent = `Error: ${error.message || 'Unable to save notification settings.'}`;
-      dom.notificationsStatus.classList.add('error');
-    }
-  } finally {
-    dom.saveNotificationsBtn.disabled = false;
+  for (const el of thresholds) {
+    el.addEventListener('input', () => {
+      const problem = notificationThresholdProblem(el);
+      if (problem) {
+        el.dataset.invalid = '1';
+        setSettingsFieldError(el, problem);
+        return;
+      }
+      delete el.dataset.invalid;
+      setSettingsFieldError(el, '');
+      // The other threshold may have been refused against this one's old value.
+      for (const other of thresholds) {
+        if (other !== el && other.dataset.invalid && !notificationThresholdProblem(other)) {
+          delete other.dataset.invalid;
+          setSettingsFieldError(other, '');
+        }
+      }
+      notificationsLastField = el;
+      saver.change(notificationsFromForm());
+    });
+    el.addEventListener('blur', () => { saver.flush(); });
   }
+  const topic = dom.notificationsNtfyTopicInput;
+  topic?.addEventListener('input', () => {
+    notificationsLastField = topic;
+    saver.change(notificationsFromForm());
+  });
+  topic?.addEventListener('blur', () => { saver.flush(); });
 }
 
 // Voice (settings redesign §5.8): each field saves as it changes. saveVoice merges
@@ -12771,69 +12854,121 @@ if (dom.skillSettingsContainer) {
   });
 }
 
-/* --- Channel management: Telegram -------------------------- */
-if (dom.saveTelegramTokenBtn) {
-  dom.saveTelegramTokenBtn.addEventListener('click', async () => {
-    const token = dom.channelTelegramTokenInput?.value?.trim();
-    if (!token) return;
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.runLlmCommand({ command: `telegram add ${token}` }),
-        'Failed to save Telegram token.'
-      );
-      dom.channelTelegramTokenInput.value = '';
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = 'Token saved successfully.';
-        dom.telegramChannelStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = err.message || 'Error saving token.';
-        dom.telegramChannelStatus.classList.add('error');
-      }
-    }
-  });
+/* --- Channel management: Telegram --------------------------
+ * The bot token is a key row (settings redesign §5.5): a status, Add or Edit
+ * opening it in place, Save & test and Remove key. A token is never auto-saved.
+ * A test result lasts until Settings closes (appState.telegramTested). */
+const TELEGRAM_KEY_ROW = 'channel:telegram';
+
+function telegramKeyView() {
+  const telegram = appState.settings.telegram || {};
+  const tested = appState.telegramTested;
+  if (!telegram.hasToken && !telegram.bridgeActive) return { state: 'no-key', reason: 'Not configured.', action: 'Add' };
+  if (tested) return { state: tested.ok ? 'working' : 'failing', reason: tested.message, action: 'Edit' };
+  if (telegram.bridgeActive) return { state: 'working', reason: 'Bridge active.', action: 'Edit' };
+  return { state: 'not-tested', reason: 'Token saved. Bridge not active.', action: 'Edit' };
 }
 
-if (dom.testTelegramBtn) {
-  dom.testTelegramBtn.addEventListener('click', async () => {
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.runLlmCommand({ command: 'telegram test' }),
-        'Failed to test Telegram.'
-      );
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = result.message || 'Test successful.';
-        dom.telegramChannelStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = err.message || 'Test failed.';
-        dom.telegramChannelStatus.classList.add('error');
-      }
-    }
-  });
+function paintTelegramKeyRow() {
+  const view = telegramKeyView();
+  const look = KEY_ROW_PILL[view.state];
+  if (dom.telegramStatusPill) {
+    dom.telegramStatusPill.className = `status-pill ${look.cls}`;
+    dom.telegramStatusPill.textContent = look.text;
+  }
+  if (dom.telegramChannelStatus) {
+    dom.telegramChannelStatus.textContent = view.reason || '';
+    dom.telegramChannelStatus.title = view.reason || '';
+  }
+  if (dom.telegramKeyToggleBtn) dom.telegramKeyToggleBtn.textContent = view.action;
+  const hasKey = view.state !== 'no-key';
+  if (dom.testTelegramBtn) dom.testTelegramBtn.hidden = !hasKey;
+  if (dom.clearTelegramTokenBtn) dom.clearTelegramTokenBtn.hidden = !hasKey;
+  if (dom.channelTelegramTokenInput) {
+    dom.channelTelegramTokenInput.placeholder = hasKey
+      ? 'A token is saved. Paste a new one to replace it.'
+      : 'Paste Telegram bot token';
+  }
+  if (dom.telegramKeyEditor) dom.telegramKeyEditor.hidden = !appState.openKeyRows.has(TELEGRAM_KEY_ROW);
 }
 
-if (dom.clearTelegramTokenBtn) {
-  dom.clearTelegramTokenBtn.addEventListener('click', async () => {
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.runLlmCommand({ command: 'telegram remove' }),
-        'Failed to clear Telegram token.'
-      );
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = 'Token cleared.';
-        dom.telegramChannelStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = err.message || 'Error clearing token.';
-        dom.telegramChannelStatus.classList.add('error');
-      }
-    }
-  });
+function setTelegramKeyMessage(text, isError = false) {
+  if (!dom.telegramKeyMessage) return;
+  dom.telegramKeyMessage.textContent = text || '';
+  dom.telegramKeyMessage.classList.toggle('error', Boolean(isError));
 }
+
+async function testTelegramToken() {
+  try {
+    const result = unwrapIpcResult(
+      await window.electron.settings.runLlmCommand({ command: 'telegram test' }),
+      'Failed to test Telegram.'
+    );
+    appState.telegramTested = { ok: true, message: result.message || 'Test passed.' };
+  } catch (err) {
+    appState.telegramTested = { ok: false, message: err.message || 'Test failed.' };
+  }
+  paintTelegramKeyRow();
+}
+
+dom.telegramKeyToggleBtn?.addEventListener('click', () => {
+  if (appState.openKeyRows.has(TELEGRAM_KEY_ROW)) appState.openKeyRows.delete(TELEGRAM_KEY_ROW);
+  else appState.openKeyRows.add(TELEGRAM_KEY_ROW);
+  paintTelegramKeyRow();
+  if (!dom.telegramKeyEditor?.hidden) dom.channelTelegramTokenInput?.focus();
+});
+
+dom.saveTelegramTokenBtn?.addEventListener('click', async () => {
+  const token = dom.channelTelegramTokenInput?.value?.trim();
+  if (!token) {
+    setTelegramKeyMessage('Paste a bot token first.', true);
+    return;
+  }
+  dom.saveTelegramTokenBtn.disabled = true;
+  try {
+    unwrapIpcResult(
+      await window.electron.settings.runLlmCommand({ command: `telegram add ${token}` }),
+      'Failed to save Telegram token.'
+    );
+    dom.channelTelegramTokenInput.value = '';
+    appState.settings.telegram = { ...(appState.settings.telegram || {}), hasToken: true };
+    setTelegramKeyMessage('Token saved.');
+    await testTelegramToken();
+  } catch (err) {
+    setTelegramKeyMessage(err.message || 'Error saving token.', true);
+  } finally {
+    dom.saveTelegramTokenBtn.disabled = false;
+  }
+});
+
+dom.testTelegramBtn?.addEventListener('click', async () => {
+  dom.testTelegramBtn.disabled = true;
+  try {
+    await testTelegramToken();
+  } finally {
+    dom.testTelegramBtn.disabled = false;
+  }
+});
+
+dom.clearTelegramTokenBtn?.addEventListener('click', async () => {
+  const confirmed = await showConfirmDialog('Remove the saved Telegram bot token? The bot stops answering.');
+  if (!confirmed) return;
+  dom.clearTelegramTokenBtn.disabled = true;
+  try {
+    unwrapIpcResult(
+      await window.electron.settings.runLlmCommand({ command: 'telegram remove' }),
+      'Failed to clear Telegram token.'
+    );
+    appState.settings.telegram = { ...(appState.settings.telegram || {}), hasToken: false, bridgeActive: false };
+    appState.telegramTested = null;
+    setTelegramKeyMessage('Token removed.');
+    paintTelegramKeyRow();
+  } catch (err) {
+    setTelegramKeyMessage(err.message || 'Error clearing token.', true);
+  } finally {
+    dom.clearTelegramTokenBtn.disabled = false;
+  }
+});
 
 /* --- Channel access control: allowlist + approval target ----
  *
@@ -12861,18 +12996,20 @@ function setChannelAccessStatus(channel, message, isError = false) {
 
 // Ids come from strangers on the internet, so every one of them is written
 // with textContent and never interpolated into HTML.
+// A compact list row (settings redesign §5.8 rule 7): the id, its action on the row.
 function renderChannelIdRow(label, actionLabel, onAction, actionClass = 'btn') {
   const row = document.createElement('div');
-  row.className = 'channel-access-row';
+  row.className = 'settings-list-row channel-access-row';
 
   const text = document.createElement('span');
-  text.className = 'channel-access-id';
+  text.className = 'settings-list-name channel-access-id';
   text.textContent = label;
+  text.title = label;
   row.appendChild(text);
 
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = `btn btn-small ${actionClass}`;
+  button.className = `btn btn-sm ${actionClass}`;
   button.textContent = actionLabel;
   button.addEventListener('click', onAction);
   row.appendChild(button);
@@ -13109,11 +13246,7 @@ if (dom.providerList) {
 
 wireAboutYou();
 
-if (dom.saveNotificationsBtn) {
-  dom.saveNotificationsBtn.addEventListener('click', () => {
-    handleSaveNotifications();
-  });
-}
+wireNotificationFields();
 
 wireVoiceFields();
 
@@ -14383,58 +14516,87 @@ function textToLadder(text) {
   });
 }
 
-function renderContactPolicyEditor(policy, channels, { save, showError }) {
+// The contact policy saves as it changes (settings redesign §5.8): a ladder line or
+// the digest channel when it loses focus, the times and boxes when they change. A
+// line that does not parse says so beside itself and sends nothing; any other save
+// meanwhile keeps that ladder's stored steps. `save(next)` resolves { ok, policy?,
+// error? }; after a refusal every field goes back to the stored policy.
+const CONTACT_URGENCY_LABELS = { low: 'Low urgency', normal: 'Normal urgency', high: 'High urgency' };
+
+function contactRow(labelText, forId) {
+  const row = contactEl('div', 'settings-row');
+  const label = contactEl('label', '', labelText);
+  if (forId) label.htmlFor = forId;
+  row.appendChild(label);
+  return row;
+}
+
+function renderContactPolicyEditor(policy, channels, { save }) {
+  let stored = policy;
+  let lastField = null;
   const editor = contactEl('div', 'contact-policy');
   editor.id = 'contact-policy-editor';
+
+  editor.appendChild(contactEl('p', 'settings-section-label', 'Ladders'));
+  editor.appendChild(contactEl('p', 'settings-row-help',
+    'Channels to try in order, each with the minutes to wait before it: present, telegram@30, email@240. Add +digest to send a step in the daily digest.'));
   const inputs = {};
-  editor.appendChild(contactEl('div', 'contact-policy-heading', 'Ladders (channel@minutes, comma-separated)'));
   for (const u of CONTACT_LADDER_URGENCIES) {
-    const label = contactEl('label', 'contact-policy-row', `${u} `);
-    const input = contactEl('input', 'contact-policy-ladder');
+    const row = contactRow(CONTACT_URGENCY_LABELS[u], `contact-ladder-${u}`);
+    const input = contactEl('input', 'provider-input contact-policy-ladder');
     input.type = 'text';
     input.id = `contact-ladder-${u}`;
-    input.value = ladderToText(policy.ladders[u]);
-    label.appendChild(input);
-    editor.appendChild(label);
+    input.autocomplete = 'off';
+    row.appendChild(input);
+    editor.appendChild(row);
     inputs[u] = input;
   }
-  const quiet = contactEl('label', 'contact-policy-row', 'Quiet hours ');
+
+  const quietRow = contactRow('Quiet hours', 'contact-quiet-start');
+  const quietSpan = contactEl('span', 'contact-policy-times');
   const qStart = contactEl('input', 'contact-policy-time');
   qStart.type = 'time';
   qStart.id = 'contact-quiet-start';
-  qStart.value = policy.quietHours ? policy.quietHours.start : '';
   const qEnd = contactEl('input', 'contact-policy-time');
   qEnd.type = 'time';
   qEnd.id = 'contact-quiet-end';
-  qEnd.value = policy.quietHours ? policy.quietHours.end : '';
-  quiet.append(qStart, document.createTextNode(' – '), qEnd);
-  editor.appendChild(quiet);
-  const breakthrough = contactEl('div', 'contact-policy-row', 'Break through quiet hours: ');
+  qEnd.setAttribute('aria-label', 'Quiet hours end');
+  quietSpan.append(qStart, document.createTextNode(' to '), qEnd);
+  quietRow.appendChild(quietSpan);
+  editor.appendChild(quietRow);
+  const throughRow = contactRow('Break through quiet hours');
+  const throughSpan = contactEl('span', 'contact-policy-checks');
   const through = {};
   for (const u of CONTACT_LADDER_URGENCIES) {
     const box = contactEl('input');
     box.type = 'checkbox';
     box.id = `contact-breakthrough-${u}`;
-    box.checked = (policy.quietHours?.breakthrough || ['high']).includes(u);
     const l = contactEl('label', 'contact-policy-check', ` ${u} `);
     l.prepend(box);
-    breakthrough.appendChild(l);
+    throughSpan.appendChild(l);
     through[u] = box;
   }
-  editor.appendChild(breakthrough);
-  const digest = contactEl('label', 'contact-policy-row', 'Daily digest ');
+  throughRow.appendChild(throughSpan);
+  editor.appendChild(throughRow);
+  editor.appendChild(contactEl('p', 'settings-row-help', 'Set both times to turn quiet hours on; clear both to turn them off.'));
+
+  const digestRow = contactRow('Daily digest', 'contact-digest-channel');
+  const digestSpan = contactEl('span', 'contact-policy-times');
   const dChannel = contactEl('input', 'contact-policy-digest');
   dChannel.type = 'text';
   dChannel.id = 'contact-digest-channel';
   dChannel.placeholder = 'off';
-  dChannel.value = policy.digest ? policy.digest.channel : '';
+  dChannel.autocomplete = 'off';
   const dAt = contactEl('input', 'contact-policy-time');
   dAt.type = 'time';
   dAt.id = 'contact-digest-at';
-  dAt.value = policy.digest ? policy.digest.at : '08:00';
-  digest.append(dChannel, document.createTextNode(' at '), dAt);
-  editor.appendChild(digest);
-  editor.appendChild(contactEl('div', 'contact-policy-heading', 'Channels'));
+  dAt.setAttribute('aria-label', 'Daily digest time');
+  digestSpan.append(dChannel, document.createTextNode(' at '), dAt);
+  digestRow.appendChild(digestSpan);
+  editor.appendChild(digestRow);
+  editor.appendChild(contactEl('p', 'settings-row-help', 'A channel name, such as email; leave it empty for no digest.'));
+
+  editor.appendChild(contactEl('p', 'settings-section-label', 'Channels'));
   const status = contactEl('ul', 'contact-policy-channels');
   status.id = 'contact-policy-channels';
   for (const [id, s] of Object.entries(channels || {})) {
@@ -14442,24 +14604,109 @@ function renderContactPolicyEditor(policy, channels, { save, showError }) {
     status.appendChild(contactEl('li', s.configured ? 'is-ready' : 'is-off', text));
   }
   editor.appendChild(status);
-  const saveBtn = contactEl('button', 'btn btn-primary', 'Save contact policy');
-  saveBtn.type = 'button';
-  saveBtn.id = 'contact-policy-save';
-  saveBtn.addEventListener('click', async () => {
-    try {
-      const next = { ...policy, ladders: {} };
-      for (const u of CONTACT_LADDER_URGENCIES) next.ladders[u] = textToLadder(inputs[u].value);
-      next.quietHours = qStart.value && qEnd.value
-        ? { start: qStart.value, end: qEnd.value, breakthrough: CONTACT_LADDER_URGENCIES.filter((u) => through[u].checked) }
-        : null;
-      next.digest = dChannel.value.trim() ? { channel: dChannel.value.trim(), at: dAt.value || '08:00' } : null;
-      await save(next);
-    } catch (err) {
-      showError(err.message);
+
+  const paintQuiet = () => {
+    const on = Boolean(qStart.value && qEnd.value);
+    setSettingsRowGreyed(throughRow, !on);
+  };
+  const apply = () => {
+    for (const u of CONTACT_LADDER_URGENCIES) {
+      inputs[u].value = ladderToText(stored.ladders[u]);
+      inputs[u].dataset.saved = inputs[u].value;
+      delete inputs[u].dataset.invalid;
+    }
+    qStart.value = stored.quietHours ? stored.quietHours.start : '';
+    qEnd.value = stored.quietHours ? stored.quietHours.end : '';
+    for (const u of CONTACT_LADDER_URGENCIES) through[u].checked = (stored.quietHours?.breakthrough || ['high']).includes(u);
+    dChannel.value = stored.digest ? stored.digest.channel : '';
+    dChannel.dataset.saved = dChannel.value;
+    dAt.value = stored.digest ? stored.digest.at : '08:00';
+    paintQuiet();
+  };
+
+  // The policy as the page stands, with stored values in place of what cannot be sent.
+  const snapshot = () => {
+    const next = { ...stored, ladders: {} };
+    for (const u of CONTACT_LADDER_URGENCIES) {
+      try {
+        next.ladders[u] = textToLadder(inputs[u].value);
+      } catch {
+        next.ladders[u] = stored.ladders[u];
+      }
+    }
+    if (qStart.value && qEnd.value) {
+      next.quietHours = { start: qStart.value, end: qEnd.value, breakthrough: CONTACT_LADDER_URGENCIES.filter((u) => through[u].checked) };
+    } else if (!qStart.value && !qEnd.value) {
+      next.quietHours = null;
+    } else {
+      next.quietHours = stored.quietHours || null;
+    }
+    next.digest = dChannel.value.trim() ? { channel: dChannel.value.trim(), at: dAt.value || '08:00' } : null;
+    return next;
+  };
+
+  const saver = registerSettingsAutosave('contact.policy', {
+    save: async (next) => {
+      const r = await save(next);
+      if (r && r.ok && r.policy) stored = r.policy;
+      return r;
+    },
+    onState: (state, info) => {
+      if (state === 'error') {
+        apply();
+        clearSettingsFieldErrors(editor);
+        setSettingsFieldError(lastField, `Not saved: ${info.error}`);
+      } else if (state === 'saved' && lastField && !lastField.dataset.invalid) {
+        setSettingsFieldError(lastField, '');
+      }
     }
   });
-  editor.appendChild(saveBtn);
+  const send = (field) => {
+    lastField = field;
+    saver.change(snapshot(), { immediate: true });
+  };
+
+  for (const u of CONTACT_LADDER_URGENCIES) {
+    const input = inputs[u];
+    input.addEventListener('blur', () => {
+      try {
+        textToLadder(input.value);
+      } catch (err) {
+        input.dataset.invalid = '1';
+        setSettingsFieldError(input, `Not saved: ${err.message}`);
+        return;
+      }
+      delete input.dataset.invalid;
+      setSettingsFieldError(input, '');
+      if (input.value === input.dataset.saved) return;
+      input.dataset.saved = input.value;
+      send(input);
+    });
+  }
+  for (const el of [qStart, qEnd]) {
+    el.addEventListener('change', () => {
+      paintQuiet();
+      if (Boolean(qStart.value) !== Boolean(qEnd.value)) return; // wait for the other time
+      send(el);
+    });
+  }
+  for (const u of CONTACT_LADDER_URGENCIES) through[u].addEventListener('change', () => send(through[u]));
+  dChannel.addEventListener('blur', () => {
+    if (dChannel.value === dChannel.dataset.saved) return;
+    dChannel.dataset.saved = dChannel.value;
+    send(dChannel);
+  });
+  dAt.addEventListener('change', () => send(dAt));
+
+  apply();
   return editor;
+}
+
+function contactAwayText(policy) {
+  const away = policy.away && Date.parse(policy.away.until) > Date.now() ? policy.away : null;
+  return away
+    ? `Away (${away.mode}) until ${new Date(away.until).toLocaleString()}. Tell King Louie you're back to end it.`
+    : 'Not away. To be away, tell King Louie in any chat, e.g. "email only until Friday".';
 }
 
 async function renderContactSettings() {
@@ -14478,15 +14725,15 @@ async function renderContactSettings() {
       message.textContent = text;
       message.classList.add('is-error');
     };
+    let awayLine = null;
     const save = async (next) => {
       // The away setting may have changed (set_away) since the pane drew:
       // keep the one saved now.
       const fresh = await window.electron.contact.getPolicy().catch(() => null);
       const r = await window.electron.contact.setPolicy(fresh?.ok ? { ...next, away: fresh.policy.away } : next);
-      if (!r || r.ok === false) throw new Error(r?.error || 'The contact policy was not saved.');
-      await renderContactSettings();
-      const saved = document.getElementById('contact-pane-message');
-      if (saved) saved.textContent = 'Saved.';
+      if (!r || r.ok === false) return { ok: false, error: r?.error || 'The contact policy was not saved.' };
+      if (awayLine && r.policy) awayLine.textContent = contactAwayText(r.policy);
+      return { ok: true, policy: r.policy };
     };
     // Final review M7: when another process holds the contact ladder lease,
     // this one sends nothing; say so where the owner looks.
@@ -14496,13 +14743,10 @@ async function renderContactSettings() {
       body.appendChild(elsewhere);
     }
     if (policy.ok) {
-      const away = policy.policy.away && Date.parse(policy.policy.away.until) > Date.now() ? policy.policy.away : null;
-      const awayLine = contactEl('div', 'contact-away-note', away
-        ? `Away (${away.mode}) until ${new Date(away.until).toLocaleString()}. Tell King Louie you're back to end it.`
-        : 'Not away. To be away, tell King Louie in any chat, e.g. "email only until Friday".');
+      awayLine = contactEl('div', 'contact-away-note settings-row-help', contactAwayText(policy.policy));
       awayLine.id = 'contact-away-note';
       body.appendChild(awayLine);
-      body.appendChild(renderContactPolicyEditor(policy.policy, policy.channels, { save, showError }));
+      body.appendChild(renderContactPolicyEditor(policy.policy, policy.channels, { save }));
     } else {
       showError(policy.error || 'The contact policy could not be read.');
     }

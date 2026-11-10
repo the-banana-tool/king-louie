@@ -530,15 +530,25 @@
           <section class="template-variables-card">
             <h3>Telegram</h3>
             <p class="settings-row-help">Connect a Telegram bot for remote chat and notifications.</p>
-            <div class="template-variables-grid">
-              <label for="channel-telegram-token-input">Bot Token</label>
-              <input id="channel-telegram-token-input" class="provider-input" type="password" placeholder="Paste Telegram bot token">
-            </div>
-            <div class="template-variables-actions">
-              <button id="save-telegram-token-btn" type="button" class="btn btn-primary">Save Token</button>
-              <button id="test-telegram-btn" type="button" class="btn">Test Connection</button>
-              <button id="clear-telegram-token-btn" type="button" class="btn btn-danger">Clear Token</button>
-              <span id="telegram-channel-status" class="provider-message">Not configured.</span>
+            <div class="key-row-list">
+              <div class="key-row" id="telegram-key-row" data-kind="channel" data-provider="telegram">
+                <div class="settings-list-row">
+                  <span class="settings-list-name key-row-name">Telegram bot</span>
+                  <span class="status-pill is-none" id="telegram-status-pill">No key</span>
+                  <span class="key-row-reason settings-row-help" id="telegram-channel-status">Not configured.</span>
+                  <button id="test-telegram-btn" type="button" class="btn btn-sm" hidden>Test</button>
+                  <button id="telegram-key-toggle-btn" type="button" class="btn btn-sm">Add</button>
+                </div>
+                <div class="key-row-editor" id="telegram-key-editor" hidden>
+                  <label for="channel-telegram-token-input" class="settings-row-help">Bot token</label>
+                  <input id="channel-telegram-token-input" class="provider-input" type="password" autocomplete="off" placeholder="Paste Telegram bot token">
+                  <div class="provider-actions">
+                    <button id="save-telegram-token-btn" type="button" class="btn btn-primary btn-sm">Save &amp; test</button>
+                    <button id="clear-telegram-token-btn" type="button" class="btn btn-danger btn-sm" hidden>Remove key</button>
+                  </div>
+                  <div id="telegram-key-message" class="provider-message settings-row-help"></div>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -587,28 +597,6 @@
             </div>
           </section>
 
-          <section class="template-variables-card">
-            <h3>Discord</h3>
-            <p class="settings-row-help">Connect a Discord bot for server-based interaction.</p>
-            <div class="template-variables-grid">
-              <label for="channel-discord-token-input">Bot Token</label>
-              <input id="channel-discord-token-input" class="provider-input" type="password" placeholder="Paste Discord bot token">
-              <label class="inline-toggle" for="channel-discord-enabled-input">
-                <input id="channel-discord-enabled-input" type="checkbox">
-                <span>Enable Discord channel</span>
-              </label>
-              <label class="inline-toggle" for="channel-discord-mention-input">
-                <input id="channel-discord-mention-input" type="checkbox">
-                <span>Require @mention</span>
-              </label>
-            </div>
-            <div class="template-variables-actions">
-              <button id="save-discord-token-btn" type="button" class="btn btn-primary">Save Token</button>
-              <button id="clear-discord-token-btn" type="button" class="btn btn-danger">Clear Token</button>
-              <span id="discord-channel-status" class="provider-message">Not configured.</span>
-            </div>
-          </section>
-
           <section class="template-variables-card channel-access-card" data-channel="discord">
             <h3>Discord Access</h3>
             <p class="channel-access-note settings-row-help">
@@ -654,29 +642,6 @@
             </div>
           </section>
 
-          <section class="template-variables-card">
-            <h3>Slack</h3>
-            <p class="settings-row-help">Connect Slack for workspace-based interaction.</p>
-            <div class="template-variables-grid">
-              <label for="channel-slack-app-token-input">App Token</label>
-              <input id="channel-slack-app-token-input" class="provider-input" type="password" placeholder="xapp-...">
-              <label for="channel-slack-bot-token-input">Bot Token</label>
-              <input id="channel-slack-bot-token-input" class="provider-input" type="password" placeholder="xoxb-...">
-              <label class="inline-toggle" for="channel-slack-enabled-input">
-                <input id="channel-slack-enabled-input" type="checkbox">
-                <span>Enable Slack channel</span>
-              </label>
-              <label class="inline-toggle" for="channel-slack-mention-input">
-                <input id="channel-slack-mention-input" type="checkbox">
-                <span>Require @mention</span>
-              </label>
-            </div>
-            <div class="template-variables-actions">
-              <button id="save-slack-tokens-btn" type="button" class="btn btn-primary">Save Tokens</button>
-              <button id="clear-slack-tokens-btn" type="button" class="btn btn-danger">Clear Tokens</button>
-              <span id="slack-channel-status" class="provider-message">Not configured.</span>
-            </div>
-          </section>
 
         </div>
 
@@ -795,41 +760,38 @@
         <!-- Tab: Notifications -->
         <div class="settings-tab-content" data-tab="notifications">
           <section class="template-variables-card">
-            <h3>Notification Routing</h3>
-            <p>Control duration-aware completion notifications for desktop, ntfy, and Telegram.</p>
-            <div class="template-variables-grid">
-              <label class="inline-toggle" for="notifications-enabled-input">
-                <input id="notifications-enabled-input" type="checkbox">
-                <span>Enable notifications</span>
-              </label>
-
-              <label class="inline-toggle" for="notifications-ui-toast-enabled-input">
-                <input id="notifications-ui-toast-enabled-input" type="checkbox">
-                <span>Enable desktop toast notifications</span>
-              </label>
-
-              <label class="inline-toggle" for="notifications-ntfy-enabled-input">
-                <input id="notifications-ntfy-enabled-input" type="checkbox">
-                <span>Enable ntfy external notifications</span>
-              </label>
-
-              <label class="inline-toggle" for="notifications-telegram-long-task-input">
-                <input id="notifications-telegram-long-task-input" type="checkbox">
-                <span>Enable long-task notices in Telegram</span>
-              </label>
-
-              <label for="notifications-toast-threshold-input">UI toast threshold (seconds)</label>
-              <input id="notifications-toast-threshold-input" class="provider-input" type="number" min="0" step="1" placeholder="30">
-
-              <label for="notifications-external-threshold-input">External threshold (seconds)</label>
-              <input id="notifications-external-threshold-input" class="provider-input" type="number" min="0" step="1" placeholder="120">
-
-              <label for="notifications-ntfy-topic-input">ntfy topic</label>
-              <input id="notifications-ntfy-topic-input" class="provider-input" type="text" placeholder="your-topic-name">
+            <h3>Notifications</h3>
+            <p class="settings-row-help">Tell you when a long task finishes: a desktop toast, ntfy or Telegram, by how long it ran.</p>
+            <div class="settings-row">
+              <label for="notifications-enabled-input">Notifications</label>
+              <input id="notifications-enabled-input" class="switch" type="checkbox">
             </div>
-            <div class="template-variables-actions">
-              <button id="save-notifications-btn" type="button" class="btn btn-primary">Save Notification Settings</button>
-              <span id="notifications-status" class="provider-message">Not saved yet.</span>
+            <div id="notifications-dependent-rows">
+              <div class="settings-row">
+                <label for="notifications-ui-toast-enabled-input">Desktop toast</label>
+                <input id="notifications-ui-toast-enabled-input" class="switch" type="checkbox">
+              </div>
+              <div class="settings-row">
+                <label for="notifications-toast-threshold-input">Toast after a task runs</label>
+                <span class="unit-field"><input id="notifications-toast-threshold-input" type="number" min="0" step="1" placeholder="30"><span class="unit">s</span></span>
+              </div>
+              <div class="settings-row">
+                <label for="notifications-ntfy-enabled-input">ntfy</label>
+                <input id="notifications-ntfy-enabled-input" class="switch" type="checkbox">
+              </div>
+              <div class="settings-row">
+                <label for="notifications-ntfy-topic-input">ntfy topic</label>
+                <input id="notifications-ntfy-topic-input" class="provider-input" type="text" placeholder="your-topic-name">
+              </div>
+              <div class="settings-row">
+                <label for="notifications-telegram-long-task-input">Long-task notices in Telegram</label>
+                <input id="notifications-telegram-long-task-input" class="switch" type="checkbox">
+              </div>
+              <div class="settings-row">
+                <label for="notifications-external-threshold-input">ntfy and Telegram after a task runs</label>
+                <span class="unit-field"><input id="notifications-external-threshold-input" type="number" min="0" step="1" placeholder="120"><span class="unit">s</span></span>
+              </div>
+              <p class="settings-row-help">ntfy and Telegram are told no sooner than the toast.</p>
             </div>
           </section>
         </div>
@@ -1094,7 +1056,7 @@
         <div class="settings-tab-content" data-tab="contact">
           <section class="template-variables-card contact-pane" id="contact-pane">
             <h3>Contact</h3>
-            <p>How a case's questions reach you when you are not in the app: a ladder of channels for each urgency, quiet hours and a daily digest.</p>
+            <p class="settings-row-help">How a case's questions reach you when you are not in the app: a ladder of channels for each urgency, quiet hours and a daily digest.</p>
             <div class="contact-pane-body" id="contact-pane-body"></div>
           </section>
         </div>

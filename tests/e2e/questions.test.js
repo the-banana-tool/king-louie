@@ -47,9 +47,10 @@ describe('E2E: no questions sidebar; contact policy in Settings', { skip: gitAva
     assert.strictEqual(await evaluate(ctx, `!!document.querySelector('[data-question-id="q-0001"]')`), false);
   });
 
-  it('edits the contact policy at Settings > Contact, keeping an away set meanwhile', async () => {
+  it('edits the contact policy at Settings > Contact as it changes, keeping an away set meanwhile', async () => {
     await openSettingsTab(ctx, 'contact');
-    await waitFor(ctx, `!!document.querySelector('.settings-tab-content.active[data-tab="contact"] #contact-policy-save')`, 20000);
+    await waitFor(ctx, `!!document.querySelector('.settings-tab-content.active[data-tab="contact"] #contact-ladder-high')`, 20000);
+    assert.strictEqual(await evaluate(ctx, `!!document.getElementById('contact-policy-save')`), false, 'saves as it changes');
     assert.match(await evaluate(ctx, `document.getElementById('contact-away-note').textContent`), /^Not away\./);
     assert.ok(await evaluate(ctx, `document.querySelectorAll('#contact-policy-channels li').length`) > 0, 'channel readiness is listed');
 
@@ -59,27 +60,46 @@ describe('E2E: no questions sidebar; contact policy in Settings', { skip: gitAva
     const set = await evaluate(ctx, `window.electron.contact.setPolicy(${JSON.stringify({ ...current.policy, away: { mode: 'email-only', until } })})`);
     assert.strictEqual(set.ok, true, JSON.stringify(set));
 
+    // A ladder line saves when it loses focus.
     await evaluate(ctx, `(() => {
-      document.getElementById('contact-ladder-high').value = 'present, telegram@15, email@60';
-      document.getElementById('contact-quiet-start').value = '22:00';
-      document.getElementById('contact-quiet-end').value = '07:00';
-      document.getElementById('contact-policy-save').click();
+      const el = document.getElementById('contact-ladder-high');
+      el.focus();
+      el.value = 'present, telegram@15, email@60';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.blur();
       return true;
     })()`);
-    await waitFor(ctx, `(document.getElementById('contact-pane-message')?.textContent || '') === 'Saved.'`, 20000);
+    await waitFor(ctx, `window.electron.contact.getPolicy().then((r) => r.policy.ladders.high.length === 3 && r.policy.ladders.high[1].afterMin === 15)`, 20000);
+    // Quiet hours save as they change.
+    await evaluate(ctx, `(() => {
+      for (const [id, v] of [['contact-quiet-start', '22:00'], ['contact-quiet-end', '07:00']]) {
+        const el = document.getElementById(id);
+        el.value = v;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      return true;
+    })()`);
+    await waitFor(ctx, `window.electron.contact.getPolicy().then((r) => r.policy.quietHours && r.policy.quietHours.end === '07:00')`, 20000);
+    await waitFor(ctx, `document.getElementById('settings-save-state').textContent === 'Saved'`);
     const saved = await evaluate(ctx, `window.electron.contact.getPolicy()`);
     assert.deepStrictEqual(saved.policy.ladders.high, [{ channel: 'present', afterMin: 0 }, { channel: 'telegram', afterMin: 15 }, { channel: 'email', afterMin: 60 }]);
     assert.deepStrictEqual([saved.policy.quietHours.start, saved.policy.quietHours.end], ['22:00', '07:00']);
     assert.deepStrictEqual(saved.policy.away, { mode: 'email-only', until });
-    assert.match(await evaluate(ctx, `document.getElementById('contact-away-note').textContent`), /^Away \(email-only\) until /);
+    await waitFor(ctx, `/^Away \\(email-only\\) until /.test(document.getElementById('contact-away-note').textContent)`);
 
-    // A step that does not parse is refused in the pane; nothing is saved.
+    // A step that does not parse is refused beside its line; nothing is saved.
+    const lowBefore = JSON.stringify(saved.policy.ladders.low);
     await evaluate(ctx, `(() => {
-      document.getElementById('contact-ladder-low').value = 'email@soon';
-      document.getElementById('contact-policy-save').click();
+      const el = document.getElementById('contact-ladder-low');
+      el.focus();
+      el.value = 'email@soon';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.blur();
       return true;
     })()`);
-    await waitFor(ctx, `document.getElementById('contact-pane-message')?.classList.contains('is-error')`);
-    assert.match(await evaluate(ctx, `document.getElementById('contact-pane-message').textContent`), /is not a step/);
+    await waitFor(ctx, `(document.querySelector('.settings-field-error[data-for="contact-ladder-low"]')?.textContent || '').includes('is not a step')`);
+    await new Promise((r) => setTimeout(r, 1000));
+    const after = await evaluate(ctx, `window.electron.contact.getPolicy()`);
+    assert.strictEqual(JSON.stringify(after.policy.ladders.low), lowBefore);
   });
 });

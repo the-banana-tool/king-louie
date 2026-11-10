@@ -2443,25 +2443,11 @@ body {
 .channel-access-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 
-.channel-access-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm, 6px);
-  background: var(--bg-base, transparent);
-}
-
+/* An id is a .settings-list-row; only its font differs. */
 .channel-access-id {
   font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-primary);
-  overflow-wrap: anywhere;
 }
 
 .channel-access-empty {
@@ -3807,19 +3793,16 @@ body {
 .contact-pane input:focus { border-color: var(--accent); }
 .contact-pane input[type="checkbox"] { accent-color: var(--accent); }
 .contact-pane input[type="time"] { box-sizing: border-box; width: 86px; flex: 0 0 auto; }
-.contact-away-note { font-size: 12px; color: var(--text-muted); }
 .contact-ladder-elsewhere { color: var(--warning); font-size: 0.85em; }
 .contact-pane-message { font-size: 12px; color: var(--text-secondary); }
 .contact-pane-message.is-error { color: var(--error); }
 .contact-pane-message:empty { display: none; }
 .contact-policy { display: flex; flex-direction: column; gap: 2px; }
-.contact-policy-heading { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-top: 6px; }
-.contact-policy-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0; font-size: 12px; color: var(--text-secondary); }
 .contact-policy-check { display: inline-flex; align-items: center; gap: 3px; }
 .contact-policy-ladder { flex: 1; font-family: var(--font-mono); }
 .contact-policy-channels { margin: 4px 0; padding-left: 16px; font-size: 11px; color: var(--text-muted); }
 .contact-policy-channels .is-ready { color: var(--success); }
-.contact-policy .btn { align-self: flex-start; margin-top: 6px; }
+.contact-policy-digest { box-sizing: border-box; width: 120px; }
 
 /* Cases stage 6: playbooks */
 .chat-case-new { flex-wrap: wrap; }
