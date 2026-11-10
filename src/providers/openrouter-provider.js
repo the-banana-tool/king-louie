@@ -218,6 +218,107 @@ class OpenRouterProvider extends BaseLLMProvider {
     return messages;
   }
 
+  async streamMessageWithTools(messages, tools = [], options = {}, onChunk) {
+    const requestedModel = options.model || this.getDefaultModel();
+    const preparedMessages = this.prependSystemPrompt(messages, this.systemText(options));
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({
+        model: requestedModel,
+        messages: this.formatMessages(preparedMessages),
+        tools: tools.map((tool) => ({
+          type: 'function',
+          function: { name: tool.name, description: tool.description, parameters: tool.parameters }
+        })),
+        tool_choice: 'auto',
+        temperature: options.temperature ?? 0.7,
+        stream: true,
+        stream_options: { include_usage: true }
+      })
+    }, options);
+
+    if (!response.ok) {
+      throw await this.buildError(response);
+    }
+
+    let usage = null;
+    let model = requestedModel;
+    let messageContent = '';
+    // Map from tool_calls index → { id, name, arguments }
+    const toolCallMap = new Map();
+
+    const buildResult = () => {
+      const llmMetrics = this.buildLlmCallMetrics({ model, usage });
+      if (toolCallMap.size === 0) {
+        return { type: 'text', content: messageContent, llmMetrics };
+      }
+      const toolCalls = [...toolCallMap.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([, tc]) => {
+          let parsedArgs = {};
+          try { parsedArgs = JSON.parse(tc.arguments || '{}'); } catch { parsedArgs = {}; }
+          return { toolName: tc.name, toolUseId: tc.id, parameters: parsedArgs };
+        });
+      return {
+        type: 'tool_use',
+        toolName: toolCalls[0].toolName,
+        toolUseId: toolCalls[0].toolUseId,
+        parameters: toolCalls[0].parameters,
+        toolCalls,
+        messageContent,
+        llmMetrics
+      };
+    };
+
+    return this.guardStream(options, () => ({ model, usage }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') return buildResult();
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed?.usage) usage = parsed.usage;
+            if (parsed?.model) model = parsed.model;
+            const delta = parsed?.choices?.[0]?.delta;
+            if (!delta) continue;
+            if (typeof delta.content === 'string' && delta.content) {
+              messageContent += delta.content;
+              if (typeof onChunk === 'function') onChunk(delta.content);
+            }
+            if (Array.isArray(delta.tool_calls)) {
+              for (const tc of delta.tool_calls) {
+                const idx = typeof tc.index === 'number' ? tc.index : 0;
+                if (!toolCallMap.has(idx)) toolCallMap.set(idx, { id: '', name: '', arguments: '' });
+                const acc = toolCallMap.get(idx);
+                if (tc.id) acc.id = tc.id;
+                if (tc.function?.name) acc.name = tc.function.name;
+                if (typeof tc.function?.arguments === 'string') acc.arguments += tc.function.arguments;
+              }
+            }
+          } catch {
+            // Ignore malformed chunks
+          }
+        }
+      }
+
+      return buildResult();
+    });
+  }
+
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, this.systemText(options));
