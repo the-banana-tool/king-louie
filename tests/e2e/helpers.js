@@ -183,6 +183,17 @@ async function click(ctx, selector) {
   `);
 }
 
+/**
+ * Open Settings on one page: click the gear, wait for the drawer, switch to
+ * the page as the sidebar does, and wait until its pane is the active one.
+ */
+async function openSettingsTab(ctx, tab) {
+  await click(ctx, '#open-settings-btn');
+  await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
+  await evaluate(ctx, `switchSettingsTab(${JSON.stringify(tab)}); true`);
+  await waitFor(ctx, `!!document.querySelector(${JSON.stringify(`.settings-tab-content.active[data-tab="${tab}"]`)})`);
+}
+
 async function fill(ctx, selector, value) {
   return evaluate(ctx, `
     (() => {
@@ -334,8 +345,7 @@ async function launchAttached(opts = {}) {
     ctx = await launchApp({ ...opts, env: { ...(opts.env || {}), KL_DESKTOP_BRIDGE_FILE: service.bridgeFile } });
     ctx.extraDirs.push(root);
     ctx.service = service;
-    await click(ctx, '#open-settings-btn');
-    await evaluate(ctx, `switchSettingsTab('service'); true`);
+    await openSettingsTab(ctx, 'service');
     await waitFor(ctx, `!!document.getElementById('service-action-pair')`, 15000);
     await click(ctx, '#service-action-pair');
     const request = await waitFor(ctx, `document.getElementById('service-pair-request')?.textContent || ''`, 15000);
@@ -386,6 +396,7 @@ module.exports = {
   evaluate,
   waitFor,
   click,
+  openSettingsTab,
   fill,
   getText,
   getValue,

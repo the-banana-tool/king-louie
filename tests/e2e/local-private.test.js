@@ -16,7 +16,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { launchApp, closeApp, evaluate, waitFor, readHistoryChats } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, readHistoryChats, openSettingsTab } = require('./helpers');
 const { startFakeLlmServer } = require('../helpers/fake-llm-server');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -55,10 +55,8 @@ describe('E2E: a private chat answers only from a local model (local inference L
   })()`);
   const metricsCount = () => evaluate(ctx, `document.querySelectorAll('.message-metrics-call').length`);
   const lastMetrics = () => evaluate(ctx, `(() => { const els = [...document.querySelectorAll('.message-metrics-call')]; return els.length ? els[els.length - 1].textContent : ''; })()`);
-  const openSettingsModels = async () => {
-    await evaluate(ctx, `document.getElementById('open-settings-btn').click(); true`);
-    await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
-    await evaluate(ctx, `(() => { const s = document.getElementById('settings-nav-select'); s.value = 'models'; s.dispatchEvent(new Event('change')); return true; })()`);
+  const openLocalServers = async () => {
+    await openSettingsTab(ctx, 'local-servers');
     await waitFor(ctx, `!!document.getElementById('models-local-add-btn')`, 15000);
   };
   const closeSettings = () => evaluate(ctx, `document.getElementById('close-settings-btn').click(); true`);
@@ -116,7 +114,7 @@ describe('E2E: a private chat answers only from a local model (local inference L
   });
 
   it('adds a local server in Settings → Models: this machine, probed, tools yes', async () => {
-    await openSettingsModels();
+    await openLocalServers();
     await waitFor(ctx, `document.getElementById('models-local-list').textContent.includes('No local server yet.')`, 15000);
     await evaluate(ctx, `document.getElementById('models-local-add-btn').click(); true`);
     await waitFor(ctx, `!!document.querySelector('.models-local-add')`);

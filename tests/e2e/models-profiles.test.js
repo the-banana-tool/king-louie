@@ -8,7 +8,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { launchApp, closeApp, evaluate, waitFor, readHistoryChats } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, readHistoryChats, openSettingsTab } = require('./helpers');
 const { startFakeLlmServer } = require('../helpers/fake-llm-server');
 
 const readChat = (ctx) => readHistoryChats(ctx).find((c) => c.id === 'chat-1');
@@ -179,9 +179,7 @@ describe('E2E: profiles, the main switcher and Retry with…', () => {
   });
 
   it('creates a profile in the Models tab', async () => {
-    await evaluate(ctx, `document.getElementById('open-settings-btn').click(); true`);
-    await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
-    await evaluate(ctx, `(() => { const s = document.getElementById('settings-nav-select'); s.value = 'models'; s.dispatchEvent(new Event('change')); return true; })()`);
+    await openSettingsTab(ctx, 'models');
     await waitFor(ctx, `document.querySelectorAll('#models-profile-list .models-profile-card:not(.models-profile-broken)').length === 1`);
     // The broken stored profile shows as broken, with the reason, as text.
     const broken = await evaluate(ctx, `(() => { const c = document.querySelector('#models-profile-list .models-profile-broken'); return c ? { text: c.textContent, img: !!document.getElementById('broken-img') } : null; })()`);

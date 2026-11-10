@@ -19,8 +19,11 @@ function block(start, end = '\nfunction ') {
 
 describe('renderer: settings tabs for models M2', () => {
   it('has an API keys tab and a Models tab, and no Inference or Smart Routing tab', () => {
-    assert.match(html, /<option value="providers">API keys<\/option>/);
-    assert.match(html, /<option value="models">Models<\/option>/);
+    const { SETTINGS_GROUPS } = require('../renderer-helpers/settings-nav.js');
+    const pages = SETTINGS_GROUPS.flatMap((g) => g.pages);
+    assert.ok(pages.some((p) => p.tab === 'providers' && p.label === 'Providers & keys'));
+    assert.ok(pages.some((p) => p.tab === 'models' && p.label === 'Model profiles'));
+    assert.match(html, /data-tab="providers"/);
     assert.doesNotMatch(html, /value="inference"|value="routing"|data-tab="inference"|data-tab="routing"/);
     assert.doesNotMatch(html, /llm-routing|smart-routing|inference-tier/);
     assert.match(html, /data-tab="models"/);

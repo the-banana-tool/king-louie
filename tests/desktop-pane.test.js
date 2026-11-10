@@ -532,7 +532,9 @@ describe('pane wiring', () => {
 
   it('index.html has the Local service tab and pane', () => {
     const html = read('index.html');
-    assert.ok(html.includes('<option value="service">Local service</option>'));
+    const { SETTINGS_GROUPS } = require('../renderer-helpers/settings-nav.js');
+    const pages = SETTINGS_GROUPS.flatMap((g) => g.pages);
+    assert.ok(pages.some((p) => p.tab === 'service' && p.label === 'Node & connection'));
     assert.ok(html.includes('class="settings-tab-content" data-tab="service"'));
     for (const id of ['service-pane-status', 'service-pane-request', 'service-pair-request', 'service-pair-command', 'service-pane-actions', 'service-pane-import', 'service-pane-approvals']) {
       assert.ok(html.includes(`id="${id}"`), id);
@@ -543,7 +545,7 @@ describe('pane wiring', () => {
     const renderer = read('renderer.js');
     assert.match(renderer, /async function renderServiceSection\(\)/);
     assert.match(renderer, /function markUnavailableTabs\(/);
-    const switchBody = renderer.slice(renderer.indexOf('function switchSettingsTab('), renderer.indexOf('function sortSettingsNavOptions('));
+    const switchBody = renderer.slice(renderer.indexOf('function switchSettingsTab('), renderer.indexOf('function renderSettingsNav('));
     assert.match(switchBody, /tabName === 'service'/);
     assert.strictEqual((renderer.match(/desktop\.onStatusChanged\(/g) || []).length, 1);
   });

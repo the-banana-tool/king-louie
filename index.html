@@ -214,32 +214,10 @@
         <button class="icon-button" id="close-settings-btn" type="button" title="Close settings"><i class="fas fa-xmark"></i></button>
       </div>
 
-      <div class="settings-nav">
-        <select class="settings-nav-select" id="settings-nav-select">
-          <option value="general">General</option>
-          <option value="providers">API keys</option>
-          <option value="models">Models</option>
-          <option value="vault">Vault</option>
-          <option value="mcp">MCP Servers</option>
-          <option value="channels">Channels</option>
-          <option value="contact">Contact</option>
-          <option value="profile">Profile</option>
-          <option value="voice">Voice</option>
-          <option value="notifications">Notifications</option>
-          <option value="hooks">Hooks</option>
-          <option value="permissions">Permissions</option>
-          <option value="memory">Memory</option>
-          <option value="history">History and recall</option>
-          <option value="scheduler">Scheduler</option>
-          <option value="workflows">Workflows</option>
-          <option value="webhooks">Webhooks</option>
-          <option value="skills">Skills</option>
-          <option value="system-apps">System Apps</option>
-          <option value="mesh">Mesh Network</option>
-          <option value="diagnostics">Diagnostics</option>
-          <option value="commands">Commands</option>
-          <option value="service">Local service</option>
-        </select>
+      <div class="settings-sidebar">
+        <input type="search" class="settings-search" id="settings-search" placeholder="Search settings" aria-label="Search settings" autocomplete="off" spellcheck="false">
+        <!-- Groups and pages drawn by renderSettingsNav (renderer-helpers/settings-nav.js) -->
+        <nav id="settings-sidebar" aria-label="Settings pages"></nav>
       </div>
 
       <div class="settings-body">
@@ -279,7 +257,7 @@
         </div>
 
         <!-- Tab: Providers -->
-        <div class="settings-tab-content active" data-tab="providers">
+        <div class="settings-tab-content" data-tab="providers">
           <section class="template-variables-card" id="api-keys-card">
             <h3>API keys</h3>
             <p>Keys, Anthropic sign-in and the Ollama address, with each provider's last connection test. Which models King Louie uses is set under Models.</p>
@@ -361,19 +339,6 @@
             <div class="models-profile-editor" id="models-profile-editor" hidden></div>
           </section>
 
-          <section class="template-variables-card" id="models-local-servers-card">
-            <h3>Local servers</h3>
-            <p>A server you run on this computer or your own network: Ollama, LM Studio, llama.cpp, vLLM or any OpenAI-compatible server. Its models cost nothing and can run private chats.</p>
-            <div class="provider-actions" id="models-local-actions">
-              <button type="button" class="btn btn-primary" id="models-local-add-btn"><i class="fas fa-plus"></i> Add a local server</button>
-              <button type="button" class="btn" id="models-local-ollama-btn">Use this Ollama as a local server</button>
-            </div>
-            <div class="provider-message" id="models-local-status"></div>
-            <div class="provider-list" id="models-local-list"></div>
-            <div class="models-local-admin-block" id="models-local-admin-block" hidden></div>
-            <div class="models-local-usage" id="models-local-usage"></div>
-          </section>
-
           <section class="template-variables-card" id="models-king-louie-card">
             <h3>King Louie selected</h3>
             <p>King Louie proposes models for each role from the models you can use, their prices and their scores. Nothing changes until you accept a proposal.</p>
@@ -452,6 +417,22 @@
               <button type="button" class="btn btn-primary" id="models-save-custom-role-btn">Save custom role</button>
               <span class="provider-message" id="models-custom-roles-status"></span>
             </div>
+          </section>
+        </div>
+
+        <!-- Tab: Local servers (local inference L1) -->
+        <div class="settings-tab-content" data-tab="local-servers">
+          <section class="template-variables-card" id="models-local-servers-card">
+            <h3>Local servers</h3>
+            <p>A server you run on this computer or your own network: Ollama, LM Studio, llama.cpp, vLLM or any OpenAI-compatible server. Its models cost nothing and can run private chats.</p>
+            <div class="provider-actions" id="models-local-actions">
+              <button type="button" class="btn btn-primary" id="models-local-add-btn"><i class="fas fa-plus"></i> Add a local server</button>
+              <button type="button" class="btn" id="models-local-ollama-btn">Use this Ollama as a local server</button>
+            </div>
+            <div class="provider-message" id="models-local-status"></div>
+            <div class="provider-list" id="models-local-list"></div>
+            <div class="models-local-admin-block" id="models-local-admin-block" hidden></div>
+            <div class="models-local-usage" id="models-local-usage"></div>
           </section>
         </div>
 
@@ -842,8 +823,20 @@
           </section>
         </div>
 
-        <!-- Tab: Hooks -->
-        <div class="settings-tab-content" data-tab="hooks">
+        <!-- Tab: Permissions -->
+        <div class="settings-tab-content" data-tab="permissions">
+          <section class="template-variables-card">
+            <h3>Tool Permission Rules</h3>
+            <p>Pattern-based rules that auto-approve or block tool calls. Rules are evaluated first-match-wins: a matching rule short-circuits the per-tool approval prompt. Created via the approval dialog ("Always allow pattern") or manually below.</p>
+            <div id="permission-rules-list" class="provider-list"></div>
+            <div class="template-variables-actions" style="margin-top: 12px;">
+              <span id="permission-rules-status" class="provider-message"></span>
+            </div>
+          </section>
+        </div>
+
+        <!-- Hooks: a section of Permissions & hooks (merged in Task 15) -->
+        <div class="settings-tab-content" data-tab="hooks" data-section-tab="hooks">
           <section class="template-variables-card">
             <h3>Hook Management</h3>
             <p>Manage loaded lifecycle hooks and enable/disable individual hook definitions.</p>
@@ -858,18 +851,6 @@
               <span id="hooks-status" class="provider-message">Hooks not loaded yet.</span>
             </div>
             <div class="provider-list" id="hooks-list"></div>
-          </section>
-        </div>
-
-        <!-- Tab: Permissions -->
-        <div class="settings-tab-content" data-tab="permissions">
-          <section class="template-variables-card">
-            <h3>Tool Permission Rules</h3>
-            <p>Pattern-based rules that auto-approve or block tool calls. Rules are evaluated first-match-wins: a matching rule short-circuits the per-tool approval prompt. Created via the approval dialog ("Always allow pattern") or manually below.</p>
-            <div id="permission-rules-list" class="provider-list"></div>
-            <div class="template-variables-actions" style="margin-top: 12px;">
-              <span id="permission-rules-status" class="provider-message"></span>
-            </div>
           </section>
         </div>
 
@@ -1312,6 +1293,7 @@
   </div>
 
   <script src="renderer-helpers/task-badge.js"></script>
+  <script src="renderer-helpers/settings-nav.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

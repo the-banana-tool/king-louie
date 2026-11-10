@@ -306,7 +306,8 @@ const dom = {
   skillInstallBtn: document.getElementById('skill-install-btn'),
   skillsCheckUpdatesBtn: document.getElementById('skills-check-updates-btn'),
   skillInstallStatus: document.getElementById('skill-install-status'),
-  settingsNavSelect: document.getElementById('settings-nav-select'),
+  settingsSidebar: document.getElementById('settings-sidebar'),
+  settingsSearch: document.getElementById('settings-search'),
   defaultAgentMode: document.getElementById('default-agent-mode'),
   defaultSandboxMode: document.getElementById('default-sandbox-mode'),
   generalDefaultsStatus: document.getElementById('general-defaults-status'),
@@ -4342,19 +4343,67 @@ function refreshUI() {
   updateEmptyState();
 }
 
+// Pending debounced saves are sent when the drawer closes (Task 12 fills it).
+function flushSettingsAutosaves() {}
+
 function setSettingsDrawer(open) {
+  if (!open) flushSettingsAutosaves();
   dom.settingsDrawer.hidden = !open;
   document.body.style.overflow = open ? 'hidden' : '';
   // The History and recall status poll runs only while its pane is visible.
   if (!open && typeof stopHistoryStatusPoll === 'function') stopHistoryStatusPoll();
 }
 
+function readLastSettingsTab() {
+  try {
+    return localStorage.getItem('kl-settings-last-tab');
+  } catch {
+    return null;
+  }
+}
+
+// The pages the sidebar offers now: the host's unavailable tabs left out, and
+// skill pages only while the Skills page itself is offered.
+function visibleSettingsGroups() {
+  const unavailable = appState.unavailableTabs || [];
+  const skillPages = unavailable.includes('skills') ? [] : (appState.skillSettingsPages || []);
+  return visibleGroups(SETTINGS_GROUPS, unavailable, skillPages);
+}
+
+function settingsPageFor(tabName) {
+  for (const group of visibleSettingsGroups()) {
+    const page = group.pages.find((p) => p.tab === tabName);
+    if (page) return page;
+  }
+  return null;
+}
+
+// The only place that chooses the shown page: the pane, the sidebar item,
+// the remembered page, the sections a host does not offer, and the pane's loader.
 function switchSettingsTab(tabName) {
-  if (!dom.settingsNavSelect) return;
-  dom.settingsNavSelect.value = tabName;
+  if (!dom.settingsDrawer || !tabName) return;
+  appState.settingsTab = tabName;
+  try {
+    localStorage.setItem('kl-settings-last-tab', tabName);
+  } catch {
+    // The page works without a remembered tab.
+  }
+  const page = settingsPageFor(tabName);
+  const hidden = new Set(hiddenSections(page, appState.unavailableTabs || []));
+  // A merged page shows its other sections' panes below its own.
+  const sections = page && Array.isArray(page.sections) ? page.sections.filter((s) => s !== tabName && !hidden.has(s)) : [];
   dom.settingsDrawer.querySelectorAll('.settings-tab-content').forEach((pane) => {
     pane.classList.toggle('active', pane.dataset.tab === tabName);
+    pane.classList.toggle('is-section', sections.includes(pane.dataset.tab));
   });
+  dom.settingsDrawer.querySelectorAll('[data-section-tab]').forEach((el) => {
+    el.hidden = hidden.has(el.dataset.sectionTab);
+  });
+  if (dom.settingsSidebar) {
+    dom.settingsSidebar.querySelectorAll('.settings-nav-item').forEach((item) => {
+      item.classList.toggle('is-active', item.dataset.tab === tabName);
+    });
+  }
   // Refused senders accumulate while the drawer is closed, so re-read them
   // every time the pane is opened rather than only at settings load.
   if (tabName === 'channels' && typeof loadChannelAccess === 'function') {
@@ -4372,6 +4421,9 @@ function switchSettingsTab(tabName) {
     loadLocalServers().catch((err) => settingsLog.warn(`loading local servers failed: ${err.message}`));
     loadKingLouie().catch((err) => settingsLog.warn(`loading the King Louie profile failed: ${err.message}`));
   }
+  if (tabName === 'local-servers' && typeof loadLocalServers === 'function') {
+    loadLocalServers().catch((err) => settingsLog.warn(`loading local servers failed: ${err.message}`));
+  }
   // History and recall: its status is read while the pane is open.
   if (tabName === 'history' && typeof loadHistorySettings === 'function') {
     loadHistorySettings().catch((err) => settingsLog.warn(`loading history settings failed: ${err.message}`));
@@ -4380,23 +4432,53 @@ function switchSettingsTab(tabName) {
   }
 }
 
-function sortSettingsNavOptions() {
-  if (!dom.settingsNavSelect) return;
+// Draws the sidebar from the pages offered now. Labels (a skill's name among
+// them) are set as text. The shown page is kept highlighted across a redraw.
+function renderSettingsNav() {
+  if (!dom.settingsSidebar) return;
+  const unavailable = appState.unavailableTabs || [];
+  const skillPages = unavailable.includes('skills') ? [] : (appState.skillSettingsPages || []);
+  const groups = visibleGroups(SETTINGS_GROUPS, unavailable, skillPages);
+  const nodes = groups.map((group) => {
+    const section = document.createElement('div');
+    section.className = 'settings-nav-group';
+    section.dataset.group = group.id;
+    const heading = document.createElement('h3');
+    heading.textContent = group.label;
+    section.appendChild(heading);
+    for (const page of group.pages) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'settings-nav-item';
+      item.dataset.tab = page.tab;
+      item.textContent = page.label;
+      if (page.tab === appState.settingsTab) item.classList.add('is-active');
+      section.appendChild(item);
+    }
+    return section;
+  });
+  dom.settingsSidebar.replaceChildren(...nodes);
+  applySettingsSearch();
+}
 
-  const currentValue = dom.settingsNavSelect.value;
-  const options = Array.from(dom.settingsNavSelect.options);
-  options.sort((a, b) =>
-    String(a.textContent || '').localeCompare(String(b.textContent || ''), undefined, {
-      sensitivity: 'base'
-    })
-  );
-
-  dom.settingsNavSelect.innerHTML = '';
-  options.forEach((option) => dom.settingsNavSelect.appendChild(option));
-
-  if (currentValue) {
-    dom.settingsNavSelect.value = currentValue;
-  }
+// Leaves the items whose label or keywords match the search box, and the
+// groups that still hold one; an empty box shows every item.
+function applySettingsSearch() {
+  if (!dom.settingsSidebar) return [];
+  const query = dom.settingsSearch ? dom.settingsSearch.value : '';
+  const filtering = typeof query === 'string' && query.trim() !== '';
+  const hits = filtering ? matchSettings(query, visibleSettingsGroups()) : [];
+  const shown = new Set(hits.map((h) => h.tab));
+  dom.settingsSidebar.querySelectorAll('.settings-nav-group').forEach((group) => {
+    let any = false;
+    group.querySelectorAll('.settings-nav-item').forEach((item) => {
+      const keep = !filtering || shown.has(item.dataset.tab);
+      item.hidden = !keep;
+      if (keep) any = true;
+    });
+    group.hidden = !any;
+  });
+  return hits;
 }
 
 // History and recall (recall spec §14): the embedder choice and its status.
@@ -4582,9 +4664,8 @@ else wireHistorySettings();
 function openSettingsDrawer() {
   setSettingsDrawer(true);
   loadSettings();
-  if (dom.settingsNavSelect?.value === 'history') {
-    loadHistorySettings().catch((err) => settingsLog.warn(`loading history settings failed: ${err.message}`));
-  }
+  renderSettingsNav();
+  switchSettingsTab(resolveInitialTab(readLastSettingsTab(), visibleSettingsGroups()));
 }
 
 function renderProviderCard(providerKey, provider) {
@@ -5777,8 +5858,6 @@ async function updateSkill(skillId, skillName) {
 }
 
 async function loadSkillSettingsTabs() {
-  if (!dom.settingsNavSelect) return;
-
   try {
     const result = unwrapIpcResult(await window.electron.skill.listWithSettings(), 'Unable to list skills.');
     const skills = Array.isArray(result) ? result : [];
@@ -5805,25 +5884,22 @@ async function loadSkillSettingsTabs() {
       (s) => Array.isArray(s.settingsSchema) && s.settingsSchema.length > 0
     );
 
-    // Remove previously injected skill options and panes
-    dom.settingsNavSelect.querySelectorAll('option[data-skill]').forEach((el) => el.remove());
+    // Replace previously injected skill pages and panes; the sidebar lists
+    // them after Skills (visibleGroups).
     if (dom.skillSettingsContainer) dom.skillSettingsContainer.innerHTML = '';
+    appState.skillSettingsPages = skillsWithSettings.map((skill) => ({ tab: `skill-${skill.id}`, label: String(skill.name || skill.id) }));
 
     for (const skill of skillsWithSettings) {
-      // Add dropdown option
-      const option = document.createElement('option');
-      option.value = `skill-${skill.id}`;
-      option.textContent = skill.name;
-      option.dataset.skill = skill.id;
-      dom.settingsNavSelect.appendChild(option);
-
-      // Add tab content pane
       if (dom.skillSettingsContainer) {
         dom.skillSettingsContainer.appendChild(renderSkillSettingsTab(skill));
       }
     }
 
-    sortSettingsNavOptions();
+    renderSettingsNav();
+    // A skill page shown before its pane was redrawn is shown again.
+    if (appState.settingsTab && appState.settingsTab.startsWith('skill-') && dom.settingsDrawer && !dom.settingsDrawer.hidden) {
+      switchSettingsTab(appState.settingsTab);
+    }
   } catch (err) {
     skillSettingsLog.error(`Failed to load skill settings tabs: ${err.message}`);
     // A refusal is not an empty list.
@@ -12036,11 +12112,28 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-/* --- Settings tab switching -------------------------------- */
-if (dom.settingsNavSelect) {
-  sortSettingsNavOptions();
-  dom.settingsNavSelect.addEventListener('change', () => {
-    switchSettingsTab(dom.settingsNavSelect.value);
+/* --- Settings sidebar and search --------------------------- */
+if (dom.settingsSidebar) {
+  renderSettingsNav();
+  dom.settingsSidebar.addEventListener('click', (e) => {
+    const item = e.target.closest('.settings-nav-item');
+    if (item && item.dataset.tab) switchSettingsTab(item.dataset.tab);
+  });
+}
+if (dom.settingsSearch) {
+  dom.settingsSearch.addEventListener('input', () => applySettingsSearch());
+  dom.settingsSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const [first] = applySettingsSearch();
+      if (first) switchSettingsTab(first.tab);
+    } else if (e.key === 'Escape' && dom.settingsSearch.value) {
+      // Escape clears the search first; a second one closes Settings.
+      e.preventDefault();
+      e.stopPropagation();
+      dom.settingsSearch.value = '';
+      applySettingsSearch();
+    }
   });
 }
 
@@ -13876,10 +13969,10 @@ function initMeshHandlers() {
     });
   }
 
-  // Mesh indicator opens settings to mesh tab
+  // Mesh indicator opens settings to mesh tab (Task 4 makes it a title only)
   if (dom.meshIndicatorBtn) {
     dom.meshIndicatorBtn.addEventListener('click', () => {
-      if (dom.settingsDrawer) dom.settingsDrawer.hidden = false;
+      openSettingsDrawer();
       switchSettingsTab('mesh');
     });
   }
@@ -14845,7 +14938,15 @@ async function runServiceAction(id) {
 }
 
 function markUnavailableTabs(tabs = []) {
-  const unavailable = new Set(tabs);
+  const list = Array.isArray(tabs) ? tabs.slice() : [];
+  const before = (appState.unavailableTabs || []).join('\n');
+  appState.unavailableTabs = list;
+  if (list.join('\n') !== before) {
+    renderSettingsNav();
+    // The shown page's sections follow the host's new list.
+    if (appState.settingsTab && dom.settingsDrawer && !dom.settingsDrawer.hidden) switchSettingsTab(appState.settingsTab);
+  }
+  const unavailable = new Set(list);
   document.querySelectorAll('.settings-tab-content').forEach((pane) => {
     const existing = pane.querySelector(':scope > .service-unavailable-notice');
     if (unavailable.has(pane.dataset.tab)) {
@@ -15237,7 +15338,7 @@ async function refreshServiceStatus() {
     if (document.getElementById('settings-drawer')?.hidden) loadSettings();
   }
   serviceLastConnection = conn;
-  if (dom.settingsNavSelect && dom.settingsNavSelect.value === 'service') {
+  if (appState.settingsTab === 'service' && dom.settingsDrawer && !dom.settingsDrawer.hidden) {
     renderServiceSection().catch((err) => serviceLog.warn('rendering the local service pane failed', { error: err && err.message }));
   }
 }

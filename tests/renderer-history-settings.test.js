@@ -47,11 +47,12 @@ describe('renderer: History and recall pane', () => {
     const pane = block('function historyEmbedderStatusText(', '\nfunction wireHistorySettings(');
     assert.doesNotMatch(pane, /innerHTML/);
     assert.match(pane, /textContent/);
-    assert.match(block('function switchSettingsTab(', '\nfunction sortSettingsNavOptions('), /tabName === 'history'/);
+    assert.match(block('function switchSettingsTab(', '\nfunction renderSettingsNav('), /tabName === 'history'/);
   });
 
   it('index.html has the tab and its controls', () => {
-    assert.match(html, /<option value="history">History and recall<\/option>/);
+    const { SETTINGS_GROUPS } = require('../renderer-helpers/settings-nav.js');
+    assert.ok(SETTINGS_GROUPS.flatMap((g) => g.pages).some((p) => p.tab === 'history' && p.label === 'History & recall'));
     assert.match(html, /data-tab="history"/);
     for (const id of ['history-embedder-kind', 'history-rerank-search', 'history-embedder-model', 'history-ollama-url', 'history-ollama-model',
       'history-openai-model', 'history-rerank-turn', 'history-embedder-save-btn', 'history-embedder-retry-btn', 'history-embedder-rebuild-btn', 'history-embedder-status']) {

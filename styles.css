@@ -1752,7 +1752,9 @@ body {
   display: none;
 }
 
-.settings-tab-content.active {
+/* .is-section: another pane a merged page shows below its own. */
+.settings-tab-content.active,
+.settings-tab-content.is-section {
   display: flex;
   flex-direction: column;
   gap: 14px;

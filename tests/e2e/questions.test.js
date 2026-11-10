@@ -9,7 +9,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { launchApp, closeApp, evaluate, waitFor } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, openSettingsTab } = require('./helpers');
 const { CaseStore } = require('../../src/cases/case-store');
 
 let gitAvailable = true;
@@ -48,14 +48,7 @@ describe('E2E: no questions sidebar; contact policy in Settings', { skip: gitAva
   });
 
   it('edits the contact policy at Settings > Contact, keeping an away set meanwhile', async () => {
-    await evaluate(ctx, `document.getElementById('open-settings-btn').click(); true`);
-    await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
-    await evaluate(ctx, `(() => {
-      const s = document.getElementById('settings-nav-select');
-      s.value = 'contact';
-      s.dispatchEvent(new Event('change'));
-      return true;
-    })()`);
+    await openSettingsTab(ctx, 'contact');
     await waitFor(ctx, `!!document.querySelector('.settings-tab-content.active[data-tab="contact"] #contact-policy-save')`, 20000);
     assert.match(await evaluate(ctx, `document.getElementById('contact-away-note').textContent`), /^Not away\./);
     assert.ok(await evaluate(ctx, `document.querySelectorAll('#contact-policy-channels li').length`) > 0, 'channel readiness is listed');

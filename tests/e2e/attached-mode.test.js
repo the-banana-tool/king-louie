@@ -2,7 +2,7 @@
 // Run with: unset ELECTRON_RUN_AS_NODE && node --test tests/e2e/attached-mode.test.js
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
-const { launchAttached, closeApp, evaluate, waitFor, click } = require('./helpers');
+const { launchAttached, closeApp, evaluate, waitFor, click, openSettingsTab } = require('./helpers');
 
 describe('E2E: attached mode', { timeout: 240000 }, () => {
   let ctx;
@@ -31,10 +31,18 @@ describe('E2E: attached mode', { timeout: 240000 }, () => {
     assert.match(reply, /The probe ran\./);
   });
 
-  it('marks an unproxied settings tab', async () => {
-    await evaluate(ctx, `document.getElementById('open-settings-btn').click(); switchSettingsTab('hooks'); true`);
-    const text = await waitFor(ctx, `document.querySelector('.settings-tab-content[data-tab="hooks"] .service-unavailable-notice')?.textContent`);
-    assert.strictEqual(text, 'Managed by the local service; not available while attached.');
+  it('leaves an unproxied page out of the sidebar', async () => {
+    await openSettingsTab(ctx, 'permissions');
+    await waitFor(ctx, `(appState.unavailableTabs || []).includes('hooks')`);
+    const nav = await evaluate(ctx, `(() => {
+      const sidebar = document.getElementById('settings-sidebar');
+      return {
+        hooks: !!sidebar.querySelector('.settings-nav-item[data-tab="hooks"]'),
+        permissions: !!sidebar.querySelector('.settings-nav-item[data-tab="permissions"]'),
+        hooksShown: document.querySelector('.settings-tab-content[data-tab="hooks"]').classList.contains('is-section')
+      };
+    })()`);
+    assert.deepStrictEqual(nav, { hooks: false, permissions: true, hooksShown: false });
   });
 
   it('shows the unreachable banner when the service dies and reconnects after a restart', async () => {

@@ -1,6 +1,6 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
-const { launchApp, closeApp, evaluate, waitFor, click, getText, isVisible } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, click, getText, isVisible, openSettingsTab } = require('./helpers');
 
 describe('E2E: Settings — Providers', () => {
   let ctx;
@@ -8,21 +8,7 @@ describe('E2E: Settings — Providers', () => {
   before(async () => {
     ctx = await launchApp();
     await waitFor(ctx, `!!document.getElementById('user-input')`);
-    await click(ctx, '#open-settings-btn');
-    await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
-    // Navigate to Providers tab
-    await evaluate(ctx, `
-      (() => {
-        const sel = document.getElementById('settings-nav-select');
-        for (const opt of sel.options) {
-          if (opt.textContent.includes('Provider') || opt.value === 'providers') {
-            sel.value = opt.value; sel.dispatchEvent(new Event('change')); return true;
-          }
-        }
-        return false;
-      })()
-    `);
-    await new Promise((r) => setTimeout(r, 300));
+    await openSettingsTab(ctx, 'providers');
   });
 
   after(async () => { await closeApp(ctx); });
