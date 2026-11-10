@@ -141,6 +141,49 @@ function validateScores(json) {
   return isPlainObject(json) && Array.isArray(json.data);
 }
 
+// OpenRouter /api/v1/models → Entry[] for the openrouter provider.
+// Skips variant ids (those with ':') and entries with non-finite pricing.
+function normalizeOpenRouterModels(json) {
+  const out = [];
+  const list = Array.isArray(json?.data) ? json.data : [];
+  for (const m of list) {
+    if (!isPlainObject(m) || typeof m.id !== 'string' || m.id.includes(':')) continue;
+    const pricing = m.pricing;
+    if (!isPlainObject(pricing)) continue;
+    const rawInput = typeof pricing.prompt === 'string' ? parseFloat(pricing.prompt) : pricing.prompt;
+    const rawOutput = typeof pricing.completion === 'string' ? parseFloat(pricing.completion) : pricing.completion;
+    const inputPerM = num(rawInput * 1_000_000);
+    const outputPerM = num(rawOutput * 1_000_000);
+    if (inputPerM === null || outputPerM === null) continue;
+    const id = m.id.toLowerCase();
+    out.push({
+      provider: 'openrouter',
+      id,
+      name: str(m.name) || id,
+      family: null,
+      releaseDate: null,
+      knowledge: null,
+      limits: { context: num(m.context_length), input: null, output: null },
+      input: ['text'],
+      output: ['text'],
+      toolCall: true,
+      structuredOutput: false,
+      temperature: null,
+      reasoning: { supported: false, efforts: [] },
+      openWeights: false,
+      local: false,
+      cost: { input: inputPerM, output: outputPerM, cacheRead: null, cacheWrite: null, reasoning: null, tiers: [] },
+      scores: emptyScores(),
+      sources: []
+    });
+  }
+  return out;
+}
+
+function validateOpenRouterModels(json) {
+  return isPlainObject(json) && Array.isArray(json.data);
+}
+
 // OpenRouter ids write versions with dots where vendors use hyphens
 // (claude-sonnet-4.5 against claude-sonnet-4-5); the index holds both.
 const dotless = (key) => key.replace(/\./g, '-');
@@ -206,6 +249,8 @@ module.exports = {
   trimModelsDev,
   normalizeScores,
   validateScores,
+  normalizeOpenRouterModels,
+  validateOpenRouterModels,
   buildScoreIndex,
   scoreFor,
   localEntry

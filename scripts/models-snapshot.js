@@ -5,7 +5,7 @@
 // OpenRouter's model list. Run before each release: npm run models:snapshot
 const fs = require('fs');
 const path = require('path');
-const { trimModelsDev, validateModelsDev, normalizeScores, validateScores } = require('../src/models/normalize');
+const { trimModelsDev, validateModelsDev, normalizeScores, validateScores, normalizeOpenRouterModels } = require('../src/models/normalize');
 const { CATALOG_DEFAULTS, DEFAULT_SNAPSHOT_DIR } = require('../src/models/catalog');
 
 async function getJson(fetchImpl, url) {
@@ -26,7 +26,8 @@ async function buildSnapshot({
   const fetchedAt = now().toISOString();
   return {
     modelsDev: { fetchedAt, source: 'models.dev', data: trimModelsDev(modelsDev) },
-    scores: { fetchedAt, source: 'artificial-analysis', scores: normalizeScores(scores) }
+    scores: { fetchedAt, source: 'artificial-analysis', scores: normalizeScores(scores) },
+    openrouterModels: { fetchedAt, source: 'openrouter', models: normalizeOpenRouterModels(scores) }
   };
 }
 
@@ -40,10 +41,12 @@ async function main() {
   };
   const modelBytes = write('models-dev.json', snap.modelsDev);
   const scoreBytes = write('scores.json', snap.scores);
+  const orBytes = write('openrouter-models.json', snap.openrouterModels);
   const providers = Object.keys(snap.modelsDev.data).length;
   const models = Object.values(snap.modelsDev.data).reduce((n, block) => n + Object.keys(block.models || {}).length, 0);
   process.stdout.write(`models-dev.json: ${providers} providers, ${models} models, ${Math.round(modelBytes / 1024)} KB\n`);
   process.stdout.write(`scores.json: ${Object.keys(snap.scores.scores).length} scored models, ${Math.round(scoreBytes / 1024)} KB\n`);
+  process.stdout.write(`openrouter-models.json: ${snap.openrouterModels.models.length} OpenRouter models, ${Math.round(orBytes / 1024)} KB\n`);
 }
 
 if (require.main === module) {

@@ -54,6 +54,7 @@ function writeJsonAtomic(file, value) {
 
 const validModelsDevFile = (doc) => N.isPlainObject(doc) && N.validateModelsDev(doc.data);
 const validScoresFile = (doc) => N.isPlainObject(doc) && N.isPlainObject(doc.scores);
+const validOpenRouterModelsFile = (doc) => N.isPlainObject(doc) && Array.isArray(doc.models);
 
 // Later source over earlier, field by field. Overrides merge one level deeper
 // so { cost: { input: 4 } } changes only the input rate.
@@ -72,8 +73,8 @@ class Catalog extends EventEmitter {
     super();
     this._index = new Map();
     this._local = new Map();
-    this._snapshot = { modelsDev: null, scores: null };
-    this._cache = { modelsDev: null, scores: null };
+    this._snapshot = { modelsDev: null, scores: null, openrouterModels: null };
+    this._cache = { modelsDev: null, scores: null, openrouterModels: null };
     this._liveThisSession = false;
     this._overridesSig = '';
     this._suppressEnsure = false;
@@ -89,11 +90,15 @@ class Catalog extends EventEmitter {
     if (!this._snapshot.modelsDev) log.warn(`No usable bundled model catalog in ${snapshotDir}.`);
     const snapScores = readJson(path.join(snapshotDir, 'scores.json'));
     this._snapshot.scores = validScoresFile(snapScores) ? snapScores : null;
+    const snapOrModels = readJson(path.join(snapshotDir, 'openrouter-models.json'));
+    this._snapshot.openrouterModels = validOpenRouterModelsFile(snapOrModels) ? snapOrModels : null;
     if (cacheDir) {
       const cachedModels = readJson(path.join(cacheDir, 'models-dev.json'));
       this._cache.modelsDev = validModelsDevFile(cachedModels) ? cachedModels : null;
       const cachedScores = readJson(path.join(cacheDir, 'scores.json'));
       this._cache.scores = validScoresFile(cachedScores) ? cachedScores : null;
+      const cachedOrModels = readJson(path.join(cacheDir, 'openrouter-models.json'));
+      this._cache.openrouterModels = validOpenRouterModelsFile(cachedOrModels) ? cachedOrModels : null;
     }
     this._rebuild();
     return this;
@@ -121,6 +126,11 @@ class Catalog extends EventEmitter {
     };
     if (this._snapshot.modelsDev) add(N.normalizeModelsDev(this._snapshot.modelsDev.data), 'snapshot');
     if (this._cache.modelsDev) add(N.normalizeModelsDev(this._cache.modelsDev.data), 'models.dev');
+    // OpenRouter entries go in before score attachment so scoreFor() attaches
+    // Artificial Analysis benchmarks to them (scoreFor handles 'openrouter'
+    // by looking up the id directly in the score index).
+    const orModels = (this._cache.openrouterModels || this._snapshot.openrouterModels)?.models;
+    if (Array.isArray(orModels)) add(orModels, 'openrouter');
 
     const scoreIndex = N.buildScoreIndex({ ...(this._snapshot.scores?.scores || {}), ...(this._cache.scores?.scores || {}) });
     for (const [key, entry] of index) {
@@ -276,19 +286,54 @@ class Catalog extends EventEmitter {
         force,
         parse: (doc) => (N.validateModelsDev(doc) ? { data: N.trimModelsDev(doc) } : null)
       }),
-      this._refreshOne('scores', {
-        url: cfg.scoresUrl,
-        file: 'scores.json',
-        refreshHours,
-        force,
-        parse: (doc) => (N.validateScores(doc) ? { source: 'artificial-analysis', scores: N.normalizeScores(doc) } : null)
-      })
+      this._refreshOpenRouter(cfg.scoresUrl, { refreshHours, force })
     ]);
     if (changed.some(Boolean)) {
       this._rebuild();
       this.emit('updated', this.status());
     }
     return done();
+  }
+
+  // Fetch the OpenRouter models endpoint once and update both scores and
+  // openrouterModels from the same response, sharing the ETag cache.
+  async _refreshOpenRouter(url, { refreshHours, force }) {
+    const now = this._deps.now();
+    const cached = this._cache.scores;
+    const cachedModels = this._cache.openrouterModels;
+    if (!force && cached?.fetchedAt && now.getTime() - Date.parse(cached.fetchedAt) < refreshHours * 3600000) return false;
+    const headers = cached?.etag ? { 'If-None-Match': cached.etag } : {};
+    let res;
+    try {
+      res = await this._deps.fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    } catch (err) {
+      log.warn(`Fetching ${url} failed; keeping the ${cached ? 'cached' : 'bundled'} copy: ${err.message}`);
+      return false;
+    }
+    if (res.status === 304 && cached) {
+      this._storeCache('scores', 'scores.json', { ...cached, fetchedAt: now.toISOString() });
+      if (cachedModels) this._storeCache('openrouterModels', 'openrouter-models.json', { ...cachedModels, fetchedAt: now.toISOString() });
+      return true;
+    }
+    if (!res.ok) {
+      log.warn(`Fetching ${url} returned ${res.status}; keeping the previous copy.`);
+      return false;
+    }
+    let doc;
+    try {
+      doc = await res.json();
+    } catch (err) {
+      log.warn(`${url} returned malformed JSON; keeping the previous copy: ${err.message}`);
+      return false;
+    }
+    if (!N.validateScores(doc)) {
+      log.warn(`${url} did not return a usable document; keeping the previous copy.`);
+      return false;
+    }
+    const etag = typeof res.headers?.get === 'function' ? res.headers.get('etag') : null;
+    this._storeCache('scores', 'scores.json', { fetchedAt: now.toISOString(), etag: etag || null, source: 'artificial-analysis', scores: N.normalizeScores(doc) });
+    this._storeCache('openrouterModels', 'openrouter-models.json', { fetchedAt: now.toISOString(), etag: etag || null, source: 'openrouter', models: N.normalizeOpenRouterModels(doc) });
+    return true;
   }
 
   async _refreshOne(kind, { url, file, refreshHours, force, parse }) {
@@ -332,7 +377,7 @@ class Catalog extends EventEmitter {
   // fetched copy for this session.
   _storeCache(kind, file, doc) {
     this._cache[kind] = doc;
-    if (kind === 'modelsDev') this._liveThisSession = true;
+    if (kind === 'modelsDev' || kind === 'openrouterModels') this._liveThisSession = true;
     const target = path.join(this._deps.cacheDir, file);
     try {
       writeJsonAtomic(target, doc);

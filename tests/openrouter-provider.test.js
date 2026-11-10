@@ -110,4 +110,97 @@ describe('OpenRouterProvider', () => {
     assert.ok(provider instanceof OpenRouterProvider);
     assert.strictEqual(provider.getName(), 'openrouter');
   });
+
+  it('streamMessageWithTools accumulates tool call deltas and returns tool_use shape', async () => {
+    const provider = new OpenRouterProvider('or-test-key-min-length');
+
+    // Build a fake SSE stream with tool call deltas split across chunks
+    const sseLines = [
+      'data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\""}}]}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\\"Paris\\"}"}}]}}]}',
+      'data: {"model":"openai/gpt-4o-mini","usage":{"prompt_tokens":10,"completion_tokens":5},"choices":[{"delta":{}}]}',
+      'data: [DONE]'
+    ].join('\n') + '\n';
+
+    const encoder = new TextEncoder();
+    const encoded = encoder.encode(sseLines);
+    let pos = 0;
+    const mockReader = {
+      read: async () => {
+        if (pos >= encoded.length) return { done: true, value: undefined };
+        const chunk = encoded.slice(pos, pos + 50);
+        pos += 50;
+        return { done: false, value: chunk };
+      }
+    };
+
+    const originalFetch = global.fetch;
+    global.fetch = async () => ({
+      ok: true,
+      body: { getReader: () => mockReader }
+    });
+
+    try {
+      const tools = [{ name: 'get_weather', description: 'Get weather', parameters: { type: 'object', properties: { city: { type: 'string' } } } }];
+      const result = await provider.streamMessageWithTools(
+        [{ role: 'user', content: 'What is the weather in Paris?' }],
+        tools,
+        {}
+      );
+      assert.strictEqual(result.type, 'tool_use');
+      assert.strictEqual(result.toolName, 'get_weather');
+      assert.strictEqual(result.toolUseId, 'call-1');
+      assert.deepStrictEqual(result.parameters, { city: 'Paris' });
+      assert.strictEqual(result.toolCalls.length, 1);
+      assert.strictEqual(result.messageContent, '');
+      assert.ok(result.llmMetrics);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('streamMessageWithTools calls onChunk for text content', async () => {
+    const provider = new OpenRouterProvider('or-test-key-min-length');
+
+    const sseLines = [
+      'data: {"choices":[{"delta":{"content":"Hello"}}]}',
+      'data: {"choices":[{"delta":{"content":", world"}}]}',
+      'data: {"usage":{"prompt_tokens":5,"completion_tokens":3},"choices":[{"delta":{}}]}',
+      'data: [DONE]'
+    ].join('\n') + '\n';
+
+    const encoder = new TextEncoder();
+    const encoded = encoder.encode(sseLines);
+    let pos = 0;
+    const mockReader = {
+      read: async () => {
+        if (pos >= encoded.length) return { done: true, value: undefined };
+        const chunk = encoded.slice(pos, pos + 100);
+        pos += 100;
+        return { done: false, value: chunk };
+      }
+    };
+
+    const originalFetch = global.fetch;
+    global.fetch = async () => ({
+      ok: true,
+      body: { getReader: () => mockReader }
+    });
+
+    const chunks = [];
+    try {
+      const result = await provider.streamMessageWithTools(
+        [{ role: 'user', content: 'Say hi' }],
+        [],
+        {},
+        (chunk) => chunks.push(chunk)
+      );
+      assert.strictEqual(result.type, 'text');
+      assert.strictEqual(result.content, 'Hello, world');
+      assert.deepStrictEqual(chunks, ['Hello', ', world']);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
 });

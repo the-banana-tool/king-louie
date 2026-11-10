@@ -9,7 +9,7 @@ const path = require('path');
 const { fixtureCatalog } = require('./helpers/models-fixture');
 const { Catalog } = require('../src/models/catalog');
 const ids = require('../src/models/provider-ids');
-const { normalizeScores, stripDateSuffix, localEntry } = require('../src/models/normalize');
+const { normalizeScores, normalizeOpenRouterModels, stripDateSuffix, localEntry } = require('../src/models/normalize');
 const ProviderFactory = require('../src/providers/provider-factory');
 const { setLogLevel } = require('../src/logging');
 
@@ -108,6 +108,31 @@ describe('Catalog scores', () => {
     assert.strictEqual(c.get('openrouter', 'anthropic/claude-sonnet-4.5').scores.agentic, 52);
     assert.strictEqual(c.get('anthropic', 'claude-haiku-4-5-20251001').scores.intelligence, 40);
     assert.deepStrictEqual(c.get('openai', 'gpt-5.4').scores, { intelligence: null, coding: null, agentic: null, source: 'artificial-analysis' });
+  });
+
+  it('normalizeOpenRouterModels converts per-token pricing to per-million, skips variants', () => {
+    const result = normalizeOpenRouterModels({
+      data: [
+        { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', context_length: 200000,
+          pricing: { prompt: '0.000003', completion: '0.000015' } },
+        { id: 'openai/gpt-4o:batch', pricing: { prompt: '0.0000025', completion: '0.00001' } },
+        { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', context_length: 128000,
+          pricing: { prompt: 0.00000015, completion: 0.0000006 } },
+        { id: 'free-model', pricing: { prompt: 'not-a-number', completion: '0' } }
+      ]
+    });
+    assert.strictEqual(result.length, 2, 'variant (gpt-4o:batch) and unparseable pricing are skipped');
+    const sonnet = result.find((e) => e.id === 'anthropic/claude-3.5-sonnet');
+    assert.ok(sonnet, 'claude entry present');
+    assert.strictEqual(sonnet.provider, 'openrouter');
+    assert.strictEqual(sonnet.cost.input, 3, '0.000003 per token * 1e6 = 3 per million');
+    assert.strictEqual(sonnet.cost.output, 15, '0.000015 per token * 1e6 = 15 per million');
+    assert.strictEqual(sonnet.limits.context, 200000);
+    assert.strictEqual(sonnet.toolCall, true);
+    const mini = result.find((e) => e.id === 'openai/gpt-4o-mini');
+    assert.ok(mini);
+    assert.strictEqual(mini.cost.input, 0.15);
+    assert.strictEqual(mini.cost.output, 0.6);
   });
 
   it('normalizes an OpenRouter model list, skipping variants and unscored models', () => {
