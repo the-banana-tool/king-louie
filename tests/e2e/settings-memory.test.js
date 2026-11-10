@@ -1,27 +1,17 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
-const { launchApp, closeApp, evaluate, waitFor, click, fill } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, click } = require('./helpers');
 
-describe('E2E: Settings — Memory', () => {
+// Memory left Settings (settings redesign spec §5.3): its own panel, opened
+// by the brain button beside the gear.
+describe('E2E: Memory panel', () => {
   let ctx;
 
   before(async () => {
     ctx = await launchApp();
     await waitFor(ctx, `!!document.getElementById('user-input')`);
-    await click(ctx, '#open-settings-btn');
-    await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
-    await evaluate(ctx, `
-      (() => {
-        const sel = document.getElementById('settings-nav-select');
-        for (const opt of sel.options) {
-          if (opt.textContent.includes('Memory') || opt.value === 'memory') {
-            sel.value = opt.value; sel.dispatchEvent(new Event('change')); return true;
-          }
-        }
-        return false;
-      })()
-    `);
-    await new Promise((r) => setTimeout(r, 300));
+    await click(ctx, '#open-memory-btn');
+    await waitFor(ctx, `!document.getElementById('memory-panel').hidden`);
   });
 
   after(async () => { await closeApp(ctx); });
@@ -55,6 +45,10 @@ describe('E2E: Settings — Memory', () => {
     assert.ok(clear, 'clear button should exist');
   });
 
+  it('loads the entries when it opens', async () => {
+    await waitFor(ctx, `document.getElementById('memory-status').textContent !== 'Memory not loaded yet.'`);
+  });
+
   it('clear all button uses in-app confirm dialog', async () => {
     await evaluate(ctx, `
       window.__nativeDialogsCalled = [];
@@ -65,14 +59,29 @@ describe('E2E: Settings — Memory', () => {
     await new Promise((r) => setTimeout(r, 500));
     const calls = await evaluate(ctx, `JSON.parse(JSON.stringify(window.__nativeDialogsCalled))`);
     assert.deepStrictEqual(calls, [], 'should not call native confirm');
-    // Dismiss modal
+    // Dismiss the confirm dialog with Escape: it closes itself, not the panel.
     await evaluate(ctx, `
-      (() => { const m = document.querySelector('.rename-chat-modal'); if (m) m.querySelector('button')?.click(); return true; })()
+      (() => {
+        const m = document.querySelector('.rename-chat-modal');
+        if (m) m.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return true;
+      })()
     `);
+    await waitFor(ctx, `!document.querySelector('.rename-chat-modal')`);
+    assert.strictEqual(await evaluate(ctx, `document.getElementById('memory-panel').hidden`), false);
   });
 
-  it('has memory list container', async () => {
-    const exists = await evaluate(ctx, `!!document.getElementById('memory-list')`);
-    assert.ok(exists);
+  it('has memory list container, in the panel and not in Settings', async () => {
+    assert.ok(await evaluate(ctx, `!!document.querySelector('#memory-panel #memory-list')`));
+    assert.strictEqual(await evaluate(ctx, `!!document.querySelector('#settings-drawer #memory-list')`), false);
+  });
+
+  it('Escape closes the panel, and so does the backdrop', async () => {
+    await evaluate(ctx, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+    await waitFor(ctx, `document.getElementById('memory-panel').hidden`);
+    await click(ctx, '#open-memory-btn');
+    await waitFor(ctx, `!document.getElementById('memory-panel').hidden`);
+    await evaluate(ctx, `document.getElementById('memory-panel').click(); true`);
+    await waitFor(ctx, `document.getElementById('memory-panel').hidden`);
   });
 });

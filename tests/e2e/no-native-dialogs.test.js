@@ -120,28 +120,4 @@ describe('E2E: No Native Dialogs', () => {
     const result = await evaluate(ctx, `window.__confirmResult2`);
     assert.strictEqual(result, false, 'cancel should return false');
   });
-
-  it('mesh pairing uses inline inputs, not prompt()', async () => {
-    // Open settings → Mesh Network
-    await click(ctx, '#open-settings-btn');
-    await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
-    await evaluate(ctx, `
-      (() => {
-        const sel = document.getElementById('settings-nav-select');
-        for (const opt of sel.options) {
-          if (opt.textContent.includes('Mesh')) { sel.value = opt.value; sel.dispatchEvent(new Event('change')); return; }
-        }
-      })();
-      true
-    `);
-    await new Promise((r) => setTimeout(r, 300));
-
-    // Click pair button with empty fields
-    await click(ctx, '#mesh-pair-accept-btn');
-    await new Promise((r) => setTimeout(r, 300));
-
-    // Check no native dialogs were called
-    const calls = await evaluate(ctx, `JSON.parse(JSON.stringify(window.__nativeDialogsCalled))`);
-    assert.deepStrictEqual(calls, [], 'no native dialogs called during mesh pairing');
-  });
 });

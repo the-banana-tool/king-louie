@@ -1710,6 +1710,18 @@ body {
   grid-column: 1 / -1;
 }
 
+/* What King Louie remembers: its own panel beside the gear (spec §5.3). */
+.settings-modal.memory-modal {
+  width: min(760px, 96vw);
+}
+
+.memory-modal > .memory-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 16px 20px;
+}
+
 /* An element hidden by the attribute stays hidden whatever display a
    class gives it (spec §2 bug 7: empty headings on Local service). */
 .settings-modal [hidden] {

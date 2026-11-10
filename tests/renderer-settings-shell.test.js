@@ -68,3 +68,51 @@ describe('settings shell: renderer.js', () => {
     assert.match(nav, /textContent/);
   });
 });
+
+// Task 4 (spec §5.3): Commands, Workflows and Mesh leave Settings, and memory
+// gets its own panel beside the gear.
+describe('settings shell: pages that leave Settings', () => {
+  it('index.html has no commands, workflows or mesh pane', () => {
+    assert.doesNotMatch(html, /data-tab="commands"/);
+    assert.doesNotMatch(html, /data-tab="workflows"/);
+    assert.doesNotMatch(html, /data-tab="mesh"/);
+    assert.doesNotMatch(html, /data-tab="memory"/);
+  });
+
+  it('memory has its own panel, opened by a button beside the gear', () => {
+    assert.match(html, /id="memory-panel"/);
+    assert.match(html, /id="open-memory-btn"/);
+    // The panel is its own overlay, so it ends where the next overlay starts.
+    const panelAt = html.indexOf('id="memory-panel"');
+    const next = html.indexOf('class="settings-overlay"', panelAt);
+    const panelEnd = next < 0 ? html.indexOf('<script', panelAt) : next;
+    const listAt = html.indexOf('id="memory-list"');
+    assert.ok(listAt > panelAt && listAt < panelEnd, '#memory-list inside #memory-panel');
+    assert.match(html, /class="settings-overlay" id="memory-panel" hidden>\s*<div class="settings-modal memory-modal"/);
+    const gear = html.indexOf('id="open-settings-btn"');
+    const brain = html.indexOf('id="open-memory-btn"');
+    assert.ok(Math.abs(brain - gear) < 400, 'beside the gear');
+  });
+
+  it('the mesh indicator does not open Settings', () => {
+    assert.doesNotMatch(src, /switchSettingsTab\(\s*'(mesh|workflows|commands|memory)'\s*\)/);
+    let at = src.indexOf('meshIndicatorBtn.addEventListener');
+    while (at >= 0) {
+      const slice = src.slice(at, src.indexOf('});', at));
+      assert.doesNotMatch(slice, /switchSettingsTab|openSettingsDrawer/);
+      at = src.indexOf('meshIndicatorBtn.addEventListener', at + 1);
+    }
+  });
+
+  it('the memory button opens the panel and loads the entries', () => {
+    const at = src.indexOf('openMemoryBtn.addEventListener');
+    assert.ok(at >= 0, 'handler found');
+    const body = block('function openMemoryPanel(');
+    assert.match(body, /loadMemoryEntries\(\)/);
+  });
+
+  it('loadSettings no longer loads memory, workflows or mesh', () => {
+    const body = block('async function loadSettings(');
+    assert.doesNotMatch(body, /loadMemoryEntries|loadWorkflows|loadMeshStatus/);
+  });
+});

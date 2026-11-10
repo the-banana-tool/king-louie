@@ -19,6 +19,7 @@
       <div class="sidebar-toggle-row">
         <button id="toggle-history-btn" class="icon-button history-toggle-btn" title="Collapse chat history" aria-label="Collapse chat history" type="button" aria-pressed="false"><i class="fas fa-bars"></i></button>
         <button id="new-chat-btn-compact" class="icon-button compact-add-btn" title="New chat" aria-label="New chat" type="button"><i class="fas fa-plus"></i></button>
+        <button id="open-memory-btn" class="icon-button" title="What King Louie remembers" aria-label="What King Louie remembers"><i class="fas fa-brain"></i></button>
         <button id="open-settings-btn" class="icon-button settings-gear-btn" title="Settings" aria-label="Settings" type="button"><i class="fas fa-gear"></i></button>
       </div>
       <div class="sidebar-header">
@@ -204,6 +205,50 @@
         <button type="button" class="btn" id="wizard-skip-step-btn" hidden>Skip</button>
         <button type="button" class="btn btn-primary" id="wizard-next-btn">Next</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Memory: what King Louie remembers (its own panel, beside the gear) -->
+  <div class="settings-overlay" id="memory-panel" hidden>
+    <div class="settings-modal memory-modal" role="dialog" aria-label="What King Louie remembers">
+      <div class="settings-header">
+        <h2>What King Louie remembers</h2>
+        <button id="memory-panel-close-btn" class="icon-button" type="button" title="Close" aria-label="Close"><i class="fas fa-xmark"></i></button>
+      </div>
+      <section class="template-variables-card memory-modal-body">
+        <h3>Memory (Hot / Warm / Cold)</h3>
+        <p>Persistent tiered memory used to inform future agent responses.</p>
+        <div class="template-variables-grid">
+          <label for="memory-query-input">Search</label>
+          <input id="memory-query-input" class="provider-input" type="text" placeholder="keyword or phrase">
+
+          <label for="memory-tier-filter-input">Tier Filter</label>
+          <select id="memory-tier-filter-input" class="provider-input">
+            <option value="">All tiers</option>
+            <option value="hot">Hot</option>
+            <option value="warm">Warm</option>
+            <option value="cold">Cold</option>
+          </select>
+
+          <label for="memory-capture-type-input">Capture Type</label>
+          <select id="memory-capture-type-input" class="provider-input">
+            <option value="context">context</option>
+            <option value="success">success</option>
+            <option value="failure">failure</option>
+            <option value="preference">preference</option>
+          </select>
+
+          <label for="memory-capture-content-input">Capture Content</label>
+          <textarea id="memory-capture-content-input" class="provider-input" rows="3" placeholder="Add memory entry content..."></textarea>
+        </div>
+        <div class="template-variables-actions">
+          <button id="memory-refresh-btn" type="button" class="btn">Refresh</button>
+          <button id="memory-capture-btn" type="button" class="btn btn-primary">Capture</button>
+          <button id="memory-clear-btn" type="button" class="btn btn-danger">Clear All</button>
+          <span id="memory-status" class="provider-message">Memory not loaded yet.</span>
+        </div>
+        <div class="provider-list" id="memory-list"></div>
+      </section>
     </div>
   </div>
 
@@ -854,44 +899,6 @@
           </section>
         </div>
 
-        <!-- Tab: Memory -->
-        <div class="settings-tab-content" data-tab="memory">
-          <section class="template-variables-card">
-            <h3>Memory (Hot / Warm / Cold)</h3>
-            <p>Persistent tiered memory used to inform future agent responses.</p>
-            <div class="template-variables-grid">
-              <label for="memory-query-input">Search</label>
-              <input id="memory-query-input" class="provider-input" type="text" placeholder="keyword or phrase">
-
-              <label for="memory-tier-filter-input">Tier Filter</label>
-              <select id="memory-tier-filter-input" class="provider-input">
-                <option value="">All tiers</option>
-                <option value="hot">Hot</option>
-                <option value="warm">Warm</option>
-                <option value="cold">Cold</option>
-              </select>
-
-              <label for="memory-capture-type-input">Capture Type</label>
-              <select id="memory-capture-type-input" class="provider-input">
-                <option value="context">context</option>
-                <option value="success">success</option>
-                <option value="failure">failure</option>
-                <option value="preference">preference</option>
-              </select>
-
-              <label for="memory-capture-content-input">Capture Content</label>
-              <textarea id="memory-capture-content-input" class="provider-input" rows="3" placeholder="Add memory entry content..."></textarea>
-            </div>
-            <div class="template-variables-actions">
-              <button id="memory-refresh-btn" type="button" class="btn">Refresh</button>
-              <button id="memory-capture-btn" type="button" class="btn btn-primary">Capture</button>
-              <button id="memory-clear-btn" type="button" class="btn btn-danger">Clear All</button>
-              <span id="memory-status" class="provider-message">Memory not loaded yet.</span>
-            </div>
-            <div class="provider-list" id="memory-list"></div>
-          </section>
-        </div>
-
         <!-- Tab: History and recall -->
         <div class="settings-tab-content" data-tab="history">
           <section class="template-variables-card">
@@ -1021,34 +1028,6 @@
         <!-- Skill settings tabs (dynamically injected) -->
         <div id="skill-settings-container"></div>
 
-        <!-- Tab: Workflows -->
-        <div class="settings-tab-content" data-tab="workflows">
-          <section class="template-variables-card">
-            <h3>Workflow Engine</h3>
-            <p>Plan and execute complex, multi-step workflows. Describe a goal and the planner agent decomposes it into a task graph with parallel execution and dependency ordering.</p>
-
-            <div class="template-variables-actions" style="margin-top: 10px;">
-              <button id="workflow-refresh-btn" type="button" class="btn">Refresh</button>
-              <span id="workflow-status" class="provider-message">No workflows yet.</span>
-            </div>
-
-            <!-- New workflow form -->
-            <div style="margin-top: 16px;">
-              <label for="workflow-goal-input">Goal</label>
-              <textarea id="workflow-goal-input" rows="3" placeholder="Describe the outcome you want (e.g., 'Build a REST API for user authentication with tests and documentation')" style="width: 100%; resize: vertical; font-family: inherit; padding: 8px; background: var(--bg-elevated); color: var(--text-primary); border: 1px solid var(--border-default); border-radius: 6px;"></textarea>
-              <div style="margin-top: 8px; display: flex; gap: 8px;">
-                <button id="workflow-plan-btn" type="button" class="btn">Plan Only</button>
-                <button id="workflow-run-btn" type="button" class="btn btn-primary">Plan & Execute</button>
-              </div>
-              <span id="workflow-add-status" class="provider-message"></span>
-            </div>
-
-            <!-- Workflow list -->
-            <div class="provider-list" id="workflow-list" style="margin-top: 16px;"></div>
-          </section>
-
-        </div>
-
         <!-- Tab: Webhooks -->
         <div class="settings-tab-content" data-tab="webhooks">
           <section class="template-variables-card">
@@ -1124,92 +1103,6 @@
           </section>
         </div>
 
-        <!-- Tab: Mesh Network -->
-        <div class="settings-tab-content" data-tab="mesh">
-          <section class="template-variables-card">
-            <h3><i class="fas fa-network-wired"></i> Identity</h3>
-            <p>Your mesh identity is how other King Louie instances recognize this machine.</p>
-            <div class="template-variables-grid">
-              <label>Peer ID</label>
-              <div class="provider-input" id="mesh-peer-id" style="background: var(--bg-overlay); cursor: default;">Not initialized</div>
-              <label for="mesh-display-name-input">Display Name</label>
-              <input type="text" class="provider-input" id="mesh-display-name-input" placeholder="e.g. Desktop GPU Rig">
-              <label for="mesh-capabilities-input">Capabilities (comma-separated)</label>
-              <input type="text" class="provider-input" id="mesh-capabilities-input" placeholder="e.g. gpu, build-server, 16gb-ram">
-            </div>
-            <div class="template-variables-actions">
-              <button type="button" class="btn btn-primary" id="mesh-save-identity-btn"><i class="fas fa-floppy-disk"></i> Save Identity</button>
-              <span class="provider-message" id="mesh-identity-status"></span>
-            </div>
-          </section>
-
-          <section class="template-variables-card">
-            <h3><i class="fas fa-link"></i> Pairing</h3>
-            <p>Pair with another King Louie instance using a shared code.</p>
-            <div class="template-variables-grid">
-              <label>Pairing Code</label>
-              <div class="provider-input" id="mesh-pairing-code" style="background: var(--bg-overlay); cursor: default; font-family: var(--font-mono);">Click "Generate" to create a code</div>
-            </div>
-            <div class="template-variables-actions">
-              <button type="button" class="btn btn-primary" id="mesh-pair-generate-btn"><i class="fas fa-key"></i> Generate Code</button>
-              <span class="provider-message" id="mesh-pairing-status"></span>
-            </div>
-            <div class="template-variables-grid" style="margin-top: 0.75rem;">
-              <label for="mesh-pair-code-input">Peer Code</label>
-              <input type="text" class="provider-input" id="mesh-pair-code-input" placeholder="Enter the 6-word pairing code">
-              <label for="mesh-pair-address-input">Peer Address</label>
-              <input type="text" class="provider-input" id="mesh-pair-address-input" placeholder="e.g. 192.168.1.100">
-              <label for="mesh-pair-port-input">Peer Port</label>
-              <input type="number" class="provider-input" id="mesh-pair-port-input" placeholder="18791" value="18791">
-            </div>
-            <div class="template-variables-actions">
-              <button type="button" class="btn btn-primary" id="mesh-pair-accept-btn"><i class="fas fa-handshake"></i> Pair</button>
-            </div>
-          </section>
-
-          <section class="template-variables-card">
-            <h3><i class="fas fa-plus-circle"></i> Add Peer Manually</h3>
-            <div class="template-variables-grid">
-              <label for="mesh-peer-address-input">Address</label>
-              <input type="text" class="provider-input" id="mesh-peer-address-input" placeholder="e.g. 192.168.1.100">
-              <label for="mesh-peer-port-input">Port</label>
-              <input type="number" class="provider-input" id="mesh-peer-port-input" placeholder="18791" value="18791">
-            </div>
-            <div class="template-variables-actions">
-              <button type="button" class="btn btn-primary" id="mesh-peer-connect-btn"><i class="fas fa-plug"></i> Connect</button>
-              <span class="provider-message" id="mesh-connect-status"></span>
-            </div>
-          </section>
-
-          <section class="template-variables-card">
-            <h3><i class="fas fa-tower-broadcast"></i> Connected Peers</h3>
-            <div id="mesh-peers-list"></div>
-            <div class="provider-message" id="mesh-peers-status">No peers connected</div>
-          </section>
-
-          <section class="template-variables-card">
-            <h3><i class="fas fa-gear"></i> Transport</h3>
-            <div class="template-variables-grid">
-              <label for="mesh-port-input">Mesh Port</label>
-              <input type="number" class="provider-input" id="mesh-port-input" placeholder="18791" value="18791">
-              <label class="inline-toggle" for="mesh-discovery-toggle">
-                <input id="mesh-discovery-toggle" type="checkbox" checked>
-                <span>Enable LAN discovery (mDNS)</span>
-              </label>
-            </div>
-            <div class="template-variables-actions">
-              <button type="button" class="btn btn-primary" id="mesh-save-transport-btn"><i class="fas fa-floppy-disk"></i> Save Transport Settings</button>
-              <span class="provider-message" id="mesh-transport-status"></span>
-            </div>
-          </section>
-
-          <section class="template-variables-card">
-            <h3><i class="fas fa-tasks"></i> Remote Tasks</h3>
-            <div id="mesh-tasks-list"></div>
-            <div class="provider-message" id="mesh-tasks-status">No remote tasks</div>
-          </section>
-        </div>
-
         <!-- Tab: Diagnostics -->
         <div class="settings-tab-content" data-tab="diagnostics">
           <section class="template-variables-card">
@@ -1255,39 +1148,6 @@
             <div class="service-pane-approvals" id="service-pane-approvals" hidden></div>
           </section>
         </div>
-
-        <!-- Tab: Commands -->
-        <div class="settings-tab-content" data-tab="commands">
-          <section class="template-variables-card">
-            <h3>Chat Commands Reference</h3>
-            <p>Power users can also run these commands directly in chat.</p>
-            <div class="settings-alert">
-              <ul class="settings-help-list">
-                <li><code>/help</code> — show help</li>
-                <li><code>/profile</code> — view current profile</li>
-                <li><code>/llm list</code> — list providers &amp; status</li>
-                <li><code>/llm add &lt;provider&gt; &lt;token&gt;</code> — add provider token</li>
-                <li><code>/llm test &lt;provider&gt;</code> — test provider connection</li>
-                <li><code>/llm remove &lt;provider&gt;</code> — remove provider token</li>
-                <li><code>/llm telegram add &lt;token&gt;</code> — save Telegram token</li>
-                <li><code>/llm telegram test</code> — test Telegram</li>
-                <li><code>/llm telegram remove</code> — clear Telegram token</li>
-                <li><code>/llm telegram status</code> — Telegram bridge status</li>
-                <li><code>/llm voice status</code> — voice status</li>
-                <li><code>/llm voice add &lt;key&gt;</code> — save ElevenLabs key</li>
-                <li><code>/llm voice test</code> — test voice</li>
-                <li><code>/llm voice remove</code> — clear voice key</li>
-                <li><code>/speak</code> — speak last response</li>
-                <li><code>/agent on|off|toggle|status</code> — agent mode</li>
-                <li><code>/fast</code> — switch to fast tier</li>
-                <li><code>/standard</code> — switch to standard tier</li>
-                <li><code>/smart</code> — switch to smart tier</li>
-                <li><code>/fixit</code> — run system diagnostics</li>
-              </ul>
-            </div>
-          </section>
-        </div>
-
       </div>
     </div>
   </div>

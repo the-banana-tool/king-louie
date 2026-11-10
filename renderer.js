@@ -225,6 +225,9 @@ const dom = {
   memoryClearBtn: document.getElementById('memory-clear-btn'),
   memoryStatus: document.getElementById('memory-status'),
   memoryList: document.getElementById('memory-list'),
+  memoryPanel: document.getElementById('memory-panel'),
+  openMemoryBtn: document.getElementById('open-memory-btn'),
+  memoryPanelCloseBtn: document.getElementById('memory-panel-close-btn'),
   vaultList: document.getElementById('vault-list'),
   vaultAddBtn: document.getElementById('vault-add-btn'),
   vaultRefreshBtn: document.getElementById('vault-refresh-btn'),
@@ -4661,6 +4664,20 @@ function wireHistorySettings() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wireHistorySettings);
 else wireHistorySettings();
 
+/* What King Louie remembers: its own panel beside the gear (spec §5.3). */
+function openMemoryPanel() {
+  if (!dom.memoryPanel) return;
+  dom.memoryPanel.hidden = false;
+  loadMemoryEntries();
+  dom.memoryQueryInput?.focus();
+}
+
+function closeMemoryPanel() {
+  if (!dom.memoryPanel || dom.memoryPanel.hidden) return;
+  dom.memoryPanel.hidden = true;
+  dom.userInput?.focus();
+}
+
 function openSettingsDrawer() {
   setSettingsDrawer(true);
   loadSettings();
@@ -7622,14 +7639,11 @@ async function loadSettings() {
     }
     renderSettings();
     await loadSkillSettingsTabs();
-    await loadMemoryEntries();
     await loadCronJobs();
     loadPermissionRules().catch(() => {});
-    loadWorkflows().catch(() => {});
     loadModelProfiles().catch(() => {});
     loadSystemApps().catch(() => {});
     loadWebhookList().catch(() => {});
-    loadMeshStatus().catch(() => {});
     loadChannelAccess().catch(() => {});
     loadModelsCatalogStatus().catch(() => {});
   } catch (error) {
@@ -7641,10 +7655,8 @@ async function loadSettings() {
       dom.hooksStatus.classList.add('error');
     }
     loadSkillSettingsTabs().catch(() => {});
-    loadMemoryEntries().catch(() => {});
     loadCronJobs().catch(() => {});
     loadPermissionRules().catch(() => {});
-    loadWorkflows().catch(() => {});
     loadSystemApps().catch(() => {});
     loadWebhookList().catch(() => {});
     loadChannelAccess().catch(() => {});
@@ -11617,6 +11629,18 @@ if (dom.openSettingsBtn) {
   dom.openSettingsBtn.addEventListener('click', openSettingsDrawer);
 }
 
+if (dom.openMemoryBtn) {
+  dom.openMemoryBtn.addEventListener('click', openMemoryPanel);
+}
+if (dom.memoryPanelCloseBtn) {
+  dom.memoryPanelCloseBtn.addEventListener('click', closeMemoryPanel);
+}
+if (dom.memoryPanel) {
+  dom.memoryPanel.addEventListener('click', (e) => {
+    if (e.target === dom.memoryPanel) closeMemoryPanel();
+  });
+}
+
 if (dom.floatingSettingsBtn) {
   dom.floatingSettingsBtn.addEventListener('click', openSettingsDrawer);
 }
@@ -12103,6 +12127,11 @@ dom.settingsDrawer.addEventListener('click', (e) => {
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    // A confirm dialog over the panel closes itself first.
+    if (dom.memoryPanel && !dom.memoryPanel.hidden && !e.target?.closest?.('.rename-chat-modal')) {
+      closeMemoryPanel();
+      return;
+    }
     if (!dom.settingsDrawer.hidden) {
       setSettingsDrawer(false);
       dom.userInput.focus();
@@ -13969,13 +13998,8 @@ function initMeshHandlers() {
     });
   }
 
-  // Mesh indicator opens settings to mesh tab (Task 4 makes it a title only)
-  if (dom.meshIndicatorBtn) {
-    dom.meshIndicatorBtn.addEventListener('click', () => {
-      openSettingsDrawer();
-      switchSettingsTab('mesh');
-    });
-  }
+  // The mesh indicator only says how many peers are online (its title); the
+  // Mesh Network page left Settings (spec §5.3).
 
   // Listen for mesh ready (fires after main process finishes initialization)
   if (window.electron.mesh?.onReady) {

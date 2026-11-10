@@ -286,13 +286,13 @@ describe('E2E: the setup view', { skip }, () => {
     it('with the node down the panes say SERVICE_UNREACHABLE, not "none"', async () => {
       const refusal = { ok: false, code: 'SERVICE_UNREACHABLE', error: 'The local King Louie service is not reachable (127.0.0.1:18796).' };
       await ctx.electronApp.evaluate(({ ipcMain }, answer) => {
-        for (const channel of ['skill:listWithSettings', 'settings:load', 'webhook:list', 'workflow:list', 'apps:list', 'diagnostics:run']) {
+        for (const channel of ['skill:listWithSettings', 'settings:load', 'webhook:list', 'apps:list', 'diagnostics:run']) {
           ipcMain.removeHandler(channel);
           ipcMain.handle(channel, () => answer);
         }
       }, refusal);
-      await evaluate(ctx, `Promise.all([loadSettings(), loadSkillSettingsTabs(), loadWebhookList(), loadWorkflows(), loadSystemApps()]).then(() => true)`);
-      for (const id of ['skills-status', 'hooks-status', 'webhook-list-status', 'workflow-status', 'apps-status']) {
+      await evaluate(ctx, `Promise.all([loadSettings(), loadSkillSettingsTabs(), loadWebhookList(), loadSystemApps()]).then(() => true)`);
+      for (const id of ['skills-status', 'hooks-status', 'webhook-list-status', 'apps-status']) {
         assert.match(await evaluate(ctx, `document.getElementById(${JSON.stringify(id)}).textContent`), /not reachable/, id);
       }
       assert.doesNotMatch(await evaluate(ctx, `document.getElementById('skills-list').textContent`), /No skills loaded/);
