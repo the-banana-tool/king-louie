@@ -37,6 +37,8 @@ function inspect(me, owners) {
 
 const temps = [];
 after(() => { closeOpenHistoryStores(); for (const d of temps) fs.rmSync(d, { recursive: true, force: true }); });
+// A screen-host node sets the module-level browser launcher (boot-node-tray Task 6).
+after(() => require('../src/tools/builtin/browser-registry').reset());
 afterEach(() => clearDeniedDirs());
 
 function layout(nodeYaml) {

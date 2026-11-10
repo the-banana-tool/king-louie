@@ -26,7 +26,12 @@ const { holdEventLoop } = require('./helpers/hold-event-loop');
 setLogLevel('fatal');
 const release = holdEventLoop();
 const cleanups = [];
-after(async () => { for (const c of cleanups.reverse()) await c(); release(); });
+after(async () => {
+  for (const c of cleanups.reverse()) await c();
+  // A screen-host subsystem sets the module-level browser launcher (Task 6).
+  require('../src/tools/builtin/browser-registry').reset();
+  release();
+});
 
 const WIN = process.platform === 'win32';
 const identity = testNodeIdentity({ key: 'gpu-box' });

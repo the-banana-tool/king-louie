@@ -227,12 +227,17 @@ class PlaywrightBrowser {
       if (launcher) {
         const launched = await launcher.launch({ userDataPath: options.userDataPath, headless });
         try {
+          // The page keeps the window's own size: no emulated viewport on the owner's Chrome.
           await this.attach({ cdpUrl: launched && launched.cdpUrl });
           this._screenHostLaunched = true;
         } catch (err) {
-          // Half attached: let go (and close that Chrome over CDP when connected).
+          // Half attached: let go (and close that Chrome over CDP when connected), then end it
+          // by its pid through the screen host, so it does not hold the profile lock.
           this._screenHostLaunched = true;
           await this.stop().catch(() => {});
+          if (launched && Number.isInteger(launched.pid) && typeof launcher.closeLaunched === 'function') {
+            await Promise.resolve().then(() => launcher.closeLaunched(launched.pid)).catch(() => {});
+          }
           throw err;
         }
         return;

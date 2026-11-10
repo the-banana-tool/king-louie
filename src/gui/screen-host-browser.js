@@ -37,20 +37,42 @@ function createScreenHostLauncher({ broker, guiConfig, profilesRoot }) {
       const app = cfg.browser && cfg.apps && Object.hasOwn(cfg.apps, cfg.browser) ? cfg.apps[cfg.browser] : null;
       if (!app || !app.path) throw new GuiError('invalid_params', `no browser in node.yaml (gui.browser): ${NO_BROWSER_REMEDY}`);
       if (!broker.channel.connected) throw new GuiError('screen_host_missing', SCREEN_HOST_MISSING);
-      const launched = await broker.launchBrowser({ exe: app.path, profile, args: [...CHROME_FLAGS, ...(headless ? ['--headless=new'] : [])] }, {});
+      // Under its own job id, so the broker records the pid and closeLaunched can end it.
+      const launched = await broker.launchBrowser({ exe: app.path, profile, args: [...CHROME_FLAGS, ...(headless ? ['--headless=new'] : [])] }, LAUNCH_CTX);
+      const pid = launched && Number.isInteger(launched.pid) ? launched.pid : null;
       const port = launched && launched.cdp && launched.cdp.port;
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new GuiError('browser_launch_failed', 'the screen host gave no debugging port');
-      return { cdpUrl: `http://127.0.0.1:${port}`, pid: Number.isInteger(launched.pid) ? launched.pid : null };
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        if (pid !== null) await closeQuietly(pid);
+        throw new GuiError('browser_launch_failed', 'the screen host gave no debugging port');
+      }
+      return { cdpUrl: `http://127.0.0.1:${port}`, pid };
+    },
+    // Ends a Chrome this launcher started (PlaywrightBrowser#start calls it when the attach
+    // fails), through the screen host, so it does not hold the profile lock. Best effort.
+    async closeLaunched(pid) {
+      if (Number.isInteger(pid)) await closeQuietly(pid);
     }
   };
+  async function closeQuietly(pid) {
+    try {
+      await broker.closeLaunched(pid, LAUNCH_CTX);
+    } catch {
+      // Gone already, or the screen host dropped: nothing more to do from here.
+    }
+  }
 }
 
-// `--screen-host app` with desktop apps off (gui not enabled, or a GUI that could not be set
-// up): no app can ever serve the screen, and this process still opens no saved profile.
-function refusingScreenHostLauncher() {
+// The job id the screen host's browser launches are recorded under (a chat's browser has no
+// job of its own); it only scopes GuiBroker's launched-pid bookkeeping.
+const LAUNCH_CTX = Object.freeze({ jobId: 'screen-host-browser' });
+
+// `--screen-host app` with no screen host to ask: desktop apps off (gui not enabled, or a GUI
+// that could not be set up), or the GUI stopped while the core still runs. This process still
+// opens no saved profile. `extra` adds why (the gui-off case).
+function refusingScreenHostLauncher({ extra = null } = {}) {
   return {
     async launch() {
-      throw new GuiError('screen_host_missing', `${SCREEN_HOST_MISSING} with King Louie in your session, and desktop apps are on in node.yaml (gui: enabled: true)`);
+      throw new GuiError('screen_host_missing', `${SCREEN_HOST_MISSING} with King Louie in your session${extra ? `, ${extra}` : ''}`);
     }
   };
 }

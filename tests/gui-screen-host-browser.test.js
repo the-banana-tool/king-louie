@@ -39,6 +39,9 @@ function fakeChannel({ connected = false, answer = null } = {}) {
     requests: [],
     async request(op, params, opts) {
       ch.requests.push({ op, params, opts });
+      // closeLaunched: the close is sent, and the process listing no longer shows it.
+      if (op === 'close') return { closed: params.pids };
+      if (op === 'processes') return [];
       if (op !== 'launch_browser') throw new Error(`unexpected op ${op}`);
       return answer ? answer(params) : { pid: 7, cdp: { port: 9222, path: '/devtools/browser/x' } };
     }
@@ -137,6 +140,18 @@ describe('saved browser profiles on a boot-started node', () => {
     }
   });
 
+  it('an attach that fails after the launch ends the launched Chrome by its pid through the screen host', async () => {
+    // A port nothing listens on: the launch answers, the CDP connect fails.
+    setUp({ connected: true, answer: () => ({ pid: 4321, cdp: { port: 1, path: '/devtools/browser/x' } }) });
+    const browser = new PlaywrightBrowser();
+    await assert.rejects(browser.start({ userDataPath: path.join(profilesRoot, 'shop'), headless: true }));
+    assert.equal(browser.isRunning, false);
+    const close = channel.requests.find((r) => r.op === 'close');
+    assert.ok(close, 'the screen host was asked to close it');
+    assert.deepEqual(close.params, { pids: [4321], force: false });
+    assert.equal(close.opts.jobId, channel.requests[0].opts.jobId, 'under the job the launch was recorded for');
+  });
+
   it('a headed start asks for no --headless switch', async () => {
     setUp({ connected: true });
     const out = await launcher.launch({ userDataPath: path.join(profilesRoot, 'king-louie'), headless: false });
@@ -210,7 +225,31 @@ describe('the GUI subsystem sets and clears the launcher', { skip: process.platf
     }
   });
 
-  it('screenHost app: set when built, cleared at stop; a refusal is fenced when gui is off', async () => {
+  // A stop, then a start whose personal-helper.json write throws before the launcher is set
+  // again: the registry still refuses (never null).
+  async function startFailsAfterStop() {
+    const reg = { current: null, setScreenHostLauncher(l) { this.current = l; }, screenHostLauncher() { return this.current; } };
+    let failing = false;
+    const randomBytes = (n) => { if (failing) throw new Error('no entropy'); return require('crypto').randomBytes(n); };
+    const gui = createGuiSubsystem({
+      nodeConfig: nodeConfig(guiConfig()), dataDir, approvals: approvals(), platform: 'win32', hosting: 'personal', screenHost: 'app',
+      deps: { browserRegistry: reg, netImpl: fakeNet(), randomBytes }
+    });
+    await gui.start();
+    await gui.stop();
+    failing = true;
+    await gui.start();
+    assert.equal(gui.unavailable.reason, 'gui_start_failed');
+    assert.ok(reg.current);
+    await assert.rejects(reg.current.launch({ userDataPath: path.join(dataDir, 'browser-profiles', 'shop') }), (e) => e.code === 'screen_host_missing');
+    await gui.stop();
+  }
+
+  it('a start that fails after a stop leaves saved profiles refused', async () => {
+    await startFailsAfterStop();
+  });
+
+  it('screenHost app: set when built, a refusing launcher after stop; a refusal is fenced when gui is off', async () => {
     const reg = { current: null, setScreenHostLauncher(l) { this.current = l; }, screenHostLauncher() { return this.current; } };
     const gui = createGuiSubsystem({
       nodeConfig: nodeConfig(guiConfig()), dataDir, approvals: approvals(), platform: 'win32', hosting: 'personal', screenHost: 'app',
@@ -222,7 +261,11 @@ describe('the GUI subsystem sets and clears the launcher', { skip: process.platf
     assert.equal(reg.current, live);
     await assert.rejects(live.launch({ userDataPath: path.join(dataDir, 'browser-profiles', 'shop') }), (e) => e.code === 'screen_host_missing');
     await gui.stop();
-    assert.equal(reg.current, null, 'cleared at stop');
+    // run.js stops the GUI before the core: a turn still running must not launch locally.
+    assert.ok(reg.current, 'never null ("launch locally") after stop');
+    assert.notEqual(reg.current, live);
+    await assert.rejects(reg.current.launch({ userDataPath: path.join(dataDir, 'browser-profiles', 'shop') }),
+      (e) => e.code === 'screen_host_missing' && e.message.includes(SCREEN_HOST_MISSING));
 
     const offReg = { current: null, setScreenHostLauncher(l) { this.current = l; }, screenHostLauncher() { return this.current; } };
     const off = createGuiSubsystem({

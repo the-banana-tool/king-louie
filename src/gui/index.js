@@ -117,7 +117,9 @@ function createGuiSubsystem(options = {}) {
   // state, like the launcher a live subsystem sets; nothing stops a null subsystem.
   if (options.screenHost === 'app' && (!built || built.unavailable)) {
     try {
-      browserRegistryOf(options.deps).setScreenHostLauncher(require('./screen-host-browser').refusingScreenHostLauncher());
+      browserRegistryOf(options.deps).setScreenHostLauncher(require('./screen-host-browser').refusingScreenHostLauncher({
+        extra: 'and desktop apps are on in node.yaml (gui: enabled: true)'
+      }));
     } catch (err) {
       (options.log || createLogger('gui')).error(`saved browser profiles could not be fenced: ${failureDetail(err)}`);
     }
@@ -196,15 +198,20 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
   }) : null;
   // screenHost 'app' (Task 6): every saved-profile start of the browser tools goes through
   // the app too (PlaywrightBrowser#start asks the registry). Set here, so no start of the
-  // core's tools comes before it, and again at start(); cleared only at stop(). A start()
-  // that fails leaves it set: it then refuses every saved profile (the app never connects).
+  // core's tools comes before it, and again at start(). A start() that fails leaves it set:
+  // it then refuses every saved profile (the app never connects). stop() never sets null
+  // ("launch locally"): run.js stops the GUI before the core, so a turn still running could
+  // otherwise open a saved profile from session 0. Screen-host mode is fixed for the life of
+  // the process, so stop() leaves a launcher that refuses.
   const browserLauncher = appHost ? require('./screen-host-browser').createScreenHostLauncher({
     broker, guiConfig: gui, profilesRoot: path.join(dataDir, 'browser-profiles')
   }) : null;
   const clearBrowserLauncher = () => {
     if (!browserLauncher) return;
     const registry = browserRegistryOf(deps);
-    if (registry.screenHostLauncher() === browserLauncher) registry.setScreenHostLauncher(null);
+    if (registry.screenHostLauncher() === browserLauncher) {
+      registry.setScreenHostLauncher(require('./screen-host-browser').refusingScreenHostLauncher());
+    }
   };
   if (browserLauncher) browserRegistryOf(deps).setScreenHostLauncher(browserLauncher);
   if (relay) {
