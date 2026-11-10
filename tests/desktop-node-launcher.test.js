@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { isNodeServiceLaunch, prepareLauncherApp, runNodeService, LAUNCHER_DIR_NAME } = require('../src/desktop-bridge/node-launcher');
+const { isNodeServiceLaunch, prepareLauncherApp, runLauncher, runNodeService, LAUNCHER_DIR_NAME } = require('../src/desktop-bridge/node-launcher');
 
 const ARGV = ['K.exe', '--kl-node-service', 'C:\\e.js', 'run', '--data-dir', 'C:\\d', '--screen-host', 'app'];
 
@@ -94,13 +94,30 @@ describe('node launcher', () => {
     assert.deepStrictEqual(calls, [['userData', path.join('T', LAUNCHER_DIR_NAME)], ['hw']]);
   });
 
-  it('main.js handles the launch before the app\'s electron require and the single-instance claim, on a temp userData', () => {
+  it('runLauncher sets the temp userData before spawning, then exits with the child\'s code', async () => {
+    const order = [];
+    const app = {
+      setPath: (name) => order.push(`setPath ${name}`),
+      disableHardwareAcceleration: () => order.push('disableHardwareAcceleration'),
+    };
+    const f = fakeSpawn();
+    const spawn = (...a) => { order.push('spawn'); return f.spawn(...a); };
+    const exits = [];
+    const p = runLauncher(app, { argv: ARGV, execPath: 'K.exe', env: {}, spawn, exit: (c) => exits.push(c), prepare: { tmpdir: 'T', mkdir: () => {} } });
+    f.child.emit('exit', 3);
+    assert.strictEqual(await p, 3);
+    assert.deepStrictEqual(order, ['setPath userData', 'disableHardwareAcceleration', 'spawn']);
+    assert.deepStrictEqual(exits, [3]);
+    assert.strictEqual(f.calls[0].opts.env.ELECTRON_RUN_AS_NODE, '1');
+  });
+
+  it('main.js hands the launch to runLauncher before the app\'s electron require and the single-instance claim', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-    const g = src.indexOf('isNodeServiceLaunch');
-    const prep = src.indexOf('prepareLauncherApp(');
-    const run = src.indexOf('runNodeService(');
+    const g = src.indexOf('isNodeServiceLaunch(process.argv)');
+    const run = src.indexOf("runLauncher(require('electron').app)");
     const appElectron = src.indexOf("const { app, BrowserWindow");
-    assert.ok(g >= 0 && prep > g && run > prep, 'the guard, then the temp userData, then the launch');
+    assert.ok(g >= 0 && run > g, 'the guard, then the one launcher call');
+    assert.ok(/runLauncher\(require\('electron'\)\.app\);\s*return;\s*\}/.test(src), 'the branch returns right after the call');
     assert.ok(appElectron > run, 'before the app\'s own require of electron');
     assert.ok(src.indexOf('claimSingleInstance') > run, 'before the single-instance claim');
   });

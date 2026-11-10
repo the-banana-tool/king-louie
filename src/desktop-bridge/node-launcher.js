@@ -63,4 +63,10 @@ function runNodeService({ argv = process.argv, execPath = process.execPath, env 
   });
 }
 
-module.exports = { FLAG, LAUNCHER_DIR_NAME, isNodeServiceLaunch, prepareLauncherApp, runNodeService };
+// main.js's one call for the launch: the temp userData first, then the node, then its exit code.
+function runLauncher(app, { argv = process.argv, execPath = process.execPath, env = process.env, spawn = nodeSpawn, exit = (code) => process.exit(code), prepare = {} } = {}) {
+  prepareLauncherApp(app, prepare);
+  return runNodeService({ argv, execPath, env, spawn }).then((code) => { exit(code); return code; });
+}
+
+module.exports = { FLAG, LAUNCHER_DIR_NAME, isNodeServiceLaunch, prepareLauncherApp, runLauncher, runNodeService };
