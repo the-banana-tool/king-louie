@@ -60,6 +60,50 @@ function roleStatus(roles, role) {
   return { state: 'borrows', message: 'Uses its fallback role.' };
 }
 
+// The model picker's groups (settings redesign Task 11, spec 5.6). `view` is the host's
+// { usable, unusable } list; `providers` is settings.providers, so a provider's state is
+// the one the Providers page shows (keyRowState on the same input). A local server's
+// models form one group. Working groups come first by label, then local, then the
+// failing and no-key ones, whose entries are greyed.
+function groupPickerByProvider(view, providers, localServerNames) {
+  const rowState = typeof keyRowState === 'function' ? keyRowState : require('./key-rows').keyRowState;
+  const hasKey = typeof providerHasKey === 'function' ? providerHasKey : require('./key-rows').providerHasKey;
+  const groups = new Map();
+  const add = (entry, unusable) => {
+    if (!entry) return;
+    const id = entry.provider === 'local' ? 'local' : entry.provider;
+    if (!groups.has(id)) {
+      let state = 'local';
+      if (id !== 'local') {
+        const p = providers && providers[id];
+        const s = rowState({ hasKey: hasKey(id, p), status: p && p.status ? p.status : null }).state;
+        state = s === 'not-tested' ? 'working' : s;
+      }
+      groups.set(id, {
+        provider: id,
+        label: id === 'local' ? 'Local servers' : providerDisplayName(id, providers, localServerNames, entry.model),
+        state,
+        entries: []
+      });
+    }
+    const group = groups.get(id);
+    group.entries.push({ ...entry, greyed: unusable || group.state === 'failing' || group.state === 'no-key' });
+  };
+  for (const e of (view && view.usable) || []) add(e, false);
+  for (const e of (view && view.unusable) || []) add(e, true);
+  const rank = { working: 0, local: 1, failing: 2, 'no-key': 2 };
+  return [...groups.values()].sort((a, b) => (rank[a.state] - rank[b.state]) || a.label.localeCompare(b.label));
+}
+
+// The picker's search: by model name across every group; an empty group goes.
+function filterPickerGroups(groups, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return groups;
+  return groups
+    .map((g) => ({ ...g, entries: g.entries.filter((e) => String(e.name || e.model || '').toLowerCase().includes(q)) }))
+    .filter((g) => g.entries.length);
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { providerDisplayName, isFree, modelChip, roleStatus };
+  module.exports = { providerDisplayName, isFree, modelChip, roleStatus, groupPickerByProvider, filterPickerGroups };
 }

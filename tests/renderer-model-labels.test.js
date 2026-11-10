@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
-const { providerDisplayName, isFree, modelChip, roleStatus } = require('../renderer-helpers/model-labels');
+const { providerDisplayName, isFree, modelChip, roleStatus, groupPickerByProvider, filterPickerGroups } = require('../renderer-helpers/model-labels');
 
 const ok = { provider: 'a', model: 'm' };
 const bad = { provider: 'a', model: 'n', usable: false };
@@ -75,4 +75,36 @@ describe('roleStatus', () => {
     { state: 'off', message: 'Uses the image provider set under Providers & keys.' }));
   it('custom role empty', () => assert.deepStrictEqual(roleStatus({}, 'research'),
     { state: 'borrows', message: 'Uses its fallback role.' }));
+});
+
+describe('groupPickerByProvider', () => {
+  const providers = {
+    openrouter: { label: 'OpenRouter', hasToken: true, status: { ok: true } },
+    deepseek: { label: 'DeepSeek', hasToken: true, status: { ok: false, error: 'bad key' } },
+    openai: { label: 'OpenAI' }
+  };
+  const view = {
+    usable: [
+      { provider: 'deepseek', model: 'd1', name: 'D1' },
+      { provider: 'openrouter', model: 'o1', name: 'O1' },
+      { provider: 'openrouter', model: 'o2', name: 'O2' },
+      { provider: 'local', model: 'ws/q', name: 'Q' }
+    ],
+    unusable: [{ provider: 'openai', model: 'g', name: 'G' }]
+  };
+  it('orders working, local, then failing and no-key, greying the last', () => {
+    const g = groupPickerByProvider(view, providers, { ws: 'Workstation' });
+    assert.deepStrictEqual(g.map((x) => [x.provider, x.state]), [
+      ['openrouter', 'working'], ['local', 'local'], ['deepseek', 'failing'], ['openai', 'no-key']
+    ]);
+    assert.strictEqual(g[0].entries.length, 2);
+    assert.ok(!g[0].entries[0].greyed);
+    assert.ok(g[2].entries[0].greyed && g[3].entries[0].greyed);
+    assert.strictEqual(g[0].label, 'OpenRouter');
+  });
+  it('filters by name across groups and drops empty ones', () => {
+    const g = filterPickerGroups(groupPickerByProvider(view, providers, {}), 'o2');
+    assert.deepStrictEqual(g.map((x) => x.provider), ['openrouter']);
+    assert.strictEqual(g[0].entries.length, 1);
+  });
 });

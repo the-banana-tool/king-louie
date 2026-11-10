@@ -8269,35 +8269,59 @@ async function openModelPicker(role, block) {
     const result = unwrapIpcResult(await window.electron.models.picker({ needs: MODEL_ROLE_NEEDS[role] || customRoleOf(role)?.needs || {} }), 'Unable to list models.');
     picker.textContent = '';
     const taken = new Set((profileDraft.roles[role] || []).map((e) => `${e.provider}:${e.model}`));
-    const usable = (result.usable || []).filter((c) => !taken.has(`${c.provider}:${c.model}`));
-    if (!usable.length) {
+    const view = {
+      usable: (result.usable || []).filter((c) => !taken.has(`${c.provider}:${c.model}`)),
+      unusable: (result.unusable || []).slice(0, 100)
+    };
+    const allGroups = groupPickerByProvider(view, appState.settings?.providers || {}, Object.fromEntries(appState.localServerNames || []));
+    if (!view.usable.length) {
       const none = document.createElement('div');
       none.className = 'provider-message';
-      none.textContent = 'No usable model meets this role\'s needs. Add and test a key under API keys.';
+      none.textContent = "No usable model meets this role's needs. Add and test a key under Providers & keys.";
       picker.appendChild(none);
     }
-    for (const c of usable) {
-      const item = document.createElement('button');
-      item.type = 'button';
-      item.className = 'models-picker-item';
-      item.dataset.provider = c.provider;
-      item.dataset.model = c.model;
-      // Local inference L1: a model on a local server names its server.
-      const where = c.provider === 'local' ? `local · ${localServerName(String(c.model || '').split('/')[0], appState.localServerNames)}` : c.provider;
-      item.textContent = `${c.name} (${[where, c.provider === 'local' ? null : (c.local ? 'local' : formatModelPrice(c.cost)), formatContext(c.context)].filter(Boolean).join(' · ')})`;
-      item.addEventListener('click', () => {
-        profileDraft.roles[role] = [...(profileDraft.roles[role] || []), { provider: c.provider, model: c.model, effort: null, name: c.name, usable: true, reasons: [], cost: c.cost, context: c.context, efforts: [] }];
-        renderProfileEditor();
-      });
-      picker.appendChild(item);
-    }
-    // Unusable models appear greyed out with their reasons (spec §11).
-    for (const c of (result.unusable || []).slice(0, 100)) {
-      const row = document.createElement('div');
-      row.className = 'models-picker-item is-unusable';
-      row.textContent = `${c.name} (${c.provider}): ${(c.reasons || []).join(' ')}`;
-      picker.appendChild(row);
-    }
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.className = 'models-picker-search';
+    search.placeholder = 'Search models';
+    picker.appendChild(search);
+    const listEl = document.createElement('div');
+    picker.appendChild(listEl);
+    const paint = () => {
+      listEl.textContent = '';
+      for (const g of filterPickerGroups(allGroups, search.value)) {
+        const head = document.createElement('div');
+        head.className = `models-picker-group is-${g.state}`;
+        head.textContent = g.label;
+        listEl.appendChild(head);
+        for (const c of g.entries) {
+          if (c.greyed) {
+            // Unusable models appear greyed out with their reasons (spec §11).
+            const row = document.createElement('div');
+            row.className = 'models-picker-item is-unusable';
+            const why = g.state === 'failing' || g.state === 'no-key' ? 'fix key to use' : (c.reasons || []).join(' ');
+            row.textContent = `${c.name}: ${why}`;
+            listEl.appendChild(row);
+            continue;
+          }
+          const item = document.createElement('button');
+          item.type = 'button';
+          item.className = 'models-picker-item';
+          item.dataset.provider = c.provider;
+          item.dataset.model = c.model;
+          // Local inference L1: a model on a local server names its server.
+          const where = c.provider === 'local' ? `local · ${localServerName(String(c.model || '').split('/')[0], appState.localServerNames)}` : c.provider;
+          item.textContent = `${c.name} (${[where, c.provider === 'local' ? null : (c.local ? 'local' : formatModelPrice(c.cost)), formatContext(c.context)].filter(Boolean).join(' · ')})`;
+          item.addEventListener('click', () => {
+            profileDraft.roles[role] = [...(profileDraft.roles[role] || []), { provider: c.provider, model: c.model, effort: null, name: c.name, usable: true, reasons: [], cost: c.cost, context: c.context, efforts: [] }];
+            renderProfileEditor();
+          });
+          listEl.appendChild(item);
+        }
+      }
+    };
+    search.addEventListener('input', paint);
+    paint();
   } catch (err) {
     picker.textContent = err.message;
   }
