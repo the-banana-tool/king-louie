@@ -120,16 +120,17 @@ These would make the work a failure even if everything else works:
   prompt then elevates the owner's own token, so the task is registered by and
   for the same account. `install --personal` checks this first and refuses a
   standard user with a plain message, before the consent question.
-- **The task grants the owner run and read (C-12).** If Windows does not let
-  the owner, unelevated, `/Run`, `/Query` and stop the boot task (the window's
-  Start, Restart and status depend on it), the task XML carries a security
-  descriptor that allows the owner's SID to read and run it. This grants
-  nothing beyond the owner's own account, already the trust boundary. It is
-  the fallback, not a UAC prompt per Start, and not a return to the logon
-  task.
+- **The task grants the owner run and read (C-12, made definite as plan D-1).**
+  The task XML always carries the security descriptor
+  `D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;<ownerSID>)`, so the owner,
+  unelevated, can `/Run`, `/Query` and stop the boot task (the window's
+  Start, Restart and status depend on it). The owner gets read and run, not
+  write: write would let him raise `RunLevel`. It grants nothing beyond the
+  owner's own account, already the trust boundary, and is not a UAC prompt
+  per Start or a return to the logon task.
 - **What the builder must confirm on a real machine** before relying on it:
-  that registration works after the UAC prompt; whether C-12's descriptor is
-  needed; and that `uninstall --personal` can delete the task (one more UAC
+  that registration works after the UAC prompt; that C-12's descriptor lets
+  the unelevated owner Start and Restart; and that `uninstall --personal` can delete the task (one more UAC
   prompt at uninstall is acceptable if Windows requires it, C-4).
 - **Existing installs.** Running `install --personal` again on a machine
   with the logon task replaces it with the boot task (the `/F` path), keeps
@@ -157,10 +158,15 @@ node.
 - **Trust for that connection** is the personal node's: only a process of
   the owner's own account may be the screen host. The fleet's admin-owned
   helper file, per-user copy and `icacls` steps do not apply on a personal
-  node. If a pipe is used, it is created so only the owner's SID (and
-  SYSTEM) can open it, and the connection still proves it is this node's
-  app (a secret only the owner's account can read, or the bridge's existing
-  pairing). No new listener on any non-loopback address.
+  node. **As built (plan D-2, corrected):** kl-session-v1 runs over the named
+  pipe `\\.\pipe\king-louie-personal-<16 hex>`, whose name and key the node
+  writes to `<dataDir>/session/personal-helper.json`. The pipe's default
+  security is **not** owner-only: Windows' default named-pipe DACL gives
+  Everyone read. The boundary is the key in `personal-helper.json` (a file
+  only the owner's account reads); a connection that does not prove the key
+  is dropped. Residual: another local account can open the pipe, hold its
+  unauthenticated slots and keep the tray app from connecting (a denial, not
+  a takeover). No new listener on any non-loopback address.
 - **No screen host connected** (before login, the app quit from the tray,
   the screen locked): GUI tools refuse with a clear, existing-style code
   (`capability_unavailable` naming that no screen host is connected), before
@@ -277,6 +283,15 @@ in" becomes: the node is up; screen tools and saved logins wait for login.
   that the node restarts on the new files (stage 2 §6.8 row "App updated
   while the node runs").
 
+- The screen host's pipe is not owner-only (§5.2): another local account can
+  hold its unauthenticated slots and keep the tray app from connecting.
+- Task Scheduler ending the task's wrapper may leave the node child running;
+  `king-louie-service stop` finds it by the pidfile.
+- The app's `recording()` may stay true if ffmpeg ends by itself mid-take
+  (found at the stop, as on a fleet node).
+- The real boot, UAC and S4U path is unverified until the owner's checklist
+  (`docs/superpowers/plans/2026-11-09-boot-node-tray-manual-checks.md`).
+
 ## 7. Testing
 
 As for the rest of the personal node: no test registers a real task, runs a
@@ -306,13 +321,15 @@ uninstall.
   browser profiles, so S4U Chrome can never damage the owner's logins.
 - **C-8** The app starts at login hidden in the tray through a per-user start
   entry, on by default for a personal node, with a setting to turn it off.
-- **C-9** The tray icon shows the node's state.
+- **C-9** The tray icon shows the node's state. Shipped as the tooltip and a
+  state line in the menu on the one icon; a distinct bitmap per state is a
+  follow-up.
 - **C-10** Tray mode only when attached to a personal node; standalone,
   development and fleet launches are unchanged.
 - **C-11** The owner must be an administrator; install refuses a standard
   user up front.
-- **C-12** If needed, the task's security descriptor lets the owner run and
-  read it unelevated, rather than a UAC prompt per Start or a fallback to the
+- **C-12** The task's security descriptor always lets the owner run and
+  read it unelevated (never write), rather than a UAC prompt per Start or a fallback to the
   logon task.
 - **C-13** `install --personal` from a checkout refuses and points to the
   installed app.

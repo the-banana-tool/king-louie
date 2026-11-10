@@ -1284,6 +1284,12 @@ work while attached appends it to `PROXIED_DOMAINS`).
     Tests inject the runner (`deps.nodeRunner`), and the runner's
     `inspectOwners`, `execFile`, `spawn`, `readPidfile`, `commandLineOf` and
     `whoAmI`; no test runs a real `schtasks` or CLI.
+- **Boot task and tray** (boot-node-tray; see Personal node). The window's
+  Install… registers the boot task with one UAC prompt (declined:
+  `NODE_INSTALL_DECLINED`), Start and Restart run it unelevated through the
+  task's owner descriptor, and a personal attach runs in the tray (`--kl-tray`,
+  hidden, close hides) and is the node's screen host. Standalone, development
+  and fleet launches are unchanged.
 - **Lockout:** a handshake with a valid device signature is never refused by
   lockout; only further *failing* attempts for an already-locked-out device id
   are refused, closed `4429` at once (no delay is added).
@@ -2755,7 +2761,9 @@ rulings R-BR-*, the author's calls C-1 to C-14); tickets and ledger in
   pass `ephemeral: true`. `ephemeral: true` opens an empty context that
   keeps nothing, and is refused with `profile` or `userDataPath`. A case
   turn still needs `kl-cases`; a take names its own (default `take`). The
-  owner logs into each profile once, by hand, in the headed window.
+  owner logs into each profile once, by hand, in the headed window. On a
+  boot-started personal node (`--screen-host app`) a saved profile opens only
+  through the app in the owner's session (Personal node, the screen host).
 - **`snapshot` and refs (C-5 to C-7).** `snapshot` (`BrowserPage`,
   `BrowserExtract`, `Browser`; look-only, not in `ACTING_ACTIONS`) returns
   Playwright's AI snapshot (`page._snapshotForAI().full`) as
@@ -3065,8 +3073,9 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
 `examples/personal/node.yaml` is the file it ends with.
 
 - **What it is.** The agent service on the owner's own Windows machine, in
-  his login session, as him, started by the logon task `KingLouie Node`
-  (`PERSONAL_TASK_NAME`, `src/service/personal-install.js`), not as LOCAL
+  his account, started by the task `KingLouie Node` (a boot S4U task since
+  boot-node-tray, below; a logon task before; `PERSONAL_TASK_NAME`,
+  `src/service/personal-install.js`), not as LOCAL
   SERVICE. The trust rules that compare accounts are replaced by one fact:
   the process is the account that owns the data dir and the config dir.
   Takes, leases, the take policy, the courier, the audit ledger and the
@@ -3243,9 +3252,58 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   `session-watch`, `tools-denied-dirs`, `service-cli-install-personal`,
   `service-cli-pair-personal`, `service-cli-import-case`,
   `service-doctor-hosting`, `cases-status`.
-- Residuals: a logon-task node is down from a reboot until the owner logs
-  in (the phones show "Could not confirm"; said in the consent text); the
-  owner account is the boundary, so anything running as the owner can drive
+- **Starting at boot (boot-node-tray; spec `2026-11-09-boot-node-tray-design.md`,
+  plan `2026-11-09-boot-node-tray.md`, owner checklist `...-manual-checks.md`).**
+  `install --personal` runs only from the installed app (a checkout refuses),
+  only for a member of Administrators, and refuses an elevated prompt. One UAC
+  prompt (`src/service/elevated-schtasks.js`, one `schtasks /Create` as a
+  base64 argv) registers `KingLouie Node`: boot and logon triggers, S4U (no
+  stored password), LeastPrivilege, descriptor
+  `D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;<ownerSID>)` always (the owner can
+  `/Run` and `/Query` unelevated, never write), action `"<app exe>"
+  --kl-node-service "<entry>" run --data-dir "<dir>" --screen-host app`.
+  `main.js --kl-node-service` (`src/desktop-bridge/node-launcher.js`) re-runs
+  the app's binary as Node (`ELECTRON_RUN_AS_NODE=1`, `windowsHide`), so no
+  console and no PowerShell. Install also turns on the HKCU Run value `King
+  Louie` = `"<app exe>" --kl-tray` (`src/desktop-bridge/login-start.js`, the one
+  writer); `uninstall --personal` deletes the task through the same elevated
+  step (a second prompt) and turns it off. An old logon task reads "Install
+  again to start at boot"; install again converts it in place.
+- **The screen host.** An S4U task has no desktop, so `run --screen-host app`
+  (only value, only on `run`) makes the GUI subsystem use a `HelperChannel` on
+  the pipe `\\.\pipe\king-louie-personal-<16 hex>` and write
+  `<dataDir>/session/personal-helper.json` (name and key;
+  `src/gui/personal-screen-host.js`); the app serves it (`src/ipc/screen-host.js`,
+  the session helper loop; Windows, a local personal pairing only). Until it
+  connects every GUI tool refuses `screen_host_not_connected` ("King Louie is
+  not running in your session: log in, or open King Louie"). A hand-started
+  node without the flag keeps `InProcessChannel`. Saved browser profiles open
+  only through the app (`src/gui/screen-host-browser.js`,
+  `setScreenHostLauncher`); before it connects, `screen_host_missing` ("Saved
+  logins are available after you log in") and `ephemeral` still works, so an
+  S4U Chrome never touches the owner's logins. Takes launch Chrome through the
+  helper path (`launch_browser`).
+- **The tray** (`src/desktop-bridge/tray-model.js`, `src/ipc/tray.js`,
+  `tray-host.js`): attached to a personal node only. `--kl-tray` starts hidden;
+  closing hides to the tray; Quit asks while a take records; the tooltip and a
+  menu line show the node's state (one icon, no per-state bitmap yet);
+  `relaunch()` drops `--kl-tray`. The window's **Start King Louie when I log in**
+  toggle is `desktop:loginStart`/`desktop:setLoginStart` (`LOCAL_CHANNELS`);
+  a declined UAC prompt is `NODE_INSTALL_DECLINED`; doctor has `hosting` (boot
+  or logon task) and `screen host` rows.
+- **A development copy uses its own `--data-dir`** (and profile): a second `run`
+  on a data dir whose pidfile names a live service is refused
+  (`acquireInstanceLock`, `tests/service-run.test.js`). To test the real path,
+  build the installer from a worktree (`npm run build:win`) and install it.
+- Residuals: the real boot, UAC and S4U path is unverified until the owner's
+  checklist; before login the node is up but screen tools and saved logins
+  wait (S4U also has no network credentials: Windows-sign-in shares fail). The
+  pipe's default DACL is not owner-only (Everyone read): the key in
+  `personal-helper.json` is the boundary, and another local account can hold
+  the pipe's unauthenticated slots and keep the tray app from connecting.
+  Task Scheduler ending the wrapper may leave the node child running (`stop`
+  uses the pidfile). The app's `recording()` can stay true if ffmpeg ends by
+  itself. The owner account is the boundary, so anything running as the owner can drive
   the node over `mcp` and change the approver set, and a shell the phone
   approves can do anything he can (the deny list fences the file tools, not
   a shell); attached, the desktop app runs the node's task, never the node

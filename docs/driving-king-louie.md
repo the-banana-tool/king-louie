@@ -93,8 +93,13 @@ administrator) for a machine someone else administers.
 
 ### A personal node (your own Windows machine)
 
-The service runs in your own login session, as you, from the logon task
-`KingLouie Node`; the owner account is the trust boundary. On first run the
+The service runs as you, from the boot task `KingLouie Node` (S4U: it starts
+before you log in, with no stored password); the owner account is the trust
+boundary. The King Louie app, started at login into the tray, is the node's
+screen host: until it connects (after you log in or open it), GUI tools
+refuse `screen_host_not_connected` and saved browser logins are unavailable
+(`screen_host_missing`). The install runs from the installed app (one UAC
+prompt), not from a checkout. On first run the
 desktop window installs the node, pairs with it, starts it and moves the old
 profile into it, each on one press (install guide, "Attaching the desktop
 app"). A restart the move needs is the owner's press too, so a take or task
@@ -102,7 +107,8 @@ you are driving does not end because of the move. The terminal install below sta
 window uses. The install guide (`docs/install-guide.md`, section 13) has every
 step; in short, from a normal, unelevated prompt:
 
-1. `king-louie-service install --personal` (`--dry-run` first; `--browser
+1. `king-louie-service install --personal` from the installed app (the
+   window's Install… does it; `--dry-run` first; `--browser
    <chrome.exe>` when Chrome is not where Windows registers it). It prints
    what it will do, asks `[y/N]`, creates the data dir
    (`%LOCALAPPDATA%\KingLouie\node\data`) and the config dir beside it, and
@@ -122,7 +128,7 @@ step; in short, from a normal, unelevated prompt:
      browser: chrome
    ```
 
-   It registers the logon task and does not start it yet. Add more apps you
+   It registers the boot task and does not start it yet. Add more apps you
    will demo under `gui.apps`, and `delegate: { max_sessions: 2 }` for more
    than one open session at once, by editing that file yourself.
 2. `king-louie-service token set <provider>` (the delegate's key, on stdin).
@@ -152,13 +158,14 @@ step; in short, from a normal, unelevated prompt:
    default finds the personal node) and call `list_machines`.
 
 There is no identity record, no session helper and no courier grant on a
-personal node: the GUI runs inside the service, the service starts the
-take's Chrome itself (no debugging port), and your `mcp` process already
-owns the courier's directories. Profiles a fleet layout's helper made under
+personal node: the screen work is done by the King Louie app in your session
+(a node started by hand in a terminal serves it itself), a take's Chrome opens
+through it, and your `mcp` process already owns the courier's directories.
+A development copy uses its own `--data-dir`. Profiles a fleet layout's helper made under
 `%LOCALAPPDATA%\KingLouie\browser-profiles\` are not moved: log in once
 more. `king-louie-service doctor` and
 `king-louie-service session status` say `hosting: personal`. After a reboot
-the node is down until you log in.
+the node is up before you log in; screens and saved logins wait for the app.
 The file tools cannot touch the config dir or the desktop app's profile, and
 every shell call goes to your phone; a shell the phone approves can do
 anything you can.

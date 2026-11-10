@@ -27,7 +27,7 @@
 ## Plan-level decisions (beyond the spec)
 
 - **D-1 (spec C-12, made definite):** the task XML always carries the security descriptor `D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;<ownerSID>)`. The owner gets read and run, not write (write would let him raise `RunLevel`). Deterministic and testable, instead of "only if needed".
-- **D-2 (spec §5.2 transport):** the screen host uses the existing kl-session-v1 `HelperChannel` over a named pipe whose name and secret the node writes to `<dataDir>/session/personal-helper.json`. The pipe is listened with libuv's default security (no `readableAll`/`writableAll`), so only the owner, SYSTEM and Administrators can open it.
+- **D-2 (spec §5.2 transport):** the screen host uses the existing kl-session-v1 `HelperChannel` over a named pipe whose name and secret the node writes to `<dataDir>/session/personal-helper.json`. The pipe is listened with libuv's default security (no `readableAll`/`writableAll`), which is NOT owner-only: Windows' default named-pipe DACL gives Everyone read (corrected at Task 10). The boundary is the key in `personal-helper.json`; residual: another local account can hold the pipe's unauthenticated slots and keep the tray app from connecting.
 - **D-3:** how the node knows it serves the screen through the app: the task passes `run --screen-host app`. A node run by hand without the flag keeps `InProcessChannel` (spec §5.2, last bullet).
 - **D-4:** the app's start at login is the HKCU Run value `King Louie` = `"<app exe>" --kl-tray`, written by one Electron-free module used by the CLI and the app alike (no `app.setLoginItemSettings`, so both write the same value).
 
