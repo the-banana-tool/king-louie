@@ -3475,8 +3475,9 @@ install guide's "Your first task".
   paragraph (`parseStuck`) is `waiting`, any other `done`. Every client row has
   `author: 'client'`, which `ownerMessages` leaves out: a client's words are never
   `user` provenance, in the task or in a case the chat later joins.
-- **The proposal** (`src/tasks/proposal.js`, prompt `src/tasks/prompts/task-scope-v1.md`;
-  a change is a new file). One utility-role call before any work, charged to the task,
+- **The proposal** (`src/tasks/proposal.js`, prompt `src/tasks/prompts/task-scope-v2.md`;
+  a change is a new file; v2 proposes `browser-act` for a site the owner is signed in to,
+  even to read, so that one card goes). One utility-role call before any work, charged to the task,
   routed with the chat's egress. It is off `tests/fixtures/egress-inventory.json`:
   `oneShot` is outside that walk, and `tests/fleet-task-tools.test.js` pins the
   routing. Malformed twice, or no model: the task runs with no proposal. Empty `allows`
@@ -3508,9 +3509,14 @@ install guide's "Your first task".
   tracker on the owner's third no, and the loop guardrails (ADR 0004). Answers: look-class
   actions (`LOOK_ACTIONS`) always `{ allow, look }`; navigation by the sites (only a
   look-only or no-proposal task is unbounded); `browser-act` and `logins` on a granted
-  host; `shell`; `files-write` under the work dir. `evaluate`, `evaluate_in_frame`,
-  `set_input_files` and `fill_payment` are in no class and always ask; `reload` is
-  `browser-act`. A look allow lifts only the tool's default gate; a grant's also an
+  host; `shell`; `files-write` under the work dir. `set_input_files` and `fill_payment`
+  are in no class and always ask; `reload` is `browser-act`. Owner ruling 2026-11-10 (one
+  card covers working in a site): `evaluate` and `evaluate_in_frame` are `browser-act` on a
+  granted host; a `start` naming a saved profile (`action`, `headless`, `profile` only) is
+  `browser-act` with no site check, since no page is open; `profile_list` and
+  `profile_current` are look class. The phones' words for `browser-act` ("click and type in
+  your signed-in browser") do not name scripts. A turn gets 40 steps (`TURN_MAX_ITERATIONS`),
+  as an owner chat's does. A look allow lifts only the tool's default gate; a grant's also an
   `always_confirm` match; neither lifts an `ask` rule or another unsafe tier reason.
 - **The owner can take the chat.** A send, a press or the next `run_task` that finds the
   chat in a case, private or deleted ends the task (`became_case`, `private`,

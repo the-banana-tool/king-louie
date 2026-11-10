@@ -21,7 +21,7 @@ const MIN_USD = 2;
 const MAX_USD = 50;
 const KEYS = ['allows', 'minutes', 'sites', 'usd'];
 
-const PROMPT_FILE = path.join(__dirname, 'prompts', 'task-scope-v1.md');
+const PROMPT_FILE = path.join(__dirname, 'prompts', 'task-scope-v2.md');
 const TEXT_DELIMITER = '=== TASK TEXT ===';
 
 function validateProposal(raw) {

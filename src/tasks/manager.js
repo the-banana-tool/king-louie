@@ -38,7 +38,8 @@ const WAITING_BOUND_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_USD = 2;
 const BUSY_STATES = new Set(['requested', 'awaiting_grant', 'running', 'waiting']);
 const OVER_STATES = new Set([...FINAL_STATES, 'interrupted']);
-const CONTINUABLE_STATES = new Set(['waiting', 'interrupted', 'done']);
+const TURN_MAX_ITERATIONS = 40;
+const CONTINUABLE_STATES =new Set(['waiting', 'interrupted', 'done']);
 // A loop's other ends, safe to name; its `error` and `stopped` say nothing more than turn_failed.
 const ENDED_TYPES = new Set(['max_iterations', 'guardrail_halt']);
 // The cuts that leave a task waiting. The others wrote their ending when they were asked.
@@ -530,6 +531,8 @@ class TaskManager {
       systemPromptDynamic: context.systemPromptDynamic,
       abortSignal: turn.abort.signal,
       allowedToolNames: taskToolNames(this.toolRegistry),
+      // An owner chat's turn gets this many steps; the agent's own default (10) is for a child run.
+      maxIterations: TURN_MAX_ITERATIONS,
       onUsageRecorded: (event) => this._charge(turn, [event]),
       executorOptions: {
         origin: executorOrigin(origin, `chat:${chatId}`),

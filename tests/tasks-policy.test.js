@@ -68,7 +68,12 @@ describe('createTaskPolicy, browser calls in a live grant', () => {
     ['an acting action with an off-site host', 'BrowserPage', { action: 'click', selector: 'a', host: 'other.test' }, {}, PASS],
     ['an acting action with an on-site url', 'BrowserPage', { action: 'click', selector: 'a', url: 'https://a.example.com/' }, {}, ALLOW],
     ['an on-site url does not excuse the page', 'BrowserPage', { action: 'click', selector: 'a', url: 'https://a.example.com/' }, { url: OFF_SITE }, PASS],
-    ['other session and profile actions', 'BrowserSession', { action: 'profile_list' }, {}, PASS],
+    ['evaluate on a granted page', 'BrowserPage', { action: 'evaluate', expression: '1' }, {}, ALLOW],
+    ['evaluate_in_frame on a granted page', 'BrowserPage', { action: 'evaluate_in_frame', expression: '1' }, {}, ALLOW],
+    ['evaluate off a granted page', 'BrowserPage', { action: 'evaluate', expression: '1' }, { url: OFF_SITE }, PASS],
+    ['evaluate with no page', 'BrowserPage', { action: 'evaluate', expression: '1' }, { url: null }, PASS],
+    ['evaluate without browser-act', 'BrowserPage', { action: 'evaluate', expression: '1' }, { allows: ['logins', 'shell', 'files-write'] }, PASS],
+    ['evaluate with no grant', 'BrowserPage', { action: 'evaluate', expression: '1' }, { state: { grant: null } }, PASS],
     ['an unknown action', 'BrowserPage', { action: 'teleport' }, {}, PASS],
     ['no action', 'BrowserPage', {}, {}, PASS],
   ];
@@ -78,15 +83,16 @@ describe('createTaskPolicy, browser calls in a live grant', () => {
     });
   }
 
-  // Outside "click and type": the card never says code, files or cards (spec §4.5).
-  for (const action of ['evaluate', 'evaluate_in_frame', 'set_input_files', 'fill_payment']) {
+  // Outside the card's words: it never says files or cards (spec §4.5). Page scripts are inside
+  // browser-act (owner ruling 2026-11-10).
+  for (const action of ['set_input_files', 'fill_payment']) {
     it(`${action} passes through whatever is granted`, async () => {
       const all = ['browser-act', 'logins', 'shell', 'files-write'];
       assert.deepEqual(await policy({ allows: all }).decide('Browser', { action, selector: 'a' }), PASS);
     });
   }
 
-  for (const action of ['get_cookies', 'clear_cookies', 'route_block', 'pdf', 'save_storage_state', 'profile_create', 'profile_delete', 'profile_current']) {
+  for (const action of ['get_cookies', 'clear_cookies', 'route_block', 'pdf', 'save_storage_state', 'profile_create', 'profile_delete']) {
     it(`${action} passes through`, async () => {
       assert.deepEqual(await policy().decide('Browser', { action }), PASS);
     });
@@ -112,6 +118,7 @@ describe('createTaskPolicy, look class', () => {
   const ACTIONS = [
     'snapshot', 'content', 'screenshot', 'status', 'tabs', 'get_text', 'wait_for_url',
     'hover', 'focus', 'scroll', 'mouse_move', 'mouse_wheel', 'set_viewport',
+    'profile_list', 'profile_current',
   ];
   for (const [name, state] of Object.entries(STATES)) {
     for (const action of ACTIONS) {
@@ -147,11 +154,21 @@ describe('createTaskPolicy, start and stop', () => {
       assert.deepEqual(await policy().decide(tool, { action: 'stop' }), LOOK);
     });
     it(`${tool}: a start that opens anything else passes through`, async () => {
-      for (const extra of [{ profile: 'other' }, { ephemeral: true }, { ephemeral: false }, { userDataPath: 'C:/x' }, { ownerQuote: 'go' }]) {
+      for (const extra of [{ profile: 'other', ephemeral: false }, { profile: 'other', userDataPath: 'C:/x' }, { profile: '' }, { profile: 7 }, { profile: '../x' }, { ephemeral: true }, { ephemeral: false }, { userDataPath: 'C:/x' }, { ownerQuote: 'go' }]) {
         assert.deepEqual(await policy().decide(tool, { action: 'start', ...extra }), PASS, JSON.stringify(extra));
       }
     });
   }
+  // The owner's saved profile is his signed-in browser, which is what the card's words grant
+  // (owner ruling 2026-11-10). No page is open yet, so no site bounds it.
+  it('a start on a saved profile is browser-act: allowed in a grant, asked without one', async () => {
+    for (const tool of ['BrowserSession', 'Browser']) {
+      assert.deepEqual(await policy().decide(tool, { action: 'start', profile: 'linkedin' }), ALLOW);
+      assert.deepEqual(await policy({ url: null }).decide(tool, { action: 'start', profile: 'linkedin', headless: false }), ALLOW);
+      assert.deepEqual(await policy({ allows: ['logins', 'shell', 'files-write'] }).decide(tool, { action: 'start', profile: 'linkedin' }), PASS);
+      assert.deepEqual(await policy({ state: { grant: null } }).decide(tool, { action: 'start', profile: 'linkedin' }), PASS);
+    }
+  });
   it('a stop naming a profile passes through', async () => {
     assert.deepEqual(await policy().decide('BrowserSession', { action: 'stop', profile: 'other' }), PASS);
   });

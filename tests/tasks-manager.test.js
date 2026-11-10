@@ -70,6 +70,15 @@ describe('a task is a chat', () => {
     await m.stop();
   });
 
+  // An owner chat's turn gets 40 steps (chat-handlers); the agent's own default of 10 ends a
+  // browsing task max_iterations before it has read three pages.
+  it('a turn gets an owner chat\'s 40 steps, not the agent\'s default', async () => {
+    const t = harness({ script: [reply('done')] });
+    const view = await t.manager.run({ text: 'Find a dentist', origin: FRONT });
+    await t.settled(t.manager, view.task_id);
+    assert.equal(t.calls[0].options.maxIterations, 40);
+  });
+
   it('run creates a chat with the client\'s row, runs a turn, and ends done with the answer and a push', async () => {
     const t = harness({ script: [reply('the answer')] });
     const view = await t.manager.run({ text: 'Find a dentist', origin: FRONT });
