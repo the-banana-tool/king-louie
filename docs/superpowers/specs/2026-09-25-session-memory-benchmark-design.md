@@ -489,6 +489,38 @@ This is the one part of the benchmark that only real sessions can provide.
 Its outputs contain fragments of the private sessions and are private unless
 the session is public.
 
+**Built (B4, 2026-11-09;** plan
+`docs/superpowers/plans/2026-11-09-longhaul-b4-compaction-loss.md`**).**
+`longhaul compaction-loss` takes each `manifest.compactions` entry as a
+window, samples anchors of the three kinds inside it round-robin with a seeded
+RNG, and makes three versioned prompt calls per fact: the author states one
+fact with a quote and its evidence message; the summary judge sees the fact
+and the summary only, never the window, so window size never changes its
+prompt; the needed judge sees the fact and at most `--candidates` later
+messages that match it by BM25, fused with cosine hits when the session has a
+complete embedding cache (`--embed-provider`/`--embed-model`; without one the
+run refuses `EMBEDDINGS_MISSING`). A fact with no matching later message is
+not needed, with no call. The run is priced, capped and cached like `run`.
+`runs/<id>/` holds ids, seqs, verdicts, rates, token ratios and cost; facts,
+quotes and reasons are under `private/compaction/<runId>/`. `report` writes
+the study's own CSV, TeX and Markdown and refuses a cohort that mixes it with
+answer-stage runs.
+
+**Verification (owner decision 2026-11-09).** "With verification" in step 1
+and "the same verification loop" in step 3 mean mechanical checks plus the
+human spot-check, not a `verify` review of every fact: a fact whose evidence
+message is outside the window, or whose quote is not in that message, is
+rejected and counted, never judged; and a seeded 10% of the judged facts
+(at least one) goes to `longhaul spot-check`, where a person agrees with both
+judgments or gives both of their own. The report shows agreement per judge.
+
+**Known limits.** The synthetic fixture's summaries are filler, so no fixture
+has ground truth for "preserved": the hand-built test sessions pin the
+arithmetic and the owner's spot-check pins the judges. "Needed" sees only the
+later messages that match the fact lexically (and semantically when the
+session is embedded); a later dependency phrased with none of the fact's words
+is missed, so the lost-and-needed rate is a lower bound.
+
 ## 10. Data sources and privacy
 
 ### 10.1 Private sessions
@@ -516,6 +548,43 @@ trajectories are shorter than the owner's sessions, so the converter can
 concatenate consecutive trajectories from the same repository into one
 session, marked `constructed: true` in the manifest with the boundaries
 listed. Questions that cross a boundary are allowed and flagged.
+
+**Built (B2, 2026-11-09;** plan
+`docs/superpowers/plans/2026-11-09-longhaul-b2-public-converters.md`**).**
+Two converters, chosen by the owner to go first:
+`nebius/SWE-rebench-openhands-trajectories` (`nebius-swe-rebench`) and
+`nvidia/Open-SWE-Traces` (`open-swe-traces`; the owner recommends config
+`v2.0`, split `claudecode`, and the CLI takes any). `longhaul convert` reads
+the downloaded parquet files directly with `hyparquet` (owner decision
+2026-11-09; no export step), or JSONL, in two passes: plan, then write. The
+other three datasets above move to B4, with the release.
+
+- Every session is `constructed: true`, its `boundaries` one
+  `{ fromSeq, toSeq, instanceId, trajectoryId }` per trajectory, contiguous
+  from seq 1 and each starting at the trajectory's task prompt.
+- Sessions are public: `private: false`, `license: CC-BY-4.0` (both datasets'
+  card license), and `upstreamLicense`, the repository's SPDX id from the row
+  (`NOASSERTION` when the rows differ). The Nebius dataset has no per-row
+  license, so its sessions say `unknown-upstream`; the owner decided
+  (2026-11-09) that each repository's license is looked up in SWE-rebench as
+  release-time work.
+- System messages are dropped (every trajectory repeats the same scaffold
+  prompt); `reasoning_content` is kept out of the text, its length recorded,
+  since the owner's sessions carry no such text.
+- One trajectory per `instance_id` (the first by `trajectory_id`), so repeated
+  attempts at a task do not put near-duplicate evidence in one session.
+- Neither dataset has timestamps: message times are synthetic, one second per
+  seq, and the manifest says `timestampsSynthetic: true`; seq stays the clock.
+- Defaults: `--target-tokens 500000`, `--min-tokens 250000` (a shorter part is
+  not written), `--max-sessions 12` (B-D10's public set). Every session then
+  has questions in the 200K-1M bucket; the `>1M` bucket comes only from the
+  private sessions.
+- `crossesBoundary` is computed, never typed: true when a question's evidence
+  lies in more than one trajectory. It cannot compare the ask with the
+  evidence, since every `askAtSeq` in a constructed session is a task prompt.
+- Known limit: no public trajectory has a human replying mid-run (all five
+  datasets checked 2026-11-09), so every `user` message is a task statement
+  and `user-said` questions differ from the owner's sessions.
 
 ### 10.3 Synthetic sessions
 
@@ -570,6 +639,14 @@ gets its own implementation plan.
 | B2 | Authoring pipeline, verification loop, public converters for two datasets, the `constructed` concatenation |
 | B3 | Adapters `kl-recall`, `full-history`, `sliding-window`, `summarize-compact`, `real-compaction`, `oracle`; `run`, judge, caching, `report` |
 | B4 | Compaction-loss study, external adapter protocol, remaining converters, release packaging and datasheet |
+
+Status (2026-11-09): B2 is done except converters for the other three
+datasets of §10.2, which move to B4 with the release; its two converters and
+the `constructed` concatenation are built (§10.2). B4's compaction-loss study
+is built (§9), verified by mechanical checks and the 10% human spot-check
+(owner decision 2026-11-09). B4's external adapter protocol, the remaining
+converters, the Nebius upstream-license lookup, and release packaging and the
+datasheet are not done.
 
 ## 14. Testing
 
