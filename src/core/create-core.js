@@ -1203,6 +1203,19 @@ function createCore(deps = {}) {
       const token = getDecryptedProviderToken(provider);
       return createProviderInstance(provider, token);
     },
+    // The saved key, read only to hint that a failing one looks like a
+    // placeholder (settings redesign §7.2). Under Anthropic OAuth the saved
+    // key is not what was tested, so there is nothing to judge. Null on any
+    // error: this never fails a test.
+    readToken: (provider) => {
+      try {
+        if (provider === 'anthropic' && anthropicOAuth.isConnected()) return null;
+        const encrypted = getApiTokens()[provider];
+        return encrypted ? decryptToken(encrypted) : null;
+      } catch {
+        return null;
+      }
+    },
     getStatuses: getApiStatus,
     setStatuses: setApiStatus,
     getSettings,
