@@ -4384,6 +4384,9 @@ function clearSettingsFieldErrors(container) {
 }
 
 function setSettingsDrawer(open) {
+  // A field that saves on blur (a ladder line, the digest channel) saves before the
+  // flush, whatever closed the drawer (Esc, the X, the overlay).
+  if (!open && dom.settingsDrawer.contains(document.activeElement)) document.activeElement.blur();
   if (!open) flushSettingsAutosaves();
   dom.settingsDrawer.hidden = !open;
   document.body.style.overflow = open ? 'hidden' : '';
@@ -6502,6 +6505,7 @@ function applyNotificationField(el) {
   const n = appState.settings.notifications || {};
   const ms = storedNotificationThresholdsMs();
   delete el.dataset.invalid;
+  delete el.dataset.dirty;
   const sw = NOTIFICATION_SWITCHES.find((f) => dom[f.dom] === el);
   if (sw) el.checked = sw.shown(n);
   else if (el === dom.notificationsToastThresholdInput) el.value = String(ms.toast / 1000);
@@ -6541,7 +6545,8 @@ function paintNotificationsPane() {
 function notificationSeconds(el) {
   const raw = String(el?.value ?? '').trim();
   const n = Number(raw);
-  return raw === '' || !Number.isFinite(n) || n < 0 ? null : n;
+  // The host reads 0 as unset (and stores its default), so 1 s is the least.
+  return raw === '' || !Number.isFinite(n) || n < 1 ? null : n;
 }
 
 // A threshold field's milliseconds, or the stored value while the field holds one
@@ -6565,7 +6570,7 @@ function notificationThresholdsMs() {
 // letting the host change the number silently.
 function notificationThresholdProblem(el) {
   const n = notificationSeconds(el);
-  if (n === null) return 'Not saved: enter a number of seconds, 0 or more.';
+  if (n === null) return 'Not saved: enter a number of seconds, 1 or more.';
   const stored = storedNotificationThresholdsMs();
   const ms = unitToMs(n, 's');
   if (el === dom.notificationsToastThresholdInput) {
@@ -6615,6 +6620,20 @@ function wireNotificationFields() {
     }
   });
   const thresholds = [dom.notificationsToastThresholdInput, dom.notificationsExternalThresholdInput].filter(Boolean);
+  // A text field queues the page after the debounce, and on blur sends the page as it
+  // stands then. Not saver.flush(): a flush also sends, at once, whatever another
+  // field queued while its save was in flight (tab to the toast, type 2 while the
+  // external value saves, and 2 would be saved before the debounce let 200 replace it).
+  const queue = (el) => {
+    notificationsLastField = el;
+    el.dataset.dirty = '1';
+    saver.change(notificationsFromForm());
+  };
+  const sendOnBlur = (el) => {
+    if (!el.dataset.dirty) return;
+    delete el.dataset.dirty;
+    saver.change(notificationsFromForm(), { immediate: true });
+  };
   for (const f of NOTIFICATION_SWITCHES) {
     const el = dom[f.dom];
     el?.addEventListener('change', () => {
@@ -6630,6 +6649,9 @@ function wireNotificationFields() {
       if (problem) {
         el.dataset.invalid = '1';
         setSettingsFieldError(el, problem);
+        // Replace any value queued from an earlier keystroke (2, then 20, then a
+        // refused 200 must not save 20): this field now sends its stored value.
+        queue(el);
         return;
       }
       delete el.dataset.invalid;
@@ -6641,17 +6663,13 @@ function wireNotificationFields() {
           setSettingsFieldError(other, '');
         }
       }
-      notificationsLastField = el;
-      saver.change(notificationsFromForm());
+      queue(el);
     });
-    el.addEventListener('blur', () => { saver.flush(); });
+    el.addEventListener('blur', () => sendOnBlur(el));
   }
   const topic = dom.notificationsNtfyTopicInput;
-  topic?.addEventListener('input', () => {
-    notificationsLastField = topic;
-    saver.change(notificationsFromForm());
-  });
-  topic?.addEventListener('blur', () => { saver.flush(); });
+  topic?.addEventListener('input', () => queue(topic));
+  topic?.addEventListener('blur', () => sendOnBlur(topic));
 }
 
 // Voice (settings redesign §5.8): each field saves as it changes. saveVoice merges
@@ -12904,7 +12922,7 @@ async function testTelegramToken() {
       await window.electron.settings.runLlmCommand({ command: 'telegram test' }),
       'Failed to test Telegram.'
     );
-    appState.telegramTested = { ok: true, message: result.message || 'Test passed.' };
+    appState.telegramTested = { ok: true, message: result.output || result.message || 'Test passed.' };
   } catch (err) {
     appState.telegramTested = { ok: false, message: err.message || 'Test failed.' };
   }

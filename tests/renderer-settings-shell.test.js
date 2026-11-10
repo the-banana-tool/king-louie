@@ -56,6 +56,14 @@ describe('settings shell: renderer.js', () => {
     assert.ok(block('function setSettingsDrawer(').includes('flushSettingsAutosaves()'));
   });
 
+  it('closing the drawer blurs the focused field first, so blur-savers fire before the flush', () => {
+    const body = block('function setSettingsDrawer(');
+    const blur = body.indexOf('.blur()');
+    assert.ok(blur > -1, 'blurs the focused field');
+    assert.ok(body.includes('dom.settingsDrawer.contains(document.activeElement)'), 'only a field inside the drawer');
+    assert.ok(blur < body.indexOf('flushSettingsAutosaves()'), 'blur comes before the flush');
+  });
+
   it('has no dropdown sorter', () => {
     assert.doesNotMatch(src, /sortSettingsNavOptions/);
     assert.doesNotMatch(src, /settingsNavSelect/);

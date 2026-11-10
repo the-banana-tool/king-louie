@@ -69,6 +69,31 @@ describe('E2E: Settings — Notifications', () => {
     await waitFor(ctx, `!document.querySelector('.settings-field-error[data-for="notifications-external-threshold-input"]')`);
   });
 
+  it('a refused keystroke replaces the queued value: typing 2, 20, 200 with external 120 stores no toast', async () => {
+    const before = await evaluate(ctx, stored('JSON.stringify(s.notifications.thresholdsMs)'));
+    assert.strictEqual(JSON.parse(before).external, 120000);
+    for (const v of ['2', '20', '200']) await evaluate(ctx, typeInto('notifications-toast-threshold-input', v));
+    await waitFor(ctx, `!!document.querySelector('.settings-field-error[data-for="notifications-toast-threshold-input"]')`);
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.strictEqual(await evaluate(ctx, stored('JSON.stringify(s.notifications.thresholdsMs)')), before);
+    // Put it right again.
+    await evaluate(ctx, typeInto('notifications-toast-threshold-input', String(JSON.parse(before).toast / 1000)));
+    await waitFor(ctx, `!document.querySelector('.settings-field-error[data-for="notifications-toast-threshold-input"]')`);
+    await evaluate(ctx, `document.getElementById('notifications-toast-threshold-input').blur(); true`);
+  });
+
+  it('a threshold below 1 s is refused (the host reads 0 as unset)', async () => {
+    assert.strictEqual(await evaluate(ctx, `document.getElementById('notifications-toast-threshold-input').min`), '1');
+    const before = await evaluate(ctx, stored('s.notifications.thresholdsMs.toast'));
+    await evaluate(ctx, typeInto('notifications-toast-threshold-input', '0'));
+    await waitFor(ctx, `(document.querySelector('.settings-field-error[data-for="notifications-toast-threshold-input"]')?.textContent || '').includes('1 or more')`);
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.strictEqual(await evaluate(ctx, stored('s.notifications.thresholdsMs.toast')), before);
+    await evaluate(ctx, typeInto('notifications-toast-threshold-input', String(before / 1000)));
+    await waitFor(ctx, `!document.querySelector('.settings-field-error[data-for="notifications-toast-threshold-input"]')`);
+    await evaluate(ctx, `document.getElementById('notifications-toast-threshold-input').blur(); true`);
+  });
+
   it('greys the rest until notifications are on, and saves the switch', async () => {
     await evaluate(ctx, toggle('notifications-enabled-input', false));
     await waitFor(ctx, `document.getElementById('notifications-toast-threshold-input').disabled`);
