@@ -4339,8 +4339,45 @@ function refreshUI() {
   updateEmptyState();
 }
 
-// Pending debounced saves are sent when the drawer closes (Task 12 fills it).
-function flushSettingsAutosaves() {}
+// Auto-savers for individual settings, one per key (renderer-helpers/autosave.js).
+const settingsAutosaves = new Map();
+
+// Paints the header's save indicator: 'saving', 'saved' or 'error' (with its message).
+function showSaveState(state, error) {
+  const el = document.getElementById('settings-save-state');
+  if (!el) return;
+  el.setAttribute('aria-live', 'polite');
+  el.dataset.state = state || '';
+  if (state === 'saving') el.textContent = 'Saving…';
+  else if (state === 'saved') el.textContent = 'Saved';
+  else if (state === 'error') el.textContent = String(error || 'Could not save.');
+  else el.textContent = '';
+}
+
+// registerSettingsAutosave(key, { save, delayMs?, onState? }) -> { change, flush }.
+// `save(value)` is the page's existing save call and resolves { ok, error? } (a throw
+// counts as a failure). `onState(state, info)` runs after the header indicator is
+// painted; on 'error' it puts the field back to the stored value and shows info.error
+// beside it. Registering a key again flushes the old saver first and replaces it.
+function registerSettingsAutosave(key, { save, delayMs, onState } = {}) {
+  const old = settingsAutosaves.get(key);
+  if (old) old.flush();
+  const saver = createAutosave({
+    save,
+    ...(delayMs === undefined ? {} : { delayMs }),
+    onState: (state, info) => {
+      showSaveState(state, info && info.error);
+      if (typeof onState === 'function') onState(state, info);
+    }
+  });
+  settingsAutosaves.set(key, saver);
+  return saver;
+}
+
+// Pending debounced saves are sent when the drawer closes, whatever closed it.
+function flushSettingsAutosaves() {
+  return Promise.all([...settingsAutosaves.values()].map((saver) => saver.flush()));
+}
 
 function setSettingsDrawer(open) {
   if (!open) flushSettingsAutosaves();
