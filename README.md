@@ -428,7 +428,7 @@ Configure providers and API keys in **Settings**.
 ## Profiles and roles
 
 King Louie uses only the models you place in a role. A **profile** is a named
-set of those assignments; manage profiles in **Settings > Models**.
+set of those assignments; manage profiles in **Settings › Model profiles**.
 
 - **Roles.** `main` answers chats and runs the agent loop, `worker` handles
   sub-agent work such as code exploration, and `utility` handles quick jobs
@@ -468,9 +468,8 @@ King Louie includes a durable workflow engine for executing complex, multi-step 
 
 ### How It Works
 
-1. Go to **Settings > Workflows**
-2. Enter a goal (e.g., "Build a REST API for user authentication with tests and documentation")
-3. Click **Plan & Execute**
+1. In a chat, type a goal (e.g., "Build a REST API for user authentication with tests and documentation")
+2. Click **Plan & Execute**, the button beside Send
 
 The system:
 1. Runs the **Planner Agent** to decompose the goal into a structured task graph
@@ -554,7 +553,7 @@ Categories include office (Excel, Word, LibreOffice), development (VS Code, Curs
 
 ### Managing Apps
 
-Go to **Settings > System Apps** to:
+Go to **Settings › Apps on this computer** to:
 - **View** all discovered apps grouped by category with their launch commands
 - **Re-scan** to refresh after installing new software
 - **Add custom apps** for software in non-standard locations
@@ -729,10 +728,10 @@ module.exports = MySkill;
 
 ```bash
 # From a GitHub repo
-# Settings > Skills > Install, then paste the URL
+# Settings › Skills: paste the URL under "Install a skill", then Install
 
 # From a local directory (symlinked)
-# Settings > Skills > Install, then paste the path
+# Settings › Skills: paste the path under "Install a skill", then Install
 ```
 
 Skills are auto-discovered from the `skills/` directory on startup. User-installed skills go to `%APPDATA%/King Louie/skills/` (Windows) or `~/.config/King Louie/skills/` (Linux/macOS).
@@ -750,14 +749,14 @@ first, then allowlist yourself.
 2. Add the token in Settings or via `/llm telegram add <token>`
 3. The bridge starts automatically
 4. Message the bot. It replies once with your user id and ignores you.
-5. Add that id under **Settings > Channels > Telegram Access** — it is waiting
+5. Add that id under **Settings › Telegram & Discord**, Telegram Access — it is waiting
    there under "Recently refused" with an **Allow User** button.
 
 ### Discord
 
 1. Create a Discord application and bot
 2. Add the bot token in Settings
-3. Allowlist yourself under **Settings > Channels > Discord Access**, the same
+3. Allowlist yourself under **Settings › Telegram & Discord**, Discord Access, the same
    way (Developer Mode → Copy User ID, or use the id the bot replies with)
 4. Mention gating (**Require @mention**) is a separate, narrower control: it
    decides when an *already allowed* sender's message is answered in a group.
@@ -775,7 +774,7 @@ not treat it as gated; treat it as not finished.
 
 | Where | How |
 |-------|-----|
-| Desktop | **Settings > Channels > _channel_ Access** — allowed users, allowed groups/channels, add and remove, plus a one-click **Allow** for whoever was just refused |
+| Desktop | **Settings › Telegram & Discord**, the channel's Access section — allowed users, allowed groups/channels, add and remove, plus a one-click **Allow** for whoever was just refused |
 | Service | `king-louie-service channel list telegram`<br>`king-louie-service channel allow telegram 123456789`<br>`king-louie-service channel allow discord <channel-id> --group`<br>`king-louie-service channel remove telegram 123456789` |
 
 The allowlist holds **user ids** and **group/channel ids**: a message is
@@ -804,7 +803,7 @@ owner chat you name explicitly:
 
 | Where | How |
 |-------|-----|
-| Desktop | **Settings > Channels > _channel_ Access > Approvals** |
+| Desktop | **Settings › Telegram & Discord**, the channel's Access section, Approvals |
 | Service | `king-louie-service channel approval telegram <your-chat-id>`<br>`king-louie-service channel approval telegram --clear` |
 
 **Until you set it, every approval-gated tool call from that channel is
@@ -835,7 +834,12 @@ Each King Louie instance generates a unique cryptographic identity (Ed25519 keyp
 
 ### Setting Up Two Machines
 
-**Step 1: Open Settings > Mesh Network on both machines**
+> The desktop app no longer has a Mesh Network page in Settings (removed in the
+> settings redesign). The mesh itself and the `RemoteDispatch` tool are unchanged;
+> the identity, pairing and manual-peer steps below describe the controls that page had,
+> and the desktop window does not offer them in this version.
+
+**Step 1: Name each machine**
 
 Give each machine a descriptive name and capability tags:
 
@@ -866,13 +870,13 @@ The agent uses the `RemoteDispatch` tool to send the task to the desktop's King 
 
 ### LAN Auto-Discovery
 
-If `bonjour-service` is installed (`npm install bonjour-service`), King Louie automatically discovers other instances on the same local network via mDNS. Discovered peers appear in the Mesh Network settings panel. You still need to pair before they can communicate — discovery just makes finding each other easier.
+If `bonjour-service` is installed (`npm install bonjour-service`), King Louie automatically discovers other instances on the same local network via mDNS. Discovered peers were listed on the former Mesh Network page. You still need to pair before they can communicate — discovery just makes finding each other easier.
 
 ### Manual Peer Connection
 
 For machines on different networks (VPN, Tailscale, WireGuard), add peers manually:
 
-1. Go to **Settings > Mesh Network > Add Peer Manually**
+1. Add the peer manually (the former Mesh Network page's **Add Peer Manually**)
 2. Enter the remote machine's IP address and mesh port (default: `18791`)
 3. Click **Connect**
 
@@ -1192,7 +1196,7 @@ rewritten to `deny`, so a channel that looked closed in the settings pane
 while being open to everyone is now closed in fact.
 
 *If you were using a channel, it stops answering until you allowlist yourself*
-— Settings > Channels > _channel_ Access on the desktop, or
+— Settings › Telegram & Discord, the channel's Access section, on the desktop, or
 `king-louie-service channel allow …` headless. The bot replies once to an
 unrecognised sender with the id to add.
 

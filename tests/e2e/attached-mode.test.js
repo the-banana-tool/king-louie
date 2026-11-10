@@ -56,4 +56,31 @@ describe('E2E: attached mode', { timeout: 240000 }, () => {
     await waitFor(ctx, `window.electron.desktop.status().then((s) => s.view === 'attached-connected')`, 60000);
     await waitFor(ctx, `!document.getElementById('attached-service-banner')`, 10000);
   });
+
+  it('a page opened while the node was down is re-read before it turns editable (final review 2)', async () => {
+    await openSettingsTab(ctx, 'notifications');
+    const pane = `document.querySelector('.settings-tab-content[data-tab="notifications"]')`;
+    await waitFor(ctx, `!${pane}.inert`, 30000);
+    await ctx.service.kill();
+    await waitFor(ctx, `${pane}.inert && !document.querySelector('.settings-tab-content[data-tab="service"]').inert`, 30000);
+    // Count re-reads from here, and record whether one had finished when the pane lifted.
+    await evaluate(ctx, `(() => {
+      window.__loads = 0;
+      window.__loadedWhenLifted = null;
+      const orig = loadSettings;
+      window.loadSettings = async (...args) => { const r = await orig(...args); window.__loads++; return r; };
+      const el = ${pane};
+      new MutationObserver(() => {
+        if (!el.inert && window.__loadedWhenLifted === null) window.__loadedWhenLifted = window.__loads;
+      }).observe(el, { attributes: true, attributeFilter: ['inert'] });
+      return true;
+    })()`);
+    ctx.service = await ctx.service.restart();
+    await evaluate(ctx, `window.electron.desktop.retry(); true`);
+    await waitFor(ctx, `window.electron.desktop.status().then((s) => s.view === 'attached-connected')`, 60000);
+    await waitFor(ctx, `!${pane}.inert`, 30000);
+    const seen = await evaluate(ctx, `({ drawerOpen: !document.getElementById('settings-drawer').hidden, loadedWhenLifted: window.__loadedWhenLifted })`);
+    assert.strictEqual(seen.drawerOpen, true, 'the drawer stayed open');
+    assert.ok(seen.loadedWhenLifted >= 1, `the settings were re-read before the page lifted (${seen.loadedWhenLifted})`);
+  });
 });

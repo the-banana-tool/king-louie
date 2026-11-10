@@ -48,6 +48,14 @@ describe('settingsBanner', () => {
     assert.equal(settingsBanner({ mode: 'attached', view: 'attached-connected' }).text, 'Editing King Louie Node on your node');
   });
 
+  it('a needs-node window is grey and read-only whatever its stored mode (final review 1)', () => {
+    const expected = { tone: 'unreachable', text: 'Not connected to King Louie Node yet: finish setup on Node & connection', readOnly: true };
+    for (const mode of ['standalone', 'attached', undefined]) {
+      assert.deepEqual(settingsBanner({ mode, launch: { why: 'needs-node' } }), expected);
+    }
+    assert.deepEqual(settingsBanner({ mode: 'attached', view: 'attached-connected', launch: { why: 'needs-node' } }), expected);
+  });
+
   it('handles no status at all', () => {
     assert.equal(settingsBanner(null).tone, 'desktop');
   });
@@ -84,10 +92,35 @@ describe('the renderer draws the banner as text (review focus 5)', () => {
   });
 
   it('setSettingsReadOnly makes every page but Node & connection inert', () => {
-    const body = block('function setSettingsReadOnly(');
+    const body = block('function applySettingsInert(');
     assert.match(body, /\.settings-tab-content/);
     assert.match(body, /inert/);
     assert.match(body, /service/);
+    assert.match(block('function setSettingsReadOnly('), /applySettingsInert\(true\)/);
+  });
+
+  it('read-only to editable re-reads the settings before lifting inert (final review 2)', () => {
+    const body = block('function setSettingsReadOnly(');
+    // The transition keeps the pages inert, re-reads, and lifts only after a load that succeeded.
+    const transition = body.slice(body.indexOf('// Read-only to editable'));
+    const inertFirst = transition.indexOf('applySettingsInert(true)');
+    const load = transition.indexOf('await loadSettings()');
+    const failed = transition.indexOf('if (!loaded)');
+    const reshow = transition.indexOf('switchSettingsTab(appState.settingsTab');
+    const lift = transition.indexOf('applySettingsInert(false)');
+    assert.ok(inertFirst >= 0 && load > inertFirst, 'stays inert while it re-reads');
+    assert.ok(failed > load && lift > failed, 'lifts only after a load that succeeded');
+    assert.ok(reshow > load && reshow < lift, 'the shown page is reloaded before it is lifted');
+    // The drawer being open does not skip the re-read.
+    assert.doesNotMatch(transition.slice(0, load), /hidden/);
+    // loadSettings says whether it loaded.
+    const loadBody = block('async function loadSettings(');
+    assert.match(loadBody, /return true;/);
+    assert.match(loadBody, /return false;/);
+  });
+
+  it('dims inert pages', () => {
+    assert.match(read('styles.css'), /\.settings-tab-content\[inert\]\s*\{[^}]*opacity/);
   });
 
   it('the banner is painted on each status and on opening Settings', () => {

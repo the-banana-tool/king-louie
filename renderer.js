@@ -1949,7 +1949,7 @@ function localFailoverNotes(llm, names) {
 }
 
 // A turn refused under the private mark or a local-only role: the sentence
-// for its code; each comes with a button to Settings → Models.
+// for its code; each comes with a button to Settings › Model profiles.
 const PRIVATE_REFUSAL_SENTENCES = Object.freeze({
   PRIVATE_NO_LOCAL_MODEL: 'This needs a local model, and none in the profile can take it.',
   LOCAL_ONLY_ROLE_NO_MODEL: 'This role is local-only, and it has no local model.',
@@ -1981,7 +1981,7 @@ function markdownExportLines(chat) {
   return chat && chat.private === true ? [`${PRIVATE_MARKDOWN_LINE}\n`] : [];
 }
 
-// The keep-local embedder's state (§8.4) for Settings → History, and the
+// The keep-local embedder's state (§8.4) for Settings › History & recall, and the
 // owner-visible sentence when it could not load.
 function keepLocalStatusText(keep, progress) {
   const k = keep && typeof keep === 'object' ? keep : null;
@@ -4426,13 +4426,19 @@ function settingsPageFor(tabName) {
 
 // The only place that chooses the shown page: the pane, the sidebar item,
 // the remembered page, the sections a host does not offer, and the pane's loader.
-function switchSettingsTab(tabName) {
+// `remember: false` shows a page without storing it: a fallback shown because the
+// remembered page is not offered (yet), or a redraw of the page already shown.
+// Only a page the owner chose, or a remembered one restored, is stored.
+function switchSettingsTab(tabName, { remember = true } = {}) {
   if (!dom.settingsDrawer || !tabName) return;
   appState.settingsTab = tabName;
-  try {
-    localStorage.setItem('kl-settings-last-tab', tabName);
-  } catch {
-    // The page works without a remembered tab.
+  if (remember) {
+    appState.settingsPendingTab = null;
+    try {
+      localStorage.setItem('kl-settings-last-tab', tabName);
+    } catch {
+      // The page works without a remembered tab.
+    }
   }
   const page = settingsPageFor(tabName);
   const hidden = new Set(hiddenSections(page, appState.unavailableTabs || []));
@@ -4447,7 +4453,10 @@ function switchSettingsTab(tabName) {
   });
   if (dom.settingsSidebar) {
     dom.settingsSidebar.querySelectorAll('.settings-nav-item').forEach((item) => {
-      item.classList.toggle('is-active', item.dataset.tab === tabName);
+      const active = item.dataset.tab === tabName;
+      item.classList.toggle('is-active', active);
+      if (active) item.setAttribute('aria-current', 'page');
+      else item.removeAttribute('aria-current');
     });
   }
   // Refused senders accumulate while the drawer is closed, so re-read them
@@ -4498,7 +4507,10 @@ function renderSettingsNav() {
       item.className = 'settings-nav-item';
       item.dataset.tab = page.tab;
       item.textContent = page.label;
-      if (page.tab === appState.settingsTab) item.classList.add('is-active');
+      if (page.tab === appState.settingsTab) {
+        item.classList.add('is-active');
+        item.setAttribute('aria-current', 'page');
+      }
       section.appendChild(item);
     }
     return section;
@@ -4805,7 +4817,13 @@ function openSettingsDrawer() {
   paintSettingsBanner(appState.desktopStatus || null);
   loadSettings();
   renderSettingsNav();
-  switchSettingsTab(resolveInitialTab(readLastSettingsTab(), visibleSettingsGroups()));
+  // A remembered page not offered now (a skill page whose pane has not loaded
+  // yet, or a page this host hides) is kept: the fallback shown meanwhile is
+  // not stored over it, and a skill page is restored once its pane loads.
+  const remembered = readLastSettingsTab();
+  const initial = resolveInitialTab(remembered, visibleSettingsGroups());
+  appState.settingsPendingTab = remembered && initial !== remembered ? remembered : null;
+  switchSettingsTab(initial, { remember: false });
 }
 
 // One key row (settings redesign §5.5): name, status, reason and Edit/Add, which
@@ -4987,9 +5005,37 @@ function renderSearchImageRow(item) {
   return wrap;
 }
 
+// Redraws a key-row list without losing what the owner is typing: the values
+// of inputs in rows that are open, before and after, are put back. Only typed
+// values are carried; nothing stored is ever written into an input here.
+function redrawKeyRowsKeepingTyped(container, draw) {
+  if (!container) return;
+  const typed = new Map();
+  const fieldId = (input) => `${input.dataset.provider || input.dataset.searchKey || ''}|${input.dataset.ollamaUrl ? 'url' : 'key'}`;
+  container.querySelectorAll('.key-row').forEach((wrap) => {
+    const editor = wrap.querySelector('.key-row-editor');
+    if (!editor || editor.hidden) return;
+    editor.querySelectorAll('input').forEach((input) => {
+      if (input.value) typed.set(`${wrap.dataset.kind}:${wrap.dataset.provider}:${fieldId(input)}`, input.value);
+    });
+  });
+  draw();
+  if (!typed.size) return;
+  container.querySelectorAll('.key-row').forEach((wrap) => {
+    const editor = wrap.querySelector('.key-row-editor');
+    if (!editor || editor.hidden) return;
+    editor.querySelectorAll('input').forEach((input) => {
+      const value = typed.get(`${wrap.dataset.kind}:${wrap.dataset.provider}:${fieldId(input)}`);
+      if (value !== undefined) input.value = value;
+    });
+  });
+}
+
 function renderSearchImageRows() {
   if (!dom.searchImageList) return;
-  dom.searchImageList.replaceChildren(...SEARCH_IMAGE_KEYS.map(renderSearchImageRow));
+  redrawKeyRowsKeepingTyped(dom.searchImageList, () => {
+    dom.searchImageList.replaceChildren(...SEARCH_IMAGE_KEYS.map(renderSearchImageRow));
+  });
 }
 
 function setSearchImageMessage(key, message, isError = false) {
@@ -5215,9 +5261,8 @@ function renderSettings() {
     dom.memoryCaptureTypeInput.value = 'context';
   }
 
-  dom.providerList.innerHTML = '';
-  Object.entries(appState.settings.providers).forEach(([key, provider]) => {
-    dom.providerList.appendChild(renderProviderCard(key, provider));
+  redrawKeyRowsKeepingTyped(dom.providerList, () => {
+    dom.providerList.replaceChildren(...Object.entries(appState.settings.providers).map(([key, provider]) => renderProviderCard(key, provider)));
   });
   paintProvidersFailingBanner();
   renderSearchImageRows();
@@ -5957,8 +6002,12 @@ async function loadSkillSettingsTabs() {
 
     renderSettingsNav();
     // A skill page shown before its pane was redrawn is shown again.
-    if (appState.settingsTab && appState.settingsTab.startsWith('skill-') && dom.settingsDrawer && !dom.settingsDrawer.hidden) {
-      switchSettingsTab(appState.settingsTab);
+    const drawerOpen = dom.settingsDrawer && !dom.settingsDrawer.hidden;
+    if (drawerOpen && appState.settingsPendingTab && settingsPageFor(appState.settingsPendingTab)) {
+      // The remembered page is offered now: restore it.
+      switchSettingsTab(appState.settingsPendingTab);
+    } else if (appState.settingsTab && appState.settingsTab.startsWith('skill-') && drawerOpen) {
+      switchSettingsTab(appState.settingsTab, { remember: false });
     }
   } catch (err) {
     skillSettingsLog.error(`Failed to load skill settings tabs: ${err.message}`);
@@ -7841,7 +7890,7 @@ async function loadSettings() {
     appState.settings = unwrapIpcResult(await window.electron.settings.load(), 'Unable to load settings.');
     if (!appState.settings.providers || Object.keys(appState.settings.providers).length === 0) {
       setProviderListFallback('No providers returned from settings. Please restart the app.');
-      return;
+      return false;
     }
     renderSettings();
     await loadSkillSettingsTabs();
@@ -7852,6 +7901,7 @@ async function loadSettings() {
     loadWebhookList().catch(() => {});
     loadChannelAccess().catch(() => {});
     loadModelsCatalogStatus().catch(() => {});
+    return true;
   } catch (error) {
     setProviderListFallback(`Unable to load provider settings: ${error.message || 'Unknown error'}`);
     // The hooks come with the settings; the other panes ask for themselves and say
@@ -7866,6 +7916,7 @@ async function loadSettings() {
     loadSystemApps().catch(() => {});
     loadWebhookList().catch(() => {});
     loadChannelAccess().catch(() => {});
+    return false;
   }
 }
 
@@ -7957,7 +8008,7 @@ async function loadModelsCatalogStatus() {
   }
 }
 
-/* --- Models tab: profiles and the catalog (spec 2026-09-27 §11) --- */
+/* --- Settings › Model profiles: profiles and the catalog (spec 2026-09-27 §11) --- */
 
 const MODEL_ROLE_LABELS = {
   main: 'Main: answers you in chats and cases',
@@ -8521,7 +8572,7 @@ async function openPrivateMarkFlow({ chatId = null, caseId = null } = {}) {
   return true;
 }
 
-/* Settings → Models: local servers */
+/* Settings › Local servers */
 
 function setLocalStatus(text, isError = false) {
   if (!dom.modelsLocalStatus) return;
@@ -8976,7 +9027,7 @@ function renderCatalogSettings() {
   if (dom.modelsCatalogOverrides) dom.modelsCatalogOverrides.value = JSON.stringify(models.overrides || {}, null, 2);
 }
 
-/* --- Models tab: the King Louie profile (spec 2026-09-27 §7, §11) --- */
+/* --- Settings › Model profiles: the King Louie profile (spec 2026-09-27 §7, §11) --- */
 
 function roleShortName(role) {
   return (MODEL_ROLE_LABELS[role] || role).split(':')[0];
@@ -9249,7 +9300,7 @@ if (window.electron?.models?.onProposalChanged) {
   window.electron.models.onProposalChanged((view) => renderKingLouie(view));
 }
 
-/* --- Models tab: custom roles (spec 2026-09-27 §6.2, §11) --- */
+/* --- Settings › Model profiles: custom roles (spec 2026-09-27 §6.2, §11) --- */
 
 function customRoleOf(role) {
   return (appState.modelProfiles?.customRoles || []).find((r) => r.id === role) || null;
@@ -13464,7 +13515,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
 
 // A failed turn's message (spec 2026-09-27 §15; local inference L1 §15): a
 // refusal under the private mark says why first, and an action gets its
-// button (the profile's main, or Settings → Models). Drawn the same way when
+// button (the profile's main, or Settings › Model profiles). Drawn the same way when
 // the error arrives and when a stored error row is drawn again, so a redraw
 // keeps the sentence and the button.
 const MESSAGE_ERROR_ACTIONS = Object.freeze(['use-profile-main', 'open-models']);
@@ -14250,7 +14301,7 @@ function initMeshHandlers() {
 }
 
 initMeshHandlers();
-/* --- Settings > Contact (cases stage 4 §3.8; management surfaces §3.5):
+/* --- Settings › Contact ladder (cases stage 4 §3.8; management surfaces §3.5):
    the contact policy — a ladder of channels per urgency, quiet hours, the
    daily digest — and each channel's readiness. Away mode is set_away, in
    words, from any chat. --- */
@@ -15013,7 +15064,7 @@ renderAgentModeButton();
 renderHistoryToggleButton();
 checkFirstRun();
 
-// ── Settings > Local service (fleet stage 7) ──────────────────────────────
+// ── Settings › Node & connection (fleet stage 7) ─────────────────────────
 const serviceLog = createLogger('desktop-service');
 const setupLog = createLogger('desktop-setup');
 const servicePaneState = {
@@ -15483,10 +15534,53 @@ function paintSettingsBanner(status) {
 
 // While the node cannot be reached nothing typed would be saved, so every page
 // but Node & connection (where the owner starts or reconnects it) is inert.
-function setSettingsReadOnly(readOnly) {
+// When it comes back the pages stay inert until the settings are read again:
+// a page drawn during the outage holds defaults, and a whole-form save from it
+// would write those over the node's values. Inert pages hold no typing to lose.
+let settingsReadOnly = false;
+let settingsBannerReadOnly = false;
+let settingsReadOnlyReload = null;
+
+function applySettingsInert(readOnly) {
   document.querySelectorAll('.settings-tab-content').forEach((pane) => {
     pane.inert = Boolean(readOnly) && pane.dataset.tab !== 'service';
   });
+}
+
+function setSettingsReadOnly(readOnly) {
+  const was = settingsReadOnly;
+  settingsReadOnly = Boolean(readOnly);
+  settingsBannerReadOnly = settingsReadOnly;
+  if (settingsReadOnly || settingsReadOnlyReload) {
+    applySettingsInert(true);
+    return;
+  }
+  if (!was) {
+    applySettingsInert(false);
+    return;
+  }
+  // Read-only to editable: re-read first, then lift.
+  applySettingsInert(true);
+  settingsReadOnlyReload = (async () => {
+    let loaded = false;
+    try {
+      loaded = await loadSettings();
+    } finally {
+      settingsReadOnlyReload = null;
+    }
+    if (settingsReadOnly) return;
+    if (!loaded) {
+      // Not read yet: stay inert and try again shortly, unless a newer status
+      // has made the pages read-only again by then.
+      settingsReadOnly = true;
+      setTimeout(() => {
+        if (settingsReadOnly && settingsBannerReadOnly === false) setSettingsReadOnly(false);
+      }, 3000);
+      return;
+    }
+    if (appState.settingsTab && dom.settingsDrawer && !dom.settingsDrawer.hidden) switchSettingsTab(appState.settingsTab, { remember: false });
+    applySettingsInert(false);
+  })().catch((err) => settingsLog.warn(`re-reading settings after the node came back failed: ${err && err.message}`));
 }
 
 function markUnavailableTabs(tabs = []) {
@@ -15496,7 +15590,7 @@ function markUnavailableTabs(tabs = []) {
   if (list.join('\n') !== before) {
     renderSettingsNav();
     // The shown page's sections follow the host's new list.
-    if (appState.settingsTab && dom.settingsDrawer && !dom.settingsDrawer.hidden) switchSettingsTab(appState.settingsTab);
+    if (appState.settingsTab && dom.settingsDrawer && !dom.settingsDrawer.hidden) switchSettingsTab(appState.settingsTab, { remember: false });
   }
   const unavailable = new Set(list);
   document.querySelectorAll('.settings-tab-content').forEach((pane) => {
@@ -15893,8 +15987,10 @@ async function refreshServiceStatus() {
   const conn = status.connection ? status.connection.status : null;
   if (conn === 'connected' && serviceLastConnection && serviceLastConnection !== 'connected') {
     loadChats().then(() => syncRunningChats({ reconnected: true })).catch((err) => chatLog.warn(`Chat load failed: ${err.message}`));
-    // What the panes said with the node down is over; a form open in the drawer is left alone.
-    if (document.getElementById('settings-drawer')?.hidden) loadSettings();
+    // What the panes said with the node down is over. When the banner lifted the
+    // read-only pages, setSettingsReadOnly is already re-reading them (drawer open
+    // or not); otherwise a form open in the drawer is left alone.
+    if (!settingsReadOnlyReload && document.getElementById('settings-drawer')?.hidden) loadSettings();
   }
   serviceLastConnection = conn;
   if (appState.settingsTab === 'service' && dom.settingsDrawer && !dom.settingsDrawer.hidden) {

@@ -122,4 +122,25 @@ describe('E2E: Settings — Providers', () => {
       `);
     }
   });
+
+  it('a redraw of the key rows keeps what the owner is typing in open rows (final review 6)', async () => {
+    const out = await evaluate(ctx, `(() => {
+      const open = (list, key) => {
+        const row = document.querySelector(list + ' .key-row[data-provider="' + key + '"]');
+        if (row.querySelector('.key-row-editor').hidden) row.querySelector('button[data-action="toggle"]').click();
+      };
+      open('#search-image-list', 'tavily');
+      open('#provider-list', 'groq');
+      document.getElementById('websearch-tavily-key-input').value = 'tvly-half-typed';
+      document.querySelector('#provider-list input[data-provider="groq"]').value = 'gsk_half_typed';
+      // What a model-row save or test does after it lands.
+      renderSettings();
+      return {
+        tavily: document.getElementById('websearch-tavily-key-input').value,
+        groq: document.querySelector('#provider-list input[data-provider="groq"]').value,
+        brave: document.getElementById('websearch-brave-key-input').value
+      };
+    })()`);
+    assert.deepStrictEqual(out, { tavily: 'tvly-half-typed', groq: 'gsk_half_typed', brave: '' });
+  });
 });

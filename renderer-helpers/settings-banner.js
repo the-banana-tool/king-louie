@@ -14,6 +14,12 @@ function settingsBannerNodeName(status) {
 
 function settingsBanner(status) {
   const s = status || {};
+  // A needs-node window has no core and no node: its stored mode may say
+  // anything, but nothing saved from a page would land. Only Node & connection
+  // (spared by setSettingsReadOnly) is usable, to finish setup.
+  if (s.launch && s.launch.why === 'needs-node') {
+    return { tone: 'unreachable', text: 'Not connected to King Louie Node yet: finish setup on Node & connection', readOnly: true };
+  }
   if (s.mode !== 'attached') {
     if (s.launch && s.launch.why === 'dev') return { tone: 'dev', text: 'Development standalone', readOnly: false };
     return { tone: 'desktop', text: 'Editing this desktop only, not your node', readOnly: false };

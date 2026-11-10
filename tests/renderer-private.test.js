@@ -74,7 +74,7 @@ describe('renderer: the private mark', () => {
   });
 
   it('the flow asks for the facts first and marks only on the owner\'s confirmation', () => {
-    const flow = block('async function openPrivateMarkFlow(', '\n/* Settings → Models: local servers */');
+    const flow = block('async function openPrivateMarkFlow(', '\n/* Settings › Local servers */');
     assert.doesNotMatch(flow, NO_HTML);
     const first = flow.indexOf('first = await ask({})');
     const confirm = flow.indexOf('showConfirmDialog(question, { before: lines })');

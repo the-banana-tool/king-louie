@@ -1772,6 +1772,12 @@ body {
   gap: 14px;
 }
 
+/* A page that cannot be changed now (the node is unreachable or starting; see
+   setSettingsReadOnly) is dimmed, so it does not look editable. */
+.settings-tab-content[inert] {
+  opacity: 0.6;
+}
+
 .settings-body {
   padding: 16px 20px 24px;
   overflow-y: auto;

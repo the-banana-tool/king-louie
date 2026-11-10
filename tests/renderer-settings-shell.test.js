@@ -49,7 +49,29 @@ describe('settings shell: renderer.js', () => {
   });
 
   it('openSettingsDrawer opens on the remembered page', () => {
-    assert.ok(block('function openSettingsDrawer(').includes('switchSettingsTab(resolveInitialTab('));
+    const body = block('function openSettingsDrawer(');
+    assert.ok(body.includes('resolveInitialTab(remembered'), 'resolves from the remembered page');
+    assert.ok(body.includes('switchSettingsTab(initial, { remember: false })'), 'opens on it');
+  });
+
+  it('a fallback page is never stored over the remembered one (final review 5)', () => {
+    const sw = block('function switchSettingsTab(', 'function renderSettingsNav(');
+    const guard = sw.indexOf('if (remember)');
+    assert.ok(guard >= 0 && sw.indexOf("localStorage.setItem('kl-settings-last-tab'") > guard, 'stores only when remember');
+    const open = block('function openSettingsDrawer(');
+    assert.ok(open.includes('appState.settingsPendingTab = remembered && initial !== remembered ? remembered : null'), 'keeps the unoffered page pending');
+    // Redraws of the shown page do not store it.
+    assert.doesNotMatch(src, /switchSettingsTab\(appState\.settingsTab\)/);
+    // A pending skill page is restored once its pane loads.
+    const skills = block('async function loadSkillSettingsTabs(');
+    assert.ok(skills.includes('switchSettingsTab(appState.settingsPendingTab)'), 'restores the pending page');
+  });
+
+  it('the active sidebar item carries aria-current=page (final review 7)', () => {
+    const sw = block('function switchSettingsTab(', 'function renderSettingsNav(');
+    assert.ok(sw.includes("setAttribute('aria-current', 'page')"));
+    assert.ok(sw.includes("removeAttribute('aria-current')"));
+    assert.ok(block('function renderSettingsNav(').includes("setAttribute('aria-current', 'page')"));
   });
 
   it('closing the drawer flushes pending autosaves', () => {
