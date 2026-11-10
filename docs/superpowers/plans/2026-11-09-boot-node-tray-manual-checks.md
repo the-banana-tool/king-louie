@@ -30,7 +30,7 @@ failure with what the window, `king-louie-service doctor` and
 8. **Shutdown with the app in the tray.** Log off, then shut down, with King Louie in the
    tray. Pass: no "King Louie is preventing shutdown" prompt.
 9. **Quit during a take.** Quit from the tray while a take records. Pass: it asks "A take
-   is recording. Quit and end it?"; No leaves it recording.
+   is recording. Quit and end it?" (buttons Quit and Cancel); Cancel leaves it recording.
 10. **Uninstall.** Settings > Local service > uninstall (or `uninstall --personal`). Pass: one
     UAC prompt; `schtasks /Query /TN "KingLouie Node"` finds nothing; the `King Louie` Run
     value is gone; the data dir is still there.
@@ -40,3 +40,10 @@ failure with what the window, `king-louie-service doctor` and
 12. **Stop.** `king-louie-service stop` after a boot start. Pass: the node process is gone (no
     leftover node.exe from the task's wrapper), and `schtasks /Run /TN "KingLouie Node"`
     brings it back.
+13. **The desktop profile after a boot start.** After a reboot where the boot task started
+    before login, open King Louie. Pass: it is still paired (no setup view) and your chats
+    load.
+14. **Update while the boot task runs.** Install a newer build of King Louie while the node
+    runs from the boot task. Pass: the installer completes, and after it the node runs the
+    new version (the doctor or version row says so); reboot if needed, and report whether a
+    reboot was needed.

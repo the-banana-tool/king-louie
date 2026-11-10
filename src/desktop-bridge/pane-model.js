@@ -43,7 +43,7 @@ const NODE_LINES = {
   STARTING: 'Starting King Louie Node…'
 };
 const TASK_CODES = { missing: 'NODE_TASK_MISSING', disabled: 'NODE_TASK_DISABLED', 'other-account': 'NODE_TASK_OTHER_ACCOUNT' };
-const INSTALL_DECLINED_LINE = 'Windows did not register the task: the administrator prompt was declined. Nothing else changed.';
+const INSTALL_DECLINED_LINE = 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.';
 const START_FAILED = (line) => `King Louie Node stopped while starting: ${plain(line)}`;
 const RUN_FAILED = (message) => `King Louie Node could not be started: ${plain(message)}`;
 const STOP_FAILED = (message) => `King Louie Node could not be stopped: ${plain(message)}`;

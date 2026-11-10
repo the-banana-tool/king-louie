@@ -38,7 +38,9 @@ const BOOT_LINES = [
 const NOT_THE_APP = 'install --personal runs from the installed King Louie app: open King Louie and use Install, or run its king-louie-service command';
 const NOT_AN_ADMINISTRATOR = 'the boot task needs an administrator account: your account is not in Administrators';
 const TASK_XML_FILE = 'king-louie-node-task.xml';
-const DECLINED = (what) => `Windows did not ${what} the task: the administrator prompt was declined. Nothing else changed.`;
+const INSTALL_DECLINED = 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.';
+const UNINSTALL_DECLINED = 'Windows did not remove the task: the administrator prompt was declined. The node is still installed and running.';
+const UNINSTALL_DECLINED_STOPPED = 'Windows did not remove the task: the administrator prompt was declined. The node is still installed.';
 const ELEVATED_FAILED = (what, r) => `Windows did not ${what} the task: ${r.message}`;
 const BINARY_LINE = (bin) => `binary:     ${bin}, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed`;
 const ALREADY_RUNNING = (pid) => `King Louie Node is already running (pid ${pid}); the task starts it at the next boot.`;
@@ -128,7 +130,12 @@ function renderServiceCli({ nodePath, entryPath }) {
 const loginStartText = (appPath) => `HKCU Run "${LOGIN_START_VALUE}" = ${loginStartCommand(appPath)}`;
 const errText = (err) => (err && err.message ? err.message : String(err));
 // The elevated step's refusal, one line: declined, or what schtasks said.
-const elevatedRefusal = (what, r) => (r && r.code === 'UAC_DECLINED' ? DECLINED(what) : ELEVATED_FAILED(what, r || { message: 'it gave no answer.' }));
+const installRefusal = (r) => (r && r.code === 'UAC_DECLINED' ? INSTALL_DECLINED : ELEVATED_FAILED('register', r || { message: 'it gave no answer.' }));
+// Nothing has changed when the delete is refused: the node was not stopped.
+const uninstallRefusal = (r, running) => {
+  if (r && r.code === 'UAC_DECLINED') return running ? UNINSTALL_DECLINED : UNINSTALL_DECLINED_STOPPED;
+  return `${ELEVATED_FAILED('remove', r || { message: 'it gave no answer.' })} The node is still installed${running ? ' and running' : ''}.`;
+};
 const cliLeftLine = (file) => `${shown(file, 400)} is left where it is: King Louie did not write it.`;
 
 function defaultWhoAmI(env) {
@@ -516,7 +523,7 @@ async function install({ flags, io, c }) {
     await c.execute([removeXml]);
   }
   if (!registered || !registered.ok) {
-    io.stderr.write(`${elevatedRefusal('register', registered)}\n`);
+    io.stderr.write(`${installRefusal(registered)}\n`);
     return 1;
   }
   // The task is registered; a start at login that cannot be set is said, not a failure.
@@ -597,8 +604,9 @@ async function uninstall({ flags, io, c }) {
   }
   const info = c.taskInfo() || {};
   // The S4U boot task is deleted elevated (its descriptor lets the owner read and
-  // run it, nothing more); an older InteractiveToken logon task is the owner's own.
-  const boot = info.logonType === 'S4U';
+  // run it, nothing more); only a task known to be an older InteractiveToken logon
+  // task is the owner's own. A task whose XML could not be read goes the elevated way.
+  const boot = info.logonType !== 'InteractiveToken';
   const schtasks = windowsSchtasksExe(c.env);
   const deleteArgs = ['/Delete', '/TN', PERSONAL_TASK_NAME, '/F'];
   const steps = boot ? cliSteps : [
@@ -608,11 +616,19 @@ async function uninstall({ flags, io, c }) {
     ...cliSteps
   ];
   const stays = `The data dir ${dataDir} stays, and so does the config dir beside it: the node's identity, chats and vault are in them. Delete them yourself to remove the node.`;
+  const stopText = require('./commands/stop').stopCommandText(dataDir);
   // Ending a task never stops the node itself (an old logon task's /End kills only
-  // its PowerShell wrapper), so the node is stopped first, the way `stop` stops it.
+  // its PowerShell wrapper), so the node is stopped the way `stop` stops it: for the
+  // owner's own logon task before the task goes; for the boot task only once the
+  // elevated delete has gone through, so a declined prompt leaves the node running.
   if (flags.dryRun) {
-    io.stdout.write(`  stop the node running on ${dataDir}, if any (${require('./commands/stop').stopCommandText(dataDir)})\n`);
-    if (boot) io.stdout.write(`[dry-run] delete the boot task "${PERSONAL_TASK_NAME}" through one administrator prompt: ${[schtasks, ...deleteArgs].join(' ')}\n`);
+    const stopLine = `  stop the node running on ${dataDir}, if any (${stopText})\n`;
+    if (boot) {
+      io.stdout.write(`[dry-run] delete the boot task "${PERSONAL_TASK_NAME}" through one administrator prompt: ${[schtasks, ...deleteArgs].join(' ')}\n`);
+      io.stdout.write(stopLine);
+    } else {
+      io.stdout.write(stopLine);
+    }
     await executeSteps(steps, { dryRun: true, io });
     io.stdout.write(loginDry);
     io.stdout.write(`${stays}\n`);
@@ -622,24 +638,29 @@ async function uninstall({ flags, io, c }) {
     io.stderr.write('Not removing without confirmation. Nothing was removed.\n');
     return 1;
   }
-  if (c.runningServicePid(dataDir)) {
-    if ((await c.stopNode(dataDir)) !== 0) {
-      io.stderr.write(`The node on ${dataDir} did not stop, so the task was not removed. Stop it (${require('./commands/stop').stopCommandText(dataDir)} --force), then run this again.\n`);
-      return 1;
-    }
-  }
+  let code = 0;
   if (boot) {
     io.stdout.write(`delete the boot task "${PERSONAL_TASK_NAME}": Windows asks for an administrator's yes\n`);
     const removed = await c.elevated(deleteArgs);
     if (!removed || !removed.ok) {
-      io.stderr.write(`${elevatedRefusal('remove', removed)}\n`);
+      const running = Boolean(c.runningServicePid(dataDir));
+      io.stderr.write(`${uninstallRefusal(removed, running)}\n`);
+      return 1;
+    }
+    if (c.runningServicePid(dataDir) && (await c.stopNode(dataDir)) !== 0) {
+      io.stderr.write(`The boot task "${PERSONAL_TASK_NAME}" was removed, but the node on ${dataDir} did not stop. Stop it (${stopText} --force).\n`);
+      code = 1;
+    }
+  } else if (c.runningServicePid(dataDir)) {
+    if ((await c.stopNode(dataDir)) !== 0) {
+      io.stderr.write(`The node on ${dataDir} did not stop, so the task was not removed. Stop it (${stopText} --force), then run this again.\n`);
       return 1;
     }
   }
   if (steps.length) await c.execute(steps);
   loginStartOff(io, c);
   io.stdout.write(`${stays}\n`);
-  return 0;
+  return code;
 }
 
 async function runPersonalInstall({ command, flags = {}, io, deps = {} }) {

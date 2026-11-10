@@ -170,7 +170,7 @@ describe('describeServicePane: personal node', () => {
 
   it('NODE_INSTALL_DECLINED is worded as the CLI says it', () => {
     const m = describeInstallResult({ ok: false, code: 'NODE_INSTALL_DECLINED', message: 'ignored', lines: [] });
-    assert.strictEqual(m.error, 'Windows did not register the task: the administrator prompt was declined. Nothing else changed.');
+    assert.strictEqual(m.error, 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.');
   });
 
   it('unpaired with no boot task: Install… beside Pair', () => {

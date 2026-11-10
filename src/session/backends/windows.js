@@ -13,6 +13,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { createLogger } = require('../../logging');
 const { windowsPowerShellExe } = require('../../platform/windows-paths');
+const { asarUnpackedPath } = require('../../platform/paths');
 const { GuiError } = require('../../gui/errors');
 const { LineWorker } = require('./line-worker');
 
@@ -63,10 +64,17 @@ function parsePortFile(text) {
   return { port, path: pathLine };
 }
 
+// powershell.exe -File reads the script from disk itself, and it cannot read
+// inside a packaged app's app.asar: the file is listed in build.asarUnpack and
+// read from app.asar.unpacked (the path is unchanged outside an asar).
+function defaultWorkerFile(dir = __dirname) {
+  return asarUnpackedPath(path.join(dir, 'windows-worker.ps1'));
+}
+
 const evenSide = (n) => Number.isInteger(n) && n >= 16 && n <= 16384 && n % 2 === 0;
 
 function createWindowsBackend({
-  env = process.env, log = createLogger('session-helper/windows'), spawnImpl = spawn, workerFile = path.join(__dirname, 'windows-worker.ps1'),
+  env = process.env, log = createLogger('session-helper/windows'), spawnImpl = spawn, workerFile = defaultWorkerFile(),
   readFile = fs.promises.readFile, unlink = fs.promises.unlink, mkdir = fs.promises.mkdir, statSync = fs.statSync, clock = Date.now,
   timers = { setTimeout, clearTimeout }, profileRoot = null
 } = {}) {
@@ -277,4 +285,4 @@ function createWindowsBackend({
   };
 }
 
-module.exports = { createWindowsBackend, parsePortFile, reservedSwitch, PROFILE_NAME, TAKE_ID };
+module.exports = { createWindowsBackend, defaultWorkerFile, parsePortFile, reservedSwitch, PROFILE_NAME, TAKE_ID };

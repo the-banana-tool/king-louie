@@ -1259,10 +1259,11 @@ tray when it is attached to a personal node, and is the node's **screen host**:
 it connects to the node over a named pipe, using the key the node wrote to
 `<data dir>\session\personal-helper.json`, and serves the screenshots, input,
 windows, recordings and take browsers the node asks for, in your session. Until
-it connects, GUI tools refuse `screen_host_not_connected` (`King Louie is not
-running in your session: log in, or open King Louie`), and a chat's browser
-tool refuses saved profiles with `screen_host_missing` (`Saved logins are
-available after you log in`); an ephemeral browser still works. Closing the
+it connects, GUI tools refuse `capability_unavailable` with the reason
+`screen_host_not_connected` (`King Louie is not running in your session: log
+in, or open King Louie`), and a chat's browser tool refuses saved profiles with
+`screen_host_missing` (`Saved logins are available after you log in`); an
+ephemeral browser still works, headless. Closing the
 window hides it to the tray; **Quit** from the tray asks first while a take
 records. The tray shows the node's state in its tooltip and a menu line (one
 icon). **Settings > Local service** has **Start King Louie when I log in**; an
@@ -1560,27 +1561,34 @@ node's browser jobs start with fresh profiles; add the logins with
 ### Uninstall
 
 `king-louie-service uninstall --personal [--data-dir DIR] [--dry-run] [--yes]`
-stops the node the way `king-louie-service stop` does, then ends and
-deletes the task through the same elevated step (a second UAC prompt) and
-turns off the app's start at login, after a `[y/N]` (`--yes` off a terminal). A node
-that does not stop in time leaves the task registered; stop it with
-`stop --force` and run uninstall again.
+deletes the boot task through the same elevated step (a second UAC prompt),
+then stops the node the way `king-louie-service stop` does, and turns off the
+app's start at login, after a `[y/N]` (`--yes` off a terminal). Declining the
+prompt changes nothing: `Windows did not remove the task: the administrator
+prompt was declined. The node is still installed and running.` A node that
+does not stop in time after the task is gone is named with `stop --force`. An
+older logon task is stopped first and then ended and deleted without a prompt;
+there a node that does not stop leaves the task registered.
 The data dir and the config dir stay, with the node's identity, chats and
 vault; delete them yourself to remove the node. When the task is not
 registered it says so, removes nothing and exits 0.
 
 ### Known limits
 
-- After a reboot the node is down until you log in (a Windows Update restart
-  while you are away included): the phones show "Could not confirm" for it
-  and a take cannot start. Automatic logon is your own choice and not part
-  of this.
+- After a reboot the node starts at boot, but screen work (takes, computer use)
+  and saved browser logins wait until you log in and King Louie is in the tray.
+  The S4U task has no network credentials: shares that need your Windows
+  sign-in fail.
+- Updating King Louie while the boot task's node runs is unverified: the
+  installer may need the node stopped, or a reboot, before the node runs the
+  new version (check the version row afterwards).
+- A take that ends with `keep_browser` while the app is the screen host is not
+  recorded as holding its profile: the next start on that profile fails
+  `browser_launch_failed` until you close that Chrome window.
 - The owner account is the trust boundary: anything running as you can
   drive the node through `mcp` and change its approver set, and a shell the
   phone approves can do anything you can. The deny list covers the file
   tools only.
-- Attached, the node is still down from a reboot until you log in; the
-  desktop app then starts it at launch.
 - A node you started by hand in a terminal stops when that terminal closes;
   the app then offers **Start King Louie Node**, which starts the logon
   task, not the terminal.

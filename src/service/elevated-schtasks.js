@@ -79,4 +79,4 @@ async function runElevatedSchtasks(args, { execFile = runDefault, env = process.
   return { ok: true };
 }
 
-module.exports = { runElevatedSchtasks, buildElevateScript, ELEVATE_SCRIPT };
+module.exports = { runElevatedSchtasks, buildElevateScript, ELEVATE_SCRIPT, ELEVATE_TIMEOUT_MS };

@@ -281,7 +281,11 @@ in" becomes: the node is up; screen tools and saved logins wait for login.
   executable. A boot-started node running the app's binary may be in
   another session; the builder confirms the installer still stops it or
   that the node restarts on the new files (stage 2 §6.8 row "App updated
-  while the node runs").
+  while the node runs"). Unverified until manual check 14: the installer may
+  need the node stopped, or a reboot, before the node runs the new version.
+- A screen-host take with `keep_browser` is not recorded as holding its
+  profile; the next start on that profile fails `browser_launch_failed` until
+  that Chrome is closed.
 
 - The screen host's pipe is not owner-only (§5.2): another local account can
   hold its unauthenticated slots and keep the tray app from connecting.

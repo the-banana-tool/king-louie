@@ -795,7 +795,7 @@ describe('install --personal: the boot task, one UAC prompt and the login start'
     d.elevated = async (args) => { d.executed.push([{ elevated: args }]); return { ok: false, code: 'UAC_DECLINED', message: 'The administrator prompt was declined.' }; };
     const { code, t } = await run('install', s, d);
     assert.equal(code, 1);
-    assert.equal(t.errors(), 'Windows did not register the task: the administrator prompt was declined. Nothing else changed.\n');
+    assert.equal(t.errors(), 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.\n');
     assert.deepEqual(d.loginStarts, []);
     assert.ok(!argvs(d).some((argv) => argv.includes('/Run')));
     assert.ok(d.executed.flat().some((step) => step.unlink && step.unlink.endsWith('king-louie-node-task.xml')), 'the XML is still deleted');
@@ -901,7 +901,7 @@ describe('renderPersonalTaskXml', () => {
 });
 
 describe('uninstall --personal', () => {
-  it('uninstall stops the node, deletes the task through the elevated step, and turns the login start off', async () => {
+  it('uninstall deletes the task through the elevated step, then stops the node, and turns the login start off', async () => {
     const s = setup();
     const order = [];
     const d = deps(s, {
@@ -913,7 +913,7 @@ describe('uninstall --personal', () => {
     d.setLoginStart = (opts) => { order.push('login'); d.loginStarts.push(opts); };
     const { code, t } = await run('uninstall', s, d, { yes: true });
     assert.equal(code, 0, t.errors());
-    assert.deepEqual(order, [`stop ${path.resolve(s.dataDir)}`, 'elevated', 'login']);
+    assert.deepEqual(order, ['elevated', `stop ${path.resolve(s.dataDir)}`, 'login']);
     assert.deepEqual(elevatedCalls(d), [['/Delete', '/TN', PERSONAL_TASK_NAME, '/F']]);
     assert.ok(!argvs(d).some((argv) => argv.includes('/End')), 'no unelevated /End for the boot task');
     assert.deepEqual(d.loginStarts, [{ on: false }]);
@@ -945,9 +945,52 @@ describe('uninstall --personal', () => {
     const d = deps(s, { elevated: async () => ({ ok: false, code: 'UAC_DECLINED', message: 'The administrator prompt was declined.' }) });
     const { code, t } = await run('uninstall', s, d, { yes: true });
     assert.equal(code, 1);
-    assert.equal(t.errors(), 'Windows did not remove the task: the administrator prompt was declined. Nothing else changed.\n');
+    assert.equal(t.errors(), 'Windows did not remove the task: the administrator prompt was declined. The node is still installed.\n');
     assert.deepEqual(d.loginStarts, []);
     assert.equal(d.executed.length, 0);
+  });
+
+  it('a declined prompt with the node running: the node is never stopped, and the refusal says it still runs', async () => {
+    const s = setup();
+    const d = deps(s, {
+      runningServicePid: () => 4321,
+      stopNode: async () => { throw new Error('stopNode must not be called when the delete was declined'); },
+      elevated: async () => ({ ok: false, code: 'UAC_DECLINED', message: 'The administrator prompt was declined.' })
+    });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 1);
+    assert.equal(t.errors(), 'Windows did not remove the task: the administrator prompt was declined. The node is still installed and running.\n');
+    assert.deepEqual(d.loginStarts, []);
+    assert.equal(d.executed.length, 0);
+  });
+
+  it('a failed elevated delete (not declined) says the task was not removed and leaves the node running', async () => {
+    const s = setup();
+    const d = deps(s, {
+      runningServicePid: () => 4321,
+      stopNode: async () => { throw new Error('stopNode must not be called'); },
+      elevated: async () => ({ ok: false, code: 'SCHTASKS_FAILED', message: 'ERROR: Access is denied.' })
+    });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 1);
+    assert.equal(t.errors(), 'Windows did not remove the task: ERROR: Access is denied. The node is still installed and running.\n');
+  });
+
+  it('a task whose XML cannot be read (taskInfo null) goes the elevated way', async () => {
+    const s = setup();
+    const d = deps(s, { taskInfo: () => null });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 0, t.errors());
+    assert.deepEqual(elevatedCalls(d), [['/Delete', '/TN', PERSONAL_TASK_NAME, '/F']]);
+    assert.ok(!argvs(d).some((argv) => argv[0] !== '(elevated)' && (argv.includes('/End') || argv.includes('/Delete'))), 'no unelevated schtasks');
+  });
+
+  it('a task with an unknown logon type goes the elevated way too', async () => {
+    const s = setup();
+    const d = deps(s, { taskInfo: () => ({ logonType: null }) });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 0, t.errors());
+    assert.deepEqual(elevatedCalls(d), [['/Delete', '/TN', PERSONAL_TASK_NAME, '/F']]);
   });
 
   it('a login start that cannot be turned off is a warning, exit 0', async () => {
@@ -958,9 +1001,20 @@ describe('uninstall --personal', () => {
     assert.match(t.text(), /^warning: the "King Louie" start-at-login entry was not removed \(Access is denied\.\)\.$/m);
   });
 
-  it('a node that does not stop: the task is left registered, and the refusal names stop --force', async () => {
+  it('a boot task removed but a node that does not stop: exit 1, naming stop --force; the rest still runs', async () => {
     const s = setup();
     const d = deps(s, { runningServicePid: () => 4321, stopNode: async () => 1 });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 1);
+    assert.deepEqual(elevatedCalls(d), [['/Delete', '/TN', PERSONAL_TASK_NAME, '/F']]);
+    assert.match(t.errors(), /was removed, but the node on .* did not stop/);
+    assert.match(t.errors(), /king-louie-service stop --data-dir .* --force/);
+    assert.deepEqual(d.loginStarts, [{ on: false }]);
+  });
+
+  it('an older logon task whose node does not stop: the task is left registered, and the refusal names stop --force', async () => {
+    const s = setup();
+    const d = deps(s, { taskInfo: () => ({ logonType: 'InteractiveToken' }), runningServicePid: () => 4321, stopNode: async () => 1 });
     const { code, t } = await run('uninstall', s, d, { yes: true });
     assert.equal(code, 1);
     assert.equal(d.executed.length, 0);
@@ -969,7 +1023,7 @@ describe('uninstall --personal', () => {
     assert.match(t.errors(), /king-louie-service stop --data-dir .* --force/);
   });
 
-  it('--dry-run says it would stop the node first, then the elevated delete, and runs nothing', async () => {
+  it('--dry-run says it would do the elevated delete first, then stop the node, and runs nothing', async () => {
     const s = setup();
     const d = deps(s, { runningServicePid: () => 4321 });
     const { code, t } = await run('uninstall', s, d, { dryRun: true });
@@ -977,7 +1031,7 @@ describe('uninstall --personal', () => {
     const out = t.text();
     const stop = out.indexOf('stop the node running on');
     const del = out.indexOf('through one administrator prompt: C:\\Windows\\System32\\schtasks.exe /Delete /TN KingLouie Node /F');
-    assert.ok(stop !== -1 && del > stop, out);
+    assert.ok(del !== -1 && stop > del, out);
     assert.match(out, /\[dry-run\] turn off the "King Louie" start-at-login entry/);
     assert.equal(d.executed.length, 0);
     assert.deepEqual(d.loginStarts, []);

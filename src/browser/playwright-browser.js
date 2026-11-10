@@ -199,6 +199,7 @@ class PlaywrightBrowser {
     this._persistent = false; // Whether using persistent context
     this._attached = false; // Whether attached over CDP to a Chrome another process launched
     this._screenHostLaunched = false; // Whether start() had the screen host launch that Chrome (stop() closes it)
+    this._screenHostRelease = null; // Tells the launcher, once, that the Chrome it started is closed
     this._dialogAction = 'dismiss'; // 'accept', 'dismiss', or 'prompt:text'
     this._routes = [];
   }
@@ -225,11 +226,24 @@ class PlaywrightBrowser {
     if (options.userDataPath) {
       const launcher = require('../tools/builtin/browser-registry').screenHostLauncher();
       if (launcher) {
+        // A Chrome from an earlier start that went away by itself (closed by hand) and was
+        // never stopped: forget its pid before the next launch.
+        if (this._screenHostRelease) {
+          const release = this._screenHostRelease;
+          this._screenHostRelease = null;
+          try { release(); } catch { /* bookkeeping only */ }
+        }
         const launched = await launcher.launch({ userDataPath: options.userDataPath, headless });
         try {
           // The page keeps the window's own size: no emulated viewport on the owner's Chrome.
           await this.attach({ cdpUrl: launched && launched.cdpUrl });
           this._screenHostLaunched = true;
+          // Set only once attached: on a failed attach closeLaunched below ends the pid,
+          // and must still find it recorded.
+          if (launched && Number.isInteger(launched.pid) && typeof launcher.forget === 'function') {
+            const pid = launched.pid;
+            this._screenHostRelease = () => launcher.forget(pid);
+          }
         } catch (err) {
           // Half attached: let go (and close that Chrome over CDP when connected), then end it
           // by its pid through the screen host, so it does not hold the profile lock.
@@ -349,6 +363,11 @@ class PlaywrightBrowser {
     this._persistent = false;
     this._attached = false;
     this._screenHostLaunched = false;
+    const release = this._screenHostRelease;
+    this._screenHostRelease = null;
+    if (release) {
+      try { release(); } catch { /* bookkeeping only */ }
+    }
     this._routes = [];
   }
 

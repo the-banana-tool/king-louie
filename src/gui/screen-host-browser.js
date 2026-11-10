@@ -51,6 +51,11 @@ function createScreenHostLauncher({ broker, guiConfig, profilesRoot }) {
     // fails), through the screen host, so it does not hold the profile lock. Best effort.
     async closeLaunched(pid) {
       if (Number.isInteger(pid)) await closeQuietly(pid);
+    },
+    // A Chrome this launcher started that its browser has closed (PlaywrightBrowser#stop):
+    // the broker forgets its pid, so the launched record does not grow across starts.
+    forget(pid) {
+      if (Number.isInteger(pid) && typeof broker.forgetLaunched === 'function') broker.forgetLaunched(pid, LAUNCH_CTX);
     }
   };
   async function closeQuietly(pid) {

@@ -1,7 +1,9 @@
 // The boot task's launch (--kl-node-service): re-run as plain Node with no console and
-// exit with its code. Before electron, and before the single-instance claim.
+// exit with its code. Before the app's own use of electron, and before the single-instance
+// claim. Its Electron userData is a temp folder, never the desktop profile.
 const nodeLauncher = require('./src/desktop-bridge/node-launcher');
 if (nodeLauncher.isNodeServiceLaunch(process.argv)) {
+  nodeLauncher.prepareLauncherApp(require('electron').app);
   nodeLauncher.runNodeService({ argv: process.argv, execPath: process.execPath, env: process.env }).then((code) => process.exit(code));
   return;
 }

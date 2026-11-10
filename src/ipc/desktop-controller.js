@@ -60,7 +60,9 @@ const BRIDGE_FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'TOO_MANY_
 // that is not up yet.
 const PAIR_FATAL = new Set([...BRIDGE_FATAL, 'PAIR_SERVICE_CHANGED', 'PAIR_NOT_FOUND', 'PAIR_CONFIRM_STALE', 'NOT_PAIRING']);
 const INITIAL_NODE_STATE = Object.freeze({ task: 'unknown', taskKind: null, running: false, pid: null, starting: false, startError: null });
-const INSTALL_CLI_TIMEOUT_MS = 120000;
+// The install CLI waits up to ELEVATE_TIMEOUT_MS (300 s) for the owner's answer
+// to the UAC prompt, so the window waits longer than that.
+const INSTALL_CLI_TIMEOUT_MS = 330000;
 const NOT_PERSONAL_TEXT = 'No King Louie Node on this computer is paired with this desktop.';
 // §6.5: named beside what the node's plan lists, since the engine walks none of them.
 const STAYS_BEHIND_FIXED = Object.freeze([
@@ -97,7 +99,7 @@ const BEFORE_THE_FORM = new Set(['install', 'pair', 'start', 'migrate']);
 const INSTALL_ELEVATED = /runs as you, not elevated/;
 // install --personal's one elevated step, declined at the UAC prompt (personal-install.js DECLINED).
 const INSTALL_DECLINED = /the administrator prompt was declined/;
-const INSTALL_DECLINED_TEXT = 'Windows did not register the task: the administrator prompt was declined. Nothing else changed.';
+const INSTALL_DECLINED_TEXT = 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.';
 const RESTARTING_AFTER_MOVE = 'Restarting King Louie Node, so what moved starts…';
 // The task's program is gone (§6.8): nothing `/Run` could start.
 const programGoneText = (file) => `King Louie Node's boot task runs ${file}, which is no longer there, so the node cannot start. Install registers the task again from this app.`;
@@ -2049,4 +2051,4 @@ ${stdout}`)) {
   };
 }
 
-module.exports = { createDesktopController, DETACH_WARNING, DETACH_WARNING_WINDOWS, STANDALONE_ONCE };
+module.exports = { createDesktopController, DETACH_WARNING, DETACH_WARNING_WINDOWS, STANDALONE_ONCE, INSTALL_CLI_TIMEOUT_MS };

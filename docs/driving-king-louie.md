@@ -97,7 +97,8 @@ The service runs as you, from the boot task `KingLouie Node` (S4U: it starts
 before you log in, with no stored password); the owner account is the trust
 boundary. The King Louie app, started at login into the tray, is the node's
 screen host: until it connects (after you log in or open it), GUI tools
-refuse `screen_host_not_connected` and saved browser logins are unavailable
+refuse `capability_unavailable` with the reason `screen_host_not_connected`
+and saved browser logins are unavailable
 (`screen_host_missing`). The install runs from the installed app (one UAC
 prompt), not from a checkout. On first run the
 desktop window installs the node, pairs with it, starts it and moves the old

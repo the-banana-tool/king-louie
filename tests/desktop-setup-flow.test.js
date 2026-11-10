@@ -935,8 +935,8 @@ describe('the install step says boot (boot-node-tray spec 5.5)', () => {
   });
 
   it('a declined prompt is the CLI sentence', () => {
-    const answer = describeSetup(base({ node: { ...NODE, task: 'missing' }, installResult: { ok: false, code: 'NODE_INSTALL_DECLINED', message: 'Windows did not register the task: the administrator prompt was declined. Nothing else changed.', lines: [] } }));
+    const answer = describeSetup(base({ node: { ...NODE, task: 'missing' }, installResult: { ok: false, code: 'NODE_INSTALL_DECLINED', message: 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.', lines: [] } }));
     assert.strictEqual(answer.error.code, 'NODE_INSTALL_DECLINED');
-    assert.strictEqual(answer.error.message, 'Windows did not register the task: the administrator prompt was declined. Nothing else changed.');
+    assert.strictEqual(answer.error.message, 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.');
   });
 });

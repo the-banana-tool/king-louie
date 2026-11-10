@@ -1616,7 +1616,15 @@ describe('desktop controller: Install from the pane (§8)', () => {
 // --- The node's hosting and the version gap (spec 2026-11-03 §6.8, §8, C-12).
 
 describe('desktop controller: the boot task install and the login-start setting (boot-node-tray task 9)', () => {
-  const DECLINED = 'Windows did not register the task: the administrator prompt was declined. Nothing else changed.';
+  const DECLINED = 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.';
+
+  it('the window waits for the install CLI longer than the CLI waits for the UAC answer', () => {
+    const { INSTALL_CLI_TIMEOUT_MS } = require('../src/ipc/desktop-controller');
+    const { ELEVATE_TIMEOUT_MS } = require('../src/service/elevated-schtasks');
+    assert.strictEqual(ELEVATE_TIMEOUT_MS, 300000);
+    assert.strictEqual(INSTALL_CLI_TIMEOUT_MS, 330000);
+    assert.ok(INSTALL_CLI_TIMEOUT_MS > ELEVATE_TIMEOUT_MS);
+  });
 
   it('a declined UAC prompt is NODE_INSTALL_DECLINED with the CLI sentence, for the press and the preview', async () => {
     const runner = fakeRunner({ task: 'missing', cli: () => ({ code: 1, stdout: '', stderr: `${DECLINED}

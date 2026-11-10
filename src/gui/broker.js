@@ -373,9 +373,25 @@ class GuiBroker extends EventEmitter {
         this.log.warn(`closing a launched process: the forced close failed (${codeOf(err)})`);
       }
     }
-    for (const pids of byApp.values()) pids.delete(pid);
+    this._dropLaunched(ctx.jobId, pid);
     this._audit('gui.close', { job_id: ctx.jobId, app_id: appId, pids: closed, forced });
     return { closed, forced };
+  }
+
+  // A launched process that ended another way (a screen-host browser closed over
+  // CDP by its PlaywrightBrowser#stop): forgotten, so the record does not grow.
+  forgetLaunched(pid, ctx = {}) {
+    if (ctx.jobId && Number.isInteger(pid)) this._dropLaunched(ctx.jobId, pid);
+  }
+
+  _dropLaunched(jobId, pid) {
+    const byApp = this.launched.get(jobId);
+    if (!byApp) return;
+    for (const [appId, pids] of byApp) {
+      pids.delete(pid);
+      if (!pids.size) byApp.delete(appId);
+    }
+    if (!byApp.size) this.launched.delete(jobId);
   }
 
   // The id a job names one window by. A handle keeps its id for the job.

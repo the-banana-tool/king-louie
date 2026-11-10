@@ -1,8 +1,9 @@
 // tests/gui-personal-screen-host.test.js
 // A personal node started at boot (`run --screen-host app`, boot-node-tray
 // plan D-2, D-3): the GUI subsystem serves the screen through the King Louie
-// app over the kl-session-v1 HelperChannel on an owner-only pipe, whose name
-// and key it writes to <dataDir>/session/personal-helper.json.
+// app over the kl-session-v1 HelperChannel on a named pipe, whose name and key
+// (the boundary: the pipe is not owner-only) it writes to
+// <dataDir>/session/personal-helper.json.
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
@@ -203,7 +204,7 @@ describe('screenHost app: the GUI subsystem', { skip: !WIN && 'the screen host i
     assert.equal(linux.unavailable.reason, 'gui_start_failed');
   });
 
-  it('a file that cannot be written makes start() fail the normal way (gui_start_failed), never throwing', async () => {
+  it('a key that cannot be made (randomBytes too short) makes start() fail the normal way (gui_start_failed), never throwing', async () => {
     const { gui, dataDir } = appHost({ randomBytes: () => Buffer.alloc(3) });
     await gui.start();
     cleanups.push(() => gui.stop());
@@ -212,10 +213,35 @@ describe('screenHost app: the GUI subsystem', { skip: !WIN && 'the screen host i
     assert.equal(fs.existsSync(helperFilePath(dataDir)), false);
     await gui.stop();
   });
+
+  it('a file that cannot be written (a directory in its place) makes start() fail gui_start_failed, never throwing, and leaves no temp file', async () => {
+    const dataDir = dataDirFor();
+    const file = helperFilePath(dataDir);
+    fs.mkdirSync(file, { recursive: true });
+    fs.writeFileSync(path.join(file, 'keep'), 'x');
+    const gui = createGuiSubsystem({ nodeConfig: nodeConfig(), dataDir, approvals: approvals(), platform: 'win32', hosting: 'personal', screenHost: 'app', deps: { netImpl: fakeNet() } });
+    await gui.start();
+    cleanups.push(() => gui.stop());
+    assert.equal(gui.unavailable.reason, 'gui_start_failed');
+    assert.equal(gui.capability().reason, 'gui_start_failed');
+    assert.ok(fs.statSync(file).isDirectory(), 'what was there is left alone');
+    assert.deepEqual(fs.readdirSync(path.dirname(file)).filter((n) => n.endsWith('.tmp')), []);
+    await gui.stop();
+  });
 });
 
 describe('personal-helper.json', () => {
   const write = (dataDir) => writePersonalHelperFile({ dataDir, nodeId: identity.nodeId, user: 'alice' });
+
+  it('the reader checks what it opened: a directory is not a regular file, an oversized file is refused', () => {
+    const dataDir = dataDirFor();
+    const file = helperFilePath(dataDir);
+    fs.mkdirSync(file, { recursive: true });
+    assert.throws(() => readPersonalHelperFile({ dataDir }), /not a regular file|EISDIR|EPERM|EACCES/);
+    fs.rmSync(file, { recursive: true });
+    fs.writeFileSync(file, 'x'.repeat(4097));
+    assert.throws(() => readPersonalHelperFile({ dataDir }), /larger than 4096 bytes/);
+  });
 
   it('round-trips, 0o600 where modes exist, with a 32-byte key in hex', () => {
     const dataDir = dataDirFor();

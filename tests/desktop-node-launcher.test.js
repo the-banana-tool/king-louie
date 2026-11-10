@@ -3,9 +3,9 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { isNodeServiceLaunch, runNodeService } = require('../src/desktop-bridge/node-launcher');
+const { isNodeServiceLaunch, prepareLauncherApp, runNodeService, LAUNCHER_DIR_NAME } = require('../src/desktop-bridge/node-launcher');
 
-const ARGV = ['K.exe', '--kl-node-service', 'C:\e.js', 'run', '--data-dir', 'C:\d', '--screen-host', 'app'];
+const ARGV = ['K.exe', '--kl-node-service', 'C:\\e.js', 'run', '--data-dir', 'C:\\d', '--screen-host', 'app'];
 
 function fakeSpawn() {
   const calls = [];
@@ -28,7 +28,7 @@ describe('node launcher', () => {
     f.child.emit('exit', 0);
     await p;
     assert.strictEqual(f.calls[0].cmd, 'K.exe');
-    assert.deepStrictEqual(f.calls[0].args, ['C:\e.js', 'run', '--data-dir', 'C:\d', '--screen-host', 'app']);
+    assert.deepStrictEqual(f.calls[0].args, ['C:\\e.js', 'run', '--data-dir', 'C:\\d', '--screen-host', 'app']);
     assert.strictEqual(f.calls[0].opts.env.ELECTRON_RUN_AS_NODE, '1');
     assert.strictEqual(f.calls[0].opts.env.A, 'b');
     assert.strictEqual(f.calls[0].opts.stdio, 'ignore');
@@ -49,7 +49,18 @@ describe('node launcher', () => {
     assert.strictEqual(await p, 1);
   });
 
-  it('forwards SIGTERM/SIGINT to the child', async () => {
+  it('resolves 1 when spawn throws synchronously, and leaves no signal listener', async () => {
+    const term = process.listenerCount('SIGTERM');
+    const int = process.listenerCount('SIGINT');
+    const spawn = () => { throw new Error('ENOENT'); };
+    assert.strictEqual(await runNodeService({ argv: ARGV, execPath: 'K.exe', env: {}, spawn }), 1);
+    assert.strictEqual(process.listenerCount('SIGTERM'), term);
+    assert.strictEqual(process.listenerCount('SIGINT'), int);
+  });
+
+  it('forwards SIGTERM/SIGINT to the child and removes its listeners on exit', async () => {
+    const term = process.listenerCount('SIGTERM');
+    const int = process.listenerCount('SIGINT');
     const f = fakeSpawn();
     const p = runNodeService({ argv: ARGV, execPath: 'K.exe', env: {}, spawn: f.spawn });
     process.emit('SIGTERM');
@@ -57,14 +68,40 @@ describe('node launcher', () => {
     assert.deepStrictEqual(f.child.killed, ['SIGTERM', 'SIGINT']);
     f.child.emit('exit', 0);
     await p;
-    assert.strictEqual(process.listenerCount('SIGTERM') >= 0, true);
+    assert.strictEqual(process.listenerCount('SIGTERM'), term);
+    assert.strictEqual(process.listenerCount('SIGINT'), int);
   });
 
-  it('main.js checks isNodeServiceLaunch before requiring electron and before the single-instance claim', () => {
+  it('prepareLauncherApp points userData at a temp folder and turns hardware acceleration off', () => {
+    const calls = [];
+    const app = {
+      setPath: (name, dir) => calls.push(['setPath', name, dir]),
+      disableHardwareAcceleration: () => calls.push(['disableHardwareAcceleration']),
+    };
+    const made = [];
+    const tmp = path.join('T:', 'tmp');
+    const dir = prepareLauncherApp(app, { tmpdir: tmp, mkdir: (d, o) => made.push([d, o]) });
+    assert.strictEqual(dir, path.join(tmp, LAUNCHER_DIR_NAME));
+    assert.strictEqual(LAUNCHER_DIR_NAME, 'king-louie-node-launcher');
+    assert.deepStrictEqual(made, [[dir, { recursive: true }]]);
+    assert.deepStrictEqual(calls, [['setPath', 'userData', dir], ['disableHardwareAcceleration']]);
+  });
+
+  it('prepareLauncherApp still sets userData when the folder cannot be made', () => {
+    const calls = [];
+    const app = { setPath: (n, d) => calls.push([n, d]), disableHardwareAcceleration: () => calls.push(['hw']) };
+    prepareLauncherApp(app, { tmpdir: 'T', mkdir: () => { throw new Error('EACCES'); } });
+    assert.deepStrictEqual(calls, [['userData', path.join('T', LAUNCHER_DIR_NAME)], ['hw']]);
+  });
+
+  it('main.js handles the launch before the app\'s electron require and the single-instance claim, on a temp userData', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
     const g = src.indexOf('isNodeServiceLaunch');
-    assert.ok(g >= 0);
-    assert.ok(g < src.indexOf("require('electron')"));
-    assert.ok(g < src.indexOf('claimSingleInstance'));
+    const prep = src.indexOf('prepareLauncherApp(');
+    const run = src.indexOf('runNodeService(');
+    const appElectron = src.indexOf("const { app, BrowserWindow");
+    assert.ok(g >= 0 && prep > g && run > prep, 'the guard, then the temp userData, then the launch');
+    assert.ok(appElectron > run, 'before the app\'s own require of electron');
+    assert.ok(src.indexOf('claimSingleInstance') > run, 'before the single-instance claim');
   });
 });

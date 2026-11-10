@@ -137,7 +137,9 @@ function createGuiSubsystem(options = {}) {
 // screenHost 'app' (boot-node-tray plan D-2, D-3: `run --screen-host app`,
 // a personal node started at boot outside the owner's desktop): the screen
 // is served by the King Louie app in his session, over the kl-session-v1
-// HelperChannel on an owner-only pipe. start() writes
+// HelperChannel on a named pipe whose boundary is the key in
+// personal-helper.json (Windows' default pipe DACL gives Everyone read, so the
+// pipe is not owner-only). start() writes
 // <dataDir>/session/personal-helper.json (a fresh pipe and key) before the
 // channel listens; stop() removes it. Windows and personal hosting only.
 function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => false, identityRecord = null,

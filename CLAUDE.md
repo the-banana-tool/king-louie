@@ -3199,9 +3199,13 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   `front-door.json` beside it (an `lstat`; else it says what is missing), then prints what is left: `token
   set`, `pair`, `enroll-device`, `vault set browser_cred:<profile>:<host>`
   (it asks for no secret, C-4) and `mcp`. `uninstall --personal [--data-dir
-  DIR] [--dry-run] [--yes]` stops a running node (as `stop` does; one that
-  does not stop leaves the task registered), then ends and deletes the task
-  and keeps the data dir (no task registered: it says so and exits 0). `pair`
+  DIR] [--dry-run] [--yes]` deletes the boot task through one administrator
+  prompt first (any task not known to be an InteractiveToken logon task, an
+  unreadable one included) and only then stops a running node (as `stop`
+  does), so a declined prompt leaves the node installed and running; an old
+  InteractiveToken logon task is stopped first (one that does not stop leaves
+  the task registered), then ended and deleted unelevated. It keeps the data
+  dir (no task registered: it says so and exits 0). `pair`
   under personal writes the pin and runs the task (C-9): `pair wss://<relay>`
   writes `approvers.relay` into `node.yaml`, `pair https://mcp.<domain>` (a
   front door) writes `front-door.json` and leaves `approvers.relay` alone; it still refuses while the node runs, naming `king-louie-service stop`.
@@ -3275,14 +3279,20 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   `<dataDir>/session/personal-helper.json` (name and key;
   `src/gui/personal-screen-host.js`); the app serves it (`src/ipc/screen-host.js`,
   the session helper loop; Windows, a local personal pairing only). Until it
-  connects every GUI tool refuses `screen_host_not_connected` ("King Louie is
-  not running in your session: log in, or open King Louie"). A hand-started
+  connects every GUI tool refuses `capability_unavailable` with the reason
+  `screen_host_not_connected` ("King Louie is not running in your session: log
+  in, or open King Louie"). A hand-started
   node without the flag keeps `InProcessChannel`. Saved browser profiles open
   only through the app (`src/gui/screen-host-browser.js`,
   `setScreenHostLauncher`); before it connects, `screen_host_missing` ("Saved
-  logins are available after you log in") and `ephemeral` still works, so an
-  S4U Chrome never touches the owner's logins. Takes launch Chrome through the
-  helper path (`launch_browser`).
+  logins are available after you log in") and `ephemeral` still works, always
+  headless (session 0 shows no window), so an S4U Chrome never touches the
+  owner's logins. Takes launch Chrome through the helper path (`launch_browser`);
+  `windows-worker.ps1` is in `build.asarUnpack` and read from `app.asar.unpacked`
+  (`powershell.exe -File` cannot read inside the asar). The `--kl-node-service`
+  launcher sets its Electron `userData` to `<tmp>\king-louie-node-launcher` and
+  turns hardware acceleration off (`prepareLauncherApp`), so a boot start never
+  opens the desktop profile.
 - **The tray** (`src/desktop-bridge/tray-model.js`, `src/ipc/tray.js`,
   `tray-host.js`): attached to a personal node only. `--kl-tray` starts hidden;
   closing hides to the tray; Quit asks while a take records; the tooltip and a
@@ -3310,9 +3320,12 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   itself; a node installed from the desktop runs the app's binary and
   version (removing or moving the app leaves a task that cannot start);
   macOS and Linux personal nodes are not done (the key is
-  platform-neutral; the install refuses off Windows). The logon task pins
-  the checkout and `node.exe` that ran `install --personal`, so a removed
-  checkout or worktree leaves a task that cannot start. The owner check
+  platform-neutral; the install refuses off Windows). Updating the app while
+  the boot task's node runs is unverified (manual check 14): the installer may
+  need the node stopped, or a reboot, before the node runs the new version. A
+  screen-host take with `keep_browser` is not recorded as holding its profile,
+  so the next start on that profile fails `browser_launch_failed` until that
+  Chrome is closed. The owner check
   reads owners only, not access lists: a data dir on a drive whose ACL lets
   other accounts write passes it (keep the default `%LOCALAPPDATA%`).
 

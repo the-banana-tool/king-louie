@@ -35,7 +35,7 @@
 
 1. **The app starts before the node** (boot is slow, the node is restarting): the app's screen host keeps retrying with backoff while `personal-helper.json` is missing or the pipe refuses, and never exits. Test in Task 7.
 2. **The node restarts with a new pipe and secret:** the screen host re-reads the file before every connect and reconnects. Test in Task 7.
-3. **The owner says No to the UAC prompt:** install exits 1 with "Windows did not register the task: the administrator prompt was declined. Nothing else changed.", writes no Run value and starts nothing. Test in Task 3.
+3. **The owner says No to the UAC prompt:** install exits 1 with "Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.", writes no Run value and starts nothing. Test in Task 3.
 4. **An existing logon-task install** (PowerShell action) still reads correctly in the window (`parseTaskXml`) until it is replaced, and re-installing replaces it (`/F`). Tests in Tasks 2 and 3.
 5. **A chat's browser tool before login:** a persistent profile is refused with code `screen_host_missing` and "Saved logins are available after you log in", and `ephemeral: true` still works. Test in Task 6.
 
@@ -141,7 +141,7 @@ it('registers through the elevated step, then starts it unelevated with /Run', .
 //   elevated called with ['/Create','/TN','KingLouie Node','/XML',<configDir>\\king-louie-node-task.xml,'/F']
 it('turns on the login start with the app path', ...)          // setLoginStart({ on:true, appPath })
 it('on UAC_DECLINED: exit 1, the declined message, no login start, no /Run', ...)
-//   'Windows did not register the task: the administrator prompt was declined. Nothing else changed.'
+//   'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.'
 it('the consent text names the boot task, S4U, no stored password, one prompt and the tray', ...)
 //   lines include 'boot task:  KingLouie Node (starts at boot as you; no password is stored)'
 //   and 'one Windows administrator prompt registers it; the node itself never runs elevated'

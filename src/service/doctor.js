@@ -108,11 +108,15 @@ function personalHostingRow({ dataDir, configDir, platform, deps }) {
 // owner's session is connected as the screen host, read from the running service's
 // status record. Not in screen-host mode (no helper file, no record saying so) it
 // is not used.
+function screenHostMode({ dataDir, record }) {
+  const { helperFilePath } = require('../gui/personal-screen-host');
+  return fs.existsSync(helperFilePath(dataDir)) || Boolean(record && record.reason === 'screen_host_not_connected');
+}
+
 function screenHostRow({ dataDir }) {
   const { readGuiStatusRecord } = require('../gui/status');
-  const { helperFilePath } = require('../gui/personal-screen-host');
   const record = readGuiStatusRecord({ dataDir });
-  const hostMode = fs.existsSync(helperFilePath(dataDir)) || Boolean(record && record.reason === 'screen_host_not_connected');
+  const hostMode = screenHostMode({ dataDir, record });
   if (!hostMode) return { check: 'screen host', ok: true, detail: 'not used (screen in this process)' };
   if (record && record.available === true) return { check: 'screen host', ok: true, detail: 'connected' };
   return { check: 'screen host', ok: true, warn: true, detail: 'not connected: log in to Windows, or open King Louie' };
@@ -218,7 +222,10 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
   // A personal node has no helper: its GUI runs in the service (spec §7),
   // whose status record still says when desktop apps are off.
   if (personal) {
-    results.push({ check: 'session helper', ok: true, detail: 'not used on a personal node (the GUI runs in-process)' });
+    const hostMode = screenHostMode({ dataDir, record: require('../gui/status').readGuiStatusRecord({ dataDir }) });
+    results.push({ check: 'session helper', ok: true, detail: hostMode
+      ? 'not used on a personal node (the King Louie app in your session is the screen host)'
+      : 'not used on a personal node (the GUI runs in-process)' });
     results.push(screenHostRow({ dataDir }));
     const { readGuiStatusRecord, remedyFor } = require('../gui/status');
     const { shown } = require('./commands/io');

@@ -12,7 +12,7 @@ const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const TRAY_ARG = '--kl-tray';
 // `    King Louie    REG_SZ    "<app>" --kl-tray`: the name, then the type, then the data.
 const VALUE_LINE = /^\s*King Louie\s+REG_(?:EXPAND_)?SZ\s+(.*)$/;
-const REG_OPTIONS ={ encoding: 'utf8', windowsHide: true, timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] };
+const REG_OPTIONS = { encoding: 'utf8', windowsHide: true, timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] };
 
 const loginStartCommand = (appPath) => `"${sanitizeWindowsPath('appPath', appPath)}" ${TRAY_ARG}`;
 

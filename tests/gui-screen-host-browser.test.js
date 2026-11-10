@@ -53,10 +53,13 @@ let dataDir;
 let profilesRoot;
 let channel;
 let launcher;
+let lastBroker;
+const launcherBroker = () => lastBroker;
 
 function setUp({ connected = false, answer = null, config = guiConfig() } = {}) {
   channel = fakeChannel({ connected, answer });
   const broker = new GuiBroker({ channel, guiConfig: config, platform: 'win32', hosting: 'personal', screenHost: 'app' });
+  lastBroker = broker;
   launcher = createScreenHostLauncher({ broker, guiConfig: config, profilesRoot });
   registry.setScreenHostLauncher(launcher);
 }
@@ -282,5 +285,90 @@ describe('the GUI subsystem sets and clears the launcher', { skip: process.platf
       deps: { browserRegistry: handReg, channel: new EventEmitter() }
     });
     assert.equal(handReg.current, null);
+  });
+});
+
+describe('screen-host mode: an ephemeral start runs headless', () => {
+  afterEach(() => registry.reset());
+
+  function fakeBrowser() {
+    const starts = [];
+    return { starts, isRunning: false, async start(opts) { starts.push(opts); } };
+  }
+
+  it('forces headless for ephemeral: true while a screen-host launcher is set', async () => {
+    const b = fakeBrowser();
+    registry.setBrowser(registry.DEFAULT_KEY, b);
+    registry.setScreenHostLauncher({ launch: async () => { throw new Error('not for an ephemeral start'); } });
+    const out = await browserTool.actions.start({ ephemeral: true }, {});
+    assert.equal(out.ok, true);
+    assert.equal(b.starts[0].headless, true);
+    assert.equal(b.starts[0].userDataPath, undefined);
+  });
+
+  it('leaves headless as asked with no screen-host launcher', async () => {
+    const b = fakeBrowser();
+    registry.setBrowser(registry.DEFAULT_KEY, b);
+    await browserTool.actions.start({ ephemeral: true }, {});
+    assert.equal(b.starts[0].headless, false);
+  });
+
+  it('a profile start under a screen host is not forced headless (the screen host shows it)', async () => {
+    const b = fakeBrowser();
+    registry.setBrowser(registry.DEFAULT_KEY, b);
+    registry.setScreenHostLauncher({ launch: async () => ({}) });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-eph-'));
+    try {
+      await browserTool.actions.start({ userDataPath: dir }, {});
+      assert.equal(b.starts[0].headless, false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('screen-host browser pids are forgotten when the browser goes', () => {
+  // attach() stubbed: the CDP side is covered above; this is the broker's bookkeeping.
+  function stubbedBrowser() {
+    const b = new PlaywrightBrowser();
+    b.attach = async () => {
+      b.browser = { isConnected: () => true, close: async () => {} };
+      b._attached = true;
+    };
+    return b;
+  }
+
+  it('the launched record does not grow across start/stop cycles', async () => {
+    let next = 100;
+    setUp({ connected: true, answer: () => ({ pid: next++, cdp: { port: 9222, path: '/devtools/browser/x' } }) });
+    const b = stubbedBrowser();
+    for (let i = 0; i < 5; i += 1) {
+      await b.start({ userDataPath: path.join(profilesRoot, 'shop') });
+      await b.stop();
+    }
+    const brokerOf = launcherBroker();
+    assert.equal(brokerOf.launched.has('screen-host-browser'), false, 'no pid left recorded');
+  });
+
+  it('a Chrome that went away without a stop is forgotten at the next start', async () => {
+    let next = 200;
+    setUp({ connected: true, answer: () => ({ pid: next++, cdp: { port: 9222, path: '/devtools/browser/x' } }) });
+    const b = stubbedBrowser();
+    await b.start({ userDataPath: path.join(profilesRoot, 'shop') });
+    b.browser = { isConnected: () => false, close: async () => {} }; // closed by hand
+    await b.start({ userDataPath: path.join(profilesRoot, 'shop') });
+    const pids = [...launcherBroker().launched.get('screen-host-browser').values()].flatMap((s) => [...s]);
+    assert.deepEqual(pids, [201]);
+    await b.stop();
+    assert.equal(launcherBroker().launched.has('screen-host-browser'), false);
+  });
+
+  it('closeLaunched after a failed attach still finds the pid, and leaves nothing recorded', async () => {
+    setUp({ connected: true, answer: () => ({ pid: 300, cdp: { port: 9222, path: '/devtools/browser/x' } }) });
+    const b = new PlaywrightBrowser();
+    b.attach = async () => { throw new Error('attach failed'); };
+    await assert.rejects(b.start({ userDataPath: path.join(profilesRoot, 'shop') }), /attach failed/);
+    assert.ok(channel.requests.some((r) => r.op === 'close' && r.params.pids.includes(300)), 'the launched Chrome was closed by its pid');
+    assert.equal(launcherBroker().launched.has('screen-host-browser'), false);
   });
 });

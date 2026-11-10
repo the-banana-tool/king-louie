@@ -48,8 +48,9 @@ function recorderPath(recorder) {
 class HelperChannel extends EventEmitter {
   // shared: true (a fleet node) opens the endpoint to every local account,
   // since the helper is another account than the service. false (a personal
-  // node's screen host, plan D-2) keeps the default security: on Windows only
-  // the owner, SYSTEM and Administrators can open the pipe; elsewhere 0600.
+  // node's screen host, plan D-2) keeps the default security, which on Windows
+  // is not owner-only (the default pipe DACL gives Everyone read): the key in
+  // personal-helper.json is the boundary; elsewhere the socket is 0600.
   // netImpl: tests only.
   constructor({ endpoint, readSecret, readMtime = () => null, platform = process.platform, audit = null, clock = Date.now, shared = true, netImpl = net,
     log = createLogger('gui/channel'), handshakeMs = 5000, pingMs = 10000, silenceMs = 30000, duplicatePingMs = 5000, maxUnauthenticated = 4 } = {}) {

@@ -19,7 +19,7 @@ function clampTimeout(requested, fallback) {
 // registered drives its own, every other run shares the default one. The
 // active profile is kept under the key whose browser the run drives.
 const {
-  resolvedKeyOf, getBrowser, activeProfileOf, setActiveProfile, allBrowsers,
+  resolvedKeyOf, getBrowser, activeProfileOf, setActiveProfile, allBrowsers, screenHostLauncher,
 } = require('./browser-registry');
 
 const {
@@ -388,6 +388,10 @@ const actions = {
     }
     // v1 default: headed, so the user can watch the automation.
     opts.headless = params.headless === true;
+    // A node started at boot (screen-host mode) runs outside the owner's desktop:
+    // an ephemeral context is launched by this process, where no window can show,
+    // so it runs headless. A profile goes to the screen host, which shows it.
+    if (params.ephemeral === true && screenHostLauncher()) opts.headless = true;
     try {
       await b.start(opts);
     } catch (err) {

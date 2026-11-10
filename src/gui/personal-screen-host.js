@@ -2,10 +2,11 @@
 // A personal node started at boot (`run --screen-host app`) runs outside the
 // owner's desktop, so it serves its screen work through the King Louie app in
 // his session (boot-node-tray spec §5.2, plan D-2). The node listens with the
-// kl-session-v1 HelperChannel on an owner-only named pipe and writes the
-// pipe's name and a fresh key to <dataDir>/session/personal-helper.json, which
-// the app reads before every connect. A new start writes a new pipe and key;
-// a stop removes the file. Electron-free.
+// kl-session-v1 HelperChannel on a named pipe and writes the pipe's name and a
+// fresh key to <dataDir>/session/personal-helper.json, which the app reads
+// before every connect. The pipe is not owner-only (Windows' default pipe DACL
+// gives Everyone read): the key in that file is the boundary. A new start
+// writes a new pipe and key; a stop removes the file. Electron-free.
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -62,12 +63,39 @@ function writePersonalHelperFile({ dataDir, nodeId, user, randomBytes = crypto.r
 // file's contents.
 function readPersonalHelperFile({ dataDir }) {
   const file = helperFilePath(dataDir);
-  const st = fs.lstatSync(file);
-  if (st.isSymbolicLink()) throw new PersonalHelperFileError(`${file} is a link`);
-  if (!st.isFile()) throw new PersonalHelperFileError(`${file} is not a regular file`);
-  if (st.size > MAX_FILE_BYTES) throw new PersonalHelperFileError(`${file} is larger than ${MAX_FILE_BYTES} bytes`);
-  const raw = fs.readFileSync(file);
-  if (raw.length > MAX_FILE_BYTES) throw new PersonalHelperFileError(`${file} is larger than ${MAX_FILE_BYTES} bytes`);
+  // Windows has no O_NOFOLLOW, so a link is refused by lstat first; where the flag is
+  // defined the open refuses one itself (ELOOP), so nothing swapped in between is followed.
+  const lst = fs.lstatSync(file);
+  if (lst.isSymbolicLink()) throw new PersonalHelperFileError(`${file} is a link`);
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+  let fd;
+  try {
+    fd = fs.openSync(file, flags);
+  } catch (err) {
+    if (err && err.code === 'ELOOP') throw new PersonalHelperFileError(`${file} is a link`);
+    throw err;
+  }
+  let st;
+  let raw;
+  try {
+    // The checks are on what was opened, not on the path.
+    st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new PersonalHelperFileError(`${file} is not a regular file`);
+    if (st.size > MAX_FILE_BYTES) throw new PersonalHelperFileError(`${file} is larger than ${MAX_FILE_BYTES} bytes`);
+    // One byte past the limit, to see a file that grew after the fstat.
+    const buf = Buffer.alloc(MAX_FILE_BYTES + 1);
+    let n = 0;
+    for (;;) {
+      const r = fs.readSync(fd, buf, n, buf.length - n, null);
+      if (r === 0) break;
+      n += r;
+      if (n >= buf.length) break;
+    }
+    if (n > MAX_FILE_BYTES) throw new PersonalHelperFileError(`${file} is larger than ${MAX_FILE_BYTES} bytes`);
+    raw = buf.subarray(0, n);
+  } finally {
+    fs.closeSync(fd);
+  }
   let record;
   try {
     record = JSON.parse(raw.toString('utf8'));

@@ -140,6 +140,18 @@ describe('doctor: the boot task and the screen host (boot-node-tray task 9)', ()
     const s = setup({ hosting: 'personal' });
     const { results } = await doctor(s, { personalOwner: owners('PC\owner') });
     assert.deepEqual(results.find((r) => r.check === 'screen host'), { check: 'screen host', ok: true, detail: 'not used (screen in this process)' });
+    assert.equal(results.find((r) => r.check === 'session helper').detail, 'not used on a personal node (the GUI runs in-process)');
+  });
+
+  it('session helper: on a screen-host (boot) node it does not say the GUI runs in-process', async () => {
+    const s = setup({ hosting: 'personal' });
+    const helper = path.join(s.dataDir, 'session', 'personal-helper.json');
+    fs.mkdirSync(path.dirname(helper), { recursive: true });
+    fs.writeFileSync(helper, '{}');
+    const { results } = await doctor(s, { personalOwner: owners('PC\owner') });
+    const row = results.find((r) => r.check === 'session helper');
+    assert.doesNotMatch(row.detail, /in-process/);
+    assert.equal(row.detail, 'not used on a personal node (the King Louie app in your session is the screen host)');
   });
 
   it('screen host: not connected until the app connects, then connected', async () => {

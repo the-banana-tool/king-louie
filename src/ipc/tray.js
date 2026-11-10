@@ -106,7 +106,7 @@ function createTray({
   // A down node's task and pid change with nothing to say so.
   const timer = setInterval(onChanged, refreshMs);
   if (typeof timer.unref === 'function') timer.unref();
-  refresh();
+  onChanged();
 
   return {
     refresh,
