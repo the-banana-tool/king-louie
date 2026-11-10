@@ -41,8 +41,9 @@ function roleStatus(roles, role) {
   if (role === 'main') return { state: 'warn', message: 'Nothing can answer you until Main has a model.' };
   if (role === 'worker' || role === 'utility') {
     const chain = role === 'utility' ? ['worker', 'main'] : ['main'];
-    const from = chain.find((r) => usable(own(r)).length);
-    if (from) return { state: 'borrows', from, message: `Uses ${labels[from]}'s models.` };
+    // The resolver borrows from the first role with any entries, usable or not.
+    const from = chain.find((r) => own(r).length);
+    if (from && usable(own(from)).length) return { state: 'borrows', from, message: `Uses ${labels[from]}'s models.` };
     return {
       state: 'warn',
       message: role === 'worker' ? "Agents and tasks can't run." : "Chat titles and case wake-ups can't run."

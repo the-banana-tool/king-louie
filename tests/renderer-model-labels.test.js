@@ -50,6 +50,14 @@ describe('roleStatus', () => {
   it('does not borrow unusable models', () => {
     assert.strictEqual(roleStatus({ main: [bad] }, 'worker').state, 'warn');
   });
+  it('utility stops at the first role with entries, usable or not', () => {
+    const s = roleStatus({ worker: [bad], main: [ok] }, 'utility');
+    assert.deepStrictEqual(s, { state: 'warn', message: "Chat titles and case wake-ups can't run." });
+  });
+  it('accepts imageInput yes and undefined roles', () => {
+    assert.strictEqual(roleStatus({ main: [{ ...ok, imageInput: 'yes' }] }, 'vision').state, 'borrows');
+    assert.strictEqual(roleStatus(undefined, 'worker').state, 'warn');
+  });
   it('worker and utility warn with nothing found', () => {
     assert.strictEqual(roleStatus({}, 'worker').message, "Agents and tasks can't run.");
     assert.strictEqual(roleStatus({}, 'utility').message, "Chat titles and case wake-ups can't run.");
