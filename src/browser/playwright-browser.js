@@ -198,6 +198,7 @@ class PlaywrightBrowser {
     this.consoleMessages = [];
     this._persistent = false; // Whether using persistent context
     this._attached = false; // Whether attached over CDP to a Chrome another process launched
+    this._screenHostLaunched = false; // Whether start() had the screen host launch that Chrome (stop() closes it)
     this._dialogAction = 'dismiss'; // 'accept', 'dismiss', or 'prompt:text'
     this._routes = [];
   }
@@ -215,6 +216,28 @@ class PlaywrightBrowser {
     const viewport = options.viewport === undefined ? { width: 1280, height: 720 } : options.viewport;
     const extraArgs = Array.isArray(options.extraArgs) ? options.extraArgs : [];
     const chromium = this._chromium;
+
+    // A personal node started at boot (`--screen-host app`) is outside the owner's desktop
+    // and cannot unlock his saved logins: a persistent profile is opened only by King Louie
+    // in his session (the screen host's launch_browser), and this process attaches over CDP.
+    // The launcher refuses before the app connects. Required here: the registry requires
+    // this file.
+    if (options.userDataPath) {
+      const launcher = require('../tools/builtin/browser-registry').screenHostLauncher();
+      if (launcher) {
+        const launched = await launcher.launch({ userDataPath: options.userDataPath, headless });
+        try {
+          await this.attach({ cdpUrl: launched && launched.cdpUrl });
+          this._screenHostLaunched = true;
+        } catch (err) {
+          // Half attached: let go (and close that Chrome over CDP when connected).
+          this._screenHostLaunched = true;
+          await this.stop().catch(() => {});
+          throw err;
+        }
+        return;
+      }
+    }
 
     const launch = async ({ channel, executablePath } = {}) => {
       const base = {
@@ -293,7 +316,18 @@ class PlaywrightBrowser {
 
   async stop() {
     // When attached, browser.close() disconnects Playwright only; the Chrome
-    // process belongs to whoever launched it and keeps running.
+    // process belongs to whoever launched it and keeps running. A Chrome the
+    // screen host launched for a start() is this browser's own, so it is closed
+    // over CDP first (else it would stay open on the owner's screen, holding
+    // its profile and its debugging port).
+    if (this._screenHostLaunched && this.browser && typeof this.browser.newBrowserCDPSession === 'function') {
+      try {
+        const session = await this.browser.newBrowserCDPSession();
+        await session.send('Browser.close');
+      } catch {
+        // Already gone, or the connection dropped.
+      }
+    }
     try {
       if (this._persistent && this.context) {
         await this.context.close();
@@ -309,6 +343,7 @@ class PlaywrightBrowser {
     this.consoleMessages = [];
     this._persistent = false;
     this._attached = false;
+    this._screenHostLaunched = false;
     this._routes = [];
   }
 

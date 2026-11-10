@@ -68,8 +68,18 @@ const evenSide = (n) => Number.isInteger(n) && n >= 16 && n <= 16384 && n % 2 ==
 function createWindowsBackend({
   env = process.env, log = createLogger('session-helper/windows'), spawnImpl = spawn, workerFile = path.join(__dirname, 'windows-worker.ps1'),
   readFile = fs.promises.readFile, unlink = fs.promises.unlink, mkdir = fs.promises.mkdir, statSync = fs.statSync, clock = Date.now,
-  timers = { setTimeout, clearTimeout }
+  timers = { setTimeout, clearTimeout }, profileRoot = null
 } = {}) {
+  // Where launch_browser keeps its profiles: the user's %LOCALAPPDATA%\KingLouie\browser-profiles
+  // by default; the King Louie app serving a personal node's screen passes the node's own
+  // <dataDir>\browser-profiles (boot-node-tray Task 6), so a take and a chat open the same
+  // logins. Configured by the host that loads the backend, never by the service over the wire.
+  const profilesDir = (given) => {
+    const root = given || profileRoot;
+    if (root === null || root === undefined) return path.win32.join(kingLouieDir(env), 'browser-profiles');
+    if (typeof root !== 'string' || !DRIVE_PATH.test(root)) throw new GuiError('invalid_params');
+    return root;
+  };
   const worker = new LineWorker({
     file: windowsPowerShellExe(env),
     args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', workerFile],
@@ -206,11 +216,11 @@ function createWindowsBackend({
       child.unref();
       return { pid: child.pid };
     },
-    async launchBrowser({ exe, profile, args = [] } = {}) {
+    async launchBrowser({ exe, profile, args = [], profileRoot: root = null } = {}) {
       if (!/\.exe$/i.test(String(exe))) throw new GuiError('app_type_not_supported');
       if (typeof profile !== 'string' || !PROFILE_NAME.test(profile)) throw new GuiError('invalid_params');
       if (!Array.isArray(args) || !args.every((a) => typeof a === 'string' && !reservedSwitch(a))) throw new GuiError('invalid_params');
-      const profileDir = path.win32.join(kingLouieDir(env), 'browser-profiles', profile);
+      const profileDir = path.win32.join(profilesDir(root), profile);
       try { await mkdir(profileDir, { recursive: true }); } catch { throw new GuiError('browser_launch_failed'); }
       const portFile = path.win32.join(profileDir, PORT_FILE);
       // A file left by an earlier run would hand back a dead port.

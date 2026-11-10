@@ -256,6 +256,66 @@ describe('take ops', () => {
     assert.equal(findFfmpeg({ platform: 'linux', env, isFile: () => true }), null, 'Windows only in D1');
   });
 
+  // Boot-node-tray Task 6: the King Louie app serving a personal node's screen keeps the
+  // profiles in the node's <dataDir>\browser-profiles; the host configures it, never the wire.
+  it('createOpHandler passes profileRoot to backend.launchBrowser; the op wire is unchanged', async () => {
+    const calls = [];
+    const backend = { launchBrowser: async (a) => { calls.push(a); return { pid: 1, cdp: { port: 9222, path: '/devtools/browser/x' } }; } };
+    const realpath = (p) => p;
+    const root = 'C:\\Users\\alice\\AppData\\Local\\KingLouie\\node\\data\\browser-profiles';
+    const handle = createOpHandler(backend, { platform: 'win32', realpath, profileRoot: root });
+    const exe = 'C:\\x\\chrome.exe';
+    await handle('launch_browser', { exe, profile: 'king-louie', args: ['--a'] });
+    // A profileRoot on the wire is not a launch_browser param: ignored, the host's stands.
+    await handle('launch_browser', { exe, profile: 'demo', profileRoot: 'C:\\evil', profile_root: 'C:\\evil' });
+    assert.deepEqual(calls, [
+      { exe, profile: 'king-louie', args: ['--a'], profileRoot: root },
+      { exe, profile: 'demo', args: [], profileRoot: root }
+    ]);
+    // No host profileRoot: the backend's own default (no key at all).
+    const plain = createOpHandler(backend, { platform: 'win32', realpath });
+    await plain('launch_browser', { exe, profile: 'demo', profileRoot: 'C:\\evil' });
+    assert.deepEqual(calls.at(-1), { exe, profile: 'demo', args: [] });
+  });
+
+  it('the Windows backend puts the profile under profileRoot when given', async () => {
+    const { EventEmitter } = require('events');
+    const { createWindowsBackend } = require('../src/session/backends/windows');
+    const pathWin = require('path').win32;
+    const LOCALAPPDATA = 'C:\\Users\\alice\\AppData\\Local';
+    const spawned = [];
+    const spawnImpl = (file, args) => {
+      const child = new EventEmitter();
+      child.pid = 4242;
+      child.unref = () => {};
+      child.kill = () => true;
+      spawned.push({ file, args });
+      setImmediate(() => child.emit('spawn'));
+      return child;
+    };
+    const reads = [];
+    const make = (opts = {}) => createWindowsBackend({
+      env: { LOCALAPPDATA }, spawnImpl, unlink: async () => {}, mkdir: async () => {},
+      readFile: async (p) => { reads.push(p); return '9222\n/devtools/browser/abc\n'; }, ...opts
+    });
+    const root = 'D:\\kl\\data\\browser-profiles';
+    const exe = 'C:\\x\\chrome.exe';
+    // Per call (what createOpHandler passes) and as a backend option (what loadBackend passes).
+    await make().launchBrowser({ exe, profile: 'demo', profileRoot: root });
+    await make({ profileRoot: root }).launchBrowser({ exe, profile: 'king-louie' });
+    // Neither: the user's own %LOCALAPPDATA%\KingLouie\browser-profiles, as before.
+    await make().launchBrowser({ exe, profile: 'demo' });
+    assert.equal(spawned[0].args[0], `--user-data-dir=${pathWin.join(root, 'demo')}`);
+    assert.equal(spawned[1].args[0], `--user-data-dir=${pathWin.join(root, 'king-louie')}`);
+    assert.equal(spawned[2].args[0], `--user-data-dir=${pathWin.join(LOCALAPPDATA, 'KingLouie', 'browser-profiles', 'demo')}`);
+    assert.equal(reads[0], pathWin.join(root, 'demo', 'DevToolsActivePort'));
+    // A root that is not an absolute drive path is refused before anything is spawned.
+    for (const bad of ['relative\\dir', '\\\\server\\share', 7]) {
+      await assert.rejects(make().launchBrowser({ exe, profile: 'demo', profileRoot: bad }), (e) => e.code === 'invalid_params', String(bad));
+    }
+    assert.equal(spawned.length, 3);
+  });
+
   it('launch_browser re-resolves the browser exe as launch does', async () => {
     const backend = { launchBrowser: async () => { throw new Error('not reached'); } };
     const handle = createOpHandler(backend, { platform: 'win32', realpath: () => 'C:\\elsewhere\\chrome.exe' });

@@ -22,7 +22,10 @@ const RECORDING_GRACE_MS = 30000;
 
 // `recorder`: what the helper found at startup ({ ffmpeg: <path> | null });
 // a record_start that names no ffmpeg uses it.
-function createOpHandler(backend, { platform = process.platform, realpath, recorder = { ffmpeg: null } } = {}) {
+// `profileRoot`: where launch_browser's profiles go, from the host's own
+// configuration (the King Louie app serving a personal node passes the node's
+// <dataDir>/browser-profiles). The op's wire params never name a directory.
+function createOpHandler(backend, { platform = process.platform, realpath, recorder = { ffmpeg: null }, profileRoot = null } = {}) {
   const pathOptions = { platform, ...(realpath ? { realpath } : {}) };
   const ops = {
     launch: (p) => {
@@ -33,7 +36,7 @@ function createOpHandler(backend, { platform = process.platform, realpath, recor
     launch_browser: (p) => {
       // The browser is an allowlisted app: re-resolved as launch's exe is.
       assertPathsUnchanged({ exe: p.exe, files: [] }, pathOptions);
-      return backend.launchBrowser({ exe: p.exe, profile: p.profile, args: p.args || [] });
+      return backend.launchBrowser({ exe: p.exe, profile: p.profile, args: p.args || [], ...(profileRoot ? { profileRoot } : {}) });
     },
     record_start: (p) => backend.recordStart({
       ffmpeg: p.ffmpeg || (recorder && recorder.ffmpeg) || null,

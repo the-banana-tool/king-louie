@@ -81,11 +81,29 @@ function allBrowsers() {
   return list;
 }
 
-// For tests: forget every browser and profile (stops nothing).
+// A personal node started at boot (`run --screen-host app`) runs outside the
+// owner's desktop and cannot open his Chrome profiles itself: the GUI subsystem
+// sets a launcher here (src/gui/screen-host-browser.js, `{ launch(opts) }`), and
+// PlaywrightBrowser#start hands every persistent start to it. Null otherwise.
+let screenHost = null;
+
+function setScreenHostLauncher(launcher) {
+  if (launcher === null || launcher === undefined) screenHost = null;
+  else if (typeof launcher === 'function') screenHost = { launch: launcher };
+  else if (typeof launcher.launch === 'function') screenHost = launcher;
+  else throw new TypeError('a screen host launcher has a launch() method');
+}
+
+function screenHostLauncher() {
+  return screenHost;
+}
+
+// For tests: forget every browser and profile (stops nothing), and the launcher.
 function reset() {
   registry.default = null;
   registry.byKey.clear();
   profileByKey.clear();
+  screenHost = null;
 }
 
 module.exports = {
@@ -100,5 +118,7 @@ module.exports = {
   setActiveProfile,
   activeProfiles,
   allBrowsers,
+  setScreenHostLauncher,
+  screenHostLauncher,
   reset,
 };

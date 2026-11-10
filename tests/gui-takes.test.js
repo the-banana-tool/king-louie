@@ -1151,4 +1151,46 @@ describe('personal takes', () => {
     assert.deepEqual(out.browser, { profile: 'demo', cdp: false });
     assert.ok(!names(broker.calls).includes('launchBrowser'));
   });
+
+  // Boot-node-tray Task 6: a boot-started node is outside the owner's desktop, so its take's
+  // Chrome is launched by King Louie in his session (launch_browser) and attached over CDP.
+  it('a take in screen-host mode launches through the fleet path, not launchPersonalBrowser', async () => {
+    const created = [];
+    const attachedHere = [];
+    const cdpCloses = [];
+    takes = new TakeManager({
+      leases, broker, store, guiConfig, registry: realRegistry, clock: () => clock.now(), timers, hosting: 'personal', dataDir, screenHost: 'app',
+      // launchPersonalBrowser would call this: it must not run.
+      createBrowser: () => { created.push(true); throw new Error('launchPersonalBrowser was used'); },
+      attachBrowser: async (cdpUrl) => {
+        const b = { cdpUrl, page: { url: () => 'https://a.example.com' }, stop: async () => {} };
+        attachedHere.push(b);
+        return b;
+      },
+      closeBrowser: async (b) => { cdpCloses.push(b); }
+    });
+    assert.equal(takes.ownBrowser, false);
+    const out = await started();
+    assert.equal(created.length, 0, 'launchPersonalBrowser never ran');
+    const launch = broker.calls.find((c) => c[0] === 'launchBrowser');
+    assert.ok(launch, 'the screen host launched the browser');
+    assert.deepEqual(launch[1], { exe: guiConfig.apps.chrome.path, profile: 'demo', args: [...CHROME_FLAGS] });
+    assert.equal(attachedHere.length, 1);
+    assert.equal(attachedHere[0].cdpUrl, 'http://127.0.0.1:9222');
+    assert.deepEqual(out.browser, { profile: 'demo', cdp: true });
+    const key = `take:${out.take_id}`;
+    assert.equal(realRegistry.activeProfileOf(key), 'demo');
+    await takes.stop(out.take_id);
+    assert.equal(cdpCloses.length, 1, 'closed over CDP, as a fleet take is');
+    assert.equal(realRegistry.registry.byKey.has(key), false);
+  });
+
+  it('a take in screen-host mode still refuses a profile a chat holds open', async () => {
+    takes = new TakeManager({
+      leases, broker, store, guiConfig, registry: realRegistry, clock: () => clock.now(), timers, hosting: 'personal', dataDir, screenHost: 'app'
+    });
+    realRegistry.setActiveProfile(realRegistry.DEFAULT_KEY, 'demo');
+    await assert.rejects(begin(), (err) => err.code === 'browser_launch_failed' && /profile demo is open/.test(err.message));
+    assert.ok(!names(broker.calls).includes('launchBrowser'));
+  });
 });

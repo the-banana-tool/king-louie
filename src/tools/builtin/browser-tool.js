@@ -26,6 +26,7 @@ const {
   BrowserRefError, ownerOfPage, parseSnapshotLine, snapshotLineRef, parseRefSelector, isFrameAction, REF_ID, RAW_ARIA_REF,
 } = require('../../browser/playwright-browser');
 const { prepareRefLabels, checkRefLabels, otherSelectorRefRefusal } = require('./browser-ref-label');
+const { isGuiError } = require('../../gui/errors');
 
 const { createLogger } = require('../../logging');
 const log = createLogger('browser-tool');
@@ -387,7 +388,13 @@ const actions = {
     }
     // v1 default: headed, so the user can watch the automation.
     opts.headless = params.headless === true;
-    await b.start(opts);
+    try {
+      await b.start(opts);
+    } catch (err) {
+      // No browser opened the profile (the screen host refused it, say): it is not in use.
+      setActiveProfile(key, null);
+      throw err;
+    }
     return {
       ok: true,
       message: `Browser started (Playwright, ${opts.headless ? 'headless' : 'headed'})`,
@@ -1700,6 +1707,8 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
     } catch (err) {
       if (err instanceof BrowserRefError) return { ok: false, error: err.message, code: err.code };
       result = { ok: false, error: err.message || String(err) };
+      // A GUI refusal (screen_host_missing, take_browser_unavailable) keeps its code.
+      if (isGuiError(err)) result.code = err.code;
       // §8.2: a failed acting action, or a navigation that left an error page.
       if (isPageError(err) && params.action === 'navigate') await waitForErrorPage(err, context);
       if (isPageError(err) && (ACTING_ACTIONS.has(params.action) || (params.action === 'navigate' && onErrorPage(context)))) {

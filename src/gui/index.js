@@ -95,16 +95,34 @@ function isJobOpen({ jobManager = null, chatExists = null } = {}, jobId) {
 // How long gui.stop() waits for the service_stopped pushes (push spec §6.2).
 const PUSH_DRAIN_MS = 2000;
 
+// The browser registry the screen-host launcher goes in (deps.browserRegistry in tests).
+// Required lazily: it loads Playwright's wrapper.
+function browserRegistryOf(deps = {}) {
+  return deps.browserRegistry || require('../tools/builtin/browser-registry');
+}
+
 function createGuiSubsystem(options = {}) {
+  let built;
   try {
-    return buildGuiSubsystem(options);
+    built = buildGuiSubsystem(options);
   } catch (err) {
     const { nodeConfig = null, dataDir = null, platform = process.platform, hosting = 'service', log = createLogger('gui') } = options;
     // A refused screen host (not personal, not Windows) is off like any other GUI that cannot be set up.
     const detail = failureDetail(err);
     log.error(`desktop apps are off: the GUI could not be set up (${detail}). To fix it, ${remedyFor(GUI_START_FAILED)}.`, { reason: GUI_START_FAILED });
-    return unavailableSubsystem({ reason: GUI_START_FAILED, detail, guiConfig: nodeConfig && nodeConfig.gui, dataDir, platform, log, hosting });
+    built = unavailableSubsystem({ reason: GUI_START_FAILED, detail, guiConfig: nodeConfig && nodeConfig.gui, dataDir, platform, log, hosting });
   }
+  // `--screen-host app` with no screen host built (gui off, or a GUI that could not be set
+  // up): this process still never opens a saved browser profile itself (Task 6). Process
+  // state, like the launcher a live subsystem sets; nothing stops a null subsystem.
+  if (options.screenHost === 'app' && (!built || built.unavailable)) {
+    try {
+      browserRegistryOf(options.deps).setScreenHostLauncher(require('./screen-host-browser').refusingScreenHostLauncher());
+    } catch (err) {
+      (options.log || createLogger('gui')).error(`saved browser profiles could not be fenced: ${failureDetail(err)}`);
+    }
+  }
+  return built;
 }
 
 // jobOpen fails closed: a host that passes none can hold no lease.
@@ -170,10 +188,25 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
   const liveView = new LiveView({ leases, broker, identity: approvals.identity, relayClient: relay, guiConfig: gui });
   // Demo takes (spec 2026-10-24): records under <dataDir>/takes. A screen lock reaches the
   // manager through the lease (setLocked, from the helper's event), which ends the take.
+  // screenHost 'app': a take's Chrome is launched by the app in the owner's session and
+  // attached over CDP (the fleet's path), never by this process.
   const takes = dataDir ? new TakeManager({
-    leases, broker, audit, guiConfig: gui, hosting, dataDir,
+    leases, broker, audit, guiConfig: gui, hosting, dataDir, screenHost: appHost ? 'app' : null,
     store: new TakeStore({ dir: path.join(dataDir, 'takes') })
   }) : null;
+  // screenHost 'app' (Task 6): every saved-profile start of the browser tools goes through
+  // the app too (PlaywrightBrowser#start asks the registry). Set here, so no start of the
+  // core's tools comes before it, and again at start(); cleared only at stop(). A start()
+  // that fails leaves it set: it then refuses every saved profile (the app never connects).
+  const browserLauncher = appHost ? require('./screen-host-browser').createScreenHostLauncher({
+    broker, guiConfig: gui, profilesRoot: path.join(dataDir, 'browser-profiles')
+  }) : null;
+  const clearBrowserLauncher = () => {
+    if (!browserLauncher) return;
+    const registry = browserRegistryOf(deps);
+    if (registry.screenHostLauncher() === browserLauncher) registry.setScreenHostLauncher(null);
+  };
+  if (browserLauncher) browserRegistryOf(deps).setScreenHostLauncher(browserLauncher);
   if (relay) {
     relay.registerMethod('lease.grant', async ({ envelope } = {}) => leases.onGrant(envelope));
     relay.registerMethod('lease.revoke', async ({ envelope } = {}) => leases.onRevoke(envelope));
@@ -213,6 +246,8 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
             ...(deps.randomBytes ? { randomBytes: deps.randomBytes } : {})
           });
           channel.endpoint = helperRecord.endpoint;
+          // Again after a stop(): from here a saved profile is the app's.
+          browserRegistryOf(deps).setScreenHostLauncher(browserLauncher);
         }
         await channel.start();
         broker.start();
@@ -250,6 +285,7 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
         await channel.stop();
       } finally {
         if (appHost) await quietly(() => removeHelperFile());
+        clearBrowserLauncher();
         await drained;
       }
     }

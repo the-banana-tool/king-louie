@@ -16,7 +16,7 @@ const { sanitizeWindowsPath, xmlEscape, executeSteps } = require('./installers')
 const { windowsSystemRoot, windowsSchtasksExe } = require('../platform/windows-paths');
 const { ensurePrivateDir, personalDataDir, PERSONAL_CLI_FILE, PERSONAL_CLI_MARKER, isPersonalCli } = require('../platform/paths');
 const { parseYaml } = require('../platform/yaml');
-const { parseGuiConfig } = require('../gui/config');
+const { parseGuiConfig, NO_BROWSER_REMEDY } = require('../gui/config');
 const { shown } = require('./commands/io');
 const { LOGIN_START_VALUE, loginStartCommand } = require('../desktop-bridge/login-start');
 
@@ -43,7 +43,7 @@ const ELEVATED_FAILED = (what, r) => `Windows did not ${what} the task: ${r.mess
 const BINARY_LINE = (bin) => `binary:     ${bin}, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed`;
 const ALREADY_RUNNING = (pid) => `King Louie Node is already running (pid ${pid}); the task starts it at the next boot.`;
 const FFMPEG_LINE = 'ffmpeg is not on PATH: a take that records needs it. Install it as yourself: winget install Gyan.FFmpeg';
-const NO_CHROME_LINE = 'no chrome.exe found: takes and desktop apps are off; add gui.apps.chrome and gui.browser to node.yaml to turn them on';
+const NO_CHROME_LINE = `no chrome.exe found: takes and desktop apps are off; ${NO_BROWSER_REMEDY}`;
 
 // A path in a command line CommandLineToArgvW reads: double quotes around it, and a
 // run of backslashes at its end doubled so the closing quote stays a quote
