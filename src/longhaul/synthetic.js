@@ -203,7 +203,6 @@ function generateSynthetic({ sessionId, seed, turns, resultLines = 12, compactEv
   });
 
   const index = new SessionIndex(messages);
-  const questions = planted.map((q) => normalizeQuestion(q, index)).sort((a, b) => a.askAtSeq - b.askAtSeq);
   const manifest = buildManifest({
     sessionId,
     source: 'synthetic',
@@ -219,6 +218,7 @@ function generateSynthetic({ sessionId, seed, turns, resultLines = 12, compactEv
       constructed: false
     }
   });
+  const questions = planted.map((q) => normalizeQuestion(q, index, manifest)).sort((a, b) => a.askAtSeq - b.askAtSeq);
   return { manifest, messages, questions, index };
 }
 

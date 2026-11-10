@@ -34,11 +34,23 @@ function computeDistance(index, question) {
   return { messages: question.askAtSeq - nearest, estTokens: index.tokensBetween(nearest, question.askAtSeq) };
 }
 
+// In a constructed session (spec §10.2): whether the evidence lies in more
+// than one trajectory. Every askAtSeq there is a task prompt, so the ask's own
+// trajectory says nothing. null when the session is not constructed or the
+// question has no evidence.
+function crossesBoundary(manifest, question) {
+  if (!manifest || manifest.constructed !== true || !Array.isArray(manifest.boundaries)) return null;
+  const seqs = Array.isArray(question.evidenceSeqs) ? question.evidenceSeqs : [];
+  if (seqs.length === 0) return null;
+  const segments = new Set(seqs.map((s) => manifest.boundaries.findIndex((b) => s >= b.fromSeq && s <= b.toSeq)));
+  return segments.size > 1;
+}
+
 function isVerified(question) {
   return typeof question.verifiedBy === 'string' && VERIFIED_BY_RE.test(question.verifiedBy);
 }
 
-function validateQuestion(q, { index, sessionId }) {
+function validateQuestion(q, { index, sessionId, manifest = null }) {
   if (!q || typeof q !== 'object' || Array.isArray(q)) return ['not-an-object: the question is not a JSON object'];
   const errors = [];
   const add = (code, detail) => errors.push(`${code}: ${detail}`);
@@ -94,6 +106,10 @@ function validateQuestion(q, { index, sessionId }) {
       : Boolean(q.distance) && q.distance.messages === computed.messages && q.distance.estTokens === computed.estTokens;
     if (!same) add('distance-mismatch', `stored ${JSON.stringify(q.distance)}, computed ${JSON.stringify(computed)}; distance is computed, never typed`);
   }
+  if (errors.length === 0 && manifest && q.crossesBoundary !== undefined) {
+    const computed = crossesBoundary(manifest, q);
+    if (q.crossesBoundary !== computed) add('boundary-mismatch', `stored crossesBoundary ${JSON.stringify(q.crossesBoundary)}, computed ${JSON.stringify(computed)}; it is computed, never typed`);
+  }
   return errors;
 }
 
@@ -110,7 +126,9 @@ function validateQuestionSet(questions, ctx) {
   return problems;
 }
 
-function normalizeQuestion(q, index) {
+// crossesBoundary is set only for a constructed session, so other sessions'
+// question files keep today's bytes.
+function normalizeQuestion(q, index, manifest = null) {
   return {
     id: q.id,
     sessionId: q.sessionId,
@@ -122,6 +140,7 @@ function normalizeQuestion(q, index) {
     evidenceSeqs: [...q.evidenceSeqs].sort((a, b) => a - b),
     supersededBy: q.supersededBy ?? null,
     distance: computeDistance(index, q),
+    ...(manifest?.constructed === true ? { crossesBoundary: crossesBoundary(manifest, q) } : {}),
     authoredBy: q.authoredBy,
     verifiedBy: q.verifiedBy ?? null,
     notes: typeof q.notes === 'string' ? q.notes : ''
@@ -170,7 +189,7 @@ function writeQuestions(file, questions) {
 
 module.exports = {
   KINDS, BUCKETS, NO_BUCKET, VERIFIED_BY_RE,
-  bucketFor, computeDistance, isVerified,
+  bucketFor, computeDistance, crossesBoundary, isVerified,
   validateQuestion, validateQuestionSet, normalizeQuestion,
   questionsFile, rejectedFile, authorLogFile, readQuestions, writeQuestions
 };

@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { loadSession, listSessions, sessionDir, CHARS_PER_TOKEN } = require('./session-format');
-const { readQuestions, questionsFile, validateQuestionSet, isVerified, bucketFor, computeDistance } = require('./questions');
+const { readQuestions, questionsFile, validateQuestionSet, isVerified, bucketFor, computeDistance, crossesBoundary } = require('./questions');
 const { createAdapter } = require('./adapters');
 const {
   evidenceRecall, chunkEvidenceRecall, answerContainment, summarize, renderSummaryMarkdown, compareAdapters, COMPARISONS, stampFloor
@@ -87,7 +87,7 @@ async function loadRunSet({ dataRoot, sessionIds, includeUnverified }) {
     if (!fs.existsSync(qFile)) { skipped.push({ sessionId: id, reason: 'no questions file' }); continue; }
     const session = await loadSession(dir);
     const all = await readQuestions(qFile);
-    const problems = validateQuestionSet(all, { index: session.index, sessionId: id });
+    const problems = validateQuestionSet(all, { index: session.index, sessionId: id, manifest: session.manifest });
     if (problems.length) {
       const [p] = problems;
       const more = problems.length > 1 ? ` (and ${problems.length - 1} more questions)` : '';
@@ -124,7 +124,8 @@ const isSkipped = (skips, adapter, session) => skips.some((s) => s.adapter === a
 function recordBase({ runId, adapter, session, q }) {
   return {
     runId, sessionId: q.sessionId, questionId: q.id, adapter: adapter.name, kind: q.kind,
-    bucket: bucketFor(computeDistance(session.index, q)), askAtSeq: q.askAtSeq, evidenceSeqs: q.evidenceSeqs, verified: isVerified(q)
+    bucket: bucketFor(computeDistance(session.index, q)), crossesBoundary: crossesBoundary(session.manifest, q),
+    askAtSeq: q.askAtSeq, evidenceSeqs: q.evidenceSeqs, verified: isVerified(q)
   };
 }
 
