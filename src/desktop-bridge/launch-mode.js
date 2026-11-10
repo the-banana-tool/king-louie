@@ -20,10 +20,12 @@ function resolveLaunchMode({ argv, platform, stateMode, migrated = false }) {
 }
 
 // The arguments a relaunch passes (argv without the binary): both standalone
-// flags go, since the persisted mode decides again; everything else, the tray
-// flag included, stays. `extraArgs` are appended.
+// flags go, since the persisted mode decides again, and so does the tray flag:
+// every relaunch follows a press in the visible window, so it comes back
+// visible. Everything else stays. `extraArgs` are appended.
+const RELAUNCH_DROPS = new Set([STANDALONE_ONCE_FLAG, STANDALONE_FLAG, TRAY_FLAG]);
 function relaunchArgs(argv, extraArgs = []) {
-  return argv.slice(1).filter((a) => a !== STANDALONE_ONCE_FLAG && a !== STANDALONE_FLAG).concat(extraArgs);
+  return argv.slice(1).filter((a) => !RELAUNCH_DROPS.has(a)).concat(extraArgs);
 }
 
 const startsInTray = (argv) => Array.isArray(argv) && argv.includes(TRAY_FLAG);

@@ -39,10 +39,10 @@ describe('resolveLaunchMode', () => {
     assert.strictEqual(resolveLaunchMode({ argv: argv('--kl-standalone-twice', '--kl-standalone=1'), platform: 'win32', stateMode: 'standalone' }).why, 'needs-node');
   });
 
-  it('relaunch keeps --kl-tray; --kl-tray never changes attached/standalone', () => {
+  it('relaunch drops --kl-tray; --kl-tray never changes attached/standalone', () => {
     assert.strictEqual(TRAY_FLAG, '--kl-tray');
-    assert.deepStrictEqual(relaunchArgs(argv('--kl-tray', '--kl-standalone', '--kl-standalone-once', '--user-data-dir=x')), ['.', '--kl-tray', '--user-data-dir=x']);
-    assert.deepStrictEqual(relaunchArgs(argv('--kl-tray'), ['--kl-standalone-once']), ['.', '--kl-tray', '--kl-standalone-once']);
+    assert.deepStrictEqual(relaunchArgs(argv('--kl-tray', '--kl-standalone', '--kl-standalone-once', '--user-data-dir=x')), ['.', '--user-data-dir=x']);
+    assert.deepStrictEqual(relaunchArgs(argv('--kl-tray'), ['--kl-standalone-once']), ['.', '--kl-standalone-once']);
     for (const [, input] of rows) {
       const withTray = { ...input, argv: [...input.argv, '--kl-tray'] };
       assert.deepStrictEqual(resolveLaunchMode(withTray), resolveLaunchMode(input), JSON.stringify(input));

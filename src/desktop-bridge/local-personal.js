@@ -18,6 +18,9 @@ function localPersonalDataDir(pairing, platform) {
 // Standalone, development and fleet launches never have it.
 function trayModeOn({ launch, platform, pairing, stateMode }) {
   if (!launch || launch.host !== 'attached') return false;
+  // The launch rule gives `needs-node` only when the stored mode is not
+  // attached; the stateMode operand is defensive, matching attached-host's
+  // own `mode` choice should that rule ever change.
   if (launch.why === 'needs-node' && stateMode !== 'attached') return false;
   return localPersonalDataDir(pairing, platform) !== null;
 }

@@ -33,7 +33,7 @@ function createTray({
     tray.setContextMenu(Menu.buildFromTemplate(next.items.map((item) => ({
       label: item.label,
       enabled: item.enabled,
-      ...(item.enabled ? { click: () => { invoke(item.id); } } : {})
+      ...(item.enabled ? { click: () => { invoke(item.id).catch((err) => log.warn(`the tray's ${item.id} failed: ${err.message}`)); } } : {})
     }))));
   }
 
@@ -99,7 +99,7 @@ function createTray({
   tray.on('click', () => { if (!destroyed) openWindow(); });
   apply(model);
 
-  const onChanged = () => { refresh(); };
+  const onChanged = () => { refresh().catch((err) => log.warn(`the tray could not redraw: ${err.message}`)); };
   if (controller && typeof controller.on === 'function') controller.on('changed', onChanged);
   const sh = screenHost();
   if (sh && typeof sh.on === 'function') sh.on('change', onChanged);

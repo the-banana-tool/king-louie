@@ -68,7 +68,7 @@ async function launchPersonal(dataDir, seed, args) {
   }
 }
 
-const windowVisible =(ctx) => ctx.electronApp.evaluate(({ BrowserWindow }) => {
+const windowVisible = (ctx) => ctx.electronApp.evaluate(({ BrowserWindow }) => {
   const win = BrowserWindow.getAllWindows()[0];
   return Boolean(win && !win.isDestroyed() && win.isVisible());
 });

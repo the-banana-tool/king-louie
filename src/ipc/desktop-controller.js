@@ -274,7 +274,7 @@ function createDesktopController({
       app.quit();
       return { ok: true, relaunching: true };
     }
-    // Both standalone flags go; --kl-tray stays (launch-mode.js).
+    // Both standalone flags and --kl-tray go (launch-mode.js).
     const args = relaunchArgs(argv, extraArgs);
     app.relaunch({ args });
     app.exit(0);
