@@ -169,7 +169,10 @@ function createDesktopController({
   clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
   nodeStartWaitMs = NODE_START_WAIT_MS, nodeRetryMs = NODE_RETRY_MS, nodeRefreshMs = NODE_REFRESH_MS,
   oldProfileWaitMs = OLD_PROFILE_WAIT_MS,
-  migrationDeps = {}
+  migrationDeps = {},
+  // Electron's shell.openPath (resolves '' on success, else the error), passed by
+  // the hosts; this file stays free of a require('electron').
+  openPath = null
 }) {
   const move = { detectOldProfile: detectOldProfileApart, backupProfile, loadDesktopSource, ...migrationDeps };
   const emitter = new EventEmitter();
@@ -1178,6 +1181,28 @@ function createDesktopController({
     return relaunch([STANDALONE_ONCE]);
   }
 
+  // Settings redesign §8.3, "Switch to my node" from a --kl-standalone-once window:
+  // with a pairing, attach; with none, relaunch without the flag and let the launch
+  // rule decide (on Windows the setup view).
+  async function leaveStandalone() {
+    if (launch.why !== 'once') return { ok: false, code: 'NOT_ONCE', error: 'This window was not opened for one standalone session.' };
+    if (state.pairing && state.pairing.service) return attach();
+    return relaunch();
+  }
+
+  // Settings redesign §8.2: Node & connection's Open data folder, a personal
+  // node's only (a fleet node's data dir is the service account's).
+  async function openDataFolder() {
+    const svc = state.pairing && state.pairing.service;
+    if (!svc || svc.hosting !== 'personal' || !svc.dataDir) {
+      return { ok: false, code: 'NOT_PERSONAL', error: 'Only a node running as you has a data folder to open here.' };
+    }
+    if (typeof openPath !== 'function') return { ok: false, code: 'ATTACHED_UNAVAILABLE', error: 'Not available here.' };
+    const failure = await openPath(svc.dataDir);
+    if (failure) return { ok: false, code: 'OPEN_FAILED', error: `The data folder could not be opened: ${shown(String(failure), 200)}` };
+    return { ok: true };
+  }
+
   async function unpair() {
     const pairing = state.pairing;
     const wasAttached = state.mode === 'attached';
@@ -1983,7 +2008,7 @@ function createDesktopController({
   resumePendingPair();
 
   return {
-    status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
+    status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, leaveStandalone, openDataFolder, unpair, retry,
     importPlan, importApply, migrationPlan, migrationApply, restartLater, dismissServiceCommand, createClient, setClient, dispose,
     startAttached, startIdle, refreshIdle, nodeStart, nodeRestart, nodeInstallPreview, nodeInstall,
     setupStep, setupLater, setupFinish, setupWindowOnly, finishedForNow: () => finishedForNow,

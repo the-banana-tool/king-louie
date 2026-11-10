@@ -84,7 +84,8 @@ function startStandaloneHost(deps) {
   });
 
   const controller = controllerFactory({
-    state, mode: 'standalone', app, getWindow, userDataDir: app.getPath('userData'), safeStorage, launch
+    state, mode: 'standalone', app, getWindow, userDataDir: app.getPath('userData'), safeStorage, launch,
+    openPath: shell && typeof shell.openPath === 'function' ? (p) => shell.openPath(p) : null
   });
 
   registerHandlers(markingIpcMain(ipcMain), {

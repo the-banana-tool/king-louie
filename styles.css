@@ -1905,6 +1905,16 @@ body {
   white-space: nowrap;
 }
 
+/* In the drawer's header: between the title and the close button, taking the
+   room there is; empty (no status read yet) it keeps its place unseen. */
+.settings-header > .settings-where {
+  flex: 1 1 auto;
+}
+
+.settings-header > .settings-where:empty {
+  visibility: hidden;
+}
+
 .settings-where.tone-node {
   border-color: var(--success);
   background: var(--success-bg);

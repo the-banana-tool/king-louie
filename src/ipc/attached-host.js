@@ -14,7 +14,7 @@ const log = createLogger('attached-host');
 
 function startAttachedHost(deps) {
   const {
-    app, ipcMain, safeStorage, dialog, getWindow, state,
+    app, ipcMain, safeStorage, shell = null, dialog, getWindow, state,
     env = process.env, platform = process.platform,
     listChannels = listIpcChannels, clientFactory = null, controllerFactory = createDesktopController, launch
   } = deps;
@@ -24,7 +24,8 @@ function startAttachedHost(deps) {
   const mode = launch && launch.why === 'needs-node' ? state.mode : 'attached';
   const controller = controllerFactory({
     state, mode, app, getWindow, env, platform,
-    userDataDir: app.getPath('userData'), safeStorage, clientFactory, launch
+    userDataDir: app.getPath('userData'), safeStorage, clientFactory, launch,
+    openPath: shell && typeof shell.openPath === 'function' ? (p) => shell.openPath(p) : null
   });
   const client = mode === 'attached' ? controller.createClient() : null;
   controller.setClient(client);

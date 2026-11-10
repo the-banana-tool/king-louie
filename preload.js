@@ -1393,6 +1393,8 @@ contextBridge.exposeInMainWorld(
       attach: () => ipcRenderer.invoke('desktop:attach'),
       detach: (payload = {}) => ipcRenderer.invoke('desktop:detach', { confirmed: Boolean(payload && payload.confirmed === true) }),
       standaloneOnce: () => ipcRenderer.invoke('desktop:standaloneOnce'),
+      leaveStandalone: () => ipcRenderer.invoke('desktop:leaveStandalone'),
+      openDataFolder: () => ipcRenderer.invoke('desktop:openDataFolder'),
       unpair: () => ipcRenderer.invoke('desktop:unpair'),
       retry: () => ipcRenderer.invoke('desktop:retry'),
       dismissServiceCommand: () => ipcRenderer.invoke('desktop:dismissServiceCommand'),

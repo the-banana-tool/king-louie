@@ -281,6 +281,8 @@ module.exports = {
   DESKTOP_ATTACH: 'desktop:attach',
   DESKTOP_DETACH: 'desktop:detach',
   DESKTOP_STANDALONE_ONCE: 'desktop:standaloneOnce',
+  DESKTOP_LEAVE_STANDALONE: 'desktop:leaveStandalone',
+  DESKTOP_OPEN_DATA_FOLDER: 'desktop:openDataFolder',
   DESKTOP_UNPAIR: 'desktop:unpair',
   DESKTOP_IMPORT_PLAN: 'desktop:importPlan',
   DESKTOP_IMPORT_APPLY: 'desktop:importApply',

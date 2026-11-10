@@ -4680,6 +4680,7 @@ function closeMemoryPanel() {
 
 function openSettingsDrawer() {
   setSettingsDrawer(true);
+  paintSettingsBanner(appState.desktopStatus || null);
   loadSettings();
   renderSettingsNav();
   switchSettingsTab(resolveInitialTab(readLastSettingsTab(), visibleSettingsGroups()));
@@ -14961,6 +14962,33 @@ async function runServiceAction(id) {
   }
 }
 
+// Which machine Settings edits (settings redesign spec §5.2, §8.2): the line comes
+// from settingsBanner (renderer-helpers/settings-banner.js). It holds a node's
+// name, so it goes on the page as text, cut with an ellipsis by the CSS.
+function paintSettingsBanner(status) {
+  const el = document.getElementById('settings-where');
+  if (!el) return;
+  const banner = settingsBanner(status);
+  el.className = `settings-where tone-${banner.tone}`;
+  let line = el.querySelector(':scope > .settings-where-text');
+  if (!line) {
+    line = document.createElement('span');
+    line.className = 'settings-where-text';
+    el.replaceChildren(line);
+  }
+  line.textContent = banner.text;
+  el.title = banner.text;
+  setSettingsReadOnly(banner.readOnly);
+}
+
+// While the node cannot be reached nothing typed would be saved, so every page
+// but Node & connection (where the owner starts or reconnects it) is inert.
+function setSettingsReadOnly(readOnly) {
+  document.querySelectorAll('.settings-tab-content').forEach((pane) => {
+    pane.inert = Boolean(readOnly) && pane.dataset.tab !== 'service';
+  });
+}
+
 function markUnavailableTabs(tabs = []) {
   const list = Array.isArray(tabs) ? tabs.slice() : [];
   const before = (appState.unavailableTabs || []).join('\n');
@@ -15352,7 +15380,9 @@ async function refreshServiceStatus() {
     return;
   }
   serviceStatusRead = true;
+  appState.desktopStatus = status;
   markUnavailableTabs(status.unavailableTabs || []);
+  paintSettingsBanner(status);
   renderAttachedBanner(status);
   await refreshSetupView(status);
   const conn = status.connection ? status.connection.status : null;
