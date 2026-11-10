@@ -31,7 +31,7 @@ function prompt(name) {
 const oneLine = (v) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, REASON_MAX) : '');
 const fail = (reason, call, detail = null) => ({ ok: false, reason, detail, call });
 
-async function ask({ stage, promptName, values, sessionId, client, cache, hooks, maxTokens, retry }) {
+async function ask({ stage, promptName, values, sessionId, client, cache, hooks, maxTokens, retry, inflight }) {
   const p = prompt(promptName);
   const filled = fillTemplate(p.text, values);
   const key = cacheKey({
@@ -39,7 +39,7 @@ async function ask({ stage, promptName, values, sessionId, client, cache, hooks,
     provider: client.provider, model: client.model, baseUrl: client.baseUrl, maxTokens, input: sha256Text(filled)
   });
   try {
-    return { call: await cachedCall({ cache, stage, key, client, prompt: filled, maxTokens, hooks, retry }) };
+    return { call: await cachedCall({ cache, stage, key, client, prompt: filled, maxTokens, hooks, retry, inflight }) };
   } catch (err) {
     const stop = stopErrorFor(err, client.provider);
     if (stop) throw stop;
@@ -47,7 +47,7 @@ async function ask({ stage, promptName, values, sessionId, client, cache, hooks,
   }
 }
 
-async function authorFact({ session, window, item, client, cache, hooks, maxTokens = AUTHOR_MAX_TOKENS, retry }) {
+async function authorFact({ session, window, item, client, cache, hooks, inflight, maxTokens = AUTHOR_MAX_TOKENS, retry }) {
   const span = [];
   for (let s = item.spanFrom; s <= item.spanTo; s++) {
     const m = session.index.get(s);
@@ -56,7 +56,7 @@ async function authorFact({ session, window, item, client, cache, hooks, maxToke
   const { call, error } = await ask({
     stage: 'compaction-fact', promptName: 'compactionFact', sessionId: session.manifest?.sessionId,
     values: { kind: item.kind, kindRule: KIND_RULES[item.kind], span: span.join('\n\n') },
-    client, cache, hooks, maxTokens, retry
+    client, cache, hooks, inflight, maxTokens, retry
   });
   if (error) return fail('model-error', null, error);
   const parsed = parseReply(call.text);
@@ -77,11 +77,11 @@ async function authorFact({ session, window, item, client, cache, hooks, maxToke
   return { ok: true, value: { kind: item.kind, fact, quote, evidenceSeq }, call };
 }
 
-async function judgePreserved({ fact, summary, sessionId, client, cache, hooks, maxTokens = JUDGE_MAX_TOKENS, retry }) {
+async function judgePreserved({ fact, summary, sessionId, client, cache, hooks, inflight, maxTokens = JUDGE_MAX_TOKENS, retry }) {
   const { call, error } = await ask({
     stage: 'compaction-preserved', promptName: 'compactionPreserved', sessionId,
     values: { fact: String(fact ?? ''), summary: String(summary ?? '') },
-    client, cache, hooks, maxTokens, retry
+    client, cache, hooks, inflight, maxTokens, retry
   });
   if (error) return fail('model-error', null, error);
   const parsed = parseReply(call.text);
@@ -90,11 +90,11 @@ async function judgePreserved({ fact, summary, sessionId, client, cache, hooks, 
   return { ok: true, value: { verdict, reason: oneLine(parsed.reason) }, call };
 }
 
-async function judgeNeeded({ fact, candidates, sessionId, client, cache, hooks, maxTokens = JUDGE_MAX_TOKENS, retry }) {
+async function judgeNeeded({ fact, candidates, sessionId, client, cache, hooks, inflight, maxTokens = JUDGE_MAX_TOKENS, retry }) {
   const { call, error } = await ask({
     stage: 'compaction-needed', promptName: 'compactionNeeded', sessionId,
     values: { fact: String(fact ?? ''), candidates: candidates.map(clipRendered).join('\n\n') },
-    client, cache, hooks, maxTokens, retry
+    client, cache, hooks, inflight, maxTokens, retry
   });
   if (error) return fail('model-error', null, error);
   const parsed = parseReply(call.text);

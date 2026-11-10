@@ -4,7 +4,7 @@
 // A private session's text goes to a remote model only with --send-private,
 // checked before any client is built. Prints counts, rates and cost only.
 const path = require('path');
-const { runCompactionStudy, assertMaySend, readManifest } = require('../compaction/study');
+const { runCompactionStudy, assertMaySend, readManifest, DEFAULT_CONCURRENCY, MAX_CONCURRENCY } = require('../compaction/study');
 const { clientFor, positiveInt } = require('./run');
 const { createFakeModels } = require('../fake-models');
 const { formatEstimate, DEFAULT_MAX_USD } = require('../cost');
@@ -15,7 +15,7 @@ const { fixed, usd } = require('../format');
 const USAGE = [
   'Usage: longhaul compaction-loss --sessions <id,...> --author-provider <p> --author-model <m> --judge-provider <p> --judge-model <m>',
   '  [--author-base-url <url>] [--judge-base-url <url>] [--facts-per-window 10] [--candidates 8] [--seed 1]',
-  '  [--embed-provider openai|local --embed-model <m>] [--max-usd 50] [--allow-unpriced] [--dry-run] [--send-private] [--fake-models]'
+  '  [--embed-provider openai|local --embed-model <m>] [--concurrency 6] [--max-usd 50] [--allow-unpriced] [--dry-run] [--send-private] [--fake-models]'
 ].join('\n');
 
 const ROLE_OPTIONS = ['author-provider', 'author-model', 'author-base-url', 'judge-provider', 'judge-model', 'judge-base-url'];
@@ -24,6 +24,13 @@ function maxUsdOf(raw) {
   if (raw === undefined) return DEFAULT_MAX_USD;
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) throw new UsageError(`--max-usd must be a positive number, got ${JSON.stringify(raw)}`);
+  return n;
+}
+
+function concurrencyOf(raw) {
+  if (raw === undefined) return DEFAULT_CONCURRENCY;
+  const n = positiveInt(raw, 'concurrency');
+  if (n > MAX_CONCURRENCY) throw new UsageError(`--concurrency must be from 1 to ${MAX_CONCURRENCY}, got ${JSON.stringify(raw)}`);
   return n;
 }
 
@@ -41,6 +48,7 @@ module.exports = {
     seed: { type: 'string' },
     'embed-provider': { type: 'string' },
     'embed-model': { type: 'string' },
+    concurrency: { type: 'string' },
     'max-usd': { type: 'string' },
     'allow-unpriced': { type: 'boolean' },
     'dry-run': { type: 'boolean' },
@@ -49,7 +57,7 @@ module.exports = {
   },
   // deps (tests only): providerInstances { author, judge }, catalog, retry,
   // embedder (an embeddings provider instance), runner (an EmbedRunner the
-  // caller owns), signals, exit.
+  // caller owns), signals, exit, clock.
   async run(ctx, values, _positionals, deps = {}) {
     if (!values.sessions) throw new UsageError(USAGE);
     const sessionIds = [...new Set(values.sessions.split(',').map((s) => s.trim()).filter(Boolean))];
@@ -63,6 +71,8 @@ module.exports = {
       candidates: values.candidates ? positiveInt(values.candidates, 'candidates') : 8,
       seed: values.seed ? positiveInt(values.seed, 'seed') : 1,
       maxUsd: maxUsdOf(values['max-usd']),
+      concurrency: concurrencyOf(values.concurrency),
+      progress: (line) => ctx.stderr.write(line),
       allowUnpriced: values['allow-unpriced'] === true,
       dryRun: values['dry-run'] === true,
       sendPrivate: values['send-private'] === true,
@@ -100,7 +110,7 @@ module.exports = {
     try {
       result = await runCompactionStudy({
         home: ctx.home, sessionIds, clients, options,
-        deps: { now: ctx.now, catalog: deps.catalog, retry: deps.retry, signals: deps.signals, exit: deps.exit }
+        deps: { now: ctx.now, catalog: deps.catalog, retry: deps.retry, signals: deps.signals, exit: deps.exit, clock: deps.clock }
       });
     } finally {
       if (runner && !deps.runner) await runner.stop();

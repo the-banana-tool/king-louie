@@ -22,6 +22,14 @@ const A = 'alpha-key-4411 deploy key';
 const B = 'bravo-port-9922 web port';
 const C = 'charlie-dir-5533 cache folder';
 const FACTS = { 3: A, 18: B, 30: C };
+// More user facts for the concurrency tests (writeHandSession's extra), so a
+// run has enough items for replies to finish out of plan order.
+const EXTRA = {
+  5: 'delta-host-6101 build host', 7: 'echo-team-6202 owners', 9: 'foxtrot-zone-6303 region', 11: 'golf-flag-6404 feature flag',
+  13: 'hotel-file-6505 config file', 24: 'india-db-6606 database', 26: 'juliet-user-6707 service user', 32: 'kilo-queue-6808 job queue',
+  34: 'lima-cron-6909 nightly cron'
+};
+const ALL_FACTS = { ...FACTS, ...EXTRA };
 
 function msg(seq, sender, text, meta) {
   return { id: `m${seq}`, seq, sender, text, timestamp: new Date(Date.UTC(2026, 0, 1, 0, seq)).toISOString(), ...(meta ? { meta } : {}) };
@@ -30,7 +38,7 @@ function msg(seq, sender, text, meta) {
 // Window 1 is 1-20 (summary 21) holding A at 3 and B at 18; window 2 is 22-40
 // (summary 41) holding C at 30. The summary of window 1 keeps A and not B;
 // B's token comes back at 50.
-function writeHandSession(root, { sessionId = SID, compactions = true } = {}) {
+function writeHandSession(root, { sessionId = SID, compactions = true, extra = false } = {}) {
   const messages = [];
   for (let seq = 1; seq <= 60; seq++) {
     let m = msg(seq, seq % 2 ? 'user' : 'assistant', `ok ${seq}`);
@@ -38,6 +46,8 @@ function writeHandSession(root, { sessionId = SID, compactions = true } = {}) {
     if (seq === 18) m = msg(seq, 'user', `we will serve on ${B} from today onward`);
     if (seq === 30) m = msg(seq, 'user', `remember ${C} holds our build data`);
     if (seq === 50) m = msg(seq, 'assistant', 'bravo-port-9922 again here');
+    if (extra && EXTRA[seq]) m = msg(seq, 'user', `please note ${EXTRA[seq]} for the team`);
+    if (extra && seq === 52) m = msg(seq, 'assistant', 'echo-team-6202 and india-db-6606 came up again');
     if (compactions && seq === 21) m = msg(seq, 'status', `Summary: ${A} chosen.`, { compaction: true });
     if (compactions && seq === 41) m = msg(seq, 'status', `Summary: ${C} noted.`, { compaction: true });
     messages.push(m);
@@ -59,11 +69,12 @@ const between = (text, open, close) => {
 
 // The author states the fact of the one marked message in its span (fact =
 // quote); the judge says preserved iff the fact is in the summary, and needed
-// iff it was shown any candidate.
-function scripted(calls) {
+// iff it was shown any candidate. delay (optional) is the ms to wait before
+// the reply, given the call's start index; costUsd is what each call reports.
+function scriptedClient(calls, { delay = null, costUsd = 0.001, starts = null, facts = FACTS } = {}) {
   const reply = (prompt) => {
     if (prompt.startsWith('You pick one fact')) {
-      for (const [seq, fact] of Object.entries(FACTS)) {
+      for (const [seq, fact] of Object.entries(facts)) {
         if (prompt.includes(`[#${seq} `)) return JSON.stringify({ fact, quote: fact, evidenceSeq: Number(seq) });
       }
       return '{"skip": true}';
@@ -77,19 +88,24 @@ function scripted(calls) {
   };
   return {
     async streamMessage(messages, _options, onChunk) {
+      const index = calls.length;
       calls.push(1);
+      if (starts) starts.push(starts.completed);
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay(index)));
       const text = reply(messages[0].content);
       onChunk(text);
-      return { content: '', llmMetrics: { inputTokens: 100, outputTokens: 20, costUsd: 0.001 } };
+      if (starts) starts.completed += 1;
+      return { content: '', llmMetrics: { inputTokens: 100, outputTokens: 20, costUsd } };
     }
   };
 }
 
-function setup() {
+function setup({ extra = false, ...clientOptions } = {}) {
   const { env, root } = tmpHome();
   const home = ensureDirs(resolveHome(env));
-  writeHandSession(root);
+  writeHandSession(root, { extra });
   const calls = [];
+  const scripted = (c) => scriptedClient(c, { ...clientOptions, ...(extra ? { facts: ALL_FACTS } : {}) });
   const ctx = { home, env, stdout: sink(), stderr: sink(), now: () => new Date('2026-11-09T10:00:00Z'), cwd: process.cwd() };
   const deps = { providerInstances: { author: scripted(calls), judge: scripted(calls) }, catalog: fixtureCatalog(), retry: { wait: async () => {} } };
   const values = {
@@ -239,6 +255,72 @@ describe('longhaul compaction-loss', () => {
     const summary = readJson(path.join(t.root, 'runs', runId, 'summary.json'));
     assert.equal(summary.embedFailures, 3);
     assert.ok(summary.all.judged > 0);
+  });
+
+  it('gives the same records, summary and spot-check sample at --concurrency 4 as at 1, with replies finishing out of order', async () => {
+    // Earlier calls wait longer, so later items finish first.
+    const delay = (i) => (8 - (i % 8)) * 6;
+    const outputs = [];
+    for (const concurrency of ['1', '4']) {
+      const t = setup({ delay, extra: true });
+      const values = { ...t.values, 'facts-per-window': '5', concurrency };
+      assert.equal(await COMMANDS['compaction-loss'].run(t.ctx, values, [], t.deps), 0, t.ctx.stderr.text);
+      const [runId] = runDirs(t.root);
+      const dir = path.join(t.root, 'runs', runId);
+      const summary = readJson(path.join(dir, 'summary.json'));
+      delete summary.runId;
+      const spot = fs.readFileSync(path.join(t.root, 'private', 'spot-checks', `${runId}.jsonl`), 'utf8').trim().split('\n')
+        .map((line) => { const r = JSON.parse(line); delete r.runId; return r; });
+      const config = readJson(path.join(dir, 'config.json'));
+      const cacheFiles = fs.readdirSync(path.join(t.root, 'private', 'model-cache'), { recursive: true }).map(String).sort();
+      outputs.push({ records: fs.readFileSync(path.join(dir, 'records.jsonl'), 'utf8'), summary, spot, calls: t.calls.length, cacheFiles, concurrency: config.concurrency });
+    }
+    const [one, four] = outputs;
+    assert.equal(one.concurrency, 1);
+    assert.equal(four.concurrency, 4);
+    assert.ok(one.records.trim().split('\n').length >= 8);
+    assert.equal(four.records, one.records);
+    assert.deepEqual(four.summary, one.summary);
+    assert.deepEqual(four.spot, one.spot);
+    assert.equal(four.calls, one.calls);
+    assert.deepEqual(four.cacheFiles, one.cacheFiles, 'the same cache keys');
+  });
+
+  it('starts no call once the spend guard trips at --concurrency 4', async () => {
+    const starts = Object.assign([], { completed: 0 });
+    // Each call reports $2 against a $1 cap: the first reply trips the guard.
+    const t = setup({ delay: (i) => 20 + (i % 3) * 10, costUsd: 2, starts, extra: true });
+    const values = { ...t.values, 'facts-per-window': '5', concurrency: '4', 'max-usd': '1' };
+    assert.equal(await COMMANDS['compaction-loss'].run(t.ctx, values, [], t.deps), 1, t.ctx.stderr.text);
+    assert.equal(starts.length, 4, 'only the four calls already in flight went out');
+    assert.deepEqual([...starts], [0, 0, 0, 0], 'every call started before the first reply settled');
+    const [runId] = runDirs(t.root);
+    const spend = readJson(path.join(t.root, 'runs', runId, 'spend.json'));
+    assert.equal(spend.overBudget, true);
+    assert.equal(spend.calls, 4);
+    const records = fs.readFileSync(path.join(t.root, 'runs', runId, 'records.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(records.some((r) => r.reason === 'over-budget'));
+  });
+
+  it('reports progress on stderr in counts and money only', async () => {
+    const t = setup();
+    assert.equal(await COMMANDS['compaction-loss'].run(t.ctx, { ...t.values, concurrency: '3' }, [], t.deps), 0, t.ctx.stderr.text);
+    const lines = t.ctx.stderr.text.split('\n').filter((l) => l.startsWith('compaction-loss: '));
+    assert.ok(lines.some((l) => /^compaction-loss: hand-study author 0\/3 items, \$0\.0000 spent$/.test(l)), t.ctx.stderr.text);
+    assert.ok(lines.some((l) => /^compaction-loss: hand-study needed 0\/3 items, \$\d+\.\d{4} spent$/.test(l)), t.ctx.stderr.text);
+    for (const fact of [A, B, C]) {
+      for (const word of fact.split(' ')) assert.ok(!t.ctx.stderr.text.includes(word), `stderr holds no fact text (${word})`);
+    }
+  });
+
+  it('refuses --concurrency outside 1 to 32 with exit 2', async () => {
+    const t = setup();
+    for (const bad of ['0', '33', '1.5', 'x']) {
+      const out = { stdout: sink(), stderr: sink(), env: t.env };
+      assert.equal(await main(['compaction-loss', '--sessions', SID, '--fake-models', '--concurrency', bad], out), 2, bad);
+      assert.match(out.stderr.text, /--concurrency/);
+    }
+    assert.deepEqual(runDirs(t.root), []);
   });
 
   it('runs end to end on synth-compacted with --fake-models, for $0', async () => {

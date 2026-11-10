@@ -36,6 +36,52 @@ const HEADER_EST_CHARS = 40;
 const EMBED_BATCH = 100;
 const TMP_PREFIX = 'kl-compaction-';
 const SPOT_ADAPTER = 'compaction-loss';
+const DEFAULT_CONCURRENCY = 6;
+const MAX_CONCURRENCY = 32;
+const PROGRESS_EVERY_ITEMS = 25;
+const PROGRESS_EVERY_MS = 10000;
+
+// Runs fn over items, at most `concurrency` at once, and returns the results
+// in item order. The first error stops new items from starting; the ones in
+// flight settle, then it is thrown. Items are taken by a shared index on the
+// one event loop, so no item runs twice.
+async function runPool(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  let failure = null;
+  const worker = async () => {
+    while (!failure && next < items.length) {
+      const i = next++;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (err) {
+        if (!failure) failure = { err };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  if (failure) throw failure.err;
+  return results;
+}
+
+// One line when a phase starts, then at most one every PROGRESS_EVERY_MS and
+// PROGRESS_EVERY_ITEMS items, whichever comes later. Counts and money only.
+function phaseProgress({ write, clock, spent }) {
+  return (sessionId, phase, total) => {
+    const line = (done) => write(`compaction-loss: ${sessionId} ${phase} ${done}/${total} items, $${spent().toFixed(4)} spent\n`);
+    let last = { done: 0, at: clock() };
+    line(0);
+    let done = 0;
+    return () => {
+      done += 1;
+      const at = clock();
+      if (done - last.done >= PROGRESS_EVERY_ITEMS && at - last.at >= PROGRESS_EVERY_MS) {
+        last = { done, at };
+        line(done);
+      }
+    };
+  };
+}
 
 // A private session goes to a remote model only with --send-private;
 // checked before any client is built. Returns the private sessions that will be sent.
@@ -193,14 +239,18 @@ async function embedQueries({ home, sessionId, embed, facts, hooks, catalog }) {
 async function runCompactionStudy({ home, sessionIds, clients, options = {}, deps = {} }) {
   const o = {
     factsPerWindow: 10, candidates: 8, seed: 1, maxUsd: DEFAULT_MAX_USD, allowUnpriced: false, dryRun: false, sendPrivate: false,
-    onPlan: () => {}, ...options
+    concurrency: DEFAULT_CONCURRENCY, onPlan: () => {}, progress: (line) => process.stderr.write(line), ...options
   };
+  if (!Number.isInteger(o.concurrency) || o.concurrency < 1 || o.concurrency > MAX_CONCURRENCY) {
+    throw new UsageError(`--concurrency must be a whole number from 1 to ${MAX_CONCURRENCY}, got ${JSON.stringify(o.concurrency)}`);
+  }
   const { author, judge, embed = null } = clients;
   const now = deps.now || (() => new Date());
   const signals = deps.signals || process;
   const exit = deps.exit || ((code) => process.exit(code));
   const catalog = deps.catalog || require('../../models').getActiveCatalog();
   const retry = deps.retry || {};
+  const clock = deps.clock || (() => Date.now());
   if (!sessionIds?.length) throw new UsageError('--sessions names at least one session.');
 
   const manifests = sessionIds.map((id) => readManifest(home.root, id));
@@ -240,7 +290,7 @@ async function runCompactionStudy({ home, sessionIds, clients, options = {}, dep
     kind: 'compaction-loss', stage: 'B4', runId, commit: deps.commit ?? gitCommit(), seed: o.seed, factsPerWindow: o.factsPerWindow, candidates: o.candidates,
     author: { provider: author.provider, model: author.model }, judge: { provider: judge.provider, model: judge.model },
     embed: embed ? { provider: embed.provider, model: embed.model } : null,
-    maxUsd: o.maxUsd, prompts,
+    maxUsd: o.maxUsd, concurrency: o.concurrency, prompts,
     sessions: sessions.map(({ id, session, windows }) => ({
       sessionId: id, source: session.manifest.source ?? null, private: session.manifest.private === true, license: session.manifest.license, windows: windows.length
     })),
@@ -273,11 +323,14 @@ async function runCompactionStudy({ home, sessionIds, clients, options = {}, dep
   const records = [];
   const facts = [];
   const spotRows = [];
-  const step = { client: null, cache, hooks, retry };
+  // inflight joins two items' identical calls into one, as the cache does in a serial run.
+  const step = { client: null, cache, hooks, retry, inflight: new Map() };
+  const startPhase = phaseProgress({ write: o.progress, clock, spent: () => guard.totals().spentUsd });
   let embedFailures = 0;
   try {
     for (const { id, session, windows } of sessions) {
-      const authored = [];
+      // Records in plan order, whatever order the calls finish in.
+      const work = [];
       for (const p of plan.filter((x) => x.sessionId === id)) {
         const { window } = p;
         const summary = summaryText(session, window);
@@ -287,47 +340,67 @@ async function runCompactionStudy({ home, sessionIds, clients, options = {}, dep
             status: 'judged', tokensToSummary: item.tokensToSummary, costUsd: 0
           };
           records.push(record);
+          work.push({ record, window, summary, item });
+        }
+      }
+
+      let tick = startPhase(id, 'author', work.length);
+      const authoredAll = await runPool(work, o.concurrency, async ({ record, window, summary, item }) => {
+        try {
           const a = await authorFact({ session, window, item, ...step, client: author, maxTokens: AUTHOR_MAX_TOKENS });
           record.costUsd = addCost(record.costUsd, a.call);
           if (!a.ok) {
             Object.assign(record, a.reason === 'model-error' ? { status: 'error', reason: a.detail } : { status: 'rejected', reason: a.reason });
             if (a.reason === 'evidence-outside-window') record.evidenceSeq = Number(a.detail);
-            continue;
+            return null;
           }
           record.evidenceSeq = a.value.evidenceSeq;
           const pres = await judgePreserved({ fact: a.value.fact, summary, sessionId: id, ...step, client: judge, maxTokens: JUDGE_MAX_TOKENS });
           record.costUsd = addCost(record.costUsd, pres.call);
           if (!pres.ok) {
             Object.assign(record, { status: 'error', reason: pres.reason === 'model-error' ? pres.detail : `preserved-${pres.reason}` });
-            continue;
+            return null;
           }
           record.preserved = pres.value.verdict;
-          authored.push({ record, window, value: a.value, preserved: pres.value });
+          return { record, window, value: a.value, preserved: pres.value };
+        } finally {
+          tick();
+          writeSpend();
         }
-        writeSpend();
-      }
+      });
+      const authored = authoredAll.filter(Boolean);
 
-      if (embed && authored.length) embedFailures += await embedQueries({ home, sessionId: id, embed, facts: authored, hooks, catalog });
+      if (embed && authored.length) {
+        startPhase(id, 'embed', authored.length);
+        embedFailures += await embedQueries({ home, sessionId: id, embed, facts: authored, hooks, catalog });
+      }
+      // Opened after the embedding, so its cosine side finds the fact queries.
       const matcher = authored.length ? await openMatcher({ home, sessionId: id, session, embed: embed ? { provider: embed.provider, model: embed.model } : null }) : null;
       try {
-        for (const f of authored) {
-          const { record, window, value } = f;
-          const later = await matcher.laterMatches(value.fact, value.quote, window.summarySeq, { k: o.candidates });
-          let needed = { verdict: 'not-needed', seqs: [], reason: '' };
-          if (!later.messages.length) {
-            record.noCandidates = true;
-          } else {
-            const n = await judgeNeeded({ fact: value.fact, candidates: later.messages, sessionId: id, ...step, client: judge, maxTokens: JUDGE_MAX_TOKENS });
-            record.costUsd = addCost(record.costUsd, n.call);
-            if (!n.ok) {
-              Object.assign(record, { status: 'error', reason: n.reason === 'model-error' ? n.detail : `needed-${n.reason}`, candidateCount: later.messages.length });
-              continue;
+        tick = startPhase(id, 'needed', authored.length);
+        await runPool(authored, o.concurrency, async (f) => {
+          try {
+            const { record, window, value } = f;
+            const later = await matcher.laterMatches(value.fact, value.quote, window.summarySeq, { k: o.candidates });
+            let needed = { verdict: 'not-needed', seqs: [], reason: '' };
+            if (!later.messages.length) {
+              record.noCandidates = true;
+            } else {
+              const n = await judgeNeeded({ fact: value.fact, candidates: later.messages, sessionId: id, ...step, client: judge, maxTokens: JUDGE_MAX_TOKENS });
+              record.costUsd = addCost(record.costUsd, n.call);
+              if (!n.ok) {
+                Object.assign(record, { status: 'error', reason: n.reason === 'model-error' ? n.detail : `needed-${n.reason}`, candidateCount: later.messages.length });
+                return;
+              }
+              needed = n.value;
             }
-            needed = n.value;
+            Object.assign(record, { needed: needed.verdict, candidateCount: later.messages.length, neededSeqs: needed.seqs });
+            f.needed = { ...needed, noCandidates: record.noCandidates === true };
+          } finally {
+            tick();
+            writeSpend();
           }
-          Object.assign(record, { needed: needed.verdict, candidateCount: later.messages.length, neededSeqs: needed.seqs });
-          f.needed = { ...needed, noCandidates: record.noCandidates === true };
-        }
+        });
       } finally {
         if (matcher) await matcher.release();
       }
@@ -377,4 +450,4 @@ async function runCompactionStudy({ home, sessionIds, clients, options = {}, dep
   return { runId, dir, config, summary, spend, spotChecks: { file: spotFile, n: spotN } };
 }
 
-module.exports = { runCompactionStudy, assertMaySend, readManifest, AUTHOR_MAX_TOKENS, JUDGE_MAX_TOKENS };
+module.exports = { runCompactionStudy, assertMaySend, readManifest, runPool, AUTHOR_MAX_TOKENS, JUDGE_MAX_TOKENS, DEFAULT_CONCURRENCY, MAX_CONCURRENCY };

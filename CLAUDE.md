@@ -896,8 +896,11 @@ Electron build.
   `longhaul compaction-loss --sessions <id,...> --author-provider P
   --author-model M --judge-provider P --judge-model M [--facts-per-window 10]
   [--candidates 8] [--seed 1] [--embed-provider openai|local --embed-model M]
-  [--max-usd 50] [--allow-unpriced] [--dry-run] [--send-private]
-  [--fake-models]` reads the imported sessions in `LONGHAUL_HOME/sessions/`.
+  [--concurrency 6] [--max-usd 50] [--allow-unpriced] [--dry-run]
+  [--send-private] [--fake-models]` reads the imported sessions in
+  `LONGHAUL_HOME/sessions/` (`--concurrency`, 1 to 32, runs that many facts'
+  calls at once with the same records and cache keys as 1, recorded in
+  `config.json`, and progress goes to stderr as counts and money only).
   Each `manifest.compactions` entry is a window (`compaction/windows.js`; an
   empty one is skipped `empty-window`, a session with none `no-compactions`,
   both in `config.json` `skipped`). Facts are sampled round-robin over
