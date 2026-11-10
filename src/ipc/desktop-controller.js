@@ -1198,6 +1198,8 @@ function createDesktopController({
       return { ok: false, code: 'NOT_PERSONAL', error: 'Only a node running as you has a data folder to open here.' };
     }
     if (typeof openPath !== 'function') return { ok: false, code: 'ATTACHED_UNAVAILABLE', error: 'Not available here.' };
+    const isDir = await fs.promises.stat(svc.dataDir).then((st) => st.isDirectory(), () => false);
+    if (!isDir) return { ok: false, code: 'DATA_DIR_MISSING', error: `The data folder is not there: ${shown(svc.dataDir, 400)}` };
     const failure = await openPath(svc.dataDir);
     if (failure) return { ok: false, code: 'OPEN_FAILED', error: `The data folder could not be opened: ${shown(String(failure), 200)}` };
     return { ok: true };

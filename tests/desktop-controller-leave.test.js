@@ -41,7 +41,7 @@ function make({ why = 'once', pairing = null, openPath } = {}) {
 
 const record = (service) => ({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service });
 const fleetService = { nodeId: 'kln-1', publicKey: 'ab', port: 18796, pairedAt: '2026-11-01T00:00:00Z' };
-const personalService = { ...fleetService, hosting: 'personal', dataDir: 'C:\\Users\\alex\\AppData\\Local\\KingLouie\\node\\data' };
+const personalService = (dataDir = tmp()) => ({ ...fleetService, hosting: 'personal', dataDir });
 
 describe('desktop controller: leaveStandalone', () => {
   it('refuses unless this launch is standalone-once', async () => {
@@ -94,14 +94,29 @@ describe('desktop controller: openDataFolder', () => {
 
   it('opens the personal node\'s data dir through the injected shell', async () => {
     const opened = [];
-    const { controller } = make({ pairing: record(personalService), openPath: async (p) => { opened.push(p); return ''; } });
+    const service = personalService();
+    const { controller } = make({ pairing: record(service), openPath: async (p) => { opened.push(p); return ''; } });
     assert.deepEqual(await controller.openDataFolder(), { ok: true });
-    assert.deepEqual(opened, [personalService.dataDir]);
+    assert.deepEqual(opened, [service.dataDir]);
     controller.dispose();
   });
 
+  it('refuses a data dir that is missing or not a directory, before the shell', async () => {
+    const opened = [];
+    const file = path.join(tmp(), 'node.yaml');
+    fs.writeFileSync(file, 'x');
+    for (const dataDir of [path.join(tmp(), 'gone'), file]) {
+      const { controller } = make({ pairing: record(personalService(dataDir)), openPath: async (p) => { opened.push(p); return ''; } });
+      const r = await controller.openDataFolder();
+      assert.equal(r.ok, false);
+      assert.equal(r.code, 'DATA_DIR_MISSING');
+      controller.dispose();
+    }
+    assert.deepEqual(opened, []);
+  });
+
   it('reports the shell\'s failure', async () => {
-    const { controller } = make({ pairing: record(personalService), openPath: async () => 'Failed to open path' });
+    const { controller } = make({ pairing: record(personalService()), openPath: async () => 'Failed to open path' });
     const r = await controller.openDataFolder();
     assert.equal(r.ok, false);
     assert.equal(r.code, 'OPEN_FAILED');

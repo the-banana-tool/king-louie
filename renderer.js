@@ -15376,6 +15376,11 @@ async function refreshServiceStatus() {
       }
       return;
     }
+    // Review focus 1: a status that cannot be read now says nothing is reachable;
+    // an attached window must not keep a green banner over pages that cannot save.
+    if (appState.desktopStatus && appState.desktopStatus.mode === 'attached') {
+      paintSettingsBanner({ ...appState.desktopStatus, view: 'attached-disconnected' });
+    }
     revealShell();
     return;
   }

@@ -1921,16 +1921,19 @@ body {
   color: var(--success);
 }
 
+/* Spec §5.2: amber while the window runs on its own. */
 .settings-where.tone-desktop {
-  border-color: var(--info);
-  background: var(--info-bg);
-  color: var(--info);
-}
-
-.settings-where.tone-dev {
   border-color: var(--warning);
   background: var(--warning-bg);
   color: var(--warning);
+}
+
+/* Development standalone: a cool blue, apart from amber and from the grey of
+   tone-unreachable. */
+.settings-where.tone-dev {
+  border-color: var(--info);
+  background: var(--info-bg);
+  color: var(--info);
 }
 
 .settings-where.tone-unreachable {

@@ -95,6 +95,13 @@ describe('the renderer draws the banner as text (review focus 5)', () => {
     assert.match(block('function openSettingsDrawer('), /paintSettingsBanner\(/);
   });
 
+  it('a status that cannot be read after a good one turns an attached banner grey (review focus 1)', () => {
+    const body = block('async function refreshServiceStatus(');
+    const failed = body.slice(body.indexOf('if (!status || status.ok === false)'), body.indexOf('serviceStatusRead = true;'));
+    assert.match(failed, /appState\.desktopStatus\.mode === 'attached'/);
+    assert.match(failed, /paintSettingsBanner\(\{ \.\.\.appState\.desktopStatus, view: 'attached-disconnected' \}\)/);
+  });
+
   it('index.html has the banner, the save state and loads the helper', () => {
     const header = html.slice(html.indexOf('<div class="settings-overlay" id="settings-drawer"'), html.indexOf('<div class="settings-sidebar">'));
     assert.match(header, /<div id="settings-where" class="settings-where"><\/div>/);

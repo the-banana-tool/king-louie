@@ -55,6 +55,20 @@ describe('settings style foundations', () => {
     });
   }
 
+  it('banner tones: amber standalone (spec §5.2), development apart from it and from grey', () => {
+    const rule = (sel) => {
+      const m = css.match(new RegExp(`(?:^|\\n)${sel.replace(/\./g, '\\.')}\\s*\\{([^}]*)\\}`));
+      assert.ok(m, `rule ${sel}`);
+      return m[1].replace(/\s+/g, ' ').trim();
+    };
+    const desktop = rule('.settings-where.tone-desktop');
+    const dev = rule('.settings-where.tone-dev');
+    const grey = rule('.settings-where.tone-unreachable');
+    assert.match(desktop, /color: var\(--warning\)/);
+    assert.notEqual(dev, desktop);
+    assert.notEqual(dev, grey);
+  });
+
   it('uses only declared CSS variables, or gives a fallback', () => {
     const declared = new Set();
     for (const m of css.matchAll(/(--[A-Za-z0-9_-]+)\s*:/g)) declared.add(m[1]);
