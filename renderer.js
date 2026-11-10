@@ -4339,8 +4339,6 @@ function refreshUI() {
   updateEmptyState();
 }
 
-// Auto-savers for individual settings, one per key (renderer-helpers/autosave.js).
-const settingsAutosaves = new Map();
 
 // Paints the header's save indicator: 'saving', 'saved' or 'error' (with its message).
 function showSaveState(state, error) {
@@ -4358,25 +4356,19 @@ function showSaveState(state, error) {
 // `save(value)` is the page's existing save call and resolves { ok, error? } (a throw
 // counts as a failure). `onState(state, info)` runs after the header indicator is
 // painted; on 'error' it puts the field back to the stored value and shows info.error
-// beside it. Registering a key again flushes the old saver first and replaces it.
-function registerSettingsAutosave(key, { save, delayMs, onState } = {}) {
-  const old = settingsAutosaves.get(key);
-  if (old) old.flush();
-  const saver = createAutosave({
-    save,
-    ...(delayMs === undefined ? {} : { delayMs }),
-    onState: (state, info) => {
-      showSaveState(state, info && info.error);
-      if (typeof onState === 'function') onState(state, info);
-    }
-  });
-  settingsAutosaves.set(key, saver);
-  return saver;
+// beside it. One saver per key: registering a key again (a page re-render) keeps the
+// same saver, with its pending value and in-flight save, and swaps in the new handlers.
+const settingsAutosaves = createAutosaveRegistry({
+  onAnyState: (state, info) => showSaveState(state, info && info.error)
+});
+
+function registerSettingsAutosave(key, opts) {
+  return settingsAutosaves.register(key, opts);
 }
 
 // Pending debounced saves are sent when the drawer closes, whatever closed it.
 function flushSettingsAutosaves() {
-  return Promise.all([...settingsAutosaves.values()].map((saver) => saver.flush()));
+  return settingsAutosaves.flushAll();
 }
 
 function setSettingsDrawer(open) {
@@ -13677,6 +13669,13 @@ unsubscribeHandlers.push(window.electron.chat.onListChanged(async ({ chatId, wha
 }));
 
 window.addEventListener('beforeunload', () => {
+  // Best effort: a pending setting is sent before the window goes (the IPC send is
+  // synchronous; its reply may never arrive).
+  try {
+    flushSettingsAutosaves();
+  } catch {
+    // Quitting goes on.
+  }
   clearPendingImages();
   appState.streamBuffers.clear();
   streamTextOffsets.clear();

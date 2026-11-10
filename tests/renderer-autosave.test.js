@@ -5,7 +5,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { createAutosave } = require('../renderer-helpers/autosave');
+const { createAutosave, createAutosaveRegistry } = require('../renderer-helpers/autosave');
 
 function fakeTimers() {
   let next = 1;
@@ -184,6 +184,45 @@ describe('createAutosave', () => {
     assert.equal(flushed, true);
   });
 
+  it('a debounced change after an immediate one during a save still waits for its timer', async () => {
+    const gates = [];
+    const calls = [];
+    const { timers, saver } = harness((v) => { calls.push(v); const d = deferred(); gates.push(d); return d.promise; });
+    saver.change('on', { immediate: true });
+    saver.change('off', { immediate: true }); // waits for the save in flight
+    saver.change('half'); // half-typed: must not ride the immediate run
+    gates[0].resolve({ ok: true });
+    await tick();
+    assert.deepEqual(calls, ['on'], 'the half-typed value is not sent when the save ends');
+    timers.fire();
+    assert.deepEqual(calls, ['on', 'half']);
+  });
+
+  it('flush() still sends a debounced value that arrived during the save it waits on', async () => {
+    const gates = [];
+    const calls = [];
+    const { saver } = harness((v) => { calls.push(v); const d = deferred(); gates.push(d); return d.promise; });
+    saver.change('a', { immediate: true });
+    const done = saver.flush();
+    saver.change('ab');
+    gates[0].resolve({ ok: true });
+    await tick();
+    assert.deepEqual(calls, ['a', 'ab']);
+    gates[1].resolve({ ok: true });
+    await done;
+  });
+
+  it('a rejection with no message reports Could not save.', async () => {
+    const { states, saver } = harness(() => Promise.reject({}));
+    saver.change('x', { immediate: true });
+    await saver.flush();
+    assert.equal(states.at(-1).error, 'Could not save.');
+    const second = harness(() => Promise.reject(undefined));
+    second.saver.change('y', { immediate: true });
+    await second.saver.flush();
+    assert.equal(second.states.at(-1).error, 'Could not save.');
+  });
+
   it('an onState that throws does not stop later saves', async () => {
     const saved = [];
     const saver = createAutosave({
@@ -195,6 +234,59 @@ describe('createAutosave', () => {
     saver.change(2, { immediate: true });
     await saver.flush();
     assert.deepEqual(saved, [1, 2]);
+  });
+});
+
+describe('createAutosaveRegistry', () => {
+  it('re-registering a key keeps one saver: saves stay sequential, the newest lands last, the old onState goes quiet', async () => {
+    const timers = fakeTimers();
+    const any = [];
+    const registry = createAutosaveRegistry({
+      onAnyState: (state) => any.push(state),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer
+    });
+    const store = [];
+    let active = 0;
+    let maxActive = 0;
+    const gates = [];
+    const makeSave = (tag) => (v) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      const d = deferred();
+      gates.push(d);
+      return d.promise.then((r) => { store.push(`${tag}:${v}`); active -= 1; return r; });
+    };
+    const oldStates = [];
+    const newStates = [];
+    const first = registry.register('voice.rate', { save: makeSave('old'), onState: (s) => oldStates.push(s) });
+    first.change('1.0', { immediate: true }); // in flight
+    first.change('1.2'); // pending
+    const oldCountAtSwap = oldStates.length;
+    const second = registry.register('voice.rate', { save: makeSave('new'), onState: (s) => newStates.push(s) });
+    assert.equal(second, first, 'one saver per key');
+    second.change('1.5', { immediate: true });
+    gates[0].resolve({ ok: true });
+    await tick();
+    assert.equal(gates.length, 2, 'the newest value is sent once the first save ends');
+    gates[1].resolve({ ok: true });
+    await registry.flushAll();
+    assert.equal(maxActive, 1, 'never two saves of one setting at once');
+    assert.deepEqual(store, ['old:1.0', 'new:1.5']);
+    assert.equal(oldStates.length, oldCountAtSwap, 'the old onState is not called after the swap');
+    assert.deepEqual(newStates, ['saving', 'saved']);
+    assert.ok(any.includes('saved'), 'onAnyState sees every saver');
+  });
+
+  it('flushAll() sends every key\'s pending value', async () => {
+    const timers = fakeTimers();
+    const registry = createAutosaveRegistry({ setTimer: timers.setTimer, clearTimer: timers.clearTimer });
+    const saved = [];
+    registry.register('a', { save: async (v) => { saved.push(['a', v]); return { ok: true }; } }).change(1);
+    registry.register('b', { save: async (v) => { saved.push(['b', v]); return { ok: true }; } }).change(2);
+    await registry.flushAll();
+    assert.deepEqual(saved, [['a', 1], ['b', 2]]);
+    assert.equal(timers.pending().length, 0);
   });
 });
 
@@ -218,8 +310,14 @@ describe('renderer wiring', () => {
 
   it('flushSettingsAutosaves flushes every registered saver', () => {
     const body = block('function flushSettingsAutosaves(');
-    assert.match(body, /settingsAutosaves/);
-    assert.match(body, /\.flush\(\)/);
+    assert.match(body, /settingsAutosaves\.flushAll\(\)/);
+    assert.match(renderer, /const settingsAutosaves = createAutosaveRegistry\(/);
+  });
+
+  it('flushes pending saves best effort when the window unloads', () => {
+    const start = renderer.indexOf("window.addEventListener('beforeunload'");
+    assert.ok(start >= 0);
+    assert.match(renderer.slice(start, renderer.indexOf('\n});\n', start)), /flushSettingsAutosaves\(\)/);
   });
 
   it('showSaveState paints #settings-save-state by textContent with the fixed copy', () => {

@@ -10,6 +10,7 @@ describe('msToUnit', () => {
     assert.deepEqual(msToUnit(60000), { value: 1, unit: 'min' });
     assert.deepEqual(msToUnit(7200000), { value: 2, unit: 'h' });
     assert.deepEqual(msToUnit(30000), { value: 30, unit: 's' });
+    assert.deepEqual(msToUnit(90000), { value: 90, unit: 's' });
     assert.deepEqual(msToUnit(5400000), { value: 90, unit: 'min' });
   });
 
