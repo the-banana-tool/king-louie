@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { readJsonlLines } = require('../../history/importers/jsonl-lines');
 const { sha256File, byCodeUnit } = require('../files');
 const { UsageError } = require('../errors');
@@ -57,17 +58,54 @@ function plainValue(value, node) {
   return out;
 }
 
-async function* readParquetFile(file, columns, startRowNo, hyparquet) {
+// hyparquet decodes SNAPPY and uncompressed pages itself; the other codecs
+// datasets ship come from Node's own zlib. Each gets the page's bytes and the
+// header's uncompressed size, and hyparquet checks the length it gets back.
+const asBytes = (buf) => new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+function zlibCompressors(z = zlib) {
+  const out = {
+    GZIP: (input, outputLength) => asBytes(z.gunzipSync(input, { maxOutputLength: Math.max(outputLength, 1) })),
+    BROTLI: (input, outputLength) => asBytes(z.brotliDecompressSync(input, { maxOutputLength: Math.max(outputLength, 1) }))
+  };
+  if (typeof z.zstdDecompressSync === 'function') {
+    out.ZSTD = (input, outputLength) => asBytes(z.zstdDecompressSync(input, { maxOutputLength: Math.max(outputLength, 1) }));
+  }
+  return out;
+}
+
+const BUILT_IN_CODECS = new Set(['UNCOMPRESSED', 'SNAPPY']);
+
+// Refuse before decoding when a wanted column uses a codec nothing here reads.
+function checkCodecs(file, metadata, wanted, compressors, nodeVersion = process.version) {
+  const want = new Set(wanted);
+  const codecs = new Set();
+  for (const group of metadata.row_groups) {
+    for (const chunk of group.columns) {
+      const meta = chunk.meta_data;
+      if (meta && want.has(meta.path_in_schema?.[0])) codecs.add(meta.codec);
+    }
+  }
+  for (const codec of codecs) {
+    if (BUILT_IN_CODECS.has(codec) || compressors[codec]) continue;
+    if (codec === 'ZSTD') {
+      throw new UsageError(`${path.basename(file)} is ZSTD-compressed parquet, which needs Node 22.15 or later (zlib.zstdDecompressSync); this is Node ${nodeVersion}.`);
+    }
+    throw new UsageError(`${path.basename(file)} uses the parquet compression codec ${codec}, which this reader does not support (it reads UNCOMPRESSED, SNAPPY, GZIP, BROTLI and ZSTD).`);
+  }
+}
+
+async function* readParquetFile(file, columns, startRowNo, hyparquet, compressors) {
   const { asyncBufferFromFile, parquetMetadataAsync, parquetSchema, parquetReadObjects } = hyparquet;
   const buffer = await asyncBufferFromFile(file);
   const metadata = await parquetMetadataAsync(buffer);
   const top = new Map(parquetSchema(metadata).children.map((n) => [n.element.name, n]));
   const wanted = columns ? columns.filter((c) => top.has(c)) : [...top.keys()];
+  checkCodecs(file, metadata, wanted, compressors);
   let rowNo = startRowNo;
   let rowStart = 0;
   for (const group of metadata.row_groups) {
     const rowEnd = rowStart + Number(group.num_rows);
-    const rows = await parquetReadObjects({ file: buffer, metadata, columns: wanted, rowStart, rowEnd });
+    const rows = await parquetReadObjects({ file: buffer, metadata, columns: wanted, rowStart, rowEnd, compressors });
     for (const raw of rows) {
       const row = {};
       for (const c of wanted) row[c] = plainValue(raw[c], top.get(c));
@@ -92,9 +130,10 @@ async function* readRows(input, { columns = null } = {}) {
     return;
   }
   const hyparquet = await import('hyparquet');
+  const compressors = zlibCompressors();
   let rowNo = 0;
   for (const file of kind === 'dir' ? parquetFiles(input) : [input]) {
-    for await (const item of readParquetFile(file, columns, rowNo, hyparquet)) {
+    for await (const item of readParquetFile(file, columns, rowNo, hyparquet, compressors)) {
       rowNo = item.rowNo;
       yield item;
     }
@@ -108,4 +147,4 @@ async function inputSha256(input) {
   return hash.digest('hex');
 }
 
-module.exports = { readRows, inputSha256, inputKind };
+module.exports = { readRows, inputSha256, inputKind, zlibCompressors, checkCodecs };

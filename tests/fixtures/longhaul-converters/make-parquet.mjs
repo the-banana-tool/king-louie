@@ -1,9 +1,11 @@
-// Writes open-swe-traces.parquet from open-swe-traces.jsonl, in the column
+// Writes open-swe-traces.parquet (SNAPPY) and open-swe-traces.zstd.parquet
+// (ZSTD) from open-swe-traces.jsonl, in the column
 // shapes nvidia/Open-SWE-Traces ships (messages a list of structs with nested
 // tool_calls). Run once from the repository root and commit the output:
 //   npm exec --yes --package hyparquet-writer@0.17.0 -- node tests/fixtures/longhaul-converters/make-parquet.mjs
 // hyparquet-writer is not a dependency: npm exec fetches the pinned 0.17.0.
 import { readFileSync } from 'node:fs';
+import zlib from 'node:zlib';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -82,4 +84,16 @@ const columnData = names.map((name) => ({
 
 // Three rows per group, so a reader must walk more than one row group.
 parquetWriteFile({ filename: join(here, 'open-swe-traces.parquet'), columnData, schema, rowGroupSize: 3, statistics: false });
-console.log(`wrote ${rows.length} rows`);
+// The same rows ZSTD-compressed (as nebius/SWE-rebench-openhands-trajectories
+// ships), through node's zlib (Node 22.15 or later).
+const sized = (buf) => new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+parquetWriteFile({
+  filename: join(here, 'open-swe-traces.zstd.parquet'),
+  columnData,
+  schema,
+  rowGroupSize: 3,
+  statistics: false,
+  codec: 'ZSTD',
+  compressors: { ZSTD: (input) => sized(zlib.zstdCompressSync(input)) }
+});
+console.log(`wrote ${rows.length} rows, twice`);

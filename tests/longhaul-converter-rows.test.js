@@ -5,12 +5,15 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { readRows, inputSha256 } = require('../src/longhaul/converters/rows');
+const zlib = require('zlib');
+const { readRows, inputSha256, zlibCompressors, checkCodecs } = require('../src/longhaul/converters/rows');
+const { UsageError } = require('../src/longhaul/errors');
 const { tmpDir } = require('./helpers/longhaul-helpers');
 
 const FIXTURES = path.join(__dirname, 'fixtures', 'longhaul-converters');
 const JSONL = path.join(FIXTURES, 'open-swe-traces.jsonl');
 const PARQUET = path.join(FIXTURES, 'open-swe-traces.parquet');
+const PARQUET_ZSTD = path.join(FIXTURES, 'open-swe-traces.zstd.parquet');
 
 async function collect(input, options = {}) {
   const out = [];
@@ -27,6 +30,42 @@ describe('readRows', () => {
     assert.equal(fromJsonl.length, 8);
     assert.deepEqual(fromParquet.map((r) => r.rowNo), fromJsonl.map((r) => r.rowNo));
     for (let i = 0; i < fromJsonl.length; i++) assert.deepEqual(plain(fromParquet[i].row), plain(fromJsonl[i].row));
+  });
+
+  it('reads a ZSTD-compressed parquet fixture as the same rows as its JSONL', { skip: typeof zlib.zstdDecompressSync !== 'function' && 'needs Node 22.15+' }, async () => {
+    const fromJsonl = await collect(JSONL);
+    const fromZstd = await collect(PARQUET_ZSTD);
+    assert.deepEqual(fromZstd.map((r) => r.rowNo), fromJsonl.map((r) => r.rowNo));
+    for (let i = 0; i < fromJsonl.length; i++) assert.deepEqual(plain(fromZstd[i].row), plain(fromJsonl[i].row));
+  });
+
+  it('decompresses GZIP and BROTLI pages through zlib to the expected length', () => {
+    const page = Buffer.from('a page of parquet bytes '.repeat(50));
+    const c = zlibCompressors();
+    for (const [codec, bytes] of [['GZIP', zlib.gzipSync(page)], ['BROTLI', zlib.brotliCompressSync(page)]]) {
+      const out = c[codec](new Uint8Array(bytes), page.length);
+      assert.ok(out instanceof Uint8Array);
+      assert.equal(out.length, page.length);
+      assert.deepEqual(Buffer.from(out), page);
+    }
+  });
+
+  it('refuses a ZSTD file with a UsageError naming the Node version when zlib has no zstd', () => {
+    const c = zlibCompressors({ gunzipSync: zlib.gunzipSync, brotliDecompressSync: zlib.brotliDecompressSync });
+    assert.equal(c.ZSTD, undefined);
+    const metadata = { row_groups: [{ columns: [{ meta_data: { path_in_schema: ['trajectory'], codec: 'ZSTD' } }] }] };
+    assert.throws(() => checkCodecs('t.parquet', metadata, ['trajectory'], c, 'v22.14.0'),
+      (err) => err instanceof UsageError && /Node 22\.15 or later/.test(err.message) && /v22\.14\.0/.test(err.message));
+  });
+
+  it('refuses an unsupported codec with a UsageError naming it, only for wanted columns', () => {
+    const metadata = { row_groups: [{ columns: [
+      { meta_data: { path_in_schema: ['repo'], codec: 'SNAPPY' } },
+      { meta_data: { path_in_schema: ['blob'], codec: 'LZ4' } }
+    ] }] };
+    assert.throws(() => checkCodecs('t.parquet', metadata, ['repo', 'blob'], zlibCompressors()),
+      (err) => err instanceof UsageError && /codec LZ4/.test(err.message));
+    checkCodecs('t.parquet', metadata, ['repo'], zlibCompressors());
   });
 
   it('decodes only the columns asked for', async () => {
