@@ -15,7 +15,7 @@ const { byCodeUnit } = require('./files');
 
 const EST_CHARS_PER_TOKEN = 3;
 const DEFAULT_MAX_USD = 50;
-const ROLE_ORDER = Object.freeze(['summary', 'answer', 'judge']);
+const ROLE_ORDER = Object.freeze(['author', 'embed', 'summary', 'answer', 'judge']);
 const { round8, usd: usdText } = require('./format');
 
 function estInputTokens(chars, extraTokens = 0) {

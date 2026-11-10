@@ -202,7 +202,7 @@ function createPersonalNodeRunner(deps = {}) {
     }
     if (typeof sid !== 'string' || !sid.trim()) return { state: 'unknown' };
     if (task.userId.toUpperCase() !== sid.trim().toUpperCase()) return { state: 'other-account', userId: shown(task.userId) };
-    return { state: task.enabled ? 'registered' : 'disabled', ...await taskProgramFacts(task) };
+    return { state: task.enabled ? 'registered' : 'disabled', logonType: task.logonType, boot: task.boot === true, ...await taskProgramFacts(task) };
   }
 
   // What the task runs, read and never run (attach stage 2 §6.8). `/Run` succeeds for
@@ -363,6 +363,12 @@ const fromPsQuote = (s) => s.replace(/''/g, "'");
 // The call renderPersonalTaskXml writes into the PowerShell arguments.
 const TASK_CALL = /&\s+'((?:[^']|'')*)'\s+'((?:[^']|'')*)'\s+run\s+--data-dir\s+'((?:[^']|'')*)'/;
 
+// The boot task's action: the app's binary with --kl-node-service "<entry>" run
+// --data-dir "<dir>" (CommandLineToArgvW quoting: a closing quote after doubled
+// backslashes).
+const NODE_SERVICE_CALL = /--kl-node-service\s+"([^"]*)"\s+run\s+--data-dir\s+"([^"]*)"(?=\s|$)/;
+const unArgQuote = (s) => s.replace(/\\+$/, (m) => m.slice(0, m.length / 2));
+
 // The principal's UserId and <Settings>' own <Enabled> (absent: enabled), and what
 // the action runs: the program and entry inside PowerShell's arguments when it is the
 // call we write, else the <Command> itself.
@@ -376,13 +382,18 @@ function parseTaskXml(xml) {
   const enabled = /<Enabled>\s*([^<]*?)\s*<\/Enabled>/.exec(own);
   const command = /<Exec>[\s\S]*?<Command>\s*([^<]*?)\s*<\/Command>/.exec(xml);
   const args = /<Exec>[\s\S]*?<Arguments>\s*([^<]*?)\s*<\/Arguments>/.exec(xml);
-  const call = args ? TASK_CALL.exec(unescapeXml(args[1])) : null;
+  const argText = args ? unescapeXml(args[1]) : '';
+  const call = args ? TASK_CALL.exec(argText) : null;
+  const svc = args && !call ? NODE_SERVICE_CALL.exec(argText) : null;
+  const logonType = /<LogonType>\s*([^<]*?)\s*<\/LogonType>/.exec(principal ? principal[1] : '');
   return {
     userId: user && user[1] ? unescapeXml(user[1]) : null,
     enabled: !(enabled && enabled[1].toLowerCase() === 'false'),
     program: call ? fromPsQuote(call[1]) : (command && command[1] ? unescapeXml(command[1]) : null),
-    entry: call ? fromPsQuote(call[2]) : null,
-    dataDir: call ? fromPsQuote(call[3]) : null
+    entry: call ? fromPsQuote(call[2]) : (svc ? unArgQuote(svc[1]) : null),
+    dataDir: call ? fromPsQuote(call[3]) : (svc ? unArgQuote(svc[2]) : null),
+    logonType: logonType ? logonType[1] : null,
+    boot: /<BootTrigger[\s>]/.test(xml)
   };
 }
 

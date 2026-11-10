@@ -52,7 +52,8 @@ describe('Electron import boundary', () => {
       'service/personal-install.js', // renderPersonalTaskXml sets it in the task
       'service/commands/session.js', // the fleet's helper, for real Node
       'session/autostart.js', // the same, its child's env is written out in full
-      'session/backends/macos.js' // reports the path on the probe
+      'session/backends/macos.js', // reports the path on the probe
+      'ipc/desktop-controller.js' // the login-start Run value starts the app binary: it records the path
     ]);
     const missing = [];
     for (const file of walk(SRC)) {
@@ -62,6 +63,14 @@ describe('Electron import boundary', () => {
       if (!/ELECTRON_RUN_AS_NODE:?\s*=?\s*'1'/.test(code)) missing.push(rel);
     }
     assert.deepStrictEqual(missing, []);
+  });
+
+  // The controller is exempt above only because it records the path (the login-start
+  // Run value). Nothing there may run it.
+  it('the desktop controller never spawns or execs process.execPath', () => {
+    const code = fs.readFileSync(path.join(SRC, 'ipc', 'desktop-controller.js'), 'utf8').split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    assert.doesNotMatch(code, /(?:spawn|spawnSync|execFile|execFileSync|exec|execSync|fork)\w*\s*\([^)]*process\.execPath/);
+    assert.doesNotMatch(code, /process\.execPath\s*,\s*\[/);
   });
 
   // fork runs process.execPath without naming it, so the scan above cannot see it.

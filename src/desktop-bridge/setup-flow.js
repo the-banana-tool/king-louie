@@ -47,7 +47,7 @@ const TASK_HELP = {
   },
   unknown: {
     code: 'NODE_TASK_UNREADABLE',
-    message: 'Windows did not say whether King Louie Node\'s logon task is there, so this app cannot go on.',
+    message: 'Windows did not say whether King Louie Node\'s boot task is there, so this app cannot go on.',
     help: 'Press Check again. If this keeps happening, restart the computer.'
   }
 };
@@ -201,7 +201,7 @@ function installAnswer(s) {
   if (result && !result.ok) {
     return { lines: [], pre: cliPre(result), error: refusalOf({ code: 'NODE_INSTALL_FAILED', ...result }), actions: [{ id: 'nodeInstallPreview', label: 'Check again' }] };
   }
-  if (result) return { lines: ['The install finished, but its logon task is not there yet.'], pre: cliPre(result), actions: [CHECK_AGAIN] };
+  if (result) return { lines: ['The install finished, but its boot task is not there yet.'], pre: cliPre(result), actions: [CHECK_AGAIN] };
   const preview = s.installPreview;
   if (preview && !preview.ok) {
     return { lines: [], pre: cliPre(preview), error: refusalOf({ code: 'NODE_INSTALL_FAILED', ...preview }), actions: [{ id: 'nodeInstallPreview', label: 'Check again' }] };
@@ -214,7 +214,7 @@ function installAnswer(s) {
 // app moved). Install registers it again.
 function programGoneBody(node) {
   return {
-    lines: [`King Louie Node's logon task runs ${long(node.programGone)}, which is no longer there, so the node cannot start. Install registers the task again from this app. You see what it does before anything changes.`],
+    lines: [`King Louie Node's boot task runs ${long(node.programGone)}, which is no longer there, so the node cannot start. Install registers the task again from this app. You see what it does before anything changes.`],
     error: { code: 'NODE_TASK_PROGRAM_GONE', message: NODE_LINES.NODE_TASK_PROGRAM_GONE },
     actions: [{ id: 'nodeInstallPreview', label: 'Install…' }]
   };
@@ -273,7 +273,7 @@ function installStep(s, f) {
   return installAnswer(s) || {
     lines: [
       'King Louie now runs as King Louie Node, a background program on this computer that runs as you. This window is how you reach it.',
-      'Installing adds a logon task that starts it when you sign in. You see what it does before anything changes.'
+      'Installing adds a Windows task that starts it at boot, before you sign in, with one administrator prompt. No password is stored. Screen work needs you signed in with King Louie in the tray. You see what it does before anything changes.'
     ],
     actions
   };

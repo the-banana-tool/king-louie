@@ -3,7 +3,7 @@ const { defaultServiceDataDir, personalDataDir } = require('../platform/paths');
 const { stopFirstText } = require('./commands/stop');
 
 const HELP = `Usage:
-  king-louie-service run [--data-dir DIR] [--profile agent|runbook|frontdoor]
+  king-louie-service run [--data-dir DIR] [--profile agent|runbook|frontdoor] [--screen-host app]
   king-louie-service status [--data-dir DIR]
   king-louie-service stop [--data-dir DIR] [--timeout S] [--force]
   king-louie-service doctor [--data-dir DIR]
@@ -41,17 +41,19 @@ const HELP = `Usage:
 
 "stop" asks the service running on the data dir to shut down and waits up to
 --timeout seconds (default 30) for it to exit; with --force it then kills
-it. On a personal node it also ends the logon task.
+it. On a personal node it also ends the boot task.
 
 A chat channel with an empty allowlist refuses every sender, and a channel
 approval is denied unless "channel approval" names an owner chat that is not
 the chat the request came from.
 
-"install --personal" sets up a personal node: the service runs in your own
-login session, as you, from a logon task ("KingLouie Node"), with its data
-dir under %LOCALAPPDATA%\KingLouie\node (Windows only). Run it from a
-normal, unelevated prompt. "uninstall --personal" removes the task and
-leaves the data dir.
+"install --personal" sets up a personal node: the service runs under your
+own account, as you, from a boot task ("KingLouie Node", S4U: no password
+is stored), with its data dir under %LOCALAPPDATA%\KingLouie\node (Windows
+only). Run it from the installed King Louie app, not an elevated prompt; it
+asks for administrator approval once (UAC) to register the task. Screen work
+needs you signed in with King Louie in the tray. "uninstall --personal"
+removes the task and leaves the data dir.
 
 "import --case" copies one case (by directory name or case id) and its chats
 from the desktop profile, with the node stopped. On a personal node
@@ -76,7 +78,7 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
        king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
 `;
 
-const VALUE_FLAGS = new Set(['data-dir', 'device', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern', 'browser', 'provider', 'model', 'case', 'timeout']);
+const VALUE_FLAGS = new Set(['data-dir', 'device', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern', 'browser', 'provider', 'model', 'case', 'timeout', 'screen-host']);
 // Flags that must never carry a value, whichever form produced it.
 const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'replace', 'personal', 'force', 'json']);
 
@@ -376,6 +378,16 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       return 2;
     }
   }
+  // A personal node started at boot serves its screen through the King Louie
+  // app (boot-node-tray plan D-3); the task passes it, and only to run.
+  if (flags.screenHost !== undefined && command !== 'run') {
+    io.stderr.write('Flag "--screen-host" is only valid for "run".\n');
+    return 2;
+  }
+  if (flags.screenHost !== undefined && flags.screenHost !== 'app') {
+    io.stderr.write('Flag "--screen-host" takes only the value "app".\n');
+    return 2;
+  }
   if (flags.case !== undefined && command !== 'import') {
     io.stderr.write('Flag "--case" is only valid for "import".\n');
     return 2;
@@ -390,7 +402,7 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
 
       case 'run': {
         const { runService } = require('./run');
-        await runService({ dataDir, profile: flags.profile, stdout: io.stdout });
+        await runService({ dataDir, profile: flags.profile, stdout: io.stdout, screenHost: flags.screenHost || null });
         return 0;
       }
 

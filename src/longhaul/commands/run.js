@@ -164,6 +164,7 @@ module.exports = {
   },
   exitCodeFor,
   positiveInt,
+  clientFor,
   // deps (tests only): providerInstances { answer, judge, summarizer }, catalog, retry, lookup (the local client's DNS).
   async run(ctx, values, _positionals, deps = {}) {
     if (!values.adapters) throw new UsageError(USAGE);

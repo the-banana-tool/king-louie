@@ -13,6 +13,9 @@ const GUI_ERROR_CODES = Object.freeze([
   'helper_already_connected', 'frame_rejected', 'auth_failed', 'op_timeout', 'unknown_op', 'backend_failed',
   'session_not_installed', 'session_file_insecure', 'session_file_invalid', 'session_user_mismatch', 'unsafe_path', 'user_not_found',
   'home_missing', 'cancelled',
+  // A personal node started at boot (`--screen-host app`): a saved browser profile before
+  // King Louie in the owner's session has connected (src/gui/screen-host-browser.js).
+  'screen_host_missing',
   // The helper's take ops (session-v1, revised 2026-10-24).
   'profile_outside_root', 'browser_launch_failed', 'unknown_recording', 'recorder_failed',
   // A take's refusals (src/gui/take-policy.js TAKE_CODES, written out: this file loads nothing).

@@ -891,6 +891,102 @@ Electron build.
   $0 smoke run.
 - Smoke run of the answer stage (no models, no network, $0):
   `node bin/longhaul.js run --sessions tests/fixtures/longhaul --adapters sliding-window,oracle,summarize-compact,real-compaction --fake-models`.
+- The compaction-loss study (B4, spec §9; plan
+  `docs/superpowers/plans/2026-11-09-longhaul-b4-compaction-loss.md`):
+  `longhaul compaction-loss --sessions <id,...> --author-provider P
+  --author-model M --judge-provider P --judge-model M [--facts-per-window 10]
+  [--candidates 8] [--seed 1] [--embed-provider openai|local --embed-model M]
+  [--concurrency 6] [--max-usd 50] [--allow-unpriced] [--dry-run]
+  [--send-private] [--fake-models]` reads the imported sessions in
+  `LONGHAUL_HOME/sessions/` (`--concurrency`, 1 to 32, runs that many facts'
+  calls at once with the same records and cache keys as 1, recorded in
+  `config.json`, and progress goes to stderr as counts and money only).
+  Each `manifest.compactions` entry is a window (`compaction/windows.js`; an
+  empty one is skipped `empty-window`, a session with none `no-compactions`,
+  both in `config.json` `skipped`). Facts are sampled round-robin over
+  `user-said`, `tool-observed` and `decision` anchors inside the window
+  (`compaction/sample.js`), then three prompts (`compaction-fact-v1`,
+  `compaction-preserved-v1`, `compaction-needed-v1`): author one fact per
+  anchor, judge whether the summary kept it (`preserved`/`partial`/`lost`; the
+  judge sees the fact and the summary, never the window), judge whether a
+  later message needed it (`needed`/`not-needed`) from at most `--candidates`
+  later messages that match it (`compaction/matches.js`: BM25 over a temp
+  store in `tmp/kl-compaction-*`, only `seq > summarySeq`, the BM25 limit
+  raised until enough later messages are found and cosine taken after the
+  seq floor; no match is `not-needed` with `noCandidates: true` and no call).
+  A fact whose `evidenceSeq` is outside the window or the span the author was
+  shown, from a sender its kind does not take (`ANCHOR_SENDERS`), or whose
+  quote is not in that message is `rejected` (`evidence-outside-window`,
+  `evidence-outside-span`, `evidence-wrong-sender`, `quote-not-found`), never
+  judged.
+  `--embed-*` adds cosine hits fused with BM25, and needs the session's
+  complete `longhaul embed` cache for that model with kl-recall's chunking,
+  else it refuses `EMBEDDINGS_MISSING` (exit 2) before anything is sent; each
+  fact's query vector is embedded and charged, and kept in that cache; a
+  reply that is not one vector of the cache's dimension per query leaves
+  those facts lexical only, counted as `embedFailures` in `summary.json`. Priced,
+  capped, cached (`private/model-cache/compaction-*`) and stopped as `run`
+  is (`PRIVATE_SESSION`, `OVER_BUDGET`, `UNPRICED`, `QUOTA`, `AUTH`, exit 2;
+  at the cap, exit 1 with the rest as errors); a rerun pays only for misses.
+  `runs/<id>/` holds `config.json` (`kind: 'compaction-loss'`),
+  `records.jsonl` (ids, seqs, verdicts, cost), `summary.json`/`summary.md`
+  (per session and `all`: preserved, partial, lost, needed and
+  lost-and-needed rates over judged facts, the window-to-summary token ratio)
+  and `spend.json`; no text. Facts, quotes and reasons go to
+  `private/compaction/<runId>/facts.jsonl`. "Needed" sees only matching
+  messages, so lost-and-needed is a lower bound. Verification is mechanical
+  (the two rejections) plus the seeded 10% spot-check in
+  `private/spot-checks/<runId>.jsonl` (owner decision 2026-11-09), not a
+  `verify` pass over every fact: `longhaul spot-check --run <id>` shows the
+  fact, quote, evidence message and summary, and takes `y` (agree with both)
+  or two letters, summary `p`/`r`/`l` then need `n`/`u` (`lu`). `longhaul
+  report` over compaction runs writes `compaction-loss.csv`,
+  `compaction-loss.tex` and `report.md` (agreement per judge); a cohort mixing
+  run kinds is refused `MIXED_RUN_KINDS`, and `--public` still refuses private
+  sessions. Tests use hand-built sessions and scripted clients; `--fake-models`
+  gives fake author and judge models. Smoke run ($0; `LONGHAUL_HOME` outside
+  any git tree): copy `tests/fixtures/longhaul/sessions/synth-compacted` into
+  `$LONGHAUL_HOME/sessions/`, then
+  `node bin/longhaul.js compaction-loss --sessions synth-compacted --fake-models`.
+- Public converters (B2, spec §10.2; plan
+  `docs/superpowers/plans/2026-11-09-longhaul-b2-public-converters.md`):
+  `longhaul convert --source <nebius-swe-rebench|open-swe-traces> --input
+  <file.parquet|dir|file.jsonl> [--repo R] [--max-sessions 12]
+  [--target-tokens 500000] [--min-tokens 250000] [--seed 1] [--config C
+  --split S] [--dry-run] [--force]` reads a file the owner downloaded from
+  Hugging Face (`nebius/SWE-rebench-openhands-trajectories`,
+  `nvidia/Open-SWE-Traces`) with its own column names: parquet, or a
+  directory of parquet files in name order, through `hyparquet` (pinned
+  `1.31.5`, a devDependency, loaded with `await import`, one row group at a
+  time), or JSONL through `readJsonlLines`; any other extension is `USAGE`.
+  `open-swe-traces` needs `--config` and `--split` (owner choice `v2.0`,
+  `claudecode`); `nebius-swe-rebench` refuses them. `src/longhaul/converters/`
+  maps OpenAI-style messages (`openai-messages.js`: system messages dropped,
+  `reasoning_content` kept only as `meta.reasoningChars`, results paired by
+  `tool_call_id` or, for Open-SWE, by order; an unknown role is a `status`
+  message with `meta.unmapped`, bad arguments `parameters: { raw }`). Pass 1
+  plans; pass 2 assembles and validates every session, then writes. A row
+  that maps to no message or whose first is not `user` is not planned and is
+  reported as having no task prompt (`noTaskPrompt`). Each session joins one repository's trajectories (the
+  first per `instance_id`) up to `--target-tokens`; a part under
+  `--min-tokens` is reported too short and not written. It is `constructed:
+  true`, with `boundaries` (`{ fromSeq, toSeq, instanceId, trajectoryId }`,
+  contiguous, each starting at a `user` message; `validateManifest` checks
+  them), synthetic timestamps (`timestampsSynthetic: true`), `private: false`,
+  `license: 'CC-BY-4.0'` and `upstreamLicense` (the rows' shared SPDX id,
+  `NOASSERTION` when they differ, `unknown-upstream` when none has one, which
+  is every Nebius session until the release looks them up). Ids (`nr-`,
+  `os-`) are derived from the repo, part, config, split and token options; the
+  same input, options and converter version again are `unchanged`, anything
+  else over an id is `SESSION_EXISTS` (exit 2) until `--force`. An input under
+  `LONGHAUL_HOME/private/` is refused; no absolute path is recorded. A
+  question in a constructed session gets a computed `crossesBoundary` (its
+  evidence in more than one trajectory; `null` elsewhere, and the key is left
+  out of unconstructed sessions' question files); a stored value that differs
+  is `boundary-mismatch`, and run records carry it. Fixtures are invented rows
+  in `tests/fixtures/longhaul-converters/` (the parquet one is made from the
+  JSONL by `make-parquet.mjs`). Smoke run ($0):
+  `node bin/longhaul.js convert --source open-swe-traces --input tests/fixtures/longhaul-converters/open-swe-traces.parquet --config v2.0 --split claudecode --target-tokens 1000 --min-tokens 100`.
 
 ## Cases
 
@@ -1284,6 +1380,12 @@ work while attached appends it to `PROXIED_DOMAINS`).
     Tests inject the runner (`deps.nodeRunner`), and the runner's
     `inspectOwners`, `execFile`, `spawn`, `readPidfile`, `commandLineOf` and
     `whoAmI`; no test runs a real `schtasks` or CLI.
+- **Boot task and tray** (boot-node-tray; see Personal node). The window's
+  Install… registers the boot task with one UAC prompt (declined:
+  `NODE_INSTALL_DECLINED`), Start and Restart run it unelevated through the
+  task's owner descriptor, and a personal attach runs in the tray (`--kl-tray`,
+  hidden, close hides) and is the node's screen host. Standalone, development
+  and fleet launches are unchanged.
 - **Lockout:** a handshake with a valid device signature is never refused by
   lockout; only further *failing* attempts for an already-locked-out device id
   are refused, closed `4429` at once (no delay is added).
@@ -2755,7 +2857,9 @@ rulings R-BR-*, the author's calls C-1 to C-14); tickets and ledger in
   pass `ephemeral: true`. `ephemeral: true` opens an empty context that
   keeps nothing, and is refused with `profile` or `userDataPath`. A case
   turn still needs `kl-cases`; a take names its own (default `take`). The
-  owner logs into each profile once, by hand, in the headed window.
+  owner logs into each profile once, by hand, in the headed window. On a
+  boot-started personal node (`--screen-host app`) a saved profile opens only
+  through the app in the owner's session (Personal node, the screen host).
 - **`snapshot` and refs (C-5 to C-7).** `snapshot` (`BrowserPage`,
   `BrowserExtract`, `Browser`; look-only, not in `ACTING_ACTIONS`) returns
   Playwright's AI snapshot (`page._snapshotForAI().full`) as
@@ -3065,8 +3169,9 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
 `examples/personal/node.yaml` is the file it ends with.
 
 - **What it is.** The agent service on the owner's own Windows machine, in
-  his login session, as him, started by the logon task `KingLouie Node`
-  (`PERSONAL_TASK_NAME`, `src/service/personal-install.js`), not as LOCAL
+  his account, started by the task `KingLouie Node` (a boot S4U task since
+  boot-node-tray, below; a logon task before; `PERSONAL_TASK_NAME`,
+  `src/service/personal-install.js`), not as LOCAL
   SERVICE. The trust rules that compare accounts are replaced by one fact:
   the process is the account that owns the data dir and the config dir.
   Takes, leases, the take policy, the courier, the audit ledger and the
@@ -3190,9 +3295,13 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   `front-door.json` beside it (an `lstat`; else it says what is missing), then prints what is left: `token
   set`, `pair`, `enroll-device`, `vault set browser_cred:<profile>:<host>`
   (it asks for no secret, C-4) and `mcp`. `uninstall --personal [--data-dir
-  DIR] [--dry-run] [--yes]` stops a running node (as `stop` does; one that
-  does not stop leaves the task registered), then ends and deletes the task
-  and keeps the data dir (no task registered: it says so and exits 0). `pair`
+  DIR] [--dry-run] [--yes]` deletes the boot task through one administrator
+  prompt first (any task not known to be an InteractiveToken logon task, an
+  unreadable one included) and only then stops a running node (as `stop`
+  does), so a declined prompt leaves the node installed and running; an old
+  InteractiveToken logon task is stopped first (one that does not stop leaves
+  the task registered), then ended and deleted unelevated. It keeps the data
+  dir (no task registered: it says so and exits 0). `pair`
   under personal writes the pin and runs the task (C-9): `pair wss://<relay>`
   writes `approvers.relay` into `node.yaml`, `pair https://mcp.<domain>` (a
   front door) writes `front-door.json` and leaves `approvers.relay` alone; it still refuses while the node runs, naming `king-louie-service stop`.
@@ -3243,18 +3352,76 @@ the install guide's section 13 and `docs/driving-king-louie.md` §2;
   `session-watch`, `tools-denied-dirs`, `service-cli-install-personal`,
   `service-cli-pair-personal`, `service-cli-import-case`,
   `service-doctor-hosting`, `cases-status`.
-- Residuals: a logon-task node is down from a reboot until the owner logs
-  in (the phones show "Could not confirm"; said in the consent text); the
-  owner account is the boundary, so anything running as the owner can drive
+- **Starting at boot (boot-node-tray; spec `2026-11-09-boot-node-tray-design.md`,
+  plan `2026-11-09-boot-node-tray.md`, owner checklist `...-manual-checks.md`).**
+  `install --personal` runs only from the installed app (a checkout refuses),
+  only for a member of Administrators, and refuses an elevated prompt. One UAC
+  prompt (`src/service/elevated-schtasks.js`, one `schtasks /Create` as a
+  base64 argv) registers `KingLouie Node`: boot and logon triggers, S4U (no
+  stored password), LeastPrivilege, descriptor
+  `D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;<ownerSID>)` always (the owner can
+  `/Run` and `/Query` unelevated, never write), action `"<app exe>"
+  --kl-node-service "<entry>" run --data-dir "<dir>" --screen-host app`.
+  `main.js --kl-node-service` (`src/desktop-bridge/node-launcher.js`) re-runs
+  the app's binary as Node (`ELECTRON_RUN_AS_NODE=1`, `windowsHide`), so no
+  console and no PowerShell. Install also turns on the HKCU Run value `King
+  Louie` = `"<app exe>" --kl-tray` (`src/desktop-bridge/login-start.js`, the one
+  writer); `uninstall --personal` deletes the task through the same elevated
+  step (a second prompt) and turns it off. An old logon task reads "Install
+  again to start at boot"; install again converts it in place.
+- **The screen host.** An S4U task has no desktop, so `run --screen-host app`
+  (only value, only on `run`) makes the GUI subsystem use a `HelperChannel` on
+  the pipe `\\.\pipe\king-louie-personal-<16 hex>` and write
+  `<dataDir>/session/personal-helper.json` (name and key;
+  `src/gui/personal-screen-host.js`); the app serves it (`src/ipc/screen-host.js`,
+  the session helper loop; Windows, a local personal pairing only). Until it
+  connects every GUI tool refuses `capability_unavailable` with the reason
+  `screen_host_not_connected` ("King Louie is not running in your session: log
+  in, or open King Louie"). A hand-started
+  node without the flag keeps `InProcessChannel`. Saved browser profiles open
+  only through the app (`src/gui/screen-host-browser.js`,
+  `setScreenHostLauncher`); before it connects, `screen_host_missing` ("Saved
+  logins are available after you log in") and `ephemeral` still works, always
+  headless (session 0 shows no window), so an S4U Chrome never touches the
+  owner's logins. Takes launch Chrome through the helper path (`launch_browser`);
+  `windows-worker.ps1` is in `build.asarUnpack` and read from `app.asar.unpacked`
+  (`powershell.exe -File` cannot read inside the asar). The `--kl-node-service`
+  launcher sets its Electron `userData` to `<tmp>\king-louie-node-launcher` and
+  turns hardware acceleration off (`prepareLauncherApp`), so a boot start never
+  opens the desktop profile.
+- **The tray** (`src/desktop-bridge/tray-model.js`, `src/ipc/tray.js`,
+  `tray-host.js`): attached to a personal node only. `--kl-tray` starts hidden;
+  closing hides to the tray; Quit asks while a take records; the tooltip and a
+  menu line show the node's state (one icon, no per-state bitmap yet);
+  `relaunch()` drops `--kl-tray`. The window's **Start King Louie when I log in**
+  toggle is `desktop:loginStart`/`desktop:setLoginStart` (`LOCAL_CHANNELS`);
+  a declined UAC prompt is `NODE_INSTALL_DECLINED`; doctor has `hosting` (boot
+  or logon task) and `screen host` rows.
+- **A development copy uses its own `--data-dir`** (and profile): a second `run`
+  on a data dir whose pidfile names a live service is refused
+  (`acquireInstanceLock`, `tests/service-run.test.js`). To test the real path,
+  build the installer from a worktree (`npm run build:win`) and install it.
+- Residuals: the real boot, UAC and S4U path is unverified until the owner's
+  checklist; before login the node is up but screen tools and saved logins
+  wait (S4U also has no network credentials: Windows-sign-in shares fail). The
+  pipe's default DACL is not owner-only (Everyone read): the key in
+  `personal-helper.json` is the boundary, and another local account can hold
+  the pipe's unauthenticated slots and keep the tray app from connecting.
+  Task Scheduler ending the wrapper may leave the node child running (`stop`
+  uses the pidfile). The app's `recording()` can stay true if ffmpeg ends by
+  itself. The owner account is the boundary, so anything running as the owner can drive
   the node over `mcp` and change the approver set, and a shell the phone
   approves can do anything he can (the deny list fences the file tools, not
   a shell); attached, the desktop app runs the node's task, never the node
   itself; a node installed from the desktop runs the app's binary and
   version (removing or moving the app leaves a task that cannot start);
   macOS and Linux personal nodes are not done (the key is
-  platform-neutral; the install refuses off Windows). The logon task pins
-  the checkout and `node.exe` that ran `install --personal`, so a removed
-  checkout or worktree leaves a task that cannot start. The owner check
+  platform-neutral; the install refuses off Windows). Updating the app while
+  the boot task's node runs is unverified (manual check 14): the installer may
+  need the node stopped, or a reboot, before the node runs the new version. A
+  screen-host take with `keep_browser` is not recorded as holding its profile,
+  so the next start on that profile fails `browser_launch_failed` until that
+  Chrome is closed. The owner check
   reads owners only, not access lists: a data dir on a drive whose ACL lets
   other accounts write passes it (keep the default `%LOCALAPPDATA%`).
 

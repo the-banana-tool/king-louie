@@ -14,6 +14,8 @@
 // runs that differ in any of these never share a row. When several runs
 // answer the same question for one series (a crashed run and its rerun), the
 // latest counts, unless it failed where an earlier one succeeded.
+// Compaction-loss runs (spec §9) are reported by compaction/report.js; one
+// report never mixes the two kinds.
 const fs = require('fs');
 const path = require('path');
 const {
@@ -331,6 +333,11 @@ function writeReport(home, runIds, { id = null, publicOnly = false } = {}) {
   const ids = [...new Set(runIds)].sort();
   if (!ids.length) throw new UsageError('Name the runs with --runs <runId>[,<runId>...].');
   const runs = ids.map((r) => loadRun(home, r));
+  const kinds = [...new Set(runs.map((r) => r.config.kind ?? 'answer'))].sort();
+  if (kinds.length > 1) {
+    throw new UsageError(`A report holds runs of one kind; these mix ${kinds.join(' and ')}: `
+      + `${runs.map((r) => `${r.runId} (${r.config.kind ?? 'answer'})`).join(', ')}. Report each kind on its own.`, 'MIXED_RUN_KINDS');
+  }
   if (publicOnly) {
     const withPrivate = runs.filter((r) => (r.config.sessions || []).some((s) => s.private)).map((r) => r.runId);
     if (withPrivate.length) {
@@ -341,10 +348,16 @@ function writeReport(home, runIds, { id = null, publicOnly = false } = {}) {
   const reportId = id ?? `r-${sha256Text(ids.join('\n')).slice(0, 12)}`;
   if (!REPORT_ID_RE.test(reportId)) throw new UsageError(`--id must be letters, digits, . _ - (at most 64), got ${JSON.stringify(reportId)}`);
   const dir = childPath(home.reports, reportId, () => new UsageError(`Report id ${JSON.stringify(reportId)} leaves ${home.reports}.`));
-  const built = buildReport(runs);
-  const files = { ...renderCsvs(built), 'adapters.tex': renderTex(built), 'report.md': renderMarkdown(reportId, runs, built) };
+  let files;
+  if (kinds[0] === 'compaction-loss') {
+    // Required here: compaction/report.js requires this module's helpers.
+    files = require('./compaction/report').renderCompactionReport(home, reportId, runs);
+  } else {
+    const built = buildReport(runs);
+    files = { ...renderCsvs(built), 'adapters.tex': renderTex(built), 'report.md': renderMarkdown(reportId, runs, built) };
+  }
   for (const [name, content] of Object.entries(files)) writeFileAtomic(path.join(dir, name), content);
   return { id: reportId, dir, files: Object.keys(files).sort() };
 }
 
-module.exports = { loadRun, cohortOf, seriesOf, buildReport, writeReport };
+module.exports = { loadRun, cohortOf, seriesOf, buildReport, writeReport, csv, texEscape, shortCommit };

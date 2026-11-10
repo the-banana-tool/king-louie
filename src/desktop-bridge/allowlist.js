@@ -10,6 +10,8 @@ const LOCAL_PREFIXES = Object.freeze(['desktop:', 'wizard:']);
 // history domain.
 const LOCAL_CHANNELS = Object.freeze([
   'app:quitWindow',
+  // The per-user Run value that starts King Louie at login: this computer's registry, window only.
+  'desktop:loginStart', 'desktop:setLoginStart',
   'history:import.pick', 'history:import.preview', 'history:import.commit'
 ]);
 const PRESTEP_CHANNELS = Object.freeze(['chat:pickWorkingDirectory', 'settings:addAllowedDirectory']);
@@ -154,6 +156,7 @@ function channelTimeoutMs(channel, defaultMs) {
 }
 
 module.exports = {
+  LOCAL_CHANNELS,
   PROXIED_DOMAINS,
   PERSONAL_PROXIED_DOMAINS,
   PROXIED_CHANNELS,

@@ -15086,7 +15086,7 @@ function serviceLinesInto(el, lines) {
 }
 
 function disableServiceActionButtons() {
-  document.querySelectorAll('#service-pane-actions button, #service-pane-import button, #service-pane-status button, #service-pane-move button, #service-pane-advanced-actions button').forEach((btn) => { btn.disabled = true; });
+  document.querySelectorAll('#service-pane-actions button, #service-pane-import button, #service-pane-status button, #service-pane-move button, #service-pane-advanced-actions button, #service-login-start').forEach((btn) => { btn.disabled = true; });
 }
 
 // Node & connection (settings redesign §5.7, §8.2): these go under the collapsed
@@ -15165,6 +15165,7 @@ function paintServicePane(model, status) {
     moveEl.hidden = true;
     approvalsEl.hidden = true;
     advancedEl.hidden = true;
+    document.getElementById('service-pane-login-start').hidden = true;
     markUnavailableTabs(status.unavailableTabs || []);
     return;
   }
@@ -15251,6 +15252,28 @@ function paintServicePane(model, status) {
     actionsEl.appendChild(btn);
   }
   actionsEl.hidden = actionsEl.childElementCount === 0;
+
+  // The login-start toggle (boot-node-tray spec §5.4), a primary setting under
+  // the actions: drawn from the pane model's row alone.
+  const loginStartEl = document.getElementById('service-pane-login-start');
+  loginStartEl.hidden = !model.loginStart;
+  if (model.loginStart) {
+    const box = document.getElementById('service-login-start');
+    document.getElementById('service-login-start-label').textContent = model.loginStart.label;
+    box.checked = model.loginStart.on === true;
+    box.disabled = servicePaneState.busy;
+    box.onchange = () => {
+      box.disabled = true;
+      window.electron.desktop.setLoginStart({ on: box.checked })
+        .then((result) => {
+          if (result && result.ok === false) {
+            servicePaneState.error = result.message || result.error || result.code;
+          }
+        })
+        .catch((err) => serviceLog.warn('setting login start failed', { error: err && err.message }))
+        .finally(() => { renderServiceSection().catch(() => {}); });
+    };
+  }
 
   moveEl.hidden = !importAction;
   if (importAction) {

@@ -292,6 +292,8 @@ module.exports = {
   DESKTOP_NODE_START: 'desktop:nodeStart',
   DESKTOP_NODE_INSTALL_PREVIEW: 'desktop:nodeInstallPreview',
   DESKTOP_NODE_INSTALL: 'desktop:nodeInstall',
+  DESKTOP_LOGIN_START: 'desktop:loginStart',
+  DESKTOP_SET_LOGIN_START: 'desktop:setLoginStart',
   DESKTOP_PAIR_RESTART_CONFIRM: 'desktop:pairRestartConfirm',
   DESKTOP_MIGRATION_PLAN: 'desktop:migrationPlan',
   DESKTOP_MIGRATION_APPLY: 'desktop:migrationApply',

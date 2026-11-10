@@ -6,7 +6,8 @@
 // Tests inject `execFile` so they exercise this without actually shelling
 // out to PowerShell.
 const { execFileSync } = require('child_process');
-const { windowsPowerShellExe } = require('../../platform/windows-paths');
+const path = require('path');
+const { windowsPowerShellExe, windowsSystemRoot } = require('../../platform/windows-paths');
 
 const IS_ADMIN_SCRIPT = '([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)';
 
@@ -27,4 +28,16 @@ function isAdmin({
   return geteuid() === 0;
 }
 
-module.exports = { isAdmin };
+// True when the Administrators group (S-1-5-32-544) is in the token, even as
+// deny-only: an unelevated member of Administrators still has it listed.
+function isAdministratorsMember({ execFile = execFileSync, env = process.env } = {}) {
+  try {
+    const exe = path.win32.join(windowsSystemRoot(env), 'System32', 'whoami.exe');
+    const out = execFile(exe, ['/groups', '/fo', 'csv'], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+    return String(out).split(/\r?\n/).some((line) => line.split(',').some((cell) => cell.replace(/"/g, '').trim() === 'S-1-5-32-544'));
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { isAdmin, isAdministratorsMember };

@@ -11,6 +11,11 @@ const { imageMatches, matchSetFor } = require('./apps');
 const { realResolve } = require('../platform/path-roots');
 const { writeGuiStatus } = require('./status');
 
+// A personal node started at boot (screenHost 'app') before the King Louie
+// app in the owner's session has connected.
+const SCREEN_HOST_NOT_CONNECTED = 'screen_host_not_connected';
+const SCREEN_HOST_MISSING_MESSAGE = 'King Louie is not running in your session: log in, or open King Louie';
+
 const SCREENSHOTS_PER_JOB = 16;
 const SCREENSHOT_TTL_MS = 10 * 60 * 1000;
 // How many of an app's other windows a screenshot names, and how many window
@@ -65,11 +70,14 @@ const HELPER_LOST_MS = 30000;
 class GuiBroker extends EventEmitter {
   // hosting: 'service' (a fleet node, over the session helper) or 'personal'
   // (spec 2026-10-25 §7, in-process); written into status.json.
-  constructor({ channel, guiConfig, getPolicy = () => ({}), audit = null, dataDir = null, platform = process.platform, hosting = 'service', clock = Date.now,
+  // screenHost 'app' (a personal node started at boot): the screen is served
+  // by the King Louie app in the owner's session; until it connects, the
+  // capability says so in words the model can pass on.
+  constructor({ channel, guiConfig, getPolicy = () => ({}), audit = null, dataDir = null, platform = process.platform, hosting = 'service', screenHost = null, clock = Date.now,
     log = createLogger('gui/broker'), heartbeatMs = 10000, realpath = realResolve, timers = { setTimeout, clearTimeout },
     monotonic = () => performance.now() } = {}) {
     super();
-    Object.assign(this, { channel, guiConfig, getPolicy, audit, dataDir, platform, hosting, clock, log, heartbeatMs, realpath, timers, monotonic });
+    Object.assign(this, { channel, guiConfig, getPolicy, audit, dataDir, platform, hosting, screenHost, clock, log, heartbeatMs, realpath, timers, monotonic });
     this.leases = null;
     // Both maps are per job and only for runs that have one (R-F5-7): a run
     // with no job id gets no entry, so such runs never share a bucket.
@@ -153,9 +161,11 @@ class GuiBroker extends EventEmitter {
     const info = !this.off && this.channel.connected ? this.channel.info : null;
     const available = Boolean(this.guiConfig.enabled && info);
     const lease = this.leases ? this.leases.statusSummary() : null;
+    const hostMissing = !this.off && this.screenHost === 'app' && !this.channel.connected;
     return {
       available,
       ...(this.off ? { reason: this.off.reason } : {}),
+      ...(hostMissing ? { reason: SCREEN_HOST_NOT_CONNECTED, message: SCREEN_HOST_MISSING_MESSAGE } : {}),
       capabilities: available ? [...info.capabilities] : [],
       user: info ? info.user : null,
       platform: info ? info.platform : null,
@@ -170,7 +180,7 @@ class GuiBroker extends EventEmitter {
   require(sub) {
     if (this.off) throw new GuiError('capability_unavailable', `gui (${this.off.message})`);
     const cap = this.capability();
-    if (!cap.available) throw new GuiError('capability_unavailable', 'gui');
+    if (!cap.available) throw new GuiError('capability_unavailable', cap.message ? `gui (${cap.message})` : 'gui');
     if (!cap.capabilities.includes(sub)) throw new GuiError('capability_unavailable', sub);
   }
 
@@ -190,7 +200,7 @@ class GuiBroker extends EventEmitter {
     try {
       writeGuiStatus(this.dataDir, {
         v: 1, pid: process.pid, hosting: this.hosting, available: stopping ? false : cap.available,
-        ...(this.off ? { reason: this.off.reason, detail: this.off.detail } : {}), user: cap.user, platform: cap.platform,
+        ...(this.off ? { reason: this.off.reason, detail: this.off.detail } : (cap.reason ? { reason: cap.reason, detail: cap.message } : {})), user: cap.user, platform: cap.platform,
         capabilities: cap.capabilities, probes: info ? info.probes : [], limits: cap.limits, apps: cap.apps, since: cap.since,
         updated_at: new Date(this.clock()).toISOString(),
         lease: cap.lease ? { active: cap.lease.active, app_ids: cap.lease.appIds, expires_at: cap.lease.expiresAt } : null
@@ -363,9 +373,25 @@ class GuiBroker extends EventEmitter {
         this.log.warn(`closing a launched process: the forced close failed (${codeOf(err)})`);
       }
     }
-    for (const pids of byApp.values()) pids.delete(pid);
+    this._dropLaunched(ctx.jobId, pid);
     this._audit('gui.close', { job_id: ctx.jobId, app_id: appId, pids: closed, forced });
     return { closed, forced };
+  }
+
+  // A launched process that ended another way (a screen-host browser closed over
+  // CDP by its PlaywrightBrowser#stop): forgotten, so the record does not grow.
+  forgetLaunched(pid, ctx = {}) {
+    if (ctx.jobId && Number.isInteger(pid)) this._dropLaunched(ctx.jobId, pid);
+  }
+
+  _dropLaunched(jobId, pid) {
+    const byApp = this.launched.get(jobId);
+    if (!byApp) return;
+    for (const [appId, pids] of byApp) {
+      pids.delete(pid);
+      if (!pids.size) byApp.delete(appId);
+    }
+    if (!byApp.size) this.launched.delete(jobId);
   }
 
   // The id a job names one window by. A handle keeps its id for the job.
@@ -599,4 +625,4 @@ class GuiBroker extends EventEmitter {
   }
 }
 
-module.exports = { GuiBroker, SUSPENDING_CODES, suspendsLease, SCREENSHOTS_PER_JOB, SCREENSHOT_TTL_MS, inputTimeoutMs, TYPE_CHUNK, typeChunks, HELPER_LOST_MS };
+module.exports = { GuiBroker, SCREEN_HOST_NOT_CONNECTED, SCREEN_HOST_MISSING_MESSAGE, SUSPENDING_CODES, suspendsLease, SCREENSHOTS_PER_JOB, SCREENSHOT_TTL_MS, inputTimeoutMs, TYPE_CHUNK, typeChunks, HELPER_LOST_MS };

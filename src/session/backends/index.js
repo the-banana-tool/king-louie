@@ -23,9 +23,12 @@ function selectBackend({ platform = process.platform, env = process.env, xdpyinf
   return null;
 }
 
-function loadBackend(name, { env = process.env, log } = {}) {
+// profileRoot: where the Windows backend's launch_browser keeps profiles (the
+// King Louie app serving a personal node's screen passes <dataDir>/browser-profiles);
+// left out, the backend's own default.
+function loadBackend(name, { env = process.env, log, profileRoot } = {}) {
   switch (name) {
-    case 'windows': return require('./windows').createWindowsBackend({ env, log });
+    case 'windows': return require('./windows').createWindowsBackend({ env, log, ...(profileRoot ? { profileRoot } : {}) });
     case 'macos': return require('./macos').createMacosBackend({ env, log });
     case 'x11': return require('./x11').createX11Backend({ env, log });
     case 'wayland': return require('./wayland').createWaylandBackend({ env, log });

@@ -50,6 +50,22 @@ describe('createModelClient', () => {
     assert.throws(() => createModelClient({ provider: 'openai', env: { OPENAI_API_KEY: 'test-key-123456' } }), UsageError);
   });
 
+  it('asks OpenRouter to route only to providers that do not collect data', async () => {
+    const originalFetch = global.fetch;
+    const bodies = [];
+    global.fetch = async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return { ok: true, body: { getReader: () => ({ read: async () => ({ done: true }), releaseLock: () => {} }) } };
+    };
+    try {
+      const client = createModelClient({ provider: 'openrouter', model: 'vendor/m', env: { OPENROUTER_API_KEY: 'or-test-key-min-length' } });
+      await client.complete('hi').catch(() => {});
+      assert.deepStrictEqual(bodies[0].provider, { data_collection: 'deny' });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
   describe('against the local fake server', () => {
     let server;
     before(async () => { server = await startFakeLlmServer(); });

@@ -194,10 +194,10 @@ describe('desktop:* handlers', () => {
     assert.strictEqual(IPC.DESKTOP_IMPORT_PROGRESS, 'desktop:importProgress');
     assert.deepStrictEqual(Object.keys(DESKTOP_METHODS).sort(), [
       'desktop:addNode', 'desktop:attach', 'desktop:clearPairing', 'desktop:detach', 'desktop:dismissServiceCommand', 'desktop:importApply', 'desktop:importPlan', 'desktop:leaveStandalone',
-      'desktop:migrationApply', 'desktop:migrationPlan',
+      'desktop:loginStart', 'desktop:migrationApply', 'desktop:migrationPlan',
       'desktop:nodeInstall', 'desktop:nodeInstallPreview', 'desktop:nodeRestart', 'desktop:nodeStart', 'desktop:noteSetup', 'desktop:openDataFolder',
       'desktop:pairCancel', 'desktop:pairConfirm', 'desktop:pairRestartConfirm', 'desktop:pairStart', 'desktop:removeNode', 'desktop:restartLater', 'desktop:retry',
-      'desktop:setNodeOrder', 'desktop:setPairing', 'desktop:setSetup',
+      'desktop:setLoginStart', 'desktop:setNodeOrder', 'desktop:setPairing', 'desktop:setSetup',
       'desktop:setupFinish', 'desktop:setupLater', 'desktop:setupStep', 'desktop:setupWindowOnly',
       'desktop:standaloneOnce', 'desktop:status', 'desktop:unpair', 'desktop:updateNode'
     ]);
@@ -215,7 +215,10 @@ describe('desktop:* handlers', () => {
       DESKTOP_SETUP_LATER: ['desktop:setupLater', 'setupLater'],
       DESKTOP_SETUP_FINISH: ['desktop:setupFinish', 'setupFinish'],
       DESKTOP_NODE_RESTART: ['desktop:nodeRestart', 'nodeRestart'],
-      DESKTOP_RESTART_LATER: ['desktop:restartLater', 'restartLater']
+      DESKTOP_RESTART_LATER: ['desktop:restartLater', 'restartLater'],
+      // Boot-node-tray spec 5.4: the per-user Run value is this computer's, window only.
+      DESKTOP_LOGIN_START: ['desktop:loginStart', 'loginStart'],
+      DESKTOP_SET_LOGIN_START: ['desktop:setLoginStart', 'setLoginStart']
     };
     const inv = listIpcChannels();
     const served = servedChannels(inv).handle;
@@ -227,6 +230,18 @@ describe('desktop:* handlers', () => {
       assert.ok(!served.includes(channel), `${channel} is not served over the bridge`);
     }
     assert.ok(!PROXIED_DOMAINS.includes('desktop'), 'desktop is not a proxied domain');
+  });
+
+  it('desktop:loginStart and desktop:setLoginStart are local-only, in every hosting', () => {
+    const { LOCAL_CHANNELS } = require('../src/desktop-bridge/allowlist');
+    for (const channel of ['desktop:loginStart', 'desktop:setLoginStart']) {
+      assert.ok(LOCAL_CHANNELS.includes(channel), `${channel} is listed in LOCAL_CHANNELS`);
+      for (const hosting of ['service', 'personal']) {
+        assert.strictEqual(classifyChannel(channel, { hosting }), 'local', `${channel} under ${hosting}`);
+        const served = servedChannels({ handle: [channel], on: [channel] }, { hosting });
+        assert.deepStrictEqual(served, { handle: [], on: [] }, `${channel} is not served under ${hosting}`);
+      }
+    }
   });
 
   it('answers ATTACHED_UNAVAILABLE without a desktop controller', async () => {

@@ -9,7 +9,7 @@
 // as on CI, answers Install: the test takes either, and the Install screen is also drawn below. The screens that need a node, a plan or an elevated
 // app come from the real describeSetup over a status a test writes, handed to the real
 // renderer by swapping the main process's own IPC handlers through Playwright: no install,
-// no logon task and no node runs, and the app holds no test path for it.
+// no boot task and no node runs, and the app holds no test path for it.
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -253,7 +253,7 @@ describe('E2E: the setup view', { skip }, () => {
     });
 
     it('Install is shown in a <pre>, and passes the press', async () => {
-      const answer = await showStatus(ctx, { node: { fresh: true }, installPreview: { ok: true, lines: ['Would register the logon task "KingLouie Node".', `Would write ${LONG_DIR}\\node.yaml`] } });
+      const answer = await showStatus(ctx, { node: { fresh: true }, installPreview: { ok: true, lines: ['Would register the boot task "KingLouie Node".', `Would write ${LONG_DIR}\\node.yaml`] } });
       await waitFor(ctx, shown('#setup-pre'), 10000);
       assert.match(await evaluate(ctx, `document.getElementById('setup-pre').textContent`), /Would register/);
       assert.strictEqual(await evaluate(ctx, shown('#setup-press-error')), false, 'the refused press was about the screen before');

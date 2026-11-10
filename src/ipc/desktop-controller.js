@@ -24,7 +24,8 @@ const { SECRET_CATEGORIES } = require('../migration/desktop-import');
 const { setAsideUnreadableSecrets } = require('../migration/desktop-source');
 const { createPersonalNodeRunner, PERSONAL_TASK_NAME, firstLine } = require('../desktop-bridge/personal-node');
 const { shown } = require('../service/commands/io');
-const { STANDALONE_FLAG, STANDALONE_ONCE_FLAG: STANDALONE_ONCE } = require('../desktop-bridge/launch-mode');
+const loginStartApi = require('../desktop-bridge/login-start');
+const { relaunchArgs, STANDALONE_ONCE_FLAG: STANDALONE_ONCE } = require('../desktop-bridge/launch-mode');
 
 const log = createLogger('desktop-controller');
 
@@ -40,14 +41,14 @@ const NODE_RETRY_MS = 3000;
 const NODE_REFRESH_MS = 5000;
 const startTimeoutText = (ms) => `King Louie Node did not answer within ${Math.round(ms / 1000)} seconds.`;
 const TASK_REFUSALS = {
-  missing: { code: 'NODE_TASK_MISSING', message: 'King Louie Node has no logon task on this computer, so this app cannot start it.' },
-  disabled: { code: 'NODE_TASK_DISABLED', message: `The logon task "${PERSONAL_TASK_NAME}" is disabled in Task Scheduler. Enable it there to let this app start the node.` },
-  'other-account': { code: 'NODE_TASK_OTHER_ACCOUNT', message: `The logon task "${PERSONAL_TASK_NAME}" belongs to another account; this app does not run it.` },
-  unknown: { code: 'NODE_TASK_MISSING', message: `The logon task "${PERSONAL_TASK_NAME}" could not be read, so this app cannot start it.` }
+  missing: { code: 'NODE_TASK_MISSING', message: 'King Louie Node has no boot task on this computer, so this app cannot start it.' },
+  disabled: { code: 'NODE_TASK_DISABLED', message: `The boot task "${PERSONAL_TASK_NAME}" is disabled in Task Scheduler. Enable it there to let this app start the node.` },
+  'other-account': { code: 'NODE_TASK_OTHER_ACCOUNT', message: `The boot task "${PERSONAL_TASK_NAME}" belongs to another account; this app does not run it.` },
+  unknown: { code: 'NODE_TASK_MISSING', message: `The boot task "${PERSONAL_TASK_NAME}" could not be read, so this app cannot start it.` }
 };
 // §8: Install runs only while no task is registered.
 const INSTALL_REFUSALS = {
-  registered: { code: 'NODE_TASK_REGISTERED', message: `The logon task "${PERSONAL_TASK_NAME}" is already registered; there is nothing to install.` },
+  registered: { code: 'NODE_TASK_REGISTERED', message: `The boot task "${PERSONAL_TASK_NAME}" is already registered; there is nothing to install.` },
   disabled: TASK_REFUSALS.disabled,
   'other-account': TASK_REFUSALS['other-account'],
   unknown: { code: 'NODE_TASK_UNREADABLE', message: TASK_REFUSALS.unknown.message }
@@ -58,8 +59,10 @@ const BRIDGE_FATAL = new Set(['DEVICE_UNPAIRED', 'PROTOCOL_MISMATCH', 'TOO_MANY_
 // FATAL set, and the pairing's own refusals); anything else is a bridge
 // that is not up yet.
 const PAIR_FATAL = new Set([...BRIDGE_FATAL, 'PAIR_SERVICE_CHANGED', 'PAIR_NOT_FOUND', 'PAIR_CONFIRM_STALE', 'NOT_PAIRING']);
-const INITIAL_NODE_STATE = Object.freeze({ task: 'unknown', running: false, pid: null, starting: false, startError: null });
-const INSTALL_CLI_TIMEOUT_MS = 120000;
+const INITIAL_NODE_STATE = Object.freeze({ task: 'unknown', taskKind: null, running: false, pid: null, starting: false, startError: null });
+// The install CLI waits up to ELEVATE_TIMEOUT_MS (300 s) for the owner's answer
+// to the UAC prompt, so the window waits longer than that.
+const INSTALL_CLI_TIMEOUT_MS = 330000;
 const NOT_PERSONAL_TEXT = 'No King Louie Node on this computer is paired with this desktop.';
 // §6.5: named beside what the node's plan lists, since the engine walks none of them.
 const STAYS_BEHIND_FIXED = Object.freeze([
@@ -94,9 +97,12 @@ const OLD_PROFILE_UNKNOWN = Object.freeze({ found: true });
 // The steps a Finish cannot jump: after them, the wizard's form takes over.
 const BEFORE_THE_FORM = new Set(['install', 'pair', 'start', 'migrate']);
 const INSTALL_ELEVATED = /runs as you, not elevated/;
+// install --personal's one elevated step, declined at the UAC prompt (personal-install.js DECLINED).
+const INSTALL_DECLINED = /the administrator prompt was declined/;
+const INSTALL_DECLINED_TEXT = 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.';
 const RESTARTING_AFTER_MOVE = 'Restarting King Louie Node, so what moved starts…';
 // The task's program is gone (§6.8): nothing `/Run` could start.
-const programGoneText = (file) => `King Louie Node's logon task runs ${file}, which is no longer there, so the node cannot start. Install registers the task again from this app.`;
+const programGoneText = (file) => `King Louie Node's boot task runs ${file}, which is no longer there, so the node cannot start. Install registers the task again from this app.`;
 
 // A data dir as the disk names it and as the pairing recorded it: Windows
 // paths compare without case and without a trailing separator.
@@ -169,6 +175,8 @@ function createDesktopController({
   clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
   nodeStartWaitMs = NODE_START_WAIT_MS, nodeRetryMs = NODE_RETRY_MS, nodeRefreshMs = NODE_REFRESH_MS,
   oldProfileWaitMs = OLD_PROFILE_WAIT_MS,
+  // The per-user Run value (boot-node-tray spec 5.4) and the app binary it starts; tests inject both.
+  loginStart: loginStartDeps = loginStartApi, appPath = process.execPath,
   migrationDeps = {},
   // Electron's shell.openPath (resolves '' on success, else the error), passed by
   // the hosts; this file stays free of a require('electron').
@@ -277,7 +285,8 @@ function createDesktopController({
       app.quit();
       return { ok: true, relaunching: true };
     }
-    const args = argv.slice(1).filter((a) => a !== STANDALONE_ONCE && a !== STANDALONE_FLAG).concat(extraArgs);
+    // Both standalone flags and --kl-tray go (launch-mode.js).
+    const args = relaunchArgs(argv, extraArgs);
     app.relaunch({ args });
     app.exit(0);
     return { ok: true, relaunching: true };
@@ -387,6 +396,7 @@ function createDesktopController({
       starting: nodeState.starting, startError: nodeState.startError,
       defaultDataDir: cliDefaultDataDir(),
       ...(nodeState.programGone ? { programGone: nodeState.programGone } : {}),
+      ...(nodeState.taskKind ? { taskKind: nodeState.taskKind } : {}),
       ...(nodeState.taskEntry ? { taskEntry: nodeState.taskEntry } : {}),
       ...(cli && cliExists(cli) ? { serviceCli: shown(cli, 400) } : {})
     };
@@ -411,6 +421,9 @@ function createDesktopController({
     return {
       task: task.state,
       programGone: task.gone ? shown(task.gone, 400) : null,
+      // What kind of task is registered: the boot task (a BootTrigger) or the earlier
+      // logon task, which starts the node only when the owner logs in.
+      taskKind: task.state === 'registered' || task.state === 'disabled' ? (task.boot === true ? 'boot' : task.boot === false ? 'logon' : null) : null,
       ...(task.runs ? { runs: task.runs } : {}),
       ...(task.runs === 'folder' && task.entry ? { taskEntry: shown(task.entry, 400) } : {})
     };
@@ -519,6 +532,7 @@ function createDesktopController({
         error: foundError
       }) : null,
       node,
+      loginStart: node && node.hosting === 'personal' ? await loginStartValue() : null,
       service,
       versionMismatch: versionGap(service, liveService),
       connection: current === 'attached-starting' ? { ...connection, status: 'starting' } : { ...connection },
@@ -530,6 +544,46 @@ function createDesktopController({
       detachWarning: detachWarning(),
       pendingServiceCommand: state.pendingServiceCommand
     });
+  }
+
+  // --- The login-start setting (spec 2026-11-09 5.4): window only. ---
+
+  // Read once, then kept; loginStart() reads it again and setLoginStart() writes it.
+  let loginStartCache;
+  function readLoginStartNow() {
+    try {
+      const r = loginStartDeps.readLoginStart({ env });
+      loginStartCache = { on: r && r.on === true };
+    } catch (err) {
+      log.warn(`login start read failed: ${err.message}`);
+      loginStartCache = null;
+    }
+    return loginStartCache;
+  }
+  async function loginStartValue() {
+    if (platform !== 'win32') return null;
+    // A failed read (null) is tried again on the next status, so the toggle comes back.
+    if (loginStartCache === undefined || loginStartCache === null) readLoginStartNow();
+    return loginStartCache;
+  }
+  async function loginStart() {
+    if (platform !== 'win32') return { ok: false, code: 'NOT_WINDOWS', message: 'Starting King Louie at login is set up on Windows only.' };
+    const value = readLoginStartNow();
+    if (!value) return { ok: false, code: 'LOGIN_START_FAILED', message: 'Windows did not say whether King Louie starts when you log in.' };
+    return { ok: true, on: value.on };
+  }
+  async function setLoginStart(payload = {}) {
+    if (platform !== 'win32') return { ok: false, code: 'NOT_WINDOWS', message: 'Starting King Louie at login is set up on Windows only.' };
+    if (!payload || typeof payload.on !== 'boolean') return { ok: false, code: 'INVALID_PARAMS', message: 'Say whether King Louie should start when you log in.' };
+    try {
+      loginStartDeps.setLoginStart({ on: payload.on, appPath }, { env });
+    } catch (err) {
+      log.warn(`login start write failed: ${err.message}`);
+      return { ok: false, code: 'LOGIN_START_FAILED', message: shown(`Windows did not change it: ${err.message}`, 400) };
+    }
+    const value = readLoginStartNow();
+    notify();
+    return { ok: true, on: value ? value.on : payload.on };
   }
 
   // --- §6.3: the setup's own state. ---
@@ -1938,6 +1992,10 @@ function createDesktopController({
     const stderr = withoutLogLines(cli && cli.stderr);
     const lines = outputLines(stdout, stderr);
     if (cli && cli.code === 0) return { ok: true, lines };
+    if (INSTALL_DECLINED.test(`${stderr}
+${stdout}`)) {
+      return { ok: false, code: 'NODE_INSTALL_DECLINED', message: shown(INSTALL_DECLINED_TEXT, 400), lines };
+    }
     const message = firstLine(stderr) || firstLine(stdout)
       || (cli && cli.timedOut ? 'the command did not finish in time' : shown((cli && cli.error) || 'the command failed', 400));
     return { ok: false, code: 'NODE_INSTALL_FAILED', message, lines };
@@ -1990,7 +2048,9 @@ function createDesktopController({
     // §8: only while no task is registered, or the owner's task runs a program that
     // is gone (§6.8): the CLI's /Create /F registers it again.
     const before = await nodeRunner.queryTask({ me: target.me }).catch(() => ({ state: 'unknown' }));
-    if (before.state !== 'missing' && !(before.state === 'registered' && before.gone)) {
+    // An earlier logon task (no BootTrigger) is replaced by the boot task: the CLI's /Create /F.
+    const oldLogon = before.state === 'registered' && before.boot === false;
+    if (before.state !== 'missing' && !(before.state === 'registered' && (before.gone || oldLogon))) {
       nodeState = { ...nodeState, ...taskFields(before) };
       notify();
       const refusal = INSTALL_REFUSALS[before.state] || INSTALL_REFUSALS.unknown;
@@ -2012,10 +2072,10 @@ function createDesktopController({
   return {
     status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, leaveStandalone, openDataFolder, unpair, retry,
     importPlan, importApply, migrationPlan, migrationApply, restartLater, dismissServiceCommand, createClient, setClient, dispose,
-    startAttached, startIdle, refreshIdle, nodeStart, nodeRestart, nodeInstallPreview, nodeInstall,
+    startAttached, startIdle, refreshIdle, nodeStart, nodeRestart, nodeInstallPreview, nodeInstall, loginStart, setLoginStart,
     setupStep, setupLater, setupFinish, setupWindowOnly, finishedForNow: () => finishedForNow,
     on: (event, fn) => emitter.on(event, fn)
   };
 }
 
-module.exports = { createDesktopController, DETACH_WARNING, DETACH_WARNING_WINDOWS, STANDALONE_ONCE };
+module.exports = { createDesktopController, DETACH_WARNING, DETACH_WARNING_WINDOWS, STANDALONE_ONCE, INSTALL_CLI_TIMEOUT_MS };

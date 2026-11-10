@@ -39,10 +39,22 @@ function io() {
   };
 }
 
+const APP_EXE = 'C:\\Program Files\\King Louie\\King Louie.exe';
+
 function deps(s, extra = {}) {
   const executed = [];
+  const loginStarts = [];
   return {
     executed,
+    loginStarts,
+    // The installed app's binary run as Node (the only place install --personal goes on).
+    runAsNode: true,
+    isAdministratorsMember: () => true,
+    // The one UAC step, recorded in order among the executed steps.
+    elevated: async (args) => { executed.push([{ elevated: args }]); return { ok: true }; },
+    setLoginStart: (opts) => { loginStarts.push(opts); },
+    readLoginStart: () => ({ on: false, command: null }),
+    taskInfo: () => ({ logonType: 'S4U' }),
     platform: 'win32',
     env: { LOCALAPPDATA: s.localAppData, SystemRoot: 'C:\\Windows', PATH: '' },
     isAdmin: () => false,
@@ -57,8 +69,7 @@ function deps(s, extra = {}) {
     // Only the temp tree exists, never the machine's real ProgramData.
     exists: (p) => p.startsWith(s.base) && fs.existsSync(p),
     hostname: () => 'laptop',
-    tmpDir: s.base,
-    nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+    nodePath: APP_EXE,
     entryPath: 'C:\\kl\\bin\\king-louie-service.js',
     execute: async (steps) => { executed.push(steps); },
     runningServicePid: () => null,
@@ -68,7 +79,9 @@ function deps(s, extra = {}) {
 }
 
 const run = (command, s, d, flags = {}, t = io()) => runPersonalInstall({ command, flags: { dataDir: s.dataDir, ...flags }, io: t.io, deps: d }).then((code) => ({ code, t }));
-const argvs = (d) => d.executed.flat().filter((step) => step.run).map((step) => step.run);
+// Every schtasks call in order; the elevated one is marked '(elevated)' in front.
+const argvs = (d) => d.executed.flat().filter((step) => step.run || step.elevated).map((step) => step.run || ['(elevated)', ...step.elevated]);
+const elevatedCalls = (d) => d.executed.flat().filter((step) => step.elevated).map((step) => step.elevated);
 
 // Attach stage 2 §6.4 (C-6): no Chrome is no reason to refuse; a node whose
 // client is the window needs neither a browser nor a relay.
@@ -230,7 +243,7 @@ describe('install --personal: refusals', () => {
   it('off a TTY without --yes: exit 2 before anything is read', async () => {
     const s = setup();
     const boom = () => { throw new Error('read'); };
-    const d = deps(s, { isTTY: () => false, isAdmin: boom, whoAmI: boom, findChrome: boom, fleetInstalled: boom, findFfmpeg: boom, confirm: boom });
+    const d = deps(s, { isTTY: () => false, isAdmin: boom, isAdministratorsMember: boom, whoAmI: boom, findChrome: boom, fleetInstalled: boom, findFfmpeg: boom, confirm: boom, elevated: boom });
     const { code, t } = await run('install', s, d);
     assert.equal(code, 2);
     assert.match(t.errors(), /--yes/);
@@ -293,7 +306,7 @@ describe('install --personal', () => {
       '  browser: chrome',
       ''
     ].join('\n'));
-    assert.ok(d.executed.flat().some((step) => step.run && step.run.includes('/Create') && step.run.includes(PERSONAL_TASK_NAME) && step.run.includes('/F')));
+    assert.deepEqual(elevatedCalls(d), [['/Create', '/TN', PERSONAL_TASK_NAME, '/XML', path.join(s.configDir, 'king-louie-node-task.xml'), '/F']]);
     const xml = d.executed.flat().find((step) => step.writeFile);
     assert.match(xml.writeFile.content, /<UserId>S-1-5-21-1-2-3-1001<\/UserId>/);
     assert.ok(!argvs(d).some((argv) => argv.includes('/Run')));
@@ -424,7 +437,7 @@ describe('install --personal', () => {
     assert.match(out, /^ {2}gui\.browser: 'chrome'$/m);
     assert.doesNotMatch(out, /^ {2}gui\.enabled: true$/m, 'a line it has is not printed');
     assert.doesNotMatch(out, /^ {2}profile: 'agent'$/m);
-    assert.ok(d.executed.flat().some((step) => step.run && step.run.includes('/Create') && step.run.includes('/F')));
+    assert.ok(elevatedCalls(d).some((args) => args.includes('/Create') && args.includes('/F')));
   });
 
   it('with approvers.relay already set, the task is started', async () => {
@@ -466,14 +479,15 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
   const RELAY_YAML = 'name: laptop\nprofile: agent\nhosting: personal\napprovers:\n  relay: wss://relay.example.com:8443\n';
   const argsOf = (xml) => /<Arguments>(.*)<\/Arguments>/.exec(xml)[1].replace(/&amp;/g, '&');
 
-  it('runAsNode: the task sets ELECTRON_RUN_AS_NODE, and the consent names the binary and what it means', async () => {
+  it('runAsNode: the task runs the app binary with --kl-node-service, and the consent names the binary and what it means', async () => {
     const s = setup();
     const d = deps(s, { runAsNode: true, nodePath: APP });
     const { code, t } = await run('install', s, d);
     assert.equal(code, 0, t.errors());
     assert.match(t.text(), /^ {2}binary: {5}C:\\Program Files\\King Louie\\King Louie\.exe, run as Node: the node then runs the desktop app's version, and stops starting if the app is removed$/m);
     const write = d.executed.flat().find((step) => step.writeFile);
-    assert.match(argsOf(write.writeFile.content), /-Command \$env:ELECTRON_RUN_AS_NODE='1'; & 'C:\\Program Files\\King Louie\\King Louie\.exe' 'C:\\kl\\bin\\king-louie-service\.js' run --data-dir /);
+    assert.match(write.writeFile.content, /<Command>C:\\Program Files\\King Louie\\King Louie\.exe<\/Command>/);
+    assert.match(argsOf(write.writeFile.content), /^--kl-node-service "C:\\kl\\bin\\king-louie-service\.js" run --data-dir ".*" --screen-host app$/);
   });
 
   describe('the launcher a window-installed owner runs', () => {
@@ -495,15 +509,6 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
       assert.equal(out.code, 0, out.t.errors());
       assert.match(out.t.text(), /\[dry-run\] [^\n]*king-louie-service\.cmd/);
       assert.ok(!fs.existsSync(step.writeFile.path), 'written only by execute');
-    });
-
-    it('a checkout install (node.exe) writes none', async () => {
-      const s = setup();
-      const d = deps(s, { runAsNode: false });
-      const { code, t } = await run('install', s, d, { yes: true });
-      assert.equal(code, 0, t.errors());
-      assert.equal(launcherStep(d), undefined);
-      assert.ok(!t.text().includes('king-louie-service.cmd'));
     });
 
     it('renders quoted, CRLF, with the variable set, spaces and shell characters inert', () => {
@@ -655,17 +660,16 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
     });
   });
 
-  it('run from node.exe: no variable in the task and no binary line in the consent', async () => {
+  it('the task runs no ELECTRON_RUN_AS_NODE and no PowerShell', async () => {
     const s = setup();
-    const d = deps(s, { runAsNode: false });
+    const d = deps(s);
     const { code, t } = await run('install', s, d);
     assert.equal(code, 0, t.errors());
-    assert.doesNotMatch(t.text(), /binary:/);
     const write = d.executed.flat().find((step) => step.writeFile);
-    assert.doesNotMatch(write.writeFile.content, /ELECTRON_RUN_AS_NODE/);
+    assert.doesNotMatch(write.writeFile.content, /ELECTRON_RUN_AS_NODE|powershell/i);
   });
 
-  it('a node already running on the data dir: no /Run step, and it says the task starts it at the next logon', async () => {
+  it('a node already running on the data dir: no /Run step, and it says the task starts it at the next boot', async () => {
     const s = setup();
     fs.mkdirSync(s.configDir, { recursive: true });
     fs.writeFileSync(s.yamlPath, RELAY_YAML);
@@ -677,7 +681,7 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
     const all = argvs(d);
     assert.ok(all.some((argv) => argv.includes('/Create')), JSON.stringify(all));
     assert.ok(!all.some((argv) => argv.includes('/Run')), JSON.stringify(all));
-    assert.match(t.text(), /^King Louie Node is already running \(pid 4242\); the task starts it at your next logon\.$/m);
+    assert.match(t.text(), /^King Louie Node is already running \(pid 4242\); the task starts it at the next boot\.$/m);
     assert.doesNotMatch(t.text(), /registered and started/);
   });
 
@@ -689,93 +693,367 @@ describe('install --personal: under the desktop app\'s binary, and with a node r
     const { code, t } = await run('install', s, d, { dryRun: true });
     assert.equal(code, 0, t.errors());
     assert.doesNotMatch(t.text(), /\/Run/);
-    assert.match(t.text(), /^King Louie Node is already running \(pid 4242\); the task starts it at your next logon\.$/m);
+    assert.match(t.text(), /^King Louie Node is already running \(pid 4242\); the task starts it at the next boot\.$/m);
+  });
+});
+
+describe('install --personal: the boot task, one UAC prompt and the login start', () => {
+  const RELAY_YAML = 'name: laptop\nprofile: agent\nhosting: personal\napprovers:\n  relay: wss://relay.example.com:8443\n';
+  const relaySetup = () => {
+    const s = setup();
+    fs.mkdirSync(s.configDir, { recursive: true });
+    fs.writeFileSync(s.yamlPath, RELAY_YAML);
+    return s;
+  };
+
+  it('refuses outside the installed app (not under Electron)', async () => {
+    const s = setup();
+    const boom = () => { throw new Error('read'); };
+    const d = deps(s, { runAsNode: false, isAdministratorsMember: boom, whoAmI: boom, findChrome: boom, fleetInstalled: boom, confirm: boom, elevated: boom });
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 2);
+    assert.equal(t.errors(), 'install --personal runs from the installed King Louie app: open King Louie and use Install, or run its king-louie-service command\n');
+    assert.equal(d.executed.length, 0);
+    assert.equal(fs.existsSync(s.configDir), false);
+  });
+
+  it('refuses an owner who is not an administrator, before the question', async () => {
+    const s = setup();
+    let asked = false;
+    const d = deps(s, { isAdministratorsMember: () => false, confirm: async () => { asked = true; return true; } });
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 2);
+    assert.equal(t.errors(), 'the boot task needs an administrator account: your account is not in Administrators\n');
+    assert.equal(asked, false);
+    assert.equal(d.executed.length, 0);
+    assert.equal(fs.existsSync(s.configDir), false);
+  });
+
+  it('still refuses an elevated prompt', async () => {
+    const s = setup();
+    const d = deps(s, { isAdmin: () => true });
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 2);
+    assert.equal(t.errors(), 'install --personal runs as you, not elevated: open a normal prompt\n');
+    assert.equal(d.executed.length, 0);
+  });
+
+  it('writes the task XML into the config dir, not the temp dir', async () => {
+    const s = setup();
+    const d = deps(s);
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    const steps = d.executed.flat();
+    const write = steps.find((step) => step.writeFile && step.writeFile.path.endsWith('.xml'));
+    const xmlPath = path.join(s.configDir, 'king-louie-node-task.xml');
+    assert.equal(write.writeFile.path, xmlPath);
+    assert.equal(write.writeFile.mode, 0o600);
+    assert.equal(write.writeFile.encoding, 'utf16le');
+    assert.ok(write.writeFile.content.startsWith('\ufeff<?xml'));
+    assert.match(write.writeFile.content, /<LogonType>S4U<\/LogonType>/);
+    // Written, registered, then deleted whatever happened.
+    const order = steps.map((step) => (step.writeFile === write.writeFile ? 'write' : step.elevated ? 'elevated' : step.unlink === xmlPath ? 'unlink' : null)).filter(Boolean);
+    assert.deepEqual(order, ['write', 'elevated', 'unlink']);
+    const unlink = steps.find((step) => step.unlink === xmlPath);
+    assert.equal(unlink.always, true);
+  });
+
+  it('registers through the elevated step, then starts it unelevated with /Run', async () => {
+    const s = relaySetup();
+    const d = deps(s);
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    assert.deepEqual(elevatedCalls(d), [['/Create', '/TN', 'KingLouie Node', '/XML', path.join(s.configDir, 'king-louie-node-task.xml'), '/F']]);
+    const all = argvs(d);
+    assert.ok(!all.some((argv) => argv[0] !== '(elevated)' && argv.includes('/Create')), 'no unelevated /Create');
+    const create = all.findIndex((argv) => argv[0] === '(elevated)');
+    const start = all.findIndex((argv) => argv[0] === 'C:\\Windows\\System32\\schtasks.exe' && argv[1] === '/Run' && argv.includes(PERSONAL_TASK_NAME));
+    assert.ok(create >= 0 && start > create, JSON.stringify(all));
+    assert.match(t.text(), /The boot task "KingLouie Node" is registered and started\./);
+  });
+
+  it('turns on the login start with the app path', async () => {
+    const s = setup();
+    const d = deps(s);
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    assert.deepEqual(d.loginStarts, [{ on: true, appPath: APP_EXE }]);
+  });
+
+  it('a login start that cannot be set is a warning line, and the install still succeeds', async () => {
+    const s = relaySetup();
+    const d = deps(s, { setLoginStart: () => { throw new Error('Access is denied.'); } });
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    assert.match(t.text(), /^warning: the "King Louie" start-at-login entry was not set \(Access is denied\.\)/m);
+    assert.ok(argvs(d).some((argv) => argv[1] === '/Run'));
+  });
+
+  it('on UAC_DECLINED: exit 1, the declined message, no login start, no /Run', async () => {
+    const s = relaySetup();
+    const d = deps(s);
+    d.elevated = async (args) => { d.executed.push([{ elevated: args }]); return { ok: false, code: 'UAC_DECLINED', message: 'The administrator prompt was declined.' }; };
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 1);
+    assert.equal(t.errors(), 'Windows did not register the task: the administrator prompt was declined. Nothing was registered or started.\n');
+    assert.deepEqual(d.loginStarts, []);
+    assert.ok(!argvs(d).some((argv) => argv.includes('/Run')));
+    assert.ok(d.executed.flat().some((step) => step.unlink && step.unlink.endsWith('king-louie-node-task.xml')), 'the XML is still deleted');
+    assert.ok(!d.executed.flat().some((step) => step.writeFile && step.writeFile.path.endsWith('king-louie-service.cmd')), 'no launcher');
+  });
+
+  it('on SCHTASKS_FAILED: exit 1 with what schtasks said', async () => {
+    const s = setup();
+    const d = deps(s, { elevated: async () => ({ ok: false, code: 'SCHTASKS_FAILED', exitCode: 1, message: 'schtasks exited with code 1.' }) });
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 1);
+    assert.equal(t.errors(), 'Windows did not register the task: schtasks exited with code 1.\n');
+    assert.deepEqual(d.loginStarts, []);
+  });
+
+  it('the consent text names the boot task, S4U, no stored password, one prompt and the tray', async () => {
+    const s = setup();
+    const d = deps(s);
+    const { code, t } = await run('install', s, d, { dryRun: true });
+    assert.equal(code, 0, t.errors());
+    const lines = t.text().split('\n').map((l) => l.trim());
+    for (const line of [
+      'boot task:  KingLouie Node (starts at boot as you; no password is stored)',
+      'one Windows administrator prompt registers it; the node itself never runs elevated',
+      'screen work (takes, computer use) needs you logged in with King Louie in the tray',
+      'saved browser logins are used only after you log in'
+    ]) assert.ok(lines.includes(line), `${line} in:\n${t.text()}`);
+    assert.doesNotMatch(t.text(), /logon task|down until you log in/);
+    assert.match(t.text(), /\[dry-run\] register the boot task "KingLouie Node" through one administrator prompt: C:\\Windows\\System32\\schtasks\.exe \/Create \/TN KingLouie Node \/XML .*king-louie-node-task\.xml \/F/);
+    assert.match(t.text(), /\[dry-run\] turn on the "King Louie" start-at-login entry: HKCU Run "King Louie" = "C:\\Program Files\\King Louie\\King Louie\.exe" --kl-tray/);
+    assert.deepEqual(d.loginStarts, []);
+    assert.equal(d.executed.length, 0);
+  });
+
+  it('re-installing over a logon task replaces it (/F) and keeps node.yaml', async () => {
+    const s = relaySetup();
+    const d = deps(s, { taskRegistered: () => true, taskInfo: () => ({ logonType: 'InteractiveToken' }) });
+    const { code, t } = await run('install', s, d);
+    assert.equal(code, 0, t.errors());
+    assert.equal(fs.readFileSync(s.yamlPath, 'utf8'), RELAY_YAML);
+    const [create] = elevatedCalls(d);
+    assert.equal(create[create.length - 1], '/F');
+    assert.ok(!argvs(d).some((argv) => argv.includes('/Delete') || argv.includes('/End')), 'replaced by /Create /F, nothing deleted first');
   });
 });
 
 describe('renderPersonalTaskXml', () => {
-  it('renderPersonalTaskXml: LogonTrigger for the SID, InteractiveToken, LeastPrivilege, run --data-dir', () => {
-    const xml = renderPersonalTaskXml({ sid: SID, nodePath: 'C:\\Program Files\\nodejs\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\Users\\owner\\AppData\\Local\\KingLouie\\node\\data', env: { SystemRoot: 'C:\\Windows' } });
+  const APPEXE = 'C:\\Program Files\\King Louie\\King Louie.exe';
+  const ENTRY = 'C:\\Program Files\\King Louie\\resources\\app.asar\\bin\\king-louie-service.js';
+  const DIR = 'C:\\Users\\o\\AppData\\Local\\KingLouie\\node\\data';
+  const base = { sid: SID, appPath: APPEXE, entryPath: ENTRY, dataDir: DIR };
+  const render = (extra = {}) => renderPersonalTaskXml({ ...base, ...extra });
+
+  it('renders a boot trigger and a logon trigger for the SID', () => {
+    const xml = render();
     assert.match(xml, /<Description>King Louie personal node<\/Description>/);
+    assert.match(xml, /<BootTrigger><Enabled>true<\/Enabled><\/BootTrigger>/);
     assert.match(xml, /<LogonTrigger><Enabled>true<\/Enabled><UserId>S-1-5-21-1-2-3-1001<\/UserId><\/LogonTrigger>/);
-    assert.match(xml, /<LogonType>InteractiveToken<\/LogonType>/);
-    assert.match(xml, /<RunLevel>LeastPrivilege<\/RunLevel>/);
-    assert.match(xml, /<RestartOnFailure>/);
-    assert.match(xml, /<DisallowStartIfOnBatteries>false<\/DisallowStartIfOnBatteries>/);
-    assert.match(xml, /<StopIfGoingOnBatteries>false<\/StopIfGoingOnBatteries>/);
-    assert.match(xml, /<Command>C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe<\/Command>/);
-    assert.match(xml, /run --data-dir 'C:\\Users\\owner\\AppData\\Local\\KingLouie\\node\\data'/);
   });
 
-  it('runAsNode: true sets ELECTRON_RUN_AS_NODE before the call to the binary; without it, no variable is set', () => {
-    const base = { sid: SID, nodePath: 'C:\\Program Files\\King Louie\\King Louie.exe', entryPath: 'C:\\Program Files\\King Louie\\resources\\app.asar\\bin\\king-louie-service.js', dataDir: 'C:\\d\\data', env: { SystemRoot: 'C:\\Windows' } };
-    const argsOf = (xml) => /<Arguments>(.*)<\/Arguments>/.exec(xml)[1].replace(/&amp;/g, '&');
-    const call = "& 'C:\\Program Files\\King Louie\\King Louie.exe' 'C:\\Program Files\\King Louie\\resources\\app.asar\\bin\\king-louie-service.js' run --data-dir 'C:\\d\\data'";
-    assert.equal(argsOf(renderPersonalTaskXml({ ...base, runAsNode: true })), `-WindowStyle Hidden -NoProfile -NonInteractive -Command $env:ELECTRON_RUN_AS_NODE='1'; ${call}`);
-    assert.equal(argsOf(renderPersonalTaskXml(base)), `-WindowStyle Hidden -NoProfile -NonInteractive -Command ${call}`);
+  it('renders an S4U principal at LeastPrivilege', () => {
+    const xml = render();
+    assert.match(xml, /<LogonType>S4U<\/LogonType>/);
+    assert.doesNotMatch(xml, /InteractiveToken/);
+    assert.match(xml, /<RunLevel>LeastPrivilege<\/RunLevel>/);
+  });
+
+  it('renders the security descriptor letting the owner read and run', () => {
+    assert.match(render(), /<SecurityDescriptor>D:\(A;;FA;;;SY\)\(A;;FA;;;BA\)\(A;;GRGX;;;S-1-5-21-1-2-3-1001\)<\/SecurityDescriptor>/);
+  });
+
+  it('runs the app binary with no PowerShell', () => {
+    const xml = render();
+    assert.ok(xml.includes(`<Command>${APPEXE}</Command>`));
+    assert.ok(xml.includes(`<Arguments>--kl-node-service "${ENTRY}" run --data-dir "${DIR}" --screen-host app</Arguments>`));
+    assert.doesNotMatch(xml, /powershell/i);
+  });
+
+  it('keeps IgnoreNew, no battery stops, PT0S and RestartOnFailure PT1M x3', () => {
+    const xml = render();
+    assert.match(xml, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
+    assert.match(xml, /<DisallowStartIfOnBatteries>false<\/DisallowStartIfOnBatteries>/);
+    assert.match(xml, /<StopIfGoingOnBatteries>false<\/StopIfGoingOnBatteries>/);
+    assert.match(xml, /<ExecutionTimeLimit>PT0S<\/ExecutionTimeLimit>/);
+    assert.match(xml, /<RestartOnFailure><Interval>PT1M<\/Interval><Count>3<\/Count><\/RestartOnFailure>/);
+  });
+
+  it('orders the elements as the Task Scheduler schema does', () => {
+    const xml = render();
+    const at = (tag) => xml.indexOf(`<${tag}`);
+    assert.ok(at('RegistrationInfo') < at('Triggers') && at('Triggers') < at('Principals') && at('Principals') < at('Settings') && at('Settings') < at('Actions'));
+  });
+
+  it('doubles a trailing backslash so the closing quote stays a quote', () => {
+    // path.win32.resolve keeps the backslash only on a drive root.
+    assert.ok(render({ dataDir: 'D:\\' }).includes('--data-dir "D:\\\\" --screen-host app'));
   });
 
   it('refuses a malformed SID and a path with a double quote', () => {
-    const base = { sid: SID, nodePath: 'C:\\n\\node.exe', entryPath: 'C:\\kl\\e.js', dataDir: 'C:\\d\\data' };
-    assert.throws(() => renderPersonalTaskXml({ ...base, sid: 'owner' }));
-    assert.throws(() => renderPersonalTaskXml({ ...base, dataDir: 'C:\\d"\\data' }));
+    assert.throws(() => render({ sid: 'owner' }));
+    assert.throws(() => render({ dataDir: 'C:\\d"\\data' }));
   });
 });
 
 describe('uninstall --personal', () => {
-  it('uninstall --personal ends and deletes the task and says the data dir stays', async () => {
-    const s = setup();
-    const d = deps(s);
-    const { code, t } = await run('uninstall', s, d);
-    assert.equal(code, 0, t.errors());
-    const all = argvs(d);
-    assert.ok(all.some((argv) => argv.includes('/End') && argv.includes(PERSONAL_TASK_NAME)));
-    assert.ok(all.some((argv) => argv.includes('/Delete') && argv.includes(PERSONAL_TASK_NAME) && argv.includes('/F')));
-    assert.ok(all.every((argv) => argv[0] === 'C:\\Windows\\System32\\schtasks.exe'));
-    assert.match(t.text(), /stays/);
-    assert.ok(t.text().includes(s.dataDir));
-  });
-
-  it('stops a running node (king-louie-service stop) before it ends and deletes the task', async () => {
+  it('uninstall deletes the task through the elevated step, then stops the node, and turns the login start off', async () => {
     const s = setup();
     const order = [];
     const d = deps(s, {
       runningServicePid: (dir) => { assert.equal(dir, path.resolve(s.dataDir)); return 4321; },
       stopNode: async (dir) => { order.push(`stop ${dir}`); return 0; }
     });
-    d.execute = async (steps) => { order.push('execute'); d.executed.push(steps); };
+    const record = d.elevated;
+    d.elevated = async (args) => { order.push('elevated'); return record(args); };
+    d.setLoginStart = (opts) => { order.push('login'); d.loginStarts.push(opts); };
     const { code, t } = await run('uninstall', s, d, { yes: true });
     assert.equal(code, 0, t.errors());
-    assert.deepEqual(order, [`stop ${path.resolve(s.dataDir)}`, 'execute']);
+    assert.deepEqual(order, ['elevated', `stop ${path.resolve(s.dataDir)}`, 'login']);
+    assert.deepEqual(elevatedCalls(d), [['/Delete', '/TN', PERSONAL_TASK_NAME, '/F']]);
+    assert.ok(!argvs(d).some((argv) => argv.includes('/End')), 'no unelevated /End for the boot task');
+    assert.deepEqual(d.loginStarts, [{ on: false }]);
+    assert.match(t.text(), /stays/);
+    assert.ok(t.text().includes(s.dataDir));
   });
 
-  it('a node that does not stop: the task is left registered, and the refusal names stop --force', async () => {
+  it('an older logon task (InteractiveToken) is ended and deleted unelevated, as before', async () => {
+    const s = setup();
+    const d = deps(s, { taskInfo: () => ({ logonType: 'InteractiveToken' }), elevated: async () => { throw new Error('elevated'); } });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 0, t.errors());
+    const all = argvs(d);
+    assert.ok(all.some((argv) => argv.includes('/End') && argv.includes(PERSONAL_TASK_NAME)));
+    assert.ok(all.some((argv) => argv.includes('/Delete') && argv.includes(PERSONAL_TASK_NAME) && argv.includes('/F')));
+    assert.ok(all.every((argv) => argv[0] === 'C:\\Windows\\System32\\schtasks.exe'));
+    assert.deepEqual(d.loginStarts, [{ on: false }]);
+  });
+
+  it('runs from a checkout too (the uninstaller and old checkout tasks): no not-the-app refusal', async () => {
+    const s = setup();
+    const d = deps(s, { runAsNode: false, taskInfo: () => ({ logonType: 'InteractiveToken' }) });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 0, t.errors());
+  });
+
+  it('a declined prompt at uninstall: exit 1, the task stays, the login start is left alone', async () => {
+    const s = setup();
+    const d = deps(s, { elevated: async () => ({ ok: false, code: 'UAC_DECLINED', message: 'The administrator prompt was declined.' }) });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 1);
+    assert.equal(t.errors(), 'Windows did not remove the task: the administrator prompt was declined. The node is still installed.\n');
+    assert.deepEqual(d.loginStarts, []);
+    assert.equal(d.executed.length, 0);
+  });
+
+  it('a declined prompt with the node running: the node is never stopped, and the refusal says it still runs', async () => {
+    const s = setup();
+    const d = deps(s, {
+      runningServicePid: () => 4321,
+      stopNode: async () => { throw new Error('stopNode must not be called when the delete was declined'); },
+      elevated: async () => ({ ok: false, code: 'UAC_DECLINED', message: 'The administrator prompt was declined.' })
+    });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 1);
+    assert.equal(t.errors(), 'Windows did not remove the task: the administrator prompt was declined. The node is still installed and running.\n');
+    assert.deepEqual(d.loginStarts, []);
+    assert.equal(d.executed.length, 0);
+  });
+
+  it('a failed elevated delete (not declined) says the task was not removed and leaves the node running', async () => {
+    const s = setup();
+    const d = deps(s, {
+      runningServicePid: () => 4321,
+      stopNode: async () => { throw new Error('stopNode must not be called'); },
+      elevated: async () => ({ ok: false, code: 'SCHTASKS_FAILED', message: 'ERROR: Access is denied.' })
+    });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 1);
+    assert.equal(t.errors(), 'Windows did not remove the task: ERROR: Access is denied. The node is still installed and running.\n');
+  });
+
+  it('a task whose XML cannot be read (taskInfo null) goes the elevated way', async () => {
+    const s = setup();
+    const d = deps(s, { taskInfo: () => null });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 0, t.errors());
+    assert.deepEqual(elevatedCalls(d), [['/Delete', '/TN', PERSONAL_TASK_NAME, '/F']]);
+    assert.ok(!argvs(d).some((argv) => argv[0] !== '(elevated)' && (argv.includes('/End') || argv.includes('/Delete'))), 'no unelevated schtasks');
+  });
+
+  it('a task with an unknown logon type goes the elevated way too', async () => {
+    const s = setup();
+    const d = deps(s, { taskInfo: () => ({ logonType: null }) });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 0, t.errors());
+    assert.deepEqual(elevatedCalls(d), [['/Delete', '/TN', PERSONAL_TASK_NAME, '/F']]);
+  });
+
+  it('a login start that cannot be turned off is a warning, exit 0', async () => {
+    const s = setup();
+    const d = deps(s, { setLoginStart: () => { throw new Error('Access is denied.'); } });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 0, t.errors());
+    assert.match(t.text(), /^warning: the "King Louie" start-at-login entry was not removed \(Access is denied\.\)\.$/m);
+  });
+
+  it('a boot task removed but a node that does not stop: exit 1, naming stop --force; the rest still runs', async () => {
     const s = setup();
     const d = deps(s, { runningServicePid: () => 4321, stopNode: async () => 1 });
     const { code, t } = await run('uninstall', s, d, { yes: true });
     assert.equal(code, 1);
+    assert.deepEqual(elevatedCalls(d), [['/Delete', '/TN', PERSONAL_TASK_NAME, '/F']]);
+    assert.match(t.errors(), /was removed, but the node on .* did not stop/);
+    assert.match(t.errors(), /king-louie-service stop --data-dir .* --force/);
+    assert.deepEqual(d.loginStarts, [{ on: false }]);
+  });
+
+  it('an older logon task whose node does not stop: the task is left registered, and the refusal names stop --force', async () => {
+    const s = setup();
+    const d = deps(s, { taskInfo: () => ({ logonType: 'InteractiveToken' }), runningServicePid: () => 4321, stopNode: async () => 1 });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 1);
     assert.equal(d.executed.length, 0);
-    assert.match(t.errors(), /did not stop, so the logon task was not removed/);
+    assert.deepEqual(d.loginStarts, []);
+    assert.match(t.errors(), /did not stop, so the task was not removed/);
     assert.match(t.errors(), /king-louie-service stop --data-dir .* --force/);
   });
 
-  it('--dry-run says it would stop the node first, and stops nothing', async () => {
+  it('--dry-run says it would do the elevated delete first, then stop the node, and runs nothing', async () => {
     const s = setup();
     const d = deps(s, { runningServicePid: () => 4321 });
     const { code, t } = await run('uninstall', s, d, { dryRun: true });
     assert.equal(code, 0, t.errors());
     const out = t.text();
-    assert.ok(out.indexOf('stop the node running on') !== -1 && out.indexOf('stop the node running on') < out.indexOf('/End'), out);
+    const stop = out.indexOf('stop the node running on');
+    const del = out.indexOf('through one administrator prompt: C:\\Windows\\System32\\schtasks.exe /Delete /TN KingLouie Node /F');
+    assert.ok(del !== -1 && stop > del, out);
+    assert.match(out, /\[dry-run\] turn off the "King Louie" start-at-login entry/);
     assert.equal(d.executed.length, 0);
+    assert.deepEqual(d.loginStarts, []);
   });
 
-  it('a task that is not registered: says so, removes nothing, exit 0', async () => {
+  it('a task that is not registered and no login start: says so, removes nothing, exit 0', async () => {
     const s = setup();
     const d = deps(s, { taskRegistered: () => false });
     const { code, t } = await run('uninstall', s, d, { yes: true });
     assert.equal(code, 0, t.errors());
     assert.equal(d.executed.length, 0);
+    assert.deepEqual(d.loginStarts, []);
     assert.match(t.text(), /is not registered: nothing to remove/);
+  });
+
+  it('no task but the login start on: it is turned off', async () => {
+    const s = setup();
+    const d = deps(s, { taskRegistered: () => false, readLoginStart: () => ({ on: true, command: `"${APP_EXE}" --kl-tray` }) });
+    const { code, t } = await run('uninstall', s, d, { yes: true });
+    assert.equal(code, 0, t.errors());
+    assert.deepEqual(d.loginStarts, [{ on: false }]);
+    assert.equal(d.executed.length, 0);
   });
 
   it('off a TTY without --yes it refuses; --yes goes on', async () => {
@@ -786,7 +1064,7 @@ describe('uninstall --personal', () => {
     assert.equal(d.executed.length, 0);
     const yes = await run('uninstall', s, d, { yes: true });
     assert.equal(yes.code, 0, yes.t.errors());
-    assert.equal(d.executed.length, 1);
+    assert.equal(elevatedCalls(d).length, 1);
   });
 });
 

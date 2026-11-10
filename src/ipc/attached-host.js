@@ -9,6 +9,7 @@ const { classifyChannel, isRendererEvent } = require('../desktop-bridge/allowlis
 const { wrapHandler } = require('./wrap-handler');
 const { createImportPicks, createPickImportFile, createAttachedImport } = require('./import-picks');
 const { MESSAGES, DEFAULT_DESKTOP_BRIDGE_PORT } = require('../desktop-bridge/protocol');
+const { localPersonalDataDir } = require('../desktop-bridge/local-personal');
 
 const log = createLogger('attached-host');
 
@@ -49,6 +50,13 @@ function startAttachedHost(deps) {
   // fleet); served() still decides per channel from the handshake.
   const hosting = () => (state.pairing && state.pairing.service && state.pairing.service.hosting === 'personal' ? 'personal' : 'service');
   const routeOf = (channel) => classifyChannel(channel, { hosting: hosting() });
+  // The screen host serves only this machine's personal node: the local
+  // pairing record, on Windows, saying `hosting: personal` with its data dir.
+  // A remote entry (attach stage 3) is never one.
+  const screenHostFactory = deps.screenHostFactory || ((opts) => require('./screen-host').startScreenHost(opts));
+  let screenHost = null;
+  const screenHostStopMs = deps.screenHostStopMs || 30000;
+  const screenHostDataDir = () => localPersonalDataDir(state.pairing, platform);
 
   async function providerReady() {
     if (!client.service || client.service.providersConfigured !== false) return true;
@@ -170,11 +178,36 @@ function startAttachedHost(deps) {
     // run the node first (once per launch) and then waits on this client's
     // own loop; a fleet pairing connects at once, as before.
     start() {
-      if (client) controller.startAttached().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
+      if (!client) return;
+      controller.startAttached().catch((err) => log.warn(`the local service is not reachable yet: ${err.message}`));
+      // Boot-node-tray Task 7: the local personal node's screen is served from
+      // this window's session. Never for a fleet pairing or a remote entry.
+      const dataDir = screenHostDataDir();
+      if (dataDir && !screenHost) {
+        try {
+          screenHost = screenHostFactory({ dataDir, platform });
+        } catch (err) {
+          log.warn(`the screen host did not start: ${err.message}`);
+        }
+      }
     },
+    screenHost: () => screenHost,
     async shutdown() {
       controller.dispose();
       if (client) client.close();
+      if (screenHost) {
+        const host = screenHost;
+        screenHost = null;
+        // Bounded: the helper may wait up to 15 s per ffmpeg; quit goes on past it.
+        let timer = null;
+        const bound = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), screenHostStopMs); });
+        const result = await Promise.race([
+          host.stop().then(() => 'stopped', (err) => { log.warn(`stopping the screen host failed: ${err.message}`); return 'failed'; }),
+          bound
+        ]);
+        clearTimeout(timer);
+        if (result === 'timeout') log.warn(`the screen host did not stop within ${Math.round(screenHostStopMs / 1000)} s; quitting anyway`);
+      }
     }
   };
 }

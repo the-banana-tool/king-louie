@@ -95,6 +95,56 @@ describe('distance', () => {
   });
 });
 
+describe('crossesBoundary', () => {
+  // Two trajectories: 1..6 and 7..12, each starting at a user message.
+  const constructed = { constructed: true, boundaries: [{ fromSeq: 1, toSeq: 6, instanceId: 'i-1', trajectoryId: 't-1' }, { fromSeq: 7, toSeq: 12, instanceId: 'i-2', trajectoryId: 't-2' }] };
+  const across = base({ kind: 'multi-hop', evidenceSeqs: [2, 8] });
+  const within = base({ kind: 'multi-hop', evidenceSeqs: [2, 5] });
+  const abstain = base({ kind: 'abstain', evidenceSeqs: [], answer: 'not in the session' });
+
+  it('is true when the evidence lies in two trajectories, false in one, null with no evidence', () => {
+    assert.strictEqual(q.crossesBoundary(constructed, across), true);
+    assert.strictEqual(q.crossesBoundary(constructed, within), false, 'asked in trajectory 2, both pieces in trajectory 1');
+    assert.strictEqual(q.crossesBoundary(constructed, abstain), null);
+  });
+
+  it('is null on an unconstructed session, and normalize adds no key there', () => {
+    assert.strictEqual(q.crossesBoundary({ constructed: false }, across), null);
+    assert.strictEqual(q.crossesBoundary(null, across), null);
+    assert.ok(!('crossesBoundary' in q.normalizeQuestion(across, index, { constructed: false })));
+    assert.ok(!('crossesBoundary' in q.normalizeQuestion(across, index)));
+  });
+
+  it('is set by normalize on a constructed session, after distance', () => {
+    const n = q.normalizeQuestion(across, index, constructed);
+    assert.strictEqual(n.crossesBoundary, true);
+    assert.deepStrictEqual(Object.keys(n).slice(9, 11), ['distance', 'crossesBoundary']);
+    assert.strictEqual(q.normalizeQuestion(abstain, index, constructed).crossesBoundary, null);
+  });
+
+  it('flags a stored value that differs from the computed one', () => {
+    const withManifest = { ...ctx, manifest: constructed };
+    const errs = q.validateQuestion({ ...across, crossesBoundary: false }, withManifest);
+    assert.deepStrictEqual(errs.map((e) => e.split(':')[0]), ['boundary-mismatch']);
+    assert.deepStrictEqual(q.validateQuestion({ ...across, crossesBoundary: true }, withManifest), []);
+    assert.deepStrictEqual(q.validateQuestion(q.normalizeQuestion(within, index, constructed), withManifest), []);
+  });
+
+  it('leaves the committed synthetic question files valid and unchanged', async () => {
+    const { loadSession } = require('../src/longhaul/session-format');
+    const root = path.join(__dirname, 'fixtures', 'longhaul');
+    for (const file of require('fs').readdirSync(path.join(root, 'questions')).filter((f) => f.endsWith('.jsonl'))) {
+      const sessionId = file.replace(/\.jsonl$/, '');
+      const session = await loadSession(path.join(root, 'sessions', sessionId));
+      const questions = await q.readQuestions(path.join(root, 'questions', file));
+      assert.deepStrictEqual(q.validateQuestionSet(questions, { index: session.index, sessionId, manifest: session.manifest }), []);
+      for (const question of questions) {
+        assert.deepStrictEqual(q.normalizeQuestion(question, session.index, session.manifest), question);
+      }
+    }
+  });
+});
+
 describe('normalize, verified and files', () => {
   it('normalizes to the spec key order with sorted evidence and the computed distance', () => {
     const n = q.normalizeQuestion(base({ kind: 'multi-hop', evidenceSeqs: [7, 2], notes: undefined, acceptableAnswers: undefined }), index);

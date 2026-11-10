@@ -113,12 +113,12 @@ async function authorCandidates({ session, plan, client, sessionId, existing = [
       verifiedBy: null,
       notes: [`author-v1 ${item.bucket}`, typeof parsed.notes === 'string' ? parsed.notes.trim() : ''].filter(Boolean).join('; ')
     };
-    const errors = validateQuestion(raw, { index: session.index, sessionId });
+    const errors = validateQuestion(raw, { index: session.index, sessionId, manifest: session.manifest });
     if (errors.length) { rejected.push({ item, reason: 'invalid', detail: errors.join('; ') }); continue; }
-    candidates.push(normalizeQuestion(raw, session.index));
+    candidates.push(normalizeQuestion(raw, session.index, session.manifest));
     serial += 1;
   }
   return { candidates, rejected, promptSha256 };
 }
 
-module.exports = { DEFAULT_PROMPT, KIND_RULES, fillPrompt, parseReply, authorCandidates, readAuthoringState };
+module.exports = { DEFAULT_PROMPT, KIND_RULES, SPAN_MESSAGE_CHARS, clipRendered, fillPrompt, parseReply, authorCandidates, readAuthoringState };
