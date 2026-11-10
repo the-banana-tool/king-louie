@@ -428,7 +428,7 @@ Configure providers and API keys in **Settings**.
 ## Profiles and roles
 
 King Louie uses only the models you place in a role. A **profile** is a named
-set of those assignments; manage profiles in **Settings > Models**.
+set of those assignments; manage profiles in **Settings › Model profiles**.
 
 - **Roles.** `main` answers chats and runs the agent loop, `worker` handles
   sub-agent work such as code exploration, and `utility` handles quick jobs
@@ -468,9 +468,8 @@ King Louie includes a durable workflow engine for executing complex, multi-step 
 
 ### How It Works
 
-1. Go to **Settings > Workflows**
-2. Enter a goal (e.g., "Build a REST API for user authentication with tests and documentation")
-3. Click **Plan & Execute**
+1. In a chat, type a goal (e.g., "Build a REST API for user authentication with tests and documentation")
+2. Click **Plan & Execute**, the button beside Send
 
 The system:
 1. Runs the **Planner Agent** to decompose the goal into a structured task graph
@@ -554,7 +553,7 @@ Categories include office (Excel, Word, LibreOffice), development (VS Code, Curs
 
 ### Managing Apps
 
-Go to **Settings > System Apps** to:
+Go to **Settings › Apps on this computer** to:
 - **View** all discovered apps grouped by category with their launch commands
 - **Re-scan** to refresh after installing new software
 - **Add custom apps** for software in non-standard locations
@@ -729,10 +728,10 @@ module.exports = MySkill;
 
 ```bash
 # From a GitHub repo
-# Settings > Skills > Install, then paste the URL
+# Settings › Skills: paste the URL under "Install a skill", then Install
 
 # From a local directory (symlinked)
-# Settings > Skills > Install, then paste the path
+# Settings › Skills: paste the path under "Install a skill", then Install
 ```
 
 Skills are auto-discovered from the `skills/` directory on startup. User-installed skills go to `%APPDATA%/King Louie/skills/` (Windows) or `~/.config/King Louie/skills/` (Linux/macOS).
@@ -750,14 +749,14 @@ first, then allowlist yourself.
 2. Add the token in Settings or via `/llm telegram add <token>`
 3. The bridge starts automatically
 4. Message the bot. It replies once with your user id and ignores you.
-5. Add that id under **Settings > Channels > Telegram Access** — it is waiting
+5. Add that id under **Settings › Telegram & Discord**, Telegram Access — it is waiting
    there under "Recently refused" with an **Allow User** button.
 
 ### Discord
 
 1. Create a Discord application and bot
 2. Add the bot token in Settings
-3. Allowlist yourself under **Settings > Channels > Discord Access**, the same
+3. Allowlist yourself under **Settings › Telegram & Discord**, Discord Access, the same
    way (Developer Mode → Copy User ID, or use the id the bot replies with)
 4. Mention gating (**Require @mention**) is a separate, narrower control: it
    decides when an *already allowed* sender's message is answered in a group.
@@ -775,7 +774,7 @@ not treat it as gated; treat it as not finished.
 
 | Where | How |
 |-------|-----|
-| Desktop | **Settings > Channels > _channel_ Access** — allowed users, allowed groups/channels, add and remove, plus a one-click **Allow** for whoever was just refused |
+| Desktop | **Settings › Telegram & Discord**, the channel's Access section — allowed users, allowed groups/channels, add and remove, plus a one-click **Allow** for whoever was just refused |
 | Service | `king-louie-service channel list telegram`<br>`king-louie-service channel allow telegram 123456789`<br>`king-louie-service channel allow discord <channel-id> --group`<br>`king-louie-service channel remove telegram 123456789` |
 
 The allowlist holds **user ids** and **group/channel ids**: a message is
@@ -804,7 +803,7 @@ owner chat you name explicitly:
 
 | Where | How |
 |-------|-----|
-| Desktop | **Settings > Channels > _channel_ Access > Approvals** |
+| Desktop | **Settings › Telegram & Discord**, the channel's Access section, Approvals |
 | Service | `king-louie-service channel approval telegram <your-chat-id>`<br>`king-louie-service channel approval telegram --clear` |
 
 **Until you set it, every approval-gated tool call from that channel is
@@ -833,50 +832,19 @@ King Louie instances can securely communicate with each other over an encrypted 
 
 Each King Louie instance generates a unique cryptographic identity (Ed25519 keypair + self-signed TLS certificate) on first launch. Instances establish trust through a pairing code exchange, then communicate over TLS-encrypted WebSocket connections with mutual authentication.
 
-### Setting Up Two Machines
+### Pairing
 
-**Step 1: Open Settings > Mesh Network on both machines**
-
-Give each machine a descriptive name and capability tags:
-
-- Desktop: Display Name = `Desktop GPU Rig`, Capabilities = `gpu, build-server`
-- Laptop: Display Name = `Work Laptop`, Capabilities = `portable`
-
-Click **Save Identity** on each.
-
-**Step 2: Pair the machines**
-
-On your **desktop**, click **Generate Code**. You'll get a 6-word code like:
-
-```
-bamboo crystal dolphin garden silver thunder
-```
-
-On your **laptop**, click **Enter Code** and type in the code, the desktop's IP address (e.g., `192.168.1.50`), and port (`18791`).
-
-The machines exchange public keys and TLS certificate fingerprints. Once paired, they'll auto-connect whenever both are online.
-
-**Step 3: Dispatch tasks**
-
-In any chat on your laptop, ask the agent to run something remotely:
+The desktop app does not offer mesh pairing in this version: the Mesh Network
+page left Settings in the settings redesign, and nothing else (no slash command,
+no `king-louie-service` command) names a machine, makes or enters a pairing
+code, or adds a peer by address. Machines paired before keep their pairing and
+reconnect whenever both are online, and the
+`RemoteDispatch` tool keeps working with them:
 
 > "Build the release binary on my desktop"
 
-The agent uses the `RemoteDispatch` tool to send the task to the desktop's King Louie, which executes it and returns the result.
-
-### LAN Auto-Discovery
-
-If `bonjour-service` is installed (`npm install bonjour-service`), King Louie automatically discovers other instances on the same local network via mDNS. Discovered peers appear in the Mesh Network settings panel. You still need to pair before they can communicate — discovery just makes finding each other easier.
-
-### Manual Peer Connection
-
-For machines on different networks (VPN, Tailscale, WireGuard), add peers manually:
-
-1. Go to **Settings > Mesh Network > Add Peer Manually**
-2. Enter the remote machine's IP address and mesh port (default: `18791`)
-3. Click **Connect**
-
-The machines must already be paired (via pairing code) for the connection to succeed.
+The agent uses `RemoteDispatch` to send the task to the paired machine's King
+Louie, which runs it and returns the result.
 
 ### Swarm Mode
 
@@ -951,7 +919,7 @@ hosts:
 ### Network Requirements
 
 - **Same LAN**: Works out of the box. mDNS handles discovery, direct connection over local IP.
-- **VPN / Tailscale / WireGuard**: Add peers manually by VPN IP address. mDNS may not cross subnets.
+- **VPN / Tailscale / WireGuard**: mDNS may not cross subnets, so discovery may not find the other machine there.
 - **Different NATs**: Requires port forwarding or a VPN. A relay server is planned for future releases.
 
 ## Cron Scheduling
@@ -1192,7 +1160,7 @@ rewritten to `deny`, so a channel that looked closed in the settings pane
 while being open to everyone is now closed in fact.
 
 *If you were using a channel, it stops answering until you allowlist yourself*
-— Settings > Channels > _channel_ Access on the desktop, or
+— Settings › Telegram & Discord, the channel's Access section, on the desktop, or
 `king-louie-service channel allow …` headless. The bot replies once to an
 unrecognised sender with the id to add.
 

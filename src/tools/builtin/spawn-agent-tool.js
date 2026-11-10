@@ -71,7 +71,7 @@ in its own conversation context. Results are returned inline to the calling agen
       },
       role: {
         type: 'string',
-        description: 'Which model role runs the sub-agent: "worker" (the default for a plain task: cheaper, good at tool use), "utility" for small mechanical jobs, "main" for hard reasoning, or a custom role from Settings → Models. With agentId and no role, the agent\'s own role applies.'
+        description: 'Which model role runs the sub-agent: "worker" (the default for a plain task: cheaper, good at tool use), "utility" for small mechanical jobs, "main" for hard reasoning, or a custom role from Settings › Model profiles › Advanced. With agentId and no role, the agent\'s own role applies.'
       },
       model: {
         type: 'string',

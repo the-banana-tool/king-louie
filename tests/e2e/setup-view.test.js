@@ -286,13 +286,13 @@ describe('E2E: the setup view', { skip }, () => {
     it('with the node down the panes say SERVICE_UNREACHABLE, not "none"', async () => {
       const refusal = { ok: false, code: 'SERVICE_UNREACHABLE', error: 'The local King Louie service is not reachable (127.0.0.1:18796).' };
       await ctx.electronApp.evaluate(({ ipcMain }, answer) => {
-        for (const channel of ['skill:listWithSettings', 'settings:load', 'webhook:list', 'workflow:list', 'apps:list', 'diagnostics:run']) {
+        for (const channel of ['skill:listWithSettings', 'settings:load', 'webhook:list', 'apps:list', 'diagnostics:run']) {
           ipcMain.removeHandler(channel);
           ipcMain.handle(channel, () => answer);
         }
       }, refusal);
-      await evaluate(ctx, `Promise.all([loadSettings(), loadSkillSettingsTabs(), loadWebhookList(), loadWorkflows(), loadSystemApps()]).then(() => true)`);
-      for (const id of ['skills-status', 'hooks-status', 'webhook-list-status', 'workflow-status', 'apps-status']) {
+      await evaluate(ctx, `Promise.all([loadSettings(), loadSkillSettingsTabs(), loadWebhookList(), loadSystemApps()]).then(() => true)`);
+      for (const id of ['skills-status', 'hooks-status', 'webhook-list-status', 'apps-status']) {
         assert.match(await evaluate(ctx, `document.getElementById(${JSON.stringify(id)}).textContent`), /not reachable/, id);
       }
       assert.doesNotMatch(await evaluate(ctx, `document.getElementById('skills-list').textContent`), /No skills loaded/);
@@ -313,6 +313,10 @@ describe('E2E: the setup view', { skip }, () => {
       assert.strictEqual(await evaluate(ctx, `document.querySelector('#webhook-list strong').textContent`), hook.name);
       assert.strictEqual(await evaluate(ctx, `document.body.dataset.pwned || null`), null);
       await evaluate(ctx, `document.querySelector('#webhook-list button[data-action="delete-webhook"]').click(); true`);
+      // A delete asks first, in the app's own dialog; the name in it is text too.
+      await waitFor(ctx, `!!document.querySelector('.rename-chat-modal')`);
+      assert.strictEqual(await evaluate(ctx, `document.querySelectorAll('.rename-chat-modal img').length`), 0);
+      await evaluate(ctx, `Array.from(document.querySelectorAll('.rename-chat-modal button')).find((b) => b.textContent === 'Confirm').click(); true`);
       await waitFor(ctx, `document.getElementById('webhook-list-status').textContent.includes('not reachable')`, 5000);
     });
 

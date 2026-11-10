@@ -1,4 +1,4 @@
-// Settings > Local service (fleet stage 7 §3.2, §3.7, §3.9): pairing, attach,
+// Settings › Node & connection (fleet stage 7 §3.2, §3.7, §3.9): pairing, attach,
 // detach, unpair, import. Mode switches persist and relaunch; handlers are
 // never swapped under a live core. The private key is sealed with safeStorage
 // and unsealed only for the moment of a signature.
@@ -177,7 +177,10 @@ function createDesktopController({
   oldProfileWaitMs = OLD_PROFILE_WAIT_MS,
   // The per-user Run value (boot-node-tray spec 5.4) and the app binary it starts; tests inject both.
   loginStart: loginStartDeps = loginStartApi, appPath = process.execPath,
-  migrationDeps = {}
+  migrationDeps = {},
+  // Electron's shell.openPath (resolves '' on success, else the error), passed by
+  // the hosts; this file stays free of a require('electron').
+  openPath = null
 }) {
   const move = { detectOldProfile: detectOldProfileApart, backupProfile, loadDesktopSource, ...migrationDeps };
   const emitter = new EventEmitter();
@@ -1232,6 +1235,30 @@ function createDesktopController({
     return relaunch([STANDALONE_ONCE]);
   }
 
+  // Settings redesign §8.3, "Switch to my node" from a --kl-standalone-once window:
+  // with a pairing, attach; with none, relaunch without the flag and let the launch
+  // rule decide (on Windows the setup view).
+  async function leaveStandalone() {
+    if (launch.why !== 'once') return { ok: false, code: 'NOT_ONCE', error: 'This window was not opened for one standalone session.' };
+    if (state.pairing && state.pairing.service) return attach();
+    return relaunch();
+  }
+
+  // Settings redesign §8.2: Node & connection's Open data folder, a personal
+  // node's only (a fleet node's data dir is the service account's).
+  async function openDataFolder() {
+    const svc = state.pairing && state.pairing.service;
+    if (!svc || svc.hosting !== 'personal' || !svc.dataDir) {
+      return { ok: false, code: 'NOT_PERSONAL', error: 'Only a node running as you has a data folder to open here.' };
+    }
+    if (typeof openPath !== 'function') return { ok: false, code: 'ATTACHED_UNAVAILABLE', error: 'Not available here.' };
+    const isDir = await fs.promises.stat(svc.dataDir).then((st) => st.isDirectory(), () => false);
+    if (!isDir) return { ok: false, code: 'DATA_DIR_MISSING', error: `The data folder is not there: ${shown(svc.dataDir, 400)}` };
+    const failure = await openPath(svc.dataDir);
+    if (failure) return { ok: false, code: 'OPEN_FAILED', error: `The data folder could not be opened: ${shown(String(failure), 200)}` };
+    return { ok: true };
+  }
+
   async function unpair() {
     const pairing = state.pairing;
     const wasAttached = state.mode === 'attached';
@@ -2043,7 +2070,7 @@ ${stdout}`)) {
   resumePendingPair();
 
   return {
-    status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
+    status, pairStart, pairConfirm, pairRestartConfirm, pairCancel, attach, detach, standaloneOnce, leaveStandalone, openDataFolder, unpair, retry,
     importPlan, importApply, migrationPlan, migrationApply, restartLater, dismissServiceCommand, createClient, setClient, dispose,
     startAttached, startIdle, refreshIdle, nodeStart, nodeRestart, nodeInstallPreview, nodeInstall, loginStart, setLoginStart,
     setupStep, setupLater, setupFinish, setupWindowOnly, finishedForNow: () => finishedForNow,

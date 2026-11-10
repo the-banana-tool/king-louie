@@ -94,9 +94,9 @@ const EXCLUDED = Object.freeze({
   'settings.mcpServers': 'MCP servers spawn processes; an administrator sets them with the service CLI',
   'settings.channels': 'a chat bot must not answer from two hosts; an administrator sets channels with the service CLI',
   channelTokens: 'bot tokens stay with the desktop',
-  'settings.activeProvider': 'model choice moved to profiles; set the models up under Settings → Models on the service',
-  'settings.providerModels': 'model choice moved to profiles; set the models up under Settings → Models on the service',
-  'settings.inference': 'tiers became profiles; set the models up under Settings → Models on the service',
+  'settings.activeProvider': 'model choice moved to profiles; set the models up under Settings › Model profiles on the service',
+  'settings.providerModels': 'model choice moved to profiles; set the models up under Settings › Model profiles on the service',
+  'settings.inference': 'tiers became profiles; set the models up under Settings › Model profiles on the service',
   // Local inference stage L1 (R-LI-6): settings.models, and with it
   // models.localServers, is not in IMPORTED_SETTINGS_KEYS. On a service a
   // local server comes only from the administrator's service.json, and the
@@ -111,7 +111,7 @@ const EXCLUDED = Object.freeze({
 const PERSONAL_SETTING_LINES = Object.freeze({
   playbooks: 'Playbook sources and auto-update do not move. On the node they come only from the playbooks block of its service.json.',
   executors: 'External agents and their settings (the agents a case can send through, the default country code, check timing and your own outbound keywords) do not move. On the node, external agents are set up in its service.json.',
-  contactPolicy: 'How questions reach you (contact ladders, quiet hours, breakthrough and digest) does not move. Set it again under Settings > Contact on the node.',
+  contactPolicy: 'How questions reach you (contact ladders, quiet hours, breakthrough and digest) does not move. Set it again under Settings › Contact ladder on the node.',
   contact: 'Who you are to the contact channels (your identity and addresses) does not move. On the node they come only from the contact block of its service.json.'
 });
 
@@ -126,7 +126,7 @@ const PERSONAL_NOTES = Object.freeze({
 const ALREADY_ON_NODE = 'already set on this node; left as it is';
 const ALLOWLIST_NOTE = 'who may reach this bot';
 const ALLOWLIST_LEFT_BEHIND = 'this node already has a list for this bot; the desktop\'s list was left behind';
-const profilesNotMoved = (n) => `your ${n} model ${n === 1 ? 'profile was' : 'profiles were'} not moved: this node's models were already set up, so they were left as they are; set the ${n === 1 ? 'profile' : 'profiles'} up again under Settings > Models`;
+const profilesNotMoved = (n) => `your ${n} model ${n === 1 ? 'profile was' : 'profiles were'} not moved: this node's models were already set up, so they were left as they are; set the ${n === 1 ? 'profile' : 'profiles'} up again under Settings › Model profiles`;
 // Trying again cannot help either of these: the plan comes out the same. What
 // helps is the owner looking, and removing the node's folder is the last resort,
 // after that, with what it would lose named.
@@ -140,15 +140,15 @@ const SECOND_CASE_NOTE = 'the node has this case under another folder; it lands 
 // EXCLUDED's reasons are the fleet's. On a personal node the owner is the
 // administrator and these panes work, so the line says what he will find.
 const PERSONAL_EXCLUDED = Object.freeze({
-  skills: 'Skills, their pins and customizations do not move: they stay on this computer, and the node starts without them. Install them again in Settings > Skills on the node.',
-  workflows: 'Workflows do not move: they stay on this computer, and the node starts with none. Set them up again in Settings > Workflows on the node.',
-  webhooks: 'Webhooks do not move: they stay on this computer. Set them up again in Settings > Webhooks on the node.',
+  skills: 'Skills, their pins and customizations do not move: they stay on this computer, and the node starts without them. Install them again in Settings › Skills on the node.',
+  workflows: 'Workflows do not move: they stay on this computer, and the node starts with none. Start them again with Plan & Execute on the node.',
+  webhooks: 'Webhooks do not move: they stay on this computer. Set them up again in Settings › Webhooks on the node.',
   apiStatus: 'provider status is recomputed by the node',
   embeddings: 'Search over your old chats fills in over time after the node\'s first start: the search index and its model stay on this computer, so the node builds its own in the background, fetching the model if it needs one.'
 });
 const OLD_MODEL_KEYS = new Set(['settings.activeProvider', 'settings.providerModels', 'settings.inference']);
 const OLD_MODELS_REPLACED = 'The old model settings (active provider, provider models and tiers) do not move: your model profiles replaced them.';
-const OLD_MODELS_SET_UP = 'The old model settings (active provider, provider models and tiers) do not move, and this profile has no model profile to move: set the models up under Settings > Models on the node.';
+const OLD_MODELS_SET_UP = 'The old model settings (active provider, provider models and tiers) do not move, and this profile has no model profile to move: set the models up under Settings › Model profiles on the node.';
 const overCapNote = (c) => `chat "${String(c.title || c.id).slice(0, 80)}" is ${(c.overCapBytes / (1024 * 1024)).toFixed(1)} MB, over the ${MAX_CHAT_BYTES / (1024 * 1024)} MB a chat can move in. It does not move: it stays in this computer's copy and in the backup.`;
 const tooLargeNote = (c, exists) => `chat "${String(c.title || c.id).slice(0, 80)}" has a message of ${(c.tooLargeBytes / (1024 * 1024)).toFixed(1)} MB, too large to send to the node. ${exists ? 'The node already holds this chat, and it is left as it is.' : 'The chat moves without what that message holds, with a line saying so in its place.'} The whole message stays in this computer's copy and in the backup.`;
 
@@ -935,7 +935,7 @@ class DesktopImporter {
     const knownTokens = new Set([...Object.keys(this.context.providerLabels || {}), ELEVENLABS_TOKEN]);
     const secret = (category, key, present) => {
       if (present) return add(category, key, 'skip-present');
-      if (secretMode === 'needs-desktop') return add(category, key, 'needs-desktop', 'only the desktop app can read its secrets; import from Settings > Local service');
+      if (secretMode === 'needs-desktop') return add(category, key, 'needs-desktop', 'only the desktop app can read its secrets; import from Settings › Node & connection');
       if (secretMode === 'unavailable') return add(category, key, 'needs-attention', MESSAGES.SECURE_STORAGE_UNAVAILABLE);
       return add(category, key, 'new');
     };
@@ -1670,7 +1670,7 @@ class DesktopImporter {
       cronDisabled,
       ...(needsRestart ? { needsRestart: true } : {}),
       notes: [
-        ...(cronDisabled ? [`${cronDisabled} cron job(s) were imported disabled; enable them in Settings > Scheduler.`] : []),
+        ...(cronDisabled ? [`${cronDisabled} cron job(s) were imported disabled; enable them in Settings › Scheduled jobs.`] : []),
         ...(needsRestart ? [RESTART_NOTE] : []),
         ...(placed ? [] : [chatsOutOfOrder(this.where)])
       ]

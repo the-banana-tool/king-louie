@@ -576,6 +576,7 @@ contextBridge.exposeInMainWorld(
       saveElevenLabsKey: (payload) => ipcRenderer.invoke('settings:saveElevenLabsKey', payload),
       testVoice: (payload) =>
         throttleInvoke('settings:testVoice', () => ipcRenderer.invoke('settings:testVoice', payload)),
+      listVoices: () => ipcRenderer.invoke('settings:listVoices'),
       saveNotifications: (payload) => ipcRenderer.invoke('settings:saveNotifications', payload),
       saveDefaults: (payload) => ipcRenderer.invoke('settings:saveDefaults', payload),
       addAllowedDirectory: () => ipcRenderer.invoke('settings:addAllowedDirectory'),
@@ -1393,6 +1394,8 @@ contextBridge.exposeInMainWorld(
       attach: () => ipcRenderer.invoke('desktop:attach'),
       detach: (payload = {}) => ipcRenderer.invoke('desktop:detach', { confirmed: Boolean(payload && payload.confirmed === true) }),
       standaloneOnce: () => ipcRenderer.invoke('desktop:standaloneOnce'),
+      leaveStandalone: () => ipcRenderer.invoke('desktop:leaveStandalone'),
+      openDataFolder: () => ipcRenderer.invoke('desktop:openDataFolder'),
       unpair: () => ipcRenderer.invoke('desktop:unpair'),
       retry: () => ipcRenderer.invoke('desktop:retry'),
       dismissServiceCommand: () => ipcRenderer.invoke('desktop:dismissServiceCommand'),

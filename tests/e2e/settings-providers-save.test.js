@@ -1,11 +1,11 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
-const { launchApp, closeApp, evaluate, waitFor, click, fill, getText } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, click, fill, getText, openSettingsTab } = require('./helpers');
 
 /**
- * E2E tests for provider token save/clear/test flows.
- * Verifies that Save Token, Test Connection and Clear Token
- * buttons work correctly for every provider card.
+ * E2E tests for the Providers & keys rows (settings redesign Task 10, spec §5.5):
+ * Add/Edit opens a row in place, Save & test saves and then tests, Remove key
+ * asks first with the in-app dialog.
  */
 
 const PROVIDERS = [
@@ -13,86 +13,74 @@ const PROVIDERS = [
   'openrouter', 'xai', 'deepseek', 'qwen', 'together', 'fireworks', 'cohere'
 ];
 
-// Providers that skip prefix validation (no specific prefix required)
-const GENERIC_TOKEN_PROVIDERS = [
-  'groq', 'mistral', 'ollama', 'gemini', 'openrouter',
-  'xai', 'deepseek', 'qwen', 'together', 'fireworks', 'cohere'
-];
+// A few providers with no prefix rule; saving one runs a real connection test,
+// so the save flow is checked on three rather than all of them.
+const SAVE_PROVIDERS = ['groq', 'mistral', 'cohere'];
 
-function providerSelector(providerKey) {
-  return `.provider-card[data-provider="${providerKey}"]`;
+function rowSelector(providerKey) {
+  return `#provider-list .key-row[data-provider="${providerKey}"]`;
 }
 
 function msgSelector(providerKey) {
-  return `${providerSelector(providerKey)} .provider-message`;
+  return `${rowSelector(providerKey)} .provider-message`;
 }
 
 function inputSelector(providerKey) {
-  return `input[data-provider="${providerKey}"]`;
+  return `${rowSelector(providerKey)} input[data-provider="${providerKey}"]`;
 }
 
 function btnSelector(providerKey, action) {
-  return `${providerSelector(providerKey)} button[data-action="${action}"]`;
+  return `${rowSelector(providerKey)} button[data-action="${action}"]`;
 }
 
-describe('E2E: Settings — Provider Save/Clear/Test', () => {
+async function openRow(ctx, providerKey) {
+  const open = await evaluate(ctx, `!document.querySelector('${rowSelector(providerKey)} .key-row-editor').hidden`);
+  if (!open) await click(ctx, btnSelector(providerKey, 'toggle'));
+}
+
+// Save & test ends when the row has left "Not tested" for a tested state.
+async function waitTested(ctx, providerKey) {
+  return waitFor(ctx, `['working', 'failing'].includes(document.querySelector('${rowSelector(providerKey)}')?.dataset.state)`, 30000);
+}
+
+describe('E2E: Settings — Providers & keys rows', () => {
   let ctx;
 
   before(async () => {
     ctx = await launchApp();
     await waitFor(ctx, `!!document.getElementById('user-input')`);
-    await click(ctx, '#open-settings-btn');
-    await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
-    // Navigate to Providers tab
-    await evaluate(ctx, `
-      (() => {
-        const sel = document.getElementById('settings-nav-select');
-        for (const opt of sel.options) {
-          if (opt.textContent.includes('Provider') || opt.value === 'providers') {
-            sel.value = opt.value; sel.dispatchEvent(new Event('change')); return true;
-          }
-        }
-        return false;
-      })()
-    `);
-    await new Promise((r) => setTimeout(r, 300));
+    await openSettingsTab(ctx, 'providers');
   });
 
   after(async () => { await closeApp(ctx); });
 
-  // --- Structural tests: every provider has all required buttons ---
+  // --- Structure: every provider has a row with its parts ---
 
   for (const provider of PROVIDERS) {
-    it(`${provider}: has Save Token button`, async () => {
-      const exists = await evaluate(ctx, `!!document.querySelector('${btnSelector(provider, 'save')}')`);
-      assert.ok(exists, `${provider} should have a save button`);
-    });
-
-    it(`${provider}: has Test Connection button`, async () => {
-      const exists = await evaluate(ctx, `!!document.querySelector('${btnSelector(provider, 'test')}')`);
-      assert.ok(exists, `${provider} should have a test button`);
-    });
-
-    it(`${provider}: has Clear Token button`, async () => {
-      const exists = await evaluate(ctx, `!!document.querySelector('${btnSelector(provider, 'clear')}')`);
-      assert.ok(exists, `${provider} should have a clear button`);
-    });
-
-    it(`${provider}: has password input for token`, async () => {
-      const exists = await evaluate(ctx, `!!document.querySelector('${inputSelector(provider)}')`);
-      assert.ok(exists, `${provider} should have a token input`);
-    });
-
-    it(`${provider}: has message area`, async () => {
-      const exists = await evaluate(ctx, `!!document.querySelector('${msgSelector(provider)}')`);
-      assert.ok(exists, `${provider} should have a message area`);
+    it(`${provider}: has a row with a status, Add or Edit, Save & test, a key input and a message area`, async () => {
+      const parts = await evaluate(ctx, `(() => {
+        const row = document.querySelector('${rowSelector(provider)}');
+        if (!row) return null;
+        return {
+          pill: !!row.querySelector('.status-pill'),
+          toggle: row.querySelector('button[data-action="toggle"]')?.textContent || '',
+          save: row.querySelector('button[data-action="save"]')?.textContent || '',
+          input: !!row.querySelector('input[data-provider="${provider}"]'),
+          message: !!row.querySelector('.provider-message')
+        };
+      })()`);
+      assert.ok(parts, `${provider} should have a row`);
+      assert.ok(parts.pill, `${provider} should show a status`);
+      assert.ok(['Add', 'Edit'].includes(parts.toggle), `${provider} button is Add or Edit, got "${parts.toggle}"`);
+      assert.strictEqual(parts.save, 'Save & test');
+      assert.ok(parts.input && parts.message);
     });
   }
 
-  // --- Validation: empty/short token should show error ---
+  // --- Validation: empty/short key shows an error, nothing saved ---
 
-  it('save with empty token shows validation error', async () => {
-    // Use gemini since it has no prefix requirement
+  it('save with an empty key shows a validation error', async () => {
+    await openRow(ctx, 'gemini');
     await fill(ctx, inputSelector('gemini'), '');
     await click(ctx, btnSelector('gemini', 'save'));
     await new Promise((r) => setTimeout(r, 300));
@@ -100,7 +88,7 @@ describe('E2E: Settings — Provider Save/Clear/Test', () => {
     assert.ok(msg.includes('at least 8 characters'), `should show length error, got: ${msg}`);
   });
 
-  it('save with short token shows validation error', async () => {
+  it('save with a short key shows a validation error', async () => {
     await fill(ctx, inputSelector('gemini'), 'abc');
     await click(ctx, btnSelector('gemini', 'save'));
     await new Promise((r) => setTimeout(r, 300));
@@ -108,9 +96,8 @@ describe('E2E: Settings — Provider Save/Clear/Test', () => {
     assert.ok(msg.includes('at least 8 characters'), `should show length error, got: ${msg}`);
   });
 
-  // --- Prefix validation for specific providers ---
-
-  it('openai: rejects token without sk- prefix', async () => {
+  it('openai: rejects a key without the sk- prefix', async () => {
+    await openRow(ctx, 'openai');
     await fill(ctx, inputSelector('openai'), 'not-a-valid-openai-token');
     await click(ctx, btnSelector('openai', 'save'));
     await new Promise((r) => setTimeout(r, 300));
@@ -118,7 +105,8 @@ describe('E2E: Settings — Provider Save/Clear/Test', () => {
     assert.ok(msg.includes('sk-'), `should warn about sk- prefix, got: ${msg}`);
   });
 
-  it('anthropic: rejects token without sk-ant- prefix', async () => {
+  it('anthropic: rejects a key without the sk-ant- prefix', async () => {
+    await openRow(ctx, 'anthropic');
     await fill(ctx, inputSelector('anthropic'), 'not-a-valid-anthropic-token');
     await click(ctx, btnSelector('anthropic', 'save'));
     await new Promise((r) => setTimeout(r, 300));
@@ -126,106 +114,54 @@ describe('E2E: Settings — Provider Save/Clear/Test', () => {
     assert.ok(msg.includes('sk-ant-'), `should warn about sk-ant- prefix, got: ${msg}`);
   });
 
-  // --- Save token flow for every provider ---
+  // --- Save & test ---
 
-  for (const provider of GENERIC_TOKEN_PROVIDERS) {
-    it(`${provider}: save button stores token and shows success`, async () => {
-      const fakeToken = `test-fake-token-${provider}-1234567890`;
-      await fill(ctx, inputSelector(provider), fakeToken);
+  for (const provider of SAVE_PROVIDERS) {
+    it(`${provider}: Save & test stores the key, tests it, and the row says Edit`, async () => {
+      await openRow(ctx, provider);
+      await fill(ctx, inputSelector(provider), `test-fake-token-${provider}-1234567890`);
       await click(ctx, btnSelector(provider, 'save'));
-      await new Promise((r) => setTimeout(r, 500));
-      const msg = await getText(ctx, msgSelector(provider));
-      assert.ok(
-        msg.includes('Token saved securely'),
-        `${provider} should show "Token saved securely", got: "${msg}"`
-      );
-    });
-
-    it(`${provider}: input is cleared after successful save`, async () => {
-      // Input should have been cleared by the previous save
-      const val = await evaluate(ctx, `
-        document.querySelector('${inputSelector(provider)}')?.value || ''
-      `);
-      assert.strictEqual(val, '', `${provider} input should be empty after save`);
-    });
-
-    it(`${provider}: label updates to show token is saved`, async () => {
-      const labelText = await evaluate(ctx, `
-        (() => {
-          const card = document.querySelector('${providerSelector(provider)}');
-          if (!card) return null;
-          const labels = card.querySelectorAll('label');
-          return labels[0]?.textContent || null;
-        })()
-      `);
-      assert.ok(
-        labelText && labelText.includes('saved'),
-        `${provider} label should indicate token is saved, got: "${labelText}"`
-      );
-    });
-
-    it(`${provider}: placeholder changes after token is saved`, async () => {
-      const placeholder = await evaluate(ctx, `
-        document.querySelector('${inputSelector(provider)}')?.placeholder || ''
-      `);
-      // When hasToken is true, placeholder shows masked characters
-      assert.ok(
-        placeholder !== 'Paste API token',
-        `${provider} placeholder should change from default after saving, got: "${placeholder}"`
-      );
+      await waitTested(ctx, provider);
+      const row = await evaluate(ctx, `(() => {
+        const row = document.querySelector('${rowSelector(provider)}');
+        return {
+          toggle: row.querySelector('button[data-action="toggle"]').textContent,
+          pill: row.querySelector('.status-pill').textContent,
+          remove: row.querySelector('button[data-action="clear"]')?.textContent || null,
+          input: row.querySelector('input[data-provider="${provider}"]').value
+        };
+      })()`);
+      assert.strictEqual(row.toggle, 'Edit');
+      assert.ok(['Working', 'Failing'].includes(row.pill), `tested after saving, got "${row.pill}"`);
+      assert.strictEqual(row.remove, 'Remove key');
+      assert.strictEqual(row.input, '', 'the key field is cleared after saving');
     });
   }
 
-  // Save with valid prefix for openai and anthropic
-  it('openai: save button stores token with valid prefix', async () => {
-    await fill(ctx, inputSelector('openai'), 'sk-test-fake-token-openai-1234567890');
-    await click(ctx, btnSelector('openai', 'save'));
-    await new Promise((r) => setTimeout(r, 500));
-    const msg = await getText(ctx, msgSelector('openai'));
-    assert.ok(msg.includes('Token saved securely'), `openai should save, got: "${msg}"`);
+  it('a failing key adds to the failing banner, counting model providers only', async () => {
+    const failing = await evaluate(ctx, `document.querySelectorAll('#provider-list .key-row[data-state="failing"]').length`);
+    const banner = await evaluate(ctx, `(() => { const b = document.getElementById('providers-failing-banner'); return { hidden: b.hidden, text: b.textContent }; })()`);
+    if (failing === 0) {
+      assert.strictEqual(banner.hidden, true);
+    } else {
+      assert.strictEqual(banner.hidden, false);
+      assert.match(banner.text, new RegExp(`^${failing} keys? (is|are) failing\\.`));
+    }
   });
 
-  it('anthropic: save button stores token with valid prefix', async () => {
-    await fill(ctx, inputSelector('anthropic'), 'sk-ant-test-fake-token-anthropic-1234567890');
-    await click(ctx, btnSelector('anthropic', 'save'));
-    await new Promise((r) => setTimeout(r, 500));
-    const msg = await getText(ctx, msgSelector('anthropic'));
-    assert.ok(msg.includes('Token saved securely'), `anthropic should save, got: "${msg}"`);
-  });
+  // --- Remove key ---
 
-  // --- Test Connection after saving ---
-
-  for (const provider of GENERIC_TOKEN_PROVIDERS) {
-    it(`${provider}: test connection runs after token is saved`, async () => {
-      await click(ctx, btnSelector(provider, 'test'));
-      await new Promise((r) => setTimeout(r, 300));
-      // Should show "Testing connection..." initially or a result message
-      // We just verify it doesn't say "No token saved"
-      const msg = await getText(ctx, msgSelector(provider));
-      assert.ok(
-        !msg.includes('No token saved'),
-        `${provider} should not show "No token saved" after saving, got: "${msg}"`
-      );
-    });
-  }
-
-  // --- Clear token flow ---
-
-  it('clear token shows confirmation dialog (not native confirm)', async () => {
-    // Trap native confirm
+  it('Remove key uses the in-app confirm dialog (not native confirm)', async () => {
     await evaluate(ctx, `
       window.__nativeConfirmCalled = false;
       window.confirm = () => { window.__nativeConfirmCalled = true; return false; };
       true
     `);
-
-    await click(ctx, btnSelector('gemini', 'clear'));
+    await openRow(ctx, 'groq');
+    await click(ctx, btnSelector('groq', 'clear'));
     await new Promise((r) => setTimeout(r, 500));
-
     const nativeCalled = await evaluate(ctx, `window.__nativeConfirmCalled`);
     assert.strictEqual(nativeCalled, false, 'should use in-app confirm, not native confirm()');
-
-    // Dismiss the modal by clicking cancel (first button)
     await evaluate(ctx, `
       (() => {
         const modal = document.querySelector('.rename-chat-modal');
@@ -236,17 +172,10 @@ describe('E2E: Settings — Provider Save/Clear/Test', () => {
     await new Promise((r) => setTimeout(r, 200));
   });
 
-  it('clear token removes saved token when confirmed', async () => {
-    // First make sure gemini has a token saved
-    await fill(ctx, inputSelector('gemini'), 'test-fake-token-gemini-cleartest');
-    await click(ctx, btnSelector('gemini', 'save'));
+  it('Remove key, confirmed, removes the key: the row says No key and Add', async () => {
+    await openRow(ctx, 'groq');
+    await click(ctx, btnSelector('groq', 'clear'));
     await new Promise((r) => setTimeout(r, 500));
-
-    // Click clear
-    await click(ctx, btnSelector('gemini', 'clear'));
-    await new Promise((r) => setTimeout(r, 500));
-
-    // Confirm the modal by clicking the last button (confirm)
     await evaluate(ctx, `
       (() => {
         const modal = document.querySelector('.rename-chat-modal');
@@ -257,55 +186,16 @@ describe('E2E: Settings — Provider Save/Clear/Test', () => {
         return true;
       })()
     `);
-    await new Promise((r) => setTimeout(r, 500));
-
-    const msg = await getText(ctx, msgSelector('gemini'));
-    assert.ok(
-      msg.includes('Token removed'),
-      `should show "Token removed" after clearing, got: "${msg}"`
-    );
-  });
-
-  it('after clearing, label reverts to default', async () => {
-    const labelText = await evaluate(ctx, `
-      (() => {
-        const card = document.querySelector('${providerSelector('gemini')}');
-        if (!card) return null;
-        const labels = card.querySelectorAll('label');
-        return labels[0]?.textContent || null;
-      })()
-    `);
-    assert.ok(
-      labelText === 'API token',
-      `label should revert to "API token" after clear, got: "${labelText}"`
-    );
-  });
-
-  it('after clearing, test connection shows "No token saved"', async () => {
-    await click(ctx, btnSelector('gemini', 'test'));
-    await new Promise((r) => setTimeout(r, 1000));
-    const msg = await getText(ctx, msgSelector('gemini'));
-    assert.ok(
-      msg.includes('No token saved'),
-      `should show "No token saved" after clearing, got: "${msg}"`
-    );
-  });
-
-  // --- Edge case: saving replaces previous token ---
-
-  it('saving a new token replaces the previous one', async () => {
-    // Save first token
-    await fill(ctx, inputSelector('mistral'), 'test-fake-token-mistral-first12345');
-    await click(ctx, btnSelector('mistral', 'save'));
-    await new Promise((r) => setTimeout(r, 500));
-    let msg = await getText(ctx, msgSelector('mistral'));
-    assert.ok(msg.includes('Token saved securely'), `first save should succeed, got: "${msg}"`);
-
-    // Save second token (replace)
-    await fill(ctx, inputSelector('mistral'), 'test-fake-token-mistral-second12345');
-    await click(ctx, btnSelector('mistral', 'save'));
-    await new Promise((r) => setTimeout(r, 500));
-    msg = await getText(ctx, msgSelector('mistral'));
-    assert.ok(msg.includes('Token saved securely'), `second save should succeed, got: "${msg}"`);
+    await waitFor(ctx, `document.querySelector('${rowSelector('groq')}')?.dataset.state === 'no-key'`);
+    const row = await evaluate(ctx, `(() => {
+      const row = document.querySelector('${rowSelector('groq')}');
+      return {
+        pill: row.querySelector('.status-pill').textContent,
+        toggle: row.querySelector('button[data-action="toggle"]').textContent,
+        remove: !!row.querySelector('button[data-action="clear"]'),
+        message: row.querySelector('.provider-message').textContent
+      };
+    })()`);
+    assert.deepStrictEqual(row, { pill: 'No key', toggle: 'Add', remove: false, message: 'Key removed.' });
   });
 });

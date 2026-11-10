@@ -2,7 +2,7 @@
 // Run with: unset ELECTRON_RUN_AS_NODE && node --test tests/e2e/attached-mode.test.js
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
-const { launchAttached, closeApp, evaluate, waitFor, click } = require('./helpers');
+const { launchAttached, closeApp, evaluate, waitFor, click, openSettingsTab } = require('./helpers');
 
 describe('E2E: attached mode', { timeout: 240000 }, () => {
   let ctx;
@@ -31,10 +31,20 @@ describe('E2E: attached mode', { timeout: 240000 }, () => {
     assert.match(reply, /The probe ran\./);
   });
 
-  it('marks an unproxied settings tab', async () => {
-    await evaluate(ctx, `document.getElementById('open-settings-btn').click(); switchSettingsTab('hooks'); true`);
-    const text = await waitFor(ctx, `document.querySelector('.settings-tab-content[data-tab="hooks"] .service-unavailable-notice')?.textContent`);
-    assert.strictEqual(text, 'Managed by the local service; not available while attached.');
+  it('leaves an unproxied page out of the sidebar', async () => {
+    await openSettingsTab(ctx, 'permissions');
+    await waitFor(ctx, `(appState.unavailableTabs || []).includes('hooks')`);
+    const nav = await evaluate(ctx, `(() => {
+      const sidebar = document.getElementById('settings-sidebar');
+      return {
+        hooks: !!sidebar.querySelector('.settings-nav-item[data-tab="hooks"]'),
+        permissions: !!sidebar.querySelector('.settings-nav-item[data-tab="permissions"]'),
+        hooksShown: document.querySelector('.settings-tab-content[data-tab="hooks"]').classList.contains('is-section'),
+        sectionHidden: [...document.querySelectorAll('[data-section-tab="hooks"]')].every((el) => el.hidden && getComputedStyle(el).display === 'none'),
+        rulesShown: getComputedStyle(document.querySelector('.settings-tab-content[data-tab="permissions"]')).display !== 'none'
+      };
+    })()`);
+    assert.deepStrictEqual(nav, { hooks: false, permissions: true, hooksShown: false, sectionHidden: true, rulesShown: true });
   });
 
   it('shows the unreachable banner when the service dies and reconnects after a restart', async () => {
@@ -45,5 +55,32 @@ describe('E2E: attached mode', { timeout: 240000 }, () => {
     await evaluate(ctx, `window.electron.desktop.retry(); true`);
     await waitFor(ctx, `window.electron.desktop.status().then((s) => s.view === 'attached-connected')`, 60000);
     await waitFor(ctx, `!document.getElementById('attached-service-banner')`, 10000);
+  });
+
+  it('a page opened while the node was down is re-read before it turns editable (final review 2)', async () => {
+    await openSettingsTab(ctx, 'notifications');
+    const pane = `document.querySelector('.settings-tab-content[data-tab="notifications"]')`;
+    await waitFor(ctx, `!${pane}.inert`, 30000);
+    await ctx.service.kill();
+    await waitFor(ctx, `${pane}.inert && !document.querySelector('.settings-tab-content[data-tab="service"]').inert`, 30000);
+    // Count re-reads from here, and record whether one had finished when the pane lifted.
+    await evaluate(ctx, `(() => {
+      window.__loads = 0;
+      window.__loadedWhenLifted = null;
+      const orig = loadSettings;
+      window.loadSettings = async (...args) => { const r = await orig(...args); window.__loads++; return r; };
+      const el = ${pane};
+      new MutationObserver(() => {
+        if (!el.inert && window.__loadedWhenLifted === null) window.__loadedWhenLifted = window.__loads;
+      }).observe(el, { attributes: true, attributeFilter: ['inert'] });
+      return true;
+    })()`);
+    ctx.service = await ctx.service.restart();
+    await evaluate(ctx, `window.electron.desktop.retry(); true`);
+    await waitFor(ctx, `window.electron.desktop.status().then((s) => s.view === 'attached-connected')`, 60000);
+    await waitFor(ctx, `!${pane}.inert`, 30000);
+    const seen = await evaluate(ctx, `({ drawerOpen: !document.getElementById('settings-drawer').hidden, loadedWhenLifted: window.__loadedWhenLifted })`);
+    assert.strictEqual(seen.drawerOpen, true, 'the drawer stayed open');
+    assert.ok(seen.loadedWhenLifted >= 1, `the settings were re-read before the page lifted (${seen.loadedWhenLifted})`);
   });
 });

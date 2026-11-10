@@ -86,6 +86,10 @@ const LOCAL = [
   // Answered REMOTE_LOCAL_ONLY.
   'models:local.add', 'models:local.fromOllama', 'models:local.probe', 'models:local.recheck',
   'models:local.remove', 'models:local.setModelInfo', 'models:local.unsetLocalOnly',
+  // This computer's voices (settings redesign §8.4): only the window on the node's own
+  // computer asks; a remote one keeps the text field, and never makes the node spawn
+  // PowerShell on request.
+  'settings:listVoices',
   'import.plan', 'import.apply', 'import.finish',
   // Handled in the window and never sent. Every other desktop: and wizard:
   // channel is local too, by WINDOW_PREFIXES.

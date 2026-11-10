@@ -8,6 +8,7 @@ const { createLogger } = require('../logging');
 const { KL_PROVIDERS, DEFAULT_OLLAMA_BASE_URL, normalizeProvider } = require('./provider-ids');
 const { stripDateSuffix, localEntry } = require('./normalize');
 const { discoverOllama } = require('./ollama');
+const { placeholderKeyHint } = require('./placeholder-key');
 
 const log = createLogger('models/availability');
 const DEFAULT_TEST_TIMEOUT_MS = 20000;
@@ -25,7 +26,10 @@ class Availability extends EventEmitter {
     fetch = globalThis.fetch,
     now = () => new Date(),
     labels = {},
-    testTimeoutMs = DEFAULT_TEST_TIMEOUT_MS
+    testTimeoutMs = DEFAULT_TEST_TIMEOUT_MS,
+    // Optional: (provider) => the saved key, or null. Read only after a
+    // failed test, to say when the key looks like a placeholder.
+    readToken = null
   } = {}) {
     super();
     for (const [name, fn] of Object.entries({ hasCredential, createProvider, getStatuses, setStatuses })) {
@@ -41,7 +45,18 @@ class Availability extends EventEmitter {
     this.now = now;
     this.labels = labels || {};
     this.testTimeoutMs = testTimeoutMs;
+    this.readToken = typeof readToken === 'function' ? readToken : null;
     this._inFlight = new Map();
+  }
+
+  // A fixed hint string or null; the token itself never leaves this method.
+  _placeholderHint(p) {
+    if (!this.readToken) return null;
+    try {
+      return placeholderKeyHint(this.readToken(p));
+    } catch {
+      return null;
+    }
   }
 
   label(provider) {
@@ -132,13 +147,15 @@ class Availability extends EventEmitter {
       }
       const message = err?.message || String(err);
       log.warn(`${this.label(p)} connection test failed: ${message}`);
+      const hint = this._placeholderHint(p);
       return this._store(p, {
         ok: false,
         error: message,
         message,
         checkedAt,
         models: [],
-        ...(status !== null ? { httpStatus: status } : {})
+        ...(status !== null ? { httpStatus: status } : {}),
+        ...(hint ? { hint } : {})
       });
     }
   }

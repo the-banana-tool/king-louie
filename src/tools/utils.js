@@ -377,7 +377,7 @@ function decryptSettingKey(encrypted, context, label = 'API') {
   } catch (err) {
     throw new Error(
       `Could not decrypt the stored ${label} key (${err.message}). `
-      + 'Re-enter it in Settings > Providers. '
+      + 'Re-enter it in Settings › Providers & keys. '
       + 'Refusing to send undecryptable material to the provider.'
     );
   }

@@ -193,9 +193,9 @@ describe('desktop:* handlers', () => {
     assert.strictEqual(IPC.DESKTOP_STATUS_CHANGED, 'desktop:statusChanged');
     assert.strictEqual(IPC.DESKTOP_IMPORT_PROGRESS, 'desktop:importProgress');
     assert.deepStrictEqual(Object.keys(DESKTOP_METHODS).sort(), [
-      'desktop:addNode', 'desktop:attach', 'desktop:clearPairing', 'desktop:detach', 'desktop:dismissServiceCommand', 'desktop:importApply', 'desktop:importPlan',
+      'desktop:addNode', 'desktop:attach', 'desktop:clearPairing', 'desktop:detach', 'desktop:dismissServiceCommand', 'desktop:importApply', 'desktop:importPlan', 'desktop:leaveStandalone',
       'desktop:loginStart', 'desktop:migrationApply', 'desktop:migrationPlan',
-      'desktop:nodeInstall', 'desktop:nodeInstallPreview', 'desktop:nodeRestart', 'desktop:nodeStart', 'desktop:noteSetup',
+      'desktop:nodeInstall', 'desktop:nodeInstallPreview', 'desktop:nodeRestart', 'desktop:nodeStart', 'desktop:noteSetup', 'desktop:openDataFolder',
       'desktop:pairCancel', 'desktop:pairConfirm', 'desktop:pairRestartConfirm', 'desktop:pairStart', 'desktop:removeNode', 'desktop:restartLater', 'desktop:retry',
       'desktop:setLoginStart', 'desktop:setNodeOrder', 'desktop:setPairing', 'desktop:setSetup',
       'desktop:setupFinish', 'desktop:setupLater', 'desktop:setupStep', 'desktop:setupWindowOnly',

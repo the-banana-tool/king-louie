@@ -1,6 +1,6 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
-const { launchApp, closeApp, evaluate, waitFor, click, getText } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, click, getText, openSettingsTab } = require('./helpers');
 
 describe('E2E: Settings Panel', () => {
   let ctx;
@@ -15,7 +15,7 @@ describe('E2E: Settings Panel', () => {
   });
 
   it('opens settings panel when clicking the settings button', async () => {
-    await click(ctx, '#open-settings-btn');
+    await openSettingsTab(ctx, 'providers');
     const visible = await waitFor(ctx, `
       (() => {
         const el = document.getElementById('settings-drawer');

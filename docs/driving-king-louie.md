@@ -239,8 +239,8 @@ an elevated prompt (Administrator).
    `LOCAL SERVICE` and cannot show a window, so the helper, as you, starts
    the take's Chrome and the recorder.
 4. Pair the desktop app with the service: turn on `features.desktopBridge` in
-   the admin `service.json`, start pairing from the app's Settings > Local
-   service, and run the command it shows (`king-louie-service desktop pair
+   the admin `service.json`, start pairing from the app's Settings ›
+   Node & connection, and run the command it shows (`king-louie-service desktop pair
    <request>`). Attach the app. To bring your standalone chats and settings
    along, stop the service and run
    `king-louie-service import --from <desktop user-data dir>`.

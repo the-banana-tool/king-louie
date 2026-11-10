@@ -123,7 +123,7 @@ class SkillRegistry {
     if (skill._enabled === false) {
       return {
         ok: false,
-        error: `Skill '${command}' is currently disabled. Enable it in Settings > Skills.`
+        error: `Skill '${command}' is currently disabled. Enable it in Settings › Skills.`
       };
     }
 

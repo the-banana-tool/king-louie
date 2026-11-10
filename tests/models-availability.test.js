@@ -16,7 +16,7 @@ setLogLevel('fatal');
 const NOW = new Date('2026-09-27T12:00:00.000Z');
 const hoursAgo = (h) => new Date(NOW.getTime() - h * 3600000).toISOString();
 
-function setup({ credentials = ['openai'], statuses = {}, lists = {}, settings = {}, fetch } = {}) {
+function setup({ credentials = ['openai'], statuses = {}, lists = {}, settings = {}, fetch, readToken } = {}) {
   let store = { ...statuses };
   const created = [];
   const events = [];
@@ -39,7 +39,8 @@ function setup({ credentials = ['openai'], statuses = {}, lists = {}, settings =
     setStatuses: (s) => { store = s; },
     getSettings: () => settings,
     now: () => NOW,
-    fetch: fetch || (async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:11434'); })
+    fetch: fetch || (async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:11434'); }),
+    ...(readToken ? { readToken } : {})
   });
   availability.on('changed', (e) => events.push(e));
   return { availability, created, events, store: () => store };
@@ -63,6 +64,39 @@ describe('the one connection test', () => {
     assert.strictEqual(s.httpStatus, 401);
     assert.strictEqual(s.checkedAt, NOW.toISOString());
     assert.deepStrictEqual(s.models, []);
+  });
+
+  it('a failing key that looks like a placeholder gets a hint that never holds the key (settings redesign §7.2)', async () => {
+    const err = Object.assign(new Error('Incorrect API key provided'), { status: 401 });
+    const asked = [];
+    const { availability, store } = setup({ lists: { openai: err }, readToken: (p) => { asked.push(p); return 'sk-1234567890'; } });
+    const s = await availability.test('openai');
+    assert.strictEqual(s.ok, false);
+    assert.strictEqual(s.hint, 'it contains a counting run of digits');
+    assert.deepStrictEqual(asked, ['openai']);
+    assert.ok(!JSON.stringify(store()).includes('1234567890'), 'no token text in the stored status');
+  });
+
+  it('a passing test stores no hint, and readToken is not asked', async () => {
+    const asked = [];
+    const { availability } = setup({ lists: { openai: ['gpt-5.5'] }, readToken: (p) => { asked.push(p); return 'sk-1234567890'; } });
+    const s = await availability.test('openai');
+    assert.strictEqual(s.ok, true);
+    assert.ok(!('hint' in s));
+    assert.deepStrictEqual(asked, []);
+  });
+
+  it('no hint without readToken, for a key that looks real, or when readToken throws', async () => {
+    const err = Object.assign(new Error('Incorrect API key provided'), { status: 401 });
+    const none = await setup({ lists: { openai: err } }).availability.test('openai');
+    assert.ok(!('hint' in none));
+    const real = await setup({ lists: { openai: err }, readToken: () => 'sk-or-v1-9f3a7c2e81b4d6f0' }).availability.test('openai');
+    assert.ok(!('hint' in real));
+    const nul = await setup({ lists: { openai: err }, readToken: () => null }).availability.test('openai');
+    assert.ok(!('hint' in nul));
+    const threw = await setup({ lists: { openai: err }, readToken: () => { throw new Error('bad'); } }).availability.test('openai');
+    assert.strictEqual(threw.ok, false);
+    assert.ok(!('hint' in threw));
   });
 
   it('a 404/405/501 from the list call means "unsupported": ok with no models list, not a failed test (final review I1)', async () => {

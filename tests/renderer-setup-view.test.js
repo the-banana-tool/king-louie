@@ -150,7 +150,6 @@ describe('panes with the node down say so', () => {
     const failed = load.slice(load.indexOf('catch (error)'));
     assert.match(failed, /dom\.hooksStatus\.textContent = /);
     assert.match(failed, /loadSkillSettingsTabs\(\)/);
-    assert.match(failed, /loadWorkflows\(\)/);
     assert.match(failed, /loadWebhookList\(\)/);
   });
 

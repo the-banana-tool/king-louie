@@ -11,7 +11,7 @@ const { IngestError } = require('./errors');
 const IMAGE_FORWARDING_PROVIDERS = Object.freeze(['anthropic', 'openai', 'gemini']);
 const DOCUMENT_MAX_BYTES = ImageHandler.MAX_DOCUMENT_SIZE_BYTES;
 const IMAGE_MAX_BYTES = ImageHandler.MAX_SIZE_BYTES;
-const NO_VISION_MESSAGE = 'No vision-capable model is configured. Add a vision model to the profile in Settings → Models, or an image-capable model to its worker or main role.';
+const NO_VISION_MESSAGE = 'No vision-capable model is configured. Add a vision model to the profile in Settings › Model profiles, or an image-capable model to its worker or main role.';
 const TOO_LARGE = 'page too large for vision';
 
 const OCR_SYSTEM = [

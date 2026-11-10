@@ -1,7 +1,7 @@
 // Standalone mode (fleet stage 7 §3.7): what main.js did before, moved here
 // unchanged, plus two things: every IPC event is marked as local-desktop
 // before any handler sees it (program §4.21), and the desktop controller is in
-// the handler context so Settings > Local service works in both modes.
+// the handler context so Settings › Node & connection works in both modes.
 const path = require('path');
 const { registerHandlers } = require('./register');
 const { createCore } = require('../core');
@@ -84,7 +84,8 @@ function startStandaloneHost(deps) {
   });
 
   const controller = controllerFactory({
-    state, mode: 'standalone', app, getWindow, userDataDir: app.getPath('userData'), safeStorage, launch
+    state, mode: 'standalone', app, getWindow, userDataDir: app.getPath('userData'), safeStorage, launch,
+    openPath: shell && typeof shell.openPath === 'function' ? (p) => shell.openPath(p) : null
   });
 
   registerHandlers(markingIpcMain(ipcMain), {

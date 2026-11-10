@@ -20,7 +20,7 @@ async function checkProvider(context) {
     return {
       status: 'WARN',
       message: 'No providers configured',
-      fix: 'Add at least one provider (e.g. OpenAI) in Settings → API keys',
+      fix: 'Add at least one provider (e.g. OpenAI) in Settings › Providers & keys',
     };
   }
 
@@ -45,7 +45,7 @@ async function checkProvider(context) {
       return {
         status: 'WARN',
         message: `${active} configured but last connection failed`,
-        fix: 'Check provider credentials in Settings → API keys and try Test Connection',
+        fix: 'Check provider credentials in Settings › Providers & keys and press Save & test',
       };
     }
     return { status: 'PASS', message: `Connected to ${active}` };
@@ -54,7 +54,7 @@ async function checkProvider(context) {
   return {
     status: 'WARN',
     message: 'No providers configured',
-    fix: 'Add at least one provider (e.g. OpenAI) in Settings → API keys',
+    fix: 'Add at least one provider (e.g. OpenAI) in Settings › Providers & keys',
   };
 }
 

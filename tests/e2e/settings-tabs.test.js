@@ -1,8 +1,14 @@
+// tests/e2e/settings-tabs.test.js — the Settings sidebar (settings redesign
+// spec §5.1): six groups, one page shown at a time, the last page remembered,
+// and search over labels and keywords.
+// Run with: unset ELECTRON_RUN_AS_NODE && node --test tests/e2e/settings-tabs.test.js
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const { launchApp, closeApp, evaluate, waitFor, click } = require('./helpers');
 
-describe('E2E: Settings — Tab Navigation', () => {
+const GROUPS = ['Models', 'Chats', 'Reaching you', 'Tools', 'Security', 'This computer'];
+
+describe('E2E: Settings — sidebar navigation', () => {
   let ctx;
 
   before(async () => {
@@ -14,53 +20,46 @@ describe('E2E: Settings — Tab Navigation', () => {
 
   after(async () => { await closeApp(ctx); });
 
-  it('settings nav select exists with multiple options', async () => {
-    const count = await evaluate(ctx, `document.getElementById('settings-nav-select').options.length`);
-    assert.ok(count >= 10, `should have at least 10 tab options, found ${count}`);
+  it('lists the six groups', async () => {
+    const labels = await evaluate(ctx, `[...document.querySelectorAll('#settings-sidebar .settings-nav-group > h3')].map((h) => h.textContent)`);
+    assert.deepStrictEqual(labels, GROUPS);
   });
 
-  it('lists all expected tabs', async () => {
-    const tabs = await evaluate(ctx, `
-      JSON.parse(JSON.stringify(
-        Array.from(document.getElementById('settings-nav-select').options).map(o => o.textContent)
-      ))
-    `);
-
-    const expectedTabs = [
-      'General', 'API keys', 'Models', 'Profile', 'Voice',
-      'Notification', 'Hook', 'Memory', 'Skill', 'Mesh', 'Diagnostic'
-    ];
-
-    for (const tab of expectedTabs) {
-      assert.ok(tabs.some(t => t.includes(tab)),
-        `should have a tab containing "${tab}". Tabs: ${tabs.join(', ')}`);
+  it('clicking each item shows exactly that page and marks exactly that item', async () => {
+    const tabs = await evaluate(ctx, `[...document.querySelectorAll('#settings-sidebar .settings-nav-item')].map((b) => b.dataset.tab)`);
+    assert.ok(tabs.length >= 15, `items: ${tabs.join(', ')}`);
+    for (const tab of tabs) {
+      await evaluate(ctx, `document.querySelector('#settings-sidebar .settings-nav-item[data-tab=${JSON.stringify(tab)}]').click(); true`);
+      const state = await evaluate(ctx, `(() => ({
+        panes: [...document.querySelectorAll('#settings-drawer .settings-tab-content.active')].map((p) => p.dataset.tab),
+        items: [...document.querySelectorAll('#settings-sidebar .settings-nav-item.is-active')].map((b) => b.dataset.tab)
+      }))()`);
+      assert.deepStrictEqual(state, { panes: [tab], items: [tab] }, tab);
     }
   });
 
-  it('can switch to each tab without errors', async () => {
-    const tabValues = await evaluate(ctx, `
-      JSON.parse(JSON.stringify(
-        Array.from(document.getElementById('settings-nav-select').options).map(o => o.value)
-      ))
-    `);
+  it('reopens on the page last shown', async () => {
+    await evaluate(ctx, `document.querySelector('#settings-sidebar .settings-nav-item[data-tab="voice"]').click(); true`);
+    await click(ctx, '#close-settings-btn');
+    await waitFor(ctx, `document.getElementById('settings-drawer').hidden`);
+    await click(ctx, '#open-settings-btn');
+    await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
+    const shown = await evaluate(ctx, `(() => ({
+      pane: document.querySelector('#settings-drawer .settings-tab-content.active')?.dataset.tab,
+      item: document.querySelector('#settings-sidebar .settings-nav-item.is-active')?.dataset.tab
+    }))()`);
+    assert.deepStrictEqual(shown, { pane: 'voice', item: 'voice' });
+  });
 
-    for (const value of tabValues) {
-      await evaluate(ctx, `
-        (() => {
-          const sel = document.getElementById('settings-nav-select');
-          sel.value = ${JSON.stringify(value)};
-          sel.dispatchEvent(new Event('change'));
-          return true;
-        })()
-      `);
-      await new Promise((r) => setTimeout(r, 200));
-
-      // Verify the tab content is shown (at least one active tab-content)
-      const hasActive = await evaluate(ctx, `
-        !!document.querySelector('.tab-content.active, [data-tab="${value}"].active, .settings-tab-content.active')
-      `);
-      // Some tabs may use different visibility mechanisms
-    }
-    assert.ok(true, 'all tabs switched without errors');
+  it('search for openrouter keeps Providers & keys', async () => {
+    await evaluate(ctx, `(() => {
+      const input = document.getElementById('settings-search');
+      input.value = 'openrouter';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    const visible = await evaluate(ctx, `[...document.querySelectorAll('#settings-sidebar .settings-nav-item')].filter((b) => !b.hidden).map((b) => b.textContent)`);
+    assert.ok(visible.includes('Providers & keys'), visible.join(', '));
+    assert.ok(!visible.includes('Voice'), 'unmatched pages are filtered out');
   });
 });

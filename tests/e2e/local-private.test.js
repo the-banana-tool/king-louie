@@ -1,6 +1,6 @@
 // tests/e2e/local-private.test.js — local inference L1 (spec 2026-10-13
 // §15, plan Task 19), driven as the owner drives it: add a local server in
-// Settings → Models, mark a chat private through the confirmation, see a
+// Settings › Local servers, mark a chat private through the confirmation, see a
 // turn with only a hosted model refused (with "Open Models") and nothing
 // sent, place the local model in the profile, see the hosted model disabled
 // in the chat's picker, get a reply from the local model with a "local"
@@ -16,7 +16,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { launchApp, closeApp, evaluate, waitFor, readHistoryChats } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, readHistoryChats, openSettingsTab } = require('./helpers');
 const { startFakeLlmServer } = require('../helpers/fake-llm-server');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -55,10 +55,8 @@ describe('E2E: a private chat answers only from a local model (local inference L
   })()`);
   const metricsCount = () => evaluate(ctx, `document.querySelectorAll('.message-metrics-call').length`);
   const lastMetrics = () => evaluate(ctx, `(() => { const els = [...document.querySelectorAll('.message-metrics-call')]; return els.length ? els[els.length - 1].textContent : ''; })()`);
-  const openSettingsModels = async () => {
-    await evaluate(ctx, `document.getElementById('open-settings-btn').click(); true`);
-    await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
-    await evaluate(ctx, `(() => { const s = document.getElementById('settings-nav-select'); s.value = 'models'; s.dispatchEvent(new Event('change')); return true; })()`);
+  const openLocalServers = async () => {
+    await openSettingsTab(ctx, 'local-servers');
     await waitFor(ctx, `!!document.getElementById('models-local-add-btn')`, 15000);
   };
   const closeSettings = () => evaluate(ctx, `document.getElementById('close-settings-btn').click(); true`);
@@ -115,8 +113,8 @@ describe('E2E: a private chat answers only from a local model (local inference L
     if (userDataDir) fs.rmSync(userDataDir, { recursive: true, force: true });
   });
 
-  it('adds a local server in Settings → Models: this machine, probed, tools yes', async () => {
-    await openSettingsModels();
+  it('adds a local server in Settings › Local servers: this machine, probed, tools yes', async () => {
+    await openLocalServers();
     await waitFor(ctx, `document.getElementById('models-local-list').textContent.includes('No local server yet.')`, 15000);
     await evaluate(ctx, `document.getElementById('models-local-add-btn').click(); true`);
     await waitFor(ctx, `!!document.querySelector('.models-local-add')`);

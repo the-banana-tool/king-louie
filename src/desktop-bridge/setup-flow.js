@@ -28,7 +28,7 @@ const ELEVATED_LINE = 'This app is running as administrator. Close it and open i
 const LATER = { id: 'setupLater', label: 'Not now: use the old standalone mode this time' };
 const LATER_NOTICE = 'Standalone mode is going away. While it runs, cron jobs and the channels (Telegram, Discord and the like) are off.';
 const CHECK_AGAIN = { id: 'retry', label: 'Check again' };
-const SERVICE_SETTINGS = { id: 'openServiceSettings', label: 'Local service settings' };
+const SERVICE_SETTINGS = { id: 'openServiceSettings', label: 'Node & connection settings' };
 // The form's own press is the window's. This one is the way on without a key or a name.
 const PAST_THE_FORM = { id: 'setupFinish', label: 'Skip the rest of setup' };
 const RESTART_NODE = { id: 'nodeRestart', label: 'Restart King Louie Node' };
@@ -56,8 +56,8 @@ const TASK_ERROR_CODES = new Set(['NODE_TASK_MISSING', 'NODE_TASK_DISABLED', 'NO
 
 // The bridge codes waiting will not change (the client's FATAL set).
 const BRIDGE_HELP = {
-  DEVICE_UNPAIRED: { help: 'King Louie Node no longer knows this app. In Local service settings press Unpair, then Pair.' },
-  SERVICE_KEY_CHANGED: { help: 'King Louie Node\'s identity changed after this app paired with it. If you reinstalled it, press Unpair in Local service settings, then Pair. If you did not, do not pair again until you know why.' },
+  DEVICE_UNPAIRED: { help: 'King Louie Node no longer knows this app. In Node & connection settings press Unpair, then Pair.' },
+  SERVICE_KEY_CHANGED: { help: 'King Louie Node\'s identity changed after this app paired with it. If you reinstalled it, press Unpair in Node & connection settings, then Pair. If you did not, do not pair again until you know why.' },
   PROTOCOL_MISMATCH: { help: 'This app and King Louie Node are too far apart in version. Restart the node. If that does not help, install the same version of both.', action: { id: 'nodeRestart', label: 'Restart King Louie Node' } },
   TOO_MANY_WINDOWS: { help: 'Too many windows are attached to King Louie Node. Close one, then press Check again.' }
 };
@@ -228,7 +228,7 @@ function installStep(s, f) {
   // Check if there's a detected fleet machine - this takes precedence over bridge errors
   if (fleetDetected) {
     return {
-      lines: ['A local King Louie service is installed on this computer.', 'Local service settings shows what was found and how to connect this app to it.'],
+      lines: ['A local King Louie service is installed on this computer.', 'Node & connection settings shows what was found and how to connect this app to it.'],
       error: { code: 'NOT_PERSONAL', message: 'This computer already has a King Louie setup that this app cannot take over, so it does not install King Louie Node here.' },
       actions: [SERVICE_SETTINGS, CHECK_AGAIN]
     };
@@ -250,7 +250,7 @@ function installStep(s, f) {
     const lines = [];
     if (b.ok) lines.push('A local King Louie service is installed on this computer.');
     else if (b.error) lines.push(long(b.error));
-    lines.push('Local service settings shows what was found and how to connect this app to it.');
+    lines.push('Node & connection settings shows what was found and how to connect this app to it.');
     return {
       lines,
       error: { code: 'NOT_PERSONAL', message: 'This computer already has a King Louie setup that this app cannot take over, so it does not install King Louie Node here.' },
@@ -264,7 +264,7 @@ function installStep(s, f) {
   const actions = [{ id: 'nodeInstallPreview', label: 'Install…' }];
   if (!n) {
     // No node at all - offer both service settings and window-only
-    actions.push({ id: 'openServiceSettings', label: 'Local service settings' });
+    actions.push({ id: 'openServiceSettings', label: 'Node & connection settings' });
     actions.push({ id: 'setupWindowOnly', label: 'Just a window' });
   } else if (n.fresh && n.personal) {
     // Fresh personal node - offer window-only
@@ -465,7 +465,7 @@ function migrateStep(s, f) {
   const old = f.oldProfile;
   if (old.schemaProblem) {
     return {
-      lines: ['Nothing was changed. Skip for now goes on without them; they stay in this app\'s folder, and Import in Local service settings can try again later.'],
+      lines: ['Nothing was changed. Skip for now goes on without them; they stay in this app\'s folder, and Import in Node & connection settings can try again later.'],
       error: { code: 'MIGRATION_SOURCE', message: `Your old chats and cases could not be read, so they cannot move yet: ${long(old.schemaProblem)}` },
       actions: [{ id: 'retry', label: 'Retry' }, { id: 'skip', label: 'Skip for now' }]
     };
@@ -552,7 +552,7 @@ function bodyFor(step, s, f) {
       return {
         lines: [
           'King Louie needs a key from an AI provider before it can answer. Choose a provider and enter your key; it is kept by King Louie Node on this computer.',
-          'To use Ollama, skip this and set its address later in Settings, under API keys. Local servers are not added from this window: they go in King Louie Node\'s service.json.'
+          'To use Ollama, skip this and set its address later in Settings › Providers & keys. Local servers are not added from this window: they go in King Louie Node\'s service.json.'
         ],
         actions: [PAST_THE_FORM],
         form: 'provider'

@@ -19,8 +19,11 @@ function block(start, end = '\nfunction ') {
 
 describe('renderer: settings tabs for models M2', () => {
   it('has an API keys tab and a Models tab, and no Inference or Smart Routing tab', () => {
-    assert.match(html, /<option value="providers">API keys<\/option>/);
-    assert.match(html, /<option value="models">Models<\/option>/);
+    const { SETTINGS_GROUPS } = require('../renderer-helpers/settings-nav.js');
+    const pages = SETTINGS_GROUPS.flatMap((g) => g.pages);
+    assert.ok(pages.some((p) => p.tab === 'providers' && p.label === 'Providers & keys'));
+    assert.ok(pages.some((p) => p.tab === 'models' && p.label === 'Model profiles'));
+    assert.match(html, /data-tab="providers"/);
     assert.doesNotMatch(html, /value="inference"|value="routing"|data-tab="inference"|data-tab="routing"/);
     assert.doesNotMatch(html, /llm-routing|smart-routing|inference-tier/);
     assert.match(html, /data-tab="models"/);
@@ -37,10 +40,39 @@ describe('renderer: settings tabs for models M2', () => {
     assert.doesNotMatch(src, /switch inference tier/);
   });
 
+  it('draws Providers & keys as one row per provider with a status (settings redesign §5.5)', () => {
+    const card = block('function renderProviderCard(providerKey, provider)');
+    assert.match(card, /keyRowState\(/);
+    const row = block('function buildKeyRow(');
+    assert.match(row, /status-pill/);
+    assert.match(row, /settings-list-row/);
+    for (const fn of [card, row, block('function paintKeyRowStatus('), block('function renderSearchImageRow(')]) {
+      assert.doesNotMatch(fn, /innerHTML/, 'provider errors are set as text');
+    }
+    // Search and image results live in this visit's state, never stored (spec §8.5).
+    assert.match(block('async function testSearchImageKey(item)'), /appState\.keyTestResults\[item\.key\] =/);
+    assert.match(block('function openSettingsDrawer()'), /appState\.keyTestResults = \{\}/);
+    assert.match(html, /<script src="renderer-helpers\/key-rows\.js"><\/script>[\s\S]*<script src="renderer\.js"/);
+    for (const id of ['provider-list', 'search-image-list', 'providers-failing-banner', 'models-test-all-btn']) {
+      assert.match(html, new RegExp(`id="${id}"`), id);
+    }
+    // Saving always tests (spec §5.5).
+    assert.match(block('async function handleSaveProvider(providerKey)'), /handleTestProvider\(providerKey\)/);
+  });
+
   it('builds the profile list, editor and picker from the models channels, as text', () => {
     assert.match(block('async function loadModelProfiles()'), /window\.electron\.models\.profiles\(\)/);
     const list = block('function renderModelProfileList()');
-    assert.match(list, /migration/);
+    // Migration notes are not shown on the card (settings redesign §5.4, bug 5).
+    assert.doesNotMatch(list, /models-migration-notes|migration\.notes/);
+    // Each role is a row of model chips with the provider, and a warning when it is empty.
+    const role = block('function renderProfileRoleRow(');
+    assert.match(role, /modelChip\(/);
+    assert.match(role, /roleStatus\(/);
+    assert.match(role, /chip-provider/);
+    assert.match(role, /notice-warn/);
+    assert.doesNotMatch(role, /innerHTML\s*=\s*(?!'')/);
+    assert.match(html, /<script src="renderer-helpers\/model-labels\.js"><\/script>[\s\S]*<script src="renderer\.js"/);
     const entry = block('function renderRoleEntry(role, entry, index, count)');
     assert.match(entry, /is-unusable/);
     assert.match(entry, /reasons\.join/);

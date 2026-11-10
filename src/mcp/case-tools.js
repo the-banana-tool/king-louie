@@ -616,7 +616,7 @@ function createCaseToolHandler({ getRuntime, getContact = null, getExecutorRegis
   // set_away: the away field alone (contact's setAway), through the same
   // validation as setPolicy (validatePolicy). The rest of the stored policy
   // is never read back and rewritten, so no default is frozen into the
-  // settings and a Settings > Contact save meanwhile is not undone. The
+  // settings and a Settings › Contact ladder save meanwhile is not undone. The
   // policy is data-dir settings on the desktop and in service mode alike
   // (only the owner and addresses are admin-only).
   async function setAway(args, ownerTurnText) {

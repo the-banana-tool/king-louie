@@ -30,6 +30,10 @@ const appState = {
   pendingImages: [],
   pendingDocuments: [],
   activeResponses: new Set(),
+  // Providers & keys: search and image test results from this Settings visit
+  // (never stored, spec §8.5), and which key rows are open.
+  keyTestResults: {},
+  openKeyRows: new Set(),
   // Case ids with a turn running now (case:changed, what: 'turn').
   runningCaseTurns: new Set(),
   streamBuffers: new Map(),
@@ -151,6 +155,8 @@ const dom = {
   modelsCatalogOverrides: document.getElementById('models-catalog-overrides'),
   modelsSaveCatalogBtn: document.getElementById('models-save-catalog-btn'),
   modelsKlStatus: document.getElementById('models-kl-status'),
+  modelsKlSummary: document.getElementById('models-kl-summary'),
+  modelsKlDetail: document.getElementById('models-kl-detail'),
   modelsKlPicks: document.getElementById('models-kl-picks'),
   modelsKlProposal: document.getElementById('models-kl-proposal'),
   modelsKlAutoAccept: document.getElementById('models-kl-auto-accept'),
@@ -177,15 +183,8 @@ const dom = {
   templateRoleInput: document.getElementById('template-role-input'),
   templatePreferencesInput: document.getElementById('template-preferences-input'),
   templateProjectContextInput: document.getElementById('template-project-context-input'),
-  saveTemplateVariablesBtn: document.getElementById('save-template-variables-btn'),
-  templateVariablesStatus: document.getElementById('template-variables-status'),
-  profileNameInput: document.getElementById('profile-name-input'),
-  profileRoleInput: document.getElementById('profile-role-input'),
   profileGoalsInput: document.getElementById('profile-goals-input'),
   profilePreferencesInput: document.getElementById('profile-preferences-input'),
-  profileProjectContextInput: document.getElementById('profile-project-context-input'),
-  saveUserProfileBtn: document.getElementById('save-user-profile-btn'),
-  userProfileStatus: document.getElementById('user-profile-status'),
   notificationsEnabledInput: document.getElementById('notifications-enabled-input'),
   notificationsUiToastEnabledInput: document.getElementById('notifications-ui-toast-enabled-input'),
   notificationsNtfyEnabledInput: document.getElementById('notifications-ntfy-enabled-input'),
@@ -193,21 +192,22 @@ const dom = {
   notificationsToastThresholdInput: document.getElementById('notifications-toast-threshold-input'),
   notificationsExternalThresholdInput: document.getElementById('notifications-external-threshold-input'),
   notificationsNtfyTopicInput: document.getElementById('notifications-ntfy-topic-input'),
-  saveNotificationsBtn: document.getElementById('save-notifications-btn'),
-  notificationsStatus: document.getElementById('notifications-status'),
+  notificationsDependentRows: document.getElementById('notifications-dependent-rows'),
   voiceEnabledInput: document.getElementById('voice-enabled-input'),
   voiceSpeakChatInput: document.getElementById('voice-speak-chat-input'),
   voiceSpeakAgentSummaryInput: document.getElementById('voice-speak-agent-summary-input'),
   voiceTelegramLongInput: document.getElementById('voice-telegram-long-input'),
   voiceEngineInput: document.getElementById('voice-engine-input'),
   voiceIdInput: document.getElementById('voice-id-input'),
+  voiceSystemSelect: document.getElementById('voice-system-select'),
+  voiceDependentRows: document.getElementById('voice-dependent-rows'),
+  voiceElevenLabsFields: document.getElementById('voice-elevenlabs-fields'),
   voiceSpeedInput: document.getElementById('voice-speed-input'),
   voiceStabilityInput: document.getElementById('voice-stability-input'),
   voiceStyleInput: document.getElementById('voice-style-input'),
   voiceSummaryMaxInput: document.getElementById('voice-summary-max-input'),
   voiceTelegramMinInput: document.getElementById('voice-telegram-min-input'),
   voiceElevenLabsKeyInput: document.getElementById('voice-elevenlabs-key-input'),
-  saveVoiceSettingsBtn: document.getElementById('save-voice-settings-btn'),
   saveVoiceKeyBtn: document.getElementById('save-voice-key-btn'),
   clearVoiceKeyBtn: document.getElementById('clear-voice-key-btn'),
   testVoiceBtn: document.getElementById('test-voice-btn'),
@@ -225,11 +225,15 @@ const dom = {
   memoryClearBtn: document.getElementById('memory-clear-btn'),
   memoryStatus: document.getElementById('memory-status'),
   memoryList: document.getElementById('memory-list'),
+  memoryPanel: document.getElementById('memory-panel'),
+  openMemoryBtn: document.getElementById('open-memory-btn'),
+  memoryPanelCloseBtn: document.getElementById('memory-panel-close-btn'),
   vaultList: document.getElementById('vault-list'),
   vaultAddBtn: document.getElementById('vault-add-btn'),
   vaultRefreshBtn: document.getElementById('vault-refresh-btn'),
   vaultStatus: document.getElementById('vault-status'),
   vaultAddPanel: document.getElementById('vault-add-panel'),
+  vaultAddTitle: document.getElementById('vault-add-title'),
   vaultAddKeyInput: document.getElementById('vault-add-key-input'),
   vaultAddValueInput: document.getElementById('vault-add-value-input'),
   vaultSaveEntryBtn: document.getElementById('vault-save-entry-btn'),
@@ -260,6 +264,10 @@ const dom = {
   cronAddTargetInput: document.getElementById('cron-add-target-input'),
   cronAddKindInput: document.getElementById('cron-add-kind-input'),
   cronAddValueInput: document.getElementById('cron-add-value-input'),
+  cronAddEveryInput: document.getElementById('cron-add-every-input'),
+  cronAddEveryUnit: document.getElementById('cron-add-every-unit'),
+  cronAddEveryRow: document.getElementById('cron-add-every-row'),
+  cronAddValueRow: document.getElementById('cron-add-value-row'),
   chatPlanBtn: document.getElementById('chat-plan-btn'),
   workflowRefreshBtn: document.getElementById('workflow-refresh-btn'),
   workflowStatus: document.getElementById('workflow-status'),
@@ -306,7 +314,8 @@ const dom = {
   skillInstallBtn: document.getElementById('skill-install-btn'),
   skillsCheckUpdatesBtn: document.getElementById('skills-check-updates-btn'),
   skillInstallStatus: document.getElementById('skill-install-status'),
-  settingsNavSelect: document.getElementById('settings-nav-select'),
+  settingsSidebar: document.getElementById('settings-sidebar'),
+  settingsSearch: document.getElementById('settings-search'),
   defaultAgentMode: document.getElementById('default-agent-mode'),
   defaultSandboxMode: document.getElementById('default-sandbox-mode'),
   generalDefaultsStatus: document.getElementById('general-defaults-status'),
@@ -315,36 +324,14 @@ const dom = {
   testTelegramBtn: document.getElementById('test-telegram-btn'),
   clearTelegramTokenBtn: document.getElementById('clear-telegram-token-btn'),
   telegramChannelStatus: document.getElementById('telegram-channel-status'),
-  channelDiscordTokenInput: document.getElementById('channel-discord-token-input'),
-  channelDiscordEnabledInput: document.getElementById('channel-discord-enabled-input'),
-  channelDiscordMentionInput: document.getElementById('channel-discord-mention-input'),
-  saveDiscordTokenBtn: document.getElementById('save-discord-token-btn'),
-  clearDiscordTokenBtn: document.getElementById('clear-discord-token-btn'),
-  discordChannelStatus: document.getElementById('discord-channel-status'),
-  channelSlackAppTokenInput: document.getElementById('channel-slack-app-token-input'),
-  channelSlackBotTokenInput: document.getElementById('channel-slack-bot-token-input'),
-  channelSlackEnabledInput: document.getElementById('channel-slack-enabled-input'),
-  channelSlackMentionInput: document.getElementById('channel-slack-mention-input'),
-  saveSlackTokensBtn: document.getElementById('save-slack-tokens-btn'),
-  clearSlackTokensBtn: document.getElementById('clear-slack-tokens-btn'),
-  slackChannelStatus: document.getElementById('slack-channel-status'),
-  websearchBraveKeyInput: document.getElementById('websearch-brave-key-input'),
-  websearchTavilyKeyInput: document.getElementById('websearch-tavily-key-input'),
-  saveWebsearchBraveBtn: document.getElementById('save-websearch-brave-btn'),
-  testWebsearchBraveBtn: document.getElementById('test-websearch-brave-btn'),
-  clearWebsearchBraveBtn: document.getElementById('clear-websearch-brave-btn'),
-  saveWebsearchTavilyBtn: document.getElementById('save-websearch-tavily-btn'),
-  testWebsearchTavilyBtn: document.getElementById('test-websearch-tavily-btn'),
-  clearWebsearchTavilyBtn: document.getElementById('clear-websearch-tavily-btn'),
-  websearchBraveStatus: document.getElementById('websearch-brave-status'),
-  websearchTavilyStatus: document.getElementById('websearch-tavily-status'),
+  telegramStatusPill: document.getElementById('telegram-status-pill'),
+  telegramKeyToggleBtn: document.getElementById('telegram-key-toggle-btn'),
+  telegramKeyEditor: document.getElementById('telegram-key-editor'),
+  telegramKeyMessage: document.getElementById('telegram-key-message'),
+  searchImageList: document.getElementById('search-image-list'),
+  providersFailingBanner: document.getElementById('providers-failing-banner'),
   imagegenDefaultSelect: document.getElementById('imagegen-default-select'),
   imagegenDefaultStatus: document.getElementById('imagegen-default-status'),
-  imagegenFalKeyInput: document.getElementById('imagegen-fal-key-input'),
-  saveImagegenFalBtn: document.getElementById('save-imagegen-fal-btn'),
-  testImagegenFalBtn: document.getElementById('test-imagegen-fal-btn'),
-  clearImagegenFalBtn: document.getElementById('clear-imagegen-fal-btn'),
-  imagegenFalStatus: document.getElementById('imagegen-fal-status'),
   workingDirBtn: document.getElementById('working-dir-btn'),
   workingDirLabel: document.getElementById('working-dir-label'),
   exportChatBtn: document.getElementById('export-chat-btn'),
@@ -385,6 +372,7 @@ const dom = {
   diagnosticsRunBtn: document.getElementById('diagnostics-run-btn'),
   diagnosticsStatus: document.getElementById('diagnostics-status'),
   diagnosticsResults: document.getElementById('diagnostics-results'),
+  diagnosticsResultsCard: document.getElementById('diagnostics-results-card'),
   wizardOverlay: document.getElementById('wizard-overlay'),
   wizardBody: document.getElementById('wizard-body'),
   wizardStepContent: document.getElementById('wizard-step-content'),
@@ -1961,7 +1949,7 @@ function localFailoverNotes(llm, names) {
 }
 
 // A turn refused under the private mark or a local-only role: the sentence
-// for its code; each comes with a button to Settings → Models.
+// for its code; each comes with a button to Settings › Model profiles.
 const PRIVATE_REFUSAL_SENTENCES = Object.freeze({
   PRIVATE_NO_LOCAL_MODEL: 'This needs a local model, and none in the profile can take it.',
   LOCAL_ONLY_ROLE_NO_MODEL: 'This role is local-only, and it has no local model.',
@@ -1993,7 +1981,7 @@ function markdownExportLines(chat) {
   return chat && chat.private === true ? [`${PRIVATE_MARKDOWN_LINE}\n`] : [];
 }
 
-// The keep-local embedder's state (§8.4) for Settings → History, and the
+// The keep-local embedder's state (§8.4) for Settings › History & recall, and the
 // owner-visible sentence when it could not load.
 function keepLocalStatusText(keep, progress) {
   const k = keep && typeof keep === 'object' ? keep : null;
@@ -4342,19 +4330,135 @@ function refreshUI() {
   updateEmptyState();
 }
 
+
+// Paints the header's save indicator: 'saving', 'saved' or 'error' (with its message).
+function showSaveState(state, error) {
+  const el = document.getElementById('settings-save-state');
+  if (!el) return;
+  el.setAttribute('aria-live', 'polite');
+  el.dataset.state = state || '';
+  if (state === 'saving') el.textContent = 'Saving…';
+  else if (state === 'saved') el.textContent = 'Saved';
+  else if (state === 'error') el.textContent = String(error || 'Could not save.');
+  else el.textContent = '';
+}
+
+// registerSettingsAutosave(key, { save, delayMs?, onState? }) -> { change, flush }.
+// `save(value)` is the page's existing save call and resolves { ok, error? } (a throw
+// counts as a failure). `onState(state, info)` runs after the header indicator is
+// painted; on 'error' it puts the field back to the stored value and shows info.error
+// beside it. One saver per key: registering a key again (a page re-render) keeps the
+// same saver, with its pending value and in-flight save, and swaps in the new handlers.
+const settingsAutosaves = createAutosaveRegistry({
+  onAnyState: (state, info) => showSaveState(state, info && info.error)
+});
+
+function registerSettingsAutosave(key, opts) {
+  return settingsAutosaves.register(key, opts);
+}
+
+// Pending debounced saves are sent when the drawer closes, whatever closed it.
+function flushSettingsAutosaves() {
+  return settingsAutosaves.flushAll();
+}
+
+// A failed save's error, beside its field (spec §7.1, Review Focus 1): the header's
+// indicator can be overwritten by another field's Saved, so the row keeps its own.
+// One error per row, just below it; an empty message removes it. Text only.
+function setSettingsFieldError(field, message) {
+  if (!field) return;
+  const row = field.closest('.settings-row') || field;
+  const next = row.nextElementSibling;
+  let el = next && next.classList.contains('settings-field-error') ? next : null;
+  if (!message) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('p');
+    el.className = 'settings-field-error';
+    el.setAttribute('role', 'alert');
+    row.insertAdjacentElement('afterend', el);
+  }
+  el.dataset.for = field.id || '';
+  el.textContent = String(message);
+}
+
+function clearSettingsFieldErrors(container) {
+  if (!container) return;
+  container.querySelectorAll('.settings-field-error').forEach((el) => el.remove());
+}
+
 function setSettingsDrawer(open) {
+  // A field that saves on blur (a ladder line, the digest channel) saves before the
+  // flush, whatever closed the drawer (Esc, the X, the overlay).
+  if (!open && dom.settingsDrawer.contains(document.activeElement)) document.activeElement.blur();
+  if (!open) flushSettingsAutosaves();
   dom.settingsDrawer.hidden = !open;
   document.body.style.overflow = open ? 'hidden' : '';
   // The History and recall status poll runs only while its pane is visible.
   if (!open && typeof stopHistoryStatusPoll === 'function') stopHistoryStatusPoll();
 }
 
-function switchSettingsTab(tabName) {
-  if (!dom.settingsNavSelect) return;
-  dom.settingsNavSelect.value = tabName;
+function readLastSettingsTab() {
+  try {
+    return localStorage.getItem('kl-settings-last-tab');
+  } catch {
+    return null;
+  }
+}
+
+// The pages the sidebar offers now: the host's unavailable tabs left out, and
+// skill pages only while the Skills page itself is offered.
+function visibleSettingsGroups() {
+  const unavailable = appState.unavailableTabs || [];
+  const skillPages = unavailable.includes('skills') ? [] : (appState.skillSettingsPages || []);
+  return visibleGroups(SETTINGS_GROUPS, unavailable, skillPages);
+}
+
+function settingsPageFor(tabName) {
+  for (const group of visibleSettingsGroups()) {
+    const page = group.pages.find((p) => p.tab === tabName);
+    if (page) return page;
+  }
+  return null;
+}
+
+// The only place that chooses the shown page: the pane, the sidebar item,
+// the remembered page, the sections a host does not offer, and the pane's loader.
+// `remember: false` shows a page without storing it: a fallback shown because the
+// remembered page is not offered (yet), or a redraw of the page already shown.
+// Only a page the owner chose, or a remembered one restored, is stored.
+function switchSettingsTab(tabName, { remember = true } = {}) {
+  if (!dom.settingsDrawer || !tabName) return;
+  appState.settingsTab = tabName;
+  if (remember) {
+    appState.settingsPendingTab = null;
+    try {
+      localStorage.setItem('kl-settings-last-tab', tabName);
+    } catch {
+      // The page works without a remembered tab.
+    }
+  }
+  const page = settingsPageFor(tabName);
+  const hidden = new Set(hiddenSections(page, appState.unavailableTabs || []));
+  // A merged page shows its other sections' panes below its own.
+  const sections = page && Array.isArray(page.sections) ? page.sections.filter((s) => s !== tabName && !hidden.has(s)) : [];
   dom.settingsDrawer.querySelectorAll('.settings-tab-content').forEach((pane) => {
     pane.classList.toggle('active', pane.dataset.tab === tabName);
+    pane.classList.toggle('is-section', sections.includes(pane.dataset.tab));
   });
+  dom.settingsDrawer.querySelectorAll('[data-section-tab]').forEach((el) => {
+    el.hidden = hidden.has(el.dataset.sectionTab);
+  });
+  if (dom.settingsSidebar) {
+    dom.settingsSidebar.querySelectorAll('.settings-nav-item').forEach((item) => {
+      const active = item.dataset.tab === tabName;
+      item.classList.toggle('is-active', active);
+      if (active) item.setAttribute('aria-current', 'page');
+      else item.removeAttribute('aria-current');
+    });
+  }
   // Refused senders accumulate while the drawer is closed, so re-read them
   // every time the pane is opened rather than only at settings load.
   if (tabName === 'channels' && typeof loadChannelAccess === 'function') {
@@ -4372,6 +4476,9 @@ function switchSettingsTab(tabName) {
     loadLocalServers().catch((err) => settingsLog.warn(`loading local servers failed: ${err.message}`));
     loadKingLouie().catch((err) => settingsLog.warn(`loading the King Louie profile failed: ${err.message}`));
   }
+  if (tabName === 'local-servers' && typeof loadLocalServers === 'function') {
+    loadLocalServers().catch((err) => settingsLog.warn(`loading local servers failed: ${err.message}`));
+  }
   // History and recall: its status is read while the pane is open.
   if (tabName === 'history' && typeof loadHistorySettings === 'function') {
     loadHistorySettings().catch((err) => settingsLog.warn(`loading history settings failed: ${err.message}`));
@@ -4380,23 +4487,56 @@ function switchSettingsTab(tabName) {
   }
 }
 
-function sortSettingsNavOptions() {
-  if (!dom.settingsNavSelect) return;
+// Draws the sidebar from the pages offered now. Labels (a skill's name among
+// them) are set as text. The shown page is kept highlighted across a redraw.
+function renderSettingsNav() {
+  if (!dom.settingsSidebar) return;
+  const unavailable = appState.unavailableTabs || [];
+  const skillPages = unavailable.includes('skills') ? [] : (appState.skillSettingsPages || []);
+  const groups = visibleGroups(SETTINGS_GROUPS, unavailable, skillPages);
+  const nodes = groups.map((group) => {
+    const section = document.createElement('div');
+    section.className = 'settings-nav-group';
+    section.dataset.group = group.id;
+    const heading = document.createElement('h3');
+    heading.textContent = group.label;
+    section.appendChild(heading);
+    for (const page of group.pages) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'settings-nav-item';
+      item.dataset.tab = page.tab;
+      item.textContent = page.label;
+      if (page.tab === appState.settingsTab) {
+        item.classList.add('is-active');
+        item.setAttribute('aria-current', 'page');
+      }
+      section.appendChild(item);
+    }
+    return section;
+  });
+  dom.settingsSidebar.replaceChildren(...nodes);
+  applySettingsSearch();
+}
 
-  const currentValue = dom.settingsNavSelect.value;
-  const options = Array.from(dom.settingsNavSelect.options);
-  options.sort((a, b) =>
-    String(a.textContent || '').localeCompare(String(b.textContent || ''), undefined, {
-      sensitivity: 'base'
-    })
-  );
-
-  dom.settingsNavSelect.innerHTML = '';
-  options.forEach((option) => dom.settingsNavSelect.appendChild(option));
-
-  if (currentValue) {
-    dom.settingsNavSelect.value = currentValue;
-  }
+// Leaves the items whose label or keywords match the search box, and the
+// groups that still hold one; an empty box shows every item.
+function applySettingsSearch() {
+  if (!dom.settingsSidebar) return [];
+  const query = dom.settingsSearch ? dom.settingsSearch.value : '';
+  const filtering = typeof query === 'string' && query.trim() !== '';
+  const hits = filtering ? matchSettings(query, visibleSettingsGroups()) : [];
+  const shown = new Set(hits.map((h) => h.tab));
+  dom.settingsSidebar.querySelectorAll('.settings-nav-group').forEach((group) => {
+    let any = false;
+    group.querySelectorAll('.settings-nav-item').forEach((item) => {
+      const keep = !filtering || shown.has(item.dataset.tab);
+      item.hidden = !keep;
+      if (keep) any = true;
+    });
+    group.hidden = !any;
+  });
+  return hits;
 }
 
 // History and recall (recall spec §14): the embedder choice and its status.
@@ -4482,29 +4622,62 @@ async function refreshHistoryEmbedderStatus() {
   return out;
 }
 
+// What the pane last saved (or loaded): a refused save puts the fields back to it.
+let historyStored = null;
+let historyLastField = null;
+
+// The embedder's own fields are shown only for the embedder chosen (§5.8 rule 4).
+function paintHistoryPane() {
+  const kind = document.getElementById('history-embedder-kind')?.value;
+  document.querySelectorAll('.settings-tab-content[data-tab="history"] [data-embedder-kind]').forEach((row) => {
+    row.hidden = row.dataset.embedderKind !== kind;
+  });
+}
+
+function applyHistoryFields(payload) {
+  if (!payload) return;
+  const set = (id, prop, value) => {
+    const el = document.getElementById(id);
+    if (el) el[prop] = value;
+  };
+  set('history-embedder-kind', 'value', payload.embedder.kind);
+  set('history-embedder-model', 'value', payload.embedder.model);
+  set('history-ollama-url', 'value', payload.embedder.ollama.baseUrl);
+  set('history-ollama-model', 'value', payload.embedder.ollama.model);
+  set('history-openai-model', 'value', payload.embedder.openai.model);
+  set('history-rerank-search', 'checked', Boolean(payload.rerank.search));
+  set('history-rerank-turn', 'checked', Boolean(payload.rerank.enabled));
+  set('history-rerank-kind', 'value', payload.rerank.kind);
+  set('history-rerank-jev-confirm', 'checked', Boolean(payload.confirmJev));
+  paintHistoryPane();
+}
+
 async function loadHistorySettings() {
   const out = await refreshHistoryEmbedderStatus();
   if (out && out.ok && out.settings) {
     const e = out.settings.embedder;
-    document.getElementById('history-embedder-kind').value = e.kind;
-    document.getElementById('history-embedder-model').value = e.model;
-    document.getElementById('history-ollama-url').value = e.ollama.baseUrl;
-    document.getElementById('history-ollama-model').value = e.ollama.model;
-    document.getElementById('history-openai-model').value = e.openai.model;
-    document.getElementById('history-rerank-search').checked = Boolean(out.settings.rerank.search);
-    document.getElementById('history-rerank-turn').checked = Boolean(out.settings.rerank.enabled);
     const kind = out.settings.rerank.kind === 'jev' ? 'jev' : 'local';
-    document.getElementById('history-rerank-kind').value = kind;
-    document.getElementById('history-rerank-jev-confirm').checked = kind === 'jev';
+    historyStored = {
+      embedder: {
+        kind: e.kind,
+        model: e.model,
+        ollama: { baseUrl: e.ollama.baseUrl, model: e.ollama.model },
+        openai: { model: e.openai.model }
+      },
+      rerank: { search: Boolean(out.settings.rerank.search), enabled: Boolean(out.settings.rerank.enabled), kind },
+      // Ticked on load when Jev is the saved choice, so unticking it is refused.
+      confirmJev: kind === 'jev'
+    };
+    applyHistoryFields(historyStored);
   }
   stopHistoryStatusPoll();
   historyStatusTimer = setInterval(() => { refreshHistoryEmbedderStatus().catch(() => {}); }, 2000);
 }
 
-async function saveHistorySettings() {
-  const el = document.getElementById('history-embedder-status');
+// The whole pane as the one save call takes it.
+function historyPayloadFromForm() {
   const val = (id) => document.getElementById(id).value.trim();
-  const out = await window.electron.history.saveEmbedder({
+  return {
     embedder: {
       kind: document.getElementById('history-embedder-kind').value,
       model: val('history-embedder-model'),
@@ -4517,15 +4690,21 @@ async function saveHistorySettings() {
       kind: document.getElementById('history-rerank-kind').value
     },
     // Jev sends excerpts to typesafe.ai: the host refuses any save with
-    // Jev chosen unless this box is ticked (it is ticked on load when Jev is
-    // the saved choice, so unticking it and saving is refused).
+    // Jev chosen unless this box is ticked.
     confirmJev: document.getElementById('history-rerank-jev-confirm').checked
-  });
-  el.textContent = out && out.ok
-    ? historyEmbedderStatusText(out.status, out.progress)
-    : `Not saved: ${(out && out.error) || 'unknown error'}`;
+  };
+}
+
+// The auto-save's save call: the host's refusal (Jev without the box ticked, say)
+// comes back as the save error, and the fields go back to what was stored.
+async function saveHistorySettings(payload) {
+  const out = await window.electron.history.saveEmbedder(payload);
+  if (!out || !out.ok) return { ok: false, error: (out && out.error) || 'unknown error' };
+  historyStored = payload;
+  document.getElementById('history-embedder-status').textContent = historyEmbedderStatusText(out.status, out.progress);
   const rerankEl = document.getElementById('history-rerank-status');
-  if (rerankEl && out && out.ok) rerankEl.textContent = historyRerankStatusText(out.jev);
+  if (rerankEl) rerankEl.textContent = historyRerankStatusText(out.jev);
+  return { ok: true };
 }
 
 // The typesafe.ai key: sent once, the field cleared at once, never read
@@ -4562,11 +4741,47 @@ async function runHistoryEmbedderAction(call) {
   await refreshHistoryEmbedderStatus();
 }
 
+function onHistorySaveState(state, info) {
+  const pane = document.querySelector('.settings-tab-content[data-tab="history"]');
+  if (state === 'error') {
+    applyHistoryFields(historyStored);
+    setSettingsFieldError(historyLastField || document.getElementById('history-embedder-kind'), `Not saved: ${info.error}`);
+  } else if (state === 'saved') {
+    clearSettingsFieldErrors(pane);
+  }
+}
+
+// With nothing loaded there is no stored value a refused save could go back to,
+// so nothing is saved until the settings have been read.
+function historyNotLoaded(field) {
+  if (historyStored) return false;
+  setSettingsFieldError(field, 'Not saved: the history settings could not be read. Close Settings and open it again.');
+  return true;
+}
+
 function wireHistorySettings() {
   const on = (id, fn) => document.getElementById(id)?.addEventListener('click', () => {
     fn().catch((err) => settingsLog.warn(`history settings: ${err.message}`));
   });
-  on('history-embedder-save-btn', saveHistorySettings);
+  // Settings redesign §5.8 rule 1: every field saves as it changes, through the one call.
+  const saver = registerSettingsAutosave('history.recall', { save: saveHistorySettings, onState: onHistorySaveState });
+  for (const id of ['history-embedder-kind', 'history-rerank-search', 'history-rerank-kind', 'history-rerank-jev-confirm', 'history-rerank-turn']) {
+    const el = document.getElementById(id);
+    el?.addEventListener('change', () => {
+      historyLastField = el;
+      paintHistoryPane();
+      if (historyNotLoaded(el)) return;
+      saver.change(historyPayloadFromForm(), { immediate: true });
+    });
+  }
+  for (const id of ['history-embedder-model', 'history-ollama-url', 'history-ollama-model', 'history-openai-model']) {
+    const el = document.getElementById(id);
+    el?.addEventListener('input', () => {
+      historyLastField = el;
+      if (historyNotLoaded(el)) return;
+      saver.change(historyPayloadFromForm());
+    });
+  }
   on('history-jev-key-save-btn', saveHistoryJevKey);
   on('history-jev-key-clear-btn', clearHistoryJevKey);
   on('history-embedder-retry-btn', () => runHistoryEmbedderAction(() => window.electron.history.retryEmbedder()));
@@ -4579,129 +4794,438 @@ function wireHistorySettings() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wireHistorySettings);
 else wireHistorySettings();
 
+/* What King Louie remembers: its own panel beside the gear (spec §5.3). */
+function openMemoryPanel() {
+  if (!dom.memoryPanel) return;
+  dom.memoryPanel.hidden = false;
+  loadMemoryEntries();
+  dom.memoryQueryInput?.focus();
+}
+
+function closeMemoryPanel() {
+  if (!dom.memoryPanel || dom.memoryPanel.hidden) return;
+  dom.memoryPanel.hidden = true;
+  dom.userInput?.focus();
+}
+
 function openSettingsDrawer() {
+  // A search or image test result lasts until Settings closes (spec §8.5).
+  appState.keyTestResults = {};
+  appState.telegramTested = null;
+  appState.openKeyRows = new Set();
   setSettingsDrawer(true);
-  loadSettings();
-  if (dom.settingsNavSelect?.value === 'history') {
-    loadHistorySettings().catch((err) => settingsLog.warn(`loading history settings failed: ${err.message}`));
+  resetSettingsReloadRetries();
+  paintSettingsBanner(appState.desktopStatus || null);
+  // After an outage the banner's paint has started the re-read; don't read twice.
+  if (!settingsReadOnlyReload) loadSettings();
+  renderSettingsNav();
+  // A remembered page not offered now (a skill page whose pane has not loaded
+  // yet, or a page this host hides) is kept: the fallback shown meanwhile is
+  // not stored over it, and a skill page is restored once its pane loads.
+  const remembered = readLastSettingsTab();
+  const initial = resolveInitialTab(remembered, visibleSettingsGroups());
+  appState.settingsPendingTab = remembered && initial !== remembered ? remembered : null;
+  switchSettingsTab(initial, { remember: false });
+}
+
+// One key row (settings redesign §5.5): name, status, reason and Edit/Add, which
+// opens the row in place. `kind` is 'model' or 'search'; a provider's error text
+// reaches the page only by textContent.
+function keyRowId(kind, key) {
+  return `${kind}:${key}`;
+}
+
+function keyRowButton(label, action, key, cls = 'btn btn-sm') {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = cls;
+  btn.textContent = label;
+  btn.dataset.action = action;
+  btn.dataset.provider = key;
+  return btn;
+}
+
+function paintKeyRowStatus(wrap, view) {
+  if (!wrap) return;
+  wrap.dataset.state = view.state;
+  const pill = wrap.querySelector('.status-pill');
+  if (pill) {
+    const look = KEY_ROW_PILL[view.state];
+    pill.className = `status-pill ${look.cls}`;
+    pill.textContent = look.text;
+  }
+  const reason = wrap.querySelector('.key-row-reason');
+  if (reason) {
+    reason.textContent = view.reason;
+    reason.title = view.reason;
+  }
+  const toggle = wrap.querySelector('button[data-action="toggle"]');
+  if (toggle) toggle.textContent = view.action;
+}
+
+function buildKeyRow({ kind, key, label, view, testable = false }) {
+  const wrap = document.createElement('div');
+  wrap.className = 'key-row';
+  wrap.dataset.kind = kind;
+  wrap.dataset.provider = key;
+
+  const line = document.createElement('div');
+  line.className = 'settings-list-row';
+  const name = document.createElement('span');
+  name.className = 'settings-list-name key-row-name';
+  name.textContent = label;
+  const pill = document.createElement('span');
+  pill.className = 'status-pill';
+  const reason = document.createElement('span');
+  reason.className = 'key-row-reason settings-row-help';
+  line.append(name, pill, reason);
+  if (testable && view.state !== 'no-key') line.appendChild(keyRowButton('Test', 'test', key));
+  line.appendChild(keyRowButton(view.action, 'toggle', key));
+
+  const editor = document.createElement('div');
+  editor.className = 'key-row-editor';
+  editor.hidden = !appState.openKeyRows.has(keyRowId(kind, key));
+
+  wrap.append(line, editor);
+  paintKeyRowStatus(wrap, view);
+  return { wrap, editor };
+}
+
+function keyRowField(editor, { id, labelText, type = 'password', placeholder, dataset = {} }) {
+  const label = document.createElement('label');
+  label.className = 'settings-row-help';
+  label.textContent = labelText;
+  const input = document.createElement('input');
+  input.className = 'provider-input';
+  input.type = type;
+  input.autocomplete = 'off';
+  input.placeholder = placeholder;
+  if (id) {
+    input.id = id;
+    label.htmlFor = id;
+  }
+  Object.assign(input.dataset, dataset);
+  editor.append(label, input);
+  return input;
+}
+
+function keyRowEditorEnd(editor, { key, hasKey, extra = [] }) {
+  const actions = document.createElement('div');
+  actions.className = 'provider-actions';
+  actions.appendChild(keyRowButton('Save & test', 'save', key, 'btn btn-primary btn-sm'));
+  for (const btn of extra) actions.appendChild(btn);
+  if (hasKey) actions.appendChild(keyRowButton('Remove key', 'clear', key, 'btn btn-danger btn-sm'));
+  const message = document.createElement('div');
+  message.className = 'provider-message settings-row-help';
+  editor.append(actions, message);
+}
+
+function toggleKeyRow(kind, key, container) {
+  const id = keyRowId(kind, key);
+  const wrap = container?.querySelector(`.key-row[data-provider="${key}"]`);
+  const editor = wrap?.querySelector('.key-row-editor');
+  if (!editor) return;
+  const open = editor.hidden;
+  editor.hidden = !open;
+  if (open) {
+    appState.openKeyRows.add(id);
+    editor.querySelector('input[type="password"]')?.focus();
+  } else {
+    appState.openKeyRows.delete(id);
   }
 }
 
 function renderProviderCard(providerKey, provider) {
-  const card = document.createElement('div');
-  card.className = 'provider-card';
-  card.dataset.provider = providerKey;
+  const view = keyRowState({ hasKey: providerHasKey(providerKey, provider), status: provider.status });
+  const { wrap, editor } = buildKeyRow({ kind: 'model', key: providerKey, label: provider.label, view });
 
-  const header = document.createElement('div');
-  header.className = 'provider-header';
-
-  const title = document.createElement('div');
-  title.className = 'provider-title';
-  title.textContent = provider.label;
-
-  const titleWrap = document.createElement('div');
-  titleWrap.className = 'provider-title-wrap';
-  titleWrap.appendChild(title);
-
-  const status = document.createElement('span');
-  status.className = 'provider-status';
-  const statusView = providerStatusText(provider.status);
-  if (statusView.cls) status.classList.add(statusView.cls);
-  status.textContent = statusView.text;
-  if (provider.status?.checkedAt) status.title = `Last tested ${new Date(provider.status.checkedAt).toLocaleString()}`;
-
-  header.appendChild(titleWrap);
-  header.appendChild(status);
-
-  const controls = document.createElement('div');
-  controls.className = 'provider-controls';
-
-  const label = document.createElement('label');
-  label.textContent = provider.hasToken
-    ? 'API token saved (replace to update)'
-    : 'API token';
-
-  const input = document.createElement('input');
-  input.className = 'provider-input';
-  input.type = 'password';
-  input.placeholder = provider.hasToken ? '""""""""""""' : 'Paste API token';
-  input.dataset.provider = providerKey;
-
-  controls.appendChild(label);
-  controls.appendChild(input);
+  keyRowField(editor, {
+    labelText: providerKey === 'ollama' ? 'API key (a local Ollama needs none)' : 'API key',
+    placeholder: provider.hasToken ? 'A key is saved. Paste a new one to replace it.' : 'Paste API key',
+    dataset: { provider: providerKey }
+  });
 
   // The Ollama address (models.ollama.baseUrl, spec 2026-09-27 §5.4).
+  const extra = [];
   if (providerKey === 'ollama') {
-    const addressLabel = document.createElement('label');
-    addressLabel.textContent = 'Ollama address';
-    const addressInput = document.createElement('input');
-    addressInput.className = 'provider-input';
-    addressInput.type = 'text';
-    addressInput.dataset.ollamaUrl = 'true';
+    const addressInput = keyRowField(editor, {
+      labelText: 'Ollama address',
+      type: 'text',
+      placeholder: 'http://127.0.0.1:11434',
+      dataset: { ollamaUrl: 'true' }
+    });
     addressInput.value = appState.settings.ollamaBaseUrl || '';
-    addressInput.placeholder = 'http://127.0.0.1:11434';
-    controls.appendChild(addressLabel);
-    controls.appendChild(addressInput);
+    extra.push(keyRowButton('Save address', 'save-ollama-url', providerKey));
   }
 
-  const actions = document.createElement('div');
-  actions.className = 'provider-actions';
+  keyRowEditorEnd(editor, { key: providerKey, hasKey: Boolean(provider.hasToken), extra });
+  return wrap;
+}
 
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'btn btn-primary';
-  saveBtn.type = 'button';
-  saveBtn.appendChild(faIcon('fas fa-floppy-disk'));
-  saveBtn.appendChild(document.createTextNode(' Save Token'));
-  saveBtn.dataset.action = 'save';
-  saveBtn.dataset.provider = providerKey;
+function paintProvidersFailingBanner() {
+  const banner = dom.providersFailingBanner;
+  if (!banner) return;
+  const n = failingCount(appState.settings.providers);
+  banner.hidden = n === 0;
+  banner.textContent = n ? failingBannerText(n) : '';
+}
 
-  const testBtn = document.createElement('button');
-  testBtn.type = 'button';
-  testBtn.className = 'btn';
-  testBtn.appendChild(faIcon('fas fa-plug'));
-  testBtn.appendChild(document.createTextNode(' Test Connection'));
-  testBtn.dataset.action = 'test';
-  testBtn.dataset.provider = providerKey;
+// Search and image keys (spec §8.5): a Test button per row, nothing tested on
+// open, the result kept in appState.keyTestResults until Settings closes.
+const SEARCH_IMAGE_KEYS = Object.freeze([
+  { key: 'brave', label: 'Brave Search', section: 'webSearch', inputId: 'websearch-brave-key-input' },
+  { key: 'tavily', label: 'Tavily', section: 'webSearch', inputId: 'websearch-tavily-key-input' },
+  { key: 'fal', label: 'Fal (Flux) images', section: 'imageGeneration', inputId: 'imagegen-fal-key-input' }
+]);
 
-  const clearBtn = document.createElement('button');
-  clearBtn.type = 'button';
-  clearBtn.className = 'btn btn-danger';
-  clearBtn.appendChild(faIcon('fas fa-eraser'));
-  clearBtn.appendChild(document.createTextNode(' Clear Token'));
-  clearBtn.dataset.action = 'clear';
-  clearBtn.dataset.provider = providerKey;
+function searchImageItem(key) {
+  return SEARCH_IMAGE_KEYS.find((item) => item.key === key) || null;
+}
 
-  actions.appendChild(saveBtn);
-  actions.appendChild(testBtn);
-  actions.appendChild(clearBtn);
+function searchImageEntry(item) {
+  const section = appState.settings[item.section] || (appState.settings[item.section] = {});
+  return section[item.key] || (section[item.key] = {});
+}
 
-  if (providerKey === 'ollama') {
-    const addressBtn = document.createElement('button');
-    addressBtn.type = 'button';
-    addressBtn.className = 'btn';
-    addressBtn.appendChild(faIcon('fas fa-location-dot'));
-    addressBtn.appendChild(document.createTextNode(' Save address'));
-    addressBtn.dataset.action = 'save-ollama-url';
-    addressBtn.dataset.provider = providerKey;
-    actions.appendChild(addressBtn);
+// A local window gets the stored key; a remote one gets hasKey in its place.
+function searchImageHasKey(item) {
+  const entry = searchImageEntry(item);
+  return typeof entry.hasKey === 'boolean' ? entry.hasKey : Boolean(entry.apiKey);
+}
+
+function renderSearchImageRow(item) {
+  const hasKey = searchImageHasKey(item);
+  const view = keyRowState({ hasKey, status: null, tested: appState.keyTestResults[item.key] || null });
+  const { wrap, editor } = buildKeyRow({ kind: 'search', key: item.key, label: item.label, view, testable: true });
+  keyRowField(editor, {
+    id: item.inputId,
+    labelText: 'API key',
+    placeholder: hasKey ? 'A key is saved. Paste a new one to replace it.' : 'Paste API key',
+    dataset: { searchKey: item.key }
+  });
+  keyRowEditorEnd(editor, { key: item.key, hasKey });
+  return wrap;
+}
+
+// Redraws a key-row list without losing what the owner is typing: the values
+// of inputs in rows that are open, before and after, are put back. Only typed
+// values are carried; nothing stored is ever written into an input here.
+function redrawKeyRowsKeepingTyped(container, draw) {
+  if (!container) return;
+  const typed = new Map();
+  const fieldId = (input) => `${input.dataset.provider || input.dataset.searchKey || ''}|${input.dataset.ollamaUrl ? 'url' : 'key'}`;
+  container.querySelectorAll('.key-row').forEach((wrap) => {
+    const editor = wrap.querySelector('.key-row-editor');
+    if (!editor || editor.hidden) return;
+    editor.querySelectorAll('input').forEach((input) => {
+      if (input.value) typed.set(`${wrap.dataset.kind}:${wrap.dataset.provider}:${fieldId(input)}`, input.value);
+    });
+  });
+  draw();
+  if (!typed.size) return;
+  container.querySelectorAll('.key-row').forEach((wrap) => {
+    const editor = wrap.querySelector('.key-row-editor');
+    if (!editor || editor.hidden) return;
+    editor.querySelectorAll('input').forEach((input) => {
+      const value = typed.get(`${wrap.dataset.kind}:${wrap.dataset.provider}:${fieldId(input)}`);
+      if (value !== undefined) input.value = value;
+    });
+  });
+}
+
+function renderSearchImageRows() {
+  if (!dom.searchImageList) return;
+  redrawKeyRowsKeepingTyped(dom.searchImageList, () => {
+    dom.searchImageList.replaceChildren(...SEARCH_IMAGE_KEYS.map(renderSearchImageRow));
+  });
+}
+
+function setSearchImageMessage(key, message, isError = false) {
+  const el = dom.searchImageList?.querySelector(`.key-row[data-provider="${key}"] .provider-message`);
+  if (!el) return;
+  el.textContent = message;
+  el.classList.toggle('error', isError);
+}
+
+async function testSearchImageKey(item) {
+  setSearchImageMessage(item.key, 'Testing…');
+  try {
+    const call = item.section === 'webSearch'
+      ? window.electron.settings.testWebSearchKey({ provider: item.key })
+      : window.electron.settings.testImageGenKey({ provider: item.key });
+    const result = unwrapIpcResult(await call, `Failed to test ${item.label}.`);
+    appState.keyTestResults[item.key] = { ok: true, message: result?.message || 'Connection successful.' };
+  } catch (err) {
+    appState.keyTestResults[item.key] = { ok: false, error: err.message || 'Test failed.' };
   }
+  const ok = appState.keyTestResults[item.key].ok;
+  if (ok) appState.openKeyRows.delete(keyRowId('search', item.key));
+  renderSearchImageRows();
+  return ok;
+}
 
-  const message = document.createElement('div');
-  message.className = 'provider-message';
-  if (provider.status?.message) {
-    message.textContent = provider.status.message;
-    if (!provider.status.ok) {
-      message.classList.add('error');
+async function saveSearchImageKey(item) {
+  const input = document.getElementById(item.inputId);
+  const apiKey = input?.value?.trim() || '';
+  if (!apiKey) {
+    setSearchImageMessage(item.key, 'Paste a key first.', true);
+    return;
+  }
+  try {
+    const call = item.section === 'webSearch'
+      ? window.electron.settings.saveWebSearchKey({ provider: item.key, apiKey })
+      : window.electron.settings.saveImageGenKey({ provider: item.key, apiKey });
+    unwrapIpcResult(await call, `Failed to save the ${item.label} key.`);
+  } catch (err) {
+    setSearchImageMessage(item.key, err.message || 'Error saving key.', true);
+    return;
+  }
+  if (input) input.value = '';
+  const entry = searchImageEntry(item);
+  delete entry.apiKey;
+  entry.hasKey = true;
+  delete appState.keyTestResults[item.key];
+  renderSearchImageRows();
+  await testSearchImageKey(item);
+}
+
+async function clearSearchImageKey(item) {
+  if (!(await showConfirmDialog(`Remove the saved ${item.label} key?`))) return;
+  try {
+    const call = item.section === 'webSearch'
+      ? window.electron.settings.saveWebSearchKey({ provider: item.key, clear: true })
+      : window.electron.settings.saveImageGenKey({ provider: item.key, clear: true });
+    unwrapIpcResult(await call, `Failed to remove the ${item.label} key.`);
+  } catch (err) {
+    setSearchImageMessage(item.key, err.message || 'Error.', true);
+    return;
+  }
+  const entry = searchImageEntry(item);
+  delete entry.apiKey;
+  entry.hasKey = false;
+  delete appState.keyTestResults[item.key];
+  appState.openKeyRows.delete(keyRowId('search', item.key));
+  renderSearchImageRows();
+}
+
+// ── Compact list rows (spec §5.8 rule 7) ───────────────────
+// A name, a short detail, a status pill where the list has one, and the row's actions
+// as small buttons on the row. Every string is set as text: names come from the node.
+const LIST_PILL_CLASS = Object.freeze({ ok: 'is-working', bad: 'is-failing', off: 'is-none', warn: 'is-untested' });
+
+function buildSettingsListRow({ name, detail = '', pill = null, controls = [], dataset = {}, nameTag = 'span' }) {
+  const row = document.createElement('div');
+  row.className = 'settings-list-row';
+  for (const [k, v] of Object.entries(dataset)) row.dataset[k] = String(v);
+  const text = document.createElement('span');
+  text.className = 'settings-list-name';
+  const title = document.createElement(nameTag);
+  title.className = 'settings-list-title';
+  title.textContent = String(name ?? '');
+  text.appendChild(title);
+  if (detail) {
+    const d = document.createElement('span');
+    d.className = 'settings-list-detail settings-row-help';
+    d.textContent = String(detail);
+    text.appendChild(d);
+  }
+  text.title = [name, detail].filter(Boolean).join('\n');
+  row.appendChild(text);
+  if (pill) {
+    const p = document.createElement('span');
+    p.className = `status-pill ${LIST_PILL_CLASS[pill.tone] || 'is-none'}`;
+    p.textContent = pill.text;
+    row.appendChild(p);
+  }
+  for (const control of controls) if (control) row.appendChild(control);
+  return row;
+}
+
+function listRowButton(label, dataset = {}, { danger = false, primary = false } = {}) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `btn btn-sm${danger ? ' btn-danger' : ''}${primary ? ' btn-primary' : ''}`;
+  btn.textContent = label;
+  for (const [k, v] of Object.entries(dataset)) btn.dataset[k] = String(v);
+  return btn;
+}
+
+// A row's on/off switch, saved as it is flipped (rules 1 and 2, §7.1). `save(enabled)`
+// resolves { ok, error? }; a failure puts the switch back and says why below the row.
+function listRowSwitch({ key, checked, label, save, onSaved }) {
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.className = 'switch';
+  input.checked = Boolean(checked);
+  input.setAttribute('aria-label', label);
+  const saver = registerSettingsAutosave(key, {
+    save,
+    onState: (state, info) => {
+      const row = input.closest('.settings-list-row') || input;
+      if (state === 'error') {
+        input.checked = info.saved !== undefined ? Boolean(info.saved) : !info.value;
+        setSettingsFieldError(row, `Not saved: ${info.error}`);
+      } else if (state === 'saved') {
+        setSettingsFieldError(row, '');
+        if (onSaved) onSaved(info.value);
+      }
     }
-  } else {
-    message.textContent = 'No connection test has been run yet.';
-  }
+  });
+  input.addEventListener('change', () => saver.change(input.checked, { immediate: true }));
+  return input;
+}
 
-  card.appendChild(header);
-  card.appendChild(controls);
-  card.appendChild(actions);
-  card.appendChild(message);
-  return card;
+function listEmptyLine(text) {
+  const empty = document.createElement('div');
+  empty.className = 'provider-message settings-row-help';
+  empty.textContent = text;
+  return empty;
+}
+
+// A stored interval in the largest whole unit: 60000 -> "Every 1 min" (rule 3).
+function formatEveryMs(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return 'Unknown interval';
+  const { value, unit } = msToUnit(ms);
+  return `Every ${value} ${unit}`;
+}
+
+// The hooks section of Permissions & hooks, from the page's copy of the hooks.
+function paintHooksSection() {
+  const hooks = appState.settings.hooks || {};
+  const loadedHooks = Array.isArray(hooks.loaded) ? hooks.loaded : [];
+  if (dom.hooksGlobalEnabledInput) dom.hooksGlobalEnabledInput.checked = hooks.enabled !== false;
+  setSettingsFieldError(dom.hooksGlobalEnabledInput, '');
+  if (dom.hooksStatus) {
+    dom.hooksStatus.textContent = loadedHooks.length === 1 ? '1 hook loaded.' : `${loadedHooks.length} hooks loaded.`;
+    dom.hooksStatus.classList.remove('error');
+  }
+  renderHooksList(loadedHooks);
+}
+
+function renderHooksList(loadedHooks) {
+  if (!dom.hooksList) return;
+  dom.hooksList.textContent = '';
+  if (!loadedHooks.length) {
+    dom.hooksList.appendChild(listEmptyLine('No hooks found in the hooks folder.'));
+    return;
+  }
+  for (const hook of loadedHooks) {
+    const detail = [`${hook.event} · matcher: ${hook.matcher || '*'}`, hook.description || hook.handler || ''].filter(Boolean).join(' · ');
+    const toggle = listRowSwitch({
+      key: `hooks.enabled.${hook.name}`,
+      checked: hook.enabled !== false,
+      label: `Hook ${hook.name}`,
+      save: (enabled) => saveHookEnabled(hook.name, enabled)
+    });
+    dom.hooksList.appendChild(buildSettingsListRow({ name: hook.name, detail, controls: [toggle], dataset: { hookName: hook.name } }));
+  }
+  greyHookRows();
+}
+
+// Each hook depends on the global switch (rule 2): greyed while it is off.
+function greyHookRows() {
+  const off = dom.hooksGlobalEnabledInput ? !dom.hooksGlobalEnabledInput.checked : false;
+  dom.hooksList?.querySelectorAll('.settings-list-row').forEach((row) => setSettingsRowGreyed(row, off));
 }
 
 function renderSettings() {
@@ -4716,159 +5240,19 @@ function renderSettings() {
   // (it disables itself if git is missing). Ask it directly.
   refreshCheckpointToggle();
 
-  const templateVariables = appState.settings.templateVariables || {};
-  if (dom.templateNameInput) dom.templateNameInput.value = templateVariables.name || '';
-  if (dom.templateRoleInput) dom.templateRoleInput.value = templateVariables.role || '';
-  if (dom.templatePreferencesInput) dom.templatePreferencesInput.value = templateVariables.preferences || '';
-  if (dom.templateProjectContextInput) dom.templateProjectContextInput.value = templateVariables.projectContext || '';
+  // About you (§8.1): one field per value, over both stores.
+  applyAboutYouFields();
+  clearSettingsFieldErrors(document.querySelector('.settings-tab-content[data-tab="profile"]'));
 
-  if (dom.templateVariablesStatus) {
-    dom.templateVariablesStatus.textContent = 'Template variables loaded.';
-    dom.templateVariablesStatus.classList.remove('error');
-  }
+  applyNotificationFields();
+  clearSettingsFieldErrors(document.querySelector('.settings-tab-content[data-tab="notifications"]'));
 
-  const userProfile = appState.settings.userProfile || {};
-  if (dom.profileNameInput) dom.profileNameInput.value = userProfile.name || '';
-  if (dom.profileRoleInput) dom.profileRoleInput.value = userProfile.role || '';
-  if (dom.profileGoalsInput) {
-    const goals = Array.isArray(userProfile.goals) ? userProfile.goals : [];
-    dom.profileGoalsInput.value = goals.join('\n');
-  }
-  if (dom.profilePreferencesInput) {
-    dom.profilePreferencesInput.value =
-      userProfile.preferences && typeof userProfile.preferences === 'object'
-        ? JSON.stringify(userProfile.preferences, null, 2)
-        : '';
-  }
-  if (dom.profileProjectContextInput) {
-    dom.profileProjectContextInput.value = userProfile.projectContext || '';
-  }
+  if (dom.voiceStatus) dom.voiceStatus.classList.remove('error');
+  applyVoiceFields();
+  clearSettingsFieldErrors(document.querySelector('.settings-tab-content[data-tab="voice"]'));
+  loadSystemVoices();
 
-  if (dom.userProfileStatus) {
-    dom.userProfileStatus.textContent = 'User profile loaded.';
-    dom.userProfileStatus.classList.remove('error');
-  }
-
-  const notifications = appState.settings.notifications || {};
-  const thresholds = notifications.thresholdsMs || {};
-  if (dom.notificationsEnabledInput) dom.notificationsEnabledInput.checked = notifications.enabled !== false;
-  if (dom.notificationsUiToastEnabledInput) dom.notificationsUiToastEnabledInput.checked = notifications.uiToast?.enabled !== false;
-  if (dom.notificationsNtfyEnabledInput) dom.notificationsNtfyEnabledInput.checked = notifications.ntfy?.enabled === true;
-  if (dom.notificationsTelegramLongTaskInput) dom.notificationsTelegramLongTaskInput.checked = notifications.telegram?.longTaskNotice !== false;
-  if (dom.notificationsToastThresholdInput) dom.notificationsToastThresholdInput.value = Math.round((Number(thresholds.toast || 30000)) / 1000);
-  if (dom.notificationsExternalThresholdInput) dom.notificationsExternalThresholdInput.value = Math.round((Number(thresholds.external || 120000)) / 1000);
-  if (dom.notificationsNtfyTopicInput) dom.notificationsNtfyTopicInput.value = String(notifications.ntfy?.topic || '');
-
-  if (dom.notificationsStatus) {
-    dom.notificationsStatus.textContent = 'Notification settings loaded.';
-    dom.notificationsStatus.classList.remove('error');
-  }
-
-  const voice = appState.settings.voice || {};
-  if (dom.voiceEnabledInput) dom.voiceEnabledInput.checked = voice.enabled === true;
-  if (dom.voiceSpeakChatInput) dom.voiceSpeakChatInput.checked = voice.speakChatResponses === true;
-  if (dom.voiceSpeakAgentSummaryInput) dom.voiceSpeakAgentSummaryInput.checked = voice.speakAgentSummary !== false;
-  if (dom.voiceTelegramLongInput) dom.voiceTelegramLongInput.checked = voice.telegramVoiceForLongResponses === true;
-  if (dom.voiceEngineInput) dom.voiceEngineInput.value = String(voice.engine || 'system');
-  if (dom.voiceIdInput) dom.voiceIdInput.value = String(voice.voiceId || '');
-  if (dom.voiceSpeedInput) dom.voiceSpeedInput.value = String(Number(voice.speed || 1));
-  if (dom.voiceStabilityInput) dom.voiceStabilityInput.value = String(Number(voice.stability || 0.5));
-  if (dom.voiceStyleInput) dom.voiceStyleInput.value = String(Number(voice.style || 0.25));
-  if (dom.voiceSummaryMaxInput) dom.voiceSummaryMaxInput.value = String(Number(voice.summaryMaxChars || 260));
-  if (dom.voiceTelegramMinInput) dom.voiceTelegramMinInput.value = String(Number(voice.telegramMinChars || 500));
-
-  if (dom.voiceStatus) {
-    dom.voiceStatus.textContent = voice.hasElevenLabsKey
-      ? 'Voice settings loaded. ElevenLabs key is saved.'
-      : 'Voice settings loaded. ElevenLabs key is not saved.';
-    dom.voiceStatus.classList.remove('error');
-  }
-
-  const hooks = appState.settings.hooks || {};
-  const loadedHooks = Array.isArray(hooks.loaded) ? hooks.loaded : [];
-
-  if (dom.hooksGlobalEnabledInput) {
-    dom.hooksGlobalEnabledInput.checked = hooks.enabled !== false;
-  }
-
-  if (dom.hooksStatus) {
-    dom.hooksStatus.textContent = `Loaded ${loadedHooks.length} hook(s).`;
-    dom.hooksStatus.classList.remove('error');
-  }
-
-  if (dom.hooksList) {
-    dom.hooksList.innerHTML = '';
-
-    if (!loadedHooks.length) {
-      const empty = document.createElement('div');
-      empty.className = 'provider-message';
-      empty.textContent = 'No hooks discovered in hooks/ directory.';
-      dom.hooksList.appendChild(empty);
-    } else {
-      loadedHooks.forEach((hook) => {
-        const card = document.createElement('div');
-        card.className = 'provider-card';
-        card.dataset.hookName = hook.name;
-
-        const header = document.createElement('div');
-        header.className = 'provider-header';
-
-        const titleWrap = document.createElement('div');
-        titleWrap.className = 'provider-title-wrap';
-
-        const title = document.createElement('div');
-        title.className = 'provider-title';
-        title.textContent = hook.name;
-
-        const eventMeta = document.createElement('div');
-        eventMeta.className = 'provider-message';
-        eventMeta.textContent = `${hook.event} • matcher: ${hook.matcher || '*'}`;
-
-        titleWrap.appendChild(title);
-        titleWrap.appendChild(eventMeta);
-
-        const status = document.createElement('span');
-        status.className = 'provider-status';
-        if (hook.enabled !== false) {
-          status.classList.add('ok');
-          status.textContent = 'Enabled';
-        } else {
-          status.classList.add('error');
-          status.textContent = 'Disabled';
-        }
-
-        header.appendChild(titleWrap);
-        header.appendChild(status);
-
-        const description = document.createElement('div');
-        description.className = 'provider-message';
-        description.textContent = hook.description || hook.handler || 'No description provided.';
-
-        const actions = document.createElement('div');
-        actions.className = 'provider-actions';
-
-        const toggleBtn = document.createElement('button');
-        toggleBtn.type = 'button';
-        toggleBtn.dataset.action = 'toggle-hook';
-        toggleBtn.dataset.hookName = hook.name;
-        toggleBtn.dataset.nextEnabled = hook.enabled !== false ? 'false' : 'true';
-        toggleBtn.appendChild(faIcon(hook.enabled !== false ? 'fas fa-toggle-on' : 'fas fa-toggle-off'));
-        toggleBtn.appendChild(document.createTextNode(hook.enabled !== false ? ' Disable Hook' : ' Enable Hook'));
-        if (hook.enabled !== false) {
-          toggleBtn.className = 'btn btn-danger';
-        } else {
-          toggleBtn.className = 'btn btn-primary';
-        }
-
-        actions.appendChild(toggleBtn);
-
-        card.appendChild(header);
-        card.appendChild(description);
-        card.appendChild(actions);
-        dom.hooksList.appendChild(card);
-      });
-    }
-  }
+  paintHooksSection();
 
   if (dom.memoryStatus) {
     dom.memoryStatus.textContent = 'Memory settings ready.';
@@ -4879,49 +5263,21 @@ function renderSettings() {
     dom.memoryCaptureTypeInput.value = 'context';
   }
 
-  dom.providerList.innerHTML = '';
-  Object.entries(appState.settings.providers).forEach(([key, provider]) => {
-    dom.providerList.appendChild(renderProviderCard(key, provider));
+  redrawKeyRowsKeepingTyped(dom.providerList, () => {
+    dom.providerList.replaceChildren(...Object.entries(appState.settings.providers).map(([key, provider]) => renderProviderCard(key, provider)));
   });
+  paintProvidersFailingBanner();
+  renderSearchImageRows();
 
   renderCatalogSettings();
   loadVaultEntries();
   loadMcpServers();
 
-  const telegram = appState.settings.telegram || {};
-  if (dom.telegramChannelStatus) {
-    if (telegram.bridgeActive) {
-      dom.telegramChannelStatus.textContent = 'Bridge active.';
-      dom.telegramChannelStatus.classList.remove('error');
-    } else if (telegram.hasToken) {
-      dom.telegramChannelStatus.textContent = 'Token saved. Bridge not active.';
-      dom.telegramChannelStatus.classList.remove('error');
-    } else {
-      dom.telegramChannelStatus.textContent = 'Not configured.';
-      dom.telegramChannelStatus.classList.remove('error');
-    }
-  }
-
-  const webSearch = appState.settings.webSearch || {};
-  if (dom.websearchBraveStatus) {
-    dom.websearchBraveStatus.textContent = webSearch.brave?.apiKey
-      ? 'Key configured.'
-      : 'Not configured.';
-  }
-  if (dom.websearchTavilyStatus) {
-    dom.websearchTavilyStatus.textContent = webSearch.tavily?.apiKey
-      ? 'Key configured.'
-      : 'Not configured.';
-  }
+  paintTelegramKeyRow();
 
   const imageGen = appState.settings.imageGeneration || {};
   if (dom.imagegenDefaultSelect) {
     dom.imagegenDefaultSelect.value = imageGen.defaultProvider || 'openai';
-  }
-  if (dom.imagegenFalStatus) {
-    dom.imagegenFalStatus.textContent = imageGen.fal?.apiKey
-      ? 'Key configured.'
-      : 'Not configured.';
   }
 }
 
@@ -4951,75 +5307,30 @@ async function loadVaultEntries() {
 
 function renderVaultEntries(keys = []) {
   if (!dom.vaultList) return;
-  dom.vaultList.innerHTML = '';
+  dom.vaultList.textContent = '';
 
   if (keys.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'provider-message';
-    empty.textContent = 'No secrets stored in the vault.';
-    dom.vaultList.appendChild(empty);
+    dom.vaultList.appendChild(listEmptyLine('No secrets in the vault yet.'));
     return;
   }
 
-  keys.forEach((key) => {
-    const card = document.createElement('div');
-    card.className = 'provider-card';
-    card.dataset.vaultKey = key;
-
-    const header = document.createElement('div');
-    header.className = 'provider-header';
-
-    const titleWrap = document.createElement('div');
-    titleWrap.className = 'provider-title-wrap';
-
-    const title = document.createElement('div');
-    title.className = 'provider-title';
-    title.textContent = key;
-
-    const meta = document.createElement('div');
-    meta.className = 'provider-message';
-    meta.textContent = 'Encrypted • Click "Update" to change the value';
-
-    titleWrap.appendChild(title);
-    titleWrap.appendChild(meta);
-
-    const status = document.createElement('span');
-    status.className = 'provider-status ok';
-    status.textContent = 'Stored';
-
-    header.appendChild(titleWrap);
-    header.appendChild(status);
-
-    const actions = document.createElement('div');
-    actions.className = 'provider-actions';
-
-    const updateBtn = document.createElement('button');
-    updateBtn.type = 'button';
-    updateBtn.className = 'btn';
-    updateBtn.appendChild(faIcon('fas fa-pen'));
-    updateBtn.appendChild(document.createTextNode(' Update'));
-    updateBtn.dataset.action = 'update-vault';
-    updateBtn.dataset.vaultKey = key;
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type = 'button';
-    deleteBtn.className = 'btn btn-danger';
-    deleteBtn.appendChild(faIcon('fas fa-trash'));
-    deleteBtn.appendChild(document.createTextNode(' Delete'));
-    deleteBtn.dataset.action = 'delete-vault';
-    deleteBtn.dataset.vaultKey = key;
-
-    actions.appendChild(updateBtn);
-    actions.appendChild(deleteBtn);
-
-    card.appendChild(header);
-    card.appendChild(actions);
-    dom.vaultList.appendChild(card);
-  });
+  // Names only: a value never reaches the page.
+  for (const key of keys) {
+    dom.vaultList.appendChild(buildSettingsListRow({
+      name: key,
+      detail: 'Encrypted',
+      pill: { text: 'Stored', tone: 'ok' },
+      controls: [
+        listRowButton('Edit', { action: 'update-vault', vaultKey: key }),
+        listRowButton('Delete', { action: 'delete-vault', vaultKey: key }, { danger: true })
+      ],
+      dataset: { vaultKey: key }
+    }));
+  }
 }
 
 async function handleVaultDelete(key) {
-  if (!confirm(`Delete secret "${key}" from the vault?`)) return;
+  if (!(await showConfirmDialog(`Delete the secret "${key}" from the vault? This cannot be undone.`))) return;
   try {
     const result = await window.electron.settings.vaultDelete({ key });
     if (!result?.ok) throw new Error(result?.error || 'Delete failed');
@@ -5032,29 +5343,45 @@ async function handleVaultDelete(key) {
   }
 }
 
-async function handleVaultUpdate(key) {
-  const newValue = prompt(`Enter new value for "${key}" (leave blank to keep current):`);
-  if (newValue === null) return; // cancelled
-  const newKey = prompt(`Rename key? (leave as-is or type new name):`, key);
-  if (newKey === null) return;
+// The add form doubles as the edit form: null adds, a key edits that entry. Electron has
+// no window.prompt, so the old prompt() edit never ran.
+let vaultEditingKey = null;
 
-  try {
-    const payload = { oldKey: key, newKey: newKey || key };
-    if (newValue) payload.value = newValue;
-    const result = await window.electron.settings.vaultUpdate(payload);
-    if (!result?.ok) throw new Error(result?.error || 'Update failed');
-    await loadVaultEntries();
-  } catch (err) {
-    if (dom.vaultStatus) {
-      dom.vaultStatus.textContent = `Error: ${err.message}`;
-      dom.vaultStatus.classList.add('error');
-    }
+function openVaultPanel(key = null) {
+  vaultEditingKey = key;
+  if (dom.vaultAddTitle) dom.vaultAddTitle.textContent = key ? 'Edit secret' : 'Add a secret';
+  if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.value = key || '';
+  if (dom.vaultAddValueInput) {
+    dom.vaultAddValueInput.value = '';
+    dom.vaultAddValueInput.placeholder = key ? 'Leave blank to keep the stored value' : 'Encrypted before it is saved';
   }
+  if (dom.vaultAddStatus) {
+    dom.vaultAddStatus.textContent = '';
+    dom.vaultAddStatus.classList.remove('error');
+  }
+  if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = false;
+  if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.focus();
+}
+
+function closeVaultPanel() {
+  vaultEditingKey = null;
+  if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.value = '';
+  if (dom.vaultAddValueInput) dom.vaultAddValueInput.value = '';
+  if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = true;
+  if (dom.vaultAddStatus) {
+    dom.vaultAddStatus.textContent = '';
+    dom.vaultAddStatus.classList.remove('error');
+  }
+}
+
+function handleVaultUpdate(key) {
+  openVaultPanel(key);
 }
 
 async function handleVaultSave() {
   const key = dom.vaultAddKeyInput?.value?.trim();
   const value = dom.vaultAddValueInput?.value;
+  const editing = vaultEditingKey;
 
   if (!key) {
     if (dom.vaultAddStatus) {
@@ -5063,7 +5390,7 @@ async function handleVaultSave() {
     }
     return;
   }
-  if (!value) {
+  if (!value && !editing) {
     if (dom.vaultAddStatus) {
       dom.vaultAddStatus.textContent = 'Value is required.';
       dom.vaultAddStatus.classList.add('error');
@@ -5072,15 +5399,16 @@ async function handleVaultSave() {
   }
 
   try {
-    const result = await window.electron.settings.vaultStore({ key, value });
-    if (!result?.ok) throw new Error(result?.error || 'Save failed');
-    if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.value = '';
-    if (dom.vaultAddValueInput) dom.vaultAddValueInput.value = '';
-    if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = true;
-    if (dom.vaultAddStatus) {
-      dom.vaultAddStatus.textContent = '';
-      dom.vaultAddStatus.classList.remove('error');
+    let result;
+    if (editing) {
+      const payload = { oldKey: editing, newKey: key };
+      if (value) payload.value = value;
+      result = await window.electron.settings.vaultUpdate(payload);
+    } else {
+      result = await window.electron.settings.vaultStore({ key, value });
     }
+    if (!result?.ok) throw new Error(result?.error || 'Save failed');
+    closeVaultPanel();
     await loadVaultEntries();
   } catch (err) {
     if (dom.vaultAddStatus) {
@@ -5115,84 +5443,29 @@ function setMcpStatus(text, isError = false) {
 
 function renderMcpServers(servers = []) {
   if (!dom.mcpList) return;
-  dom.mcpList.innerHTML = '';
+  dom.mcpList.textContent = '';
 
   if (servers.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'provider-message';
-    empty.textContent = 'No MCP servers configured. Click "Add Server" to connect one.';
-    dom.mcpList.appendChild(empty);
+    dom.mcpList.appendChild(listEmptyLine('No MCP servers yet. Add one to give agents its tools.'));
     return;
   }
 
-  servers.forEach((s) => {
-    const card = document.createElement('div');
-    card.className = 'provider-card';
-    card.dataset.mcpName = s.name;
-
-    const header = document.createElement('div');
-    header.className = 'provider-header';
-
-    const titleWrap = document.createElement('div');
-    titleWrap.className = 'provider-title-wrap';
-
-    const title = document.createElement('div');
-    title.className = 'provider-title';
-    title.textContent = s.name;
-
-    const meta = document.createElement('div');
-    meta.className = 'provider-message';
+  for (const s of servers) {
     const cmdLine = `${s.command} ${(s.args || []).join(' ')}`.trim();
-    const toolsText = s.connected
-      ? `Connected • ${(s.tools || []).length} tool(s)`
-      : 'Disconnected';
-    meta.textContent = `${cmdLine} • ${toolsText}`;
-
-    titleWrap.appendChild(title);
-    titleWrap.appendChild(meta);
-
-    const status = document.createElement('span');
-    status.className = `provider-status ${s.connected ? 'ok' : 'error'}`;
-    status.textContent = s.connected ? 'Connected' : 'Offline';
-
-    header.appendChild(titleWrap);
-    header.appendChild(status);
-
-    const actions = document.createElement('div');
-    actions.className = 'provider-actions';
-
-    const reloadBtn = document.createElement('button');
-    reloadBtn.type = 'button';
-    reloadBtn.className = 'btn';
-    reloadBtn.appendChild(faIcon('fas fa-rotate'));
-    reloadBtn.appendChild(document.createTextNode(' Reconnect'));
-    reloadBtn.dataset.action = 'reload-mcp';
-    reloadBtn.dataset.mcpName = s.name;
-
-    const editBtn = document.createElement('button');
-    editBtn.type = 'button';
-    editBtn.className = 'btn';
-    editBtn.appendChild(faIcon('fas fa-pen'));
-    editBtn.appendChild(document.createTextNode(' Edit'));
-    editBtn.dataset.action = 'edit-mcp';
-    editBtn.dataset.mcpName = s.name;
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type = 'button';
-    deleteBtn.className = 'btn btn-danger';
-    deleteBtn.appendChild(faIcon('fas fa-trash'));
-    deleteBtn.appendChild(document.createTextNode(' Delete'));
-    deleteBtn.dataset.action = 'delete-mcp';
-    deleteBtn.dataset.mcpName = s.name;
-
-    actions.appendChild(reloadBtn);
-    actions.appendChild(editBtn);
-    actions.appendChild(deleteBtn);
-
-    card.appendChild(header);
-    card.appendChild(actions);
-    dom.mcpList.appendChild(card);
-  });
+    const tools = (s.tools || []).length;
+    const detail = s.connected ? `${tools} tool${tools === 1 ? '' : 's'} · ${cmdLine}` : cmdLine;
+    dom.mcpList.appendChild(buildSettingsListRow({
+      name: s.name,
+      detail,
+      pill: s.connected ? { text: 'Connected', tone: 'ok' } : { text: 'Offline', tone: 'bad' },
+      controls: [
+        listRowButton('Reconnect', { action: 'reload-mcp', mcpName: s.name }),
+        listRowButton('Edit', { action: 'edit-mcp', mcpName: s.name }),
+        listRowButton('Delete', { action: 'delete-mcp', mcpName: s.name }, { danger: true })
+      ],
+      dataset: { mcpName: s.name }
+    }));
+  }
 }
 
 async function getVaultKeysForAutocomplete() {
@@ -5270,7 +5543,7 @@ function collectMcpEnvFromForm() {
 function openMcpEditPanel(server = null) {
   mcpEditingName = server?.name || null;
   if (dom.mcpEditTitle) {
-    dom.mcpEditTitle.textContent = server ? `Edit "${server.name}"` : 'Add MCP Server';
+    dom.mcpEditTitle.textContent = server ? `Edit "${server.name}"` : 'Add an MCP server';
   }
   if (dom.mcpNameInput) dom.mcpNameInput.value = server?.name || '';
   if (dom.mcpCommandInput) dom.mcpCommandInput.value = server?.command || '';
@@ -5348,7 +5621,7 @@ async function handleMcpEdit(name) {
 }
 
 async function handleMcpDelete(name) {
-  if (!confirm(`Delete MCP server "${name}"? This will disconnect it immediately.`)) return;
+  if (!(await showConfirmDialog(`Delete the MCP server "${name}"? It disconnects at once.`))) return;
   try {
     const result = await window.electron.settings.mcpDelete({ name });
     if (!result?.ok) throw new Error(result?.error || 'Delete failed');
@@ -5386,126 +5659,45 @@ async function handleMcpReloadAll() {
 // ── Skills List ────────────────────────────────────────────
 
 function renderSkillCard(skill) {
-  const card = document.createElement('div');
-  card.className = 'provider-card';
-  card.dataset.skillId = skill.id;
-
-  const header = document.createElement('div');
-  header.className = 'provider-header';
-
-  const titleWrap = document.createElement('div');
-  titleWrap.className = 'provider-title-wrap';
-
-  const title = document.createElement('div');
-  title.className = 'provider-title';
-  title.textContent = skill.name;
-
-  const versionBadge = document.createElement('span');
-  versionBadge.className = 'active-provider-badge';
-  versionBadge.textContent = `v${skill.version || '?'}`;
-
-  titleWrap.appendChild(title);
-  titleWrap.appendChild(versionBadge);
-
-  if (skill._updateInfo?.updateAvailable) {
-    const updateBadge = document.createElement('span');
-    updateBadge.className = 'active-provider-badge skill-update-badge';
-    const remoteVer = skill._updateInfo.remoteVersion;
-    updateBadge.textContent = remoteVer ? `v${remoteVer} available` : 'Update available';
-    updateBadge.title = skill._updateInfo.behind
-      ? `${skill._updateInfo.behind} commit(s) behind`
-      : 'New version available';
-    titleWrap.appendChild(updateBadge);
-  }
-
-  const status = document.createElement('span');
-  status.className = 'provider-status';
-  if (skill.enabled !== false) {
-    status.classList.add('ok');
-    status.textContent = 'Enabled';
-  } else {
-    status.classList.add('error');
-    status.textContent = 'Disabled';
-  }
-
-  header.appendChild(titleWrap);
-  header.appendChild(status);
-
-  const desc = document.createElement('div');
-  desc.className = 'provider-message';
   const commands = (skill.commands || []).map((c) => `/${c}`).join(', ');
-  desc.textContent = `${skill.description || ''}${commands ? ` — Commands: ${commands}` : ''}`;
-
-  const actions = document.createElement('div');
-  actions.className = 'provider-actions';
-
-  const toggleBtn = document.createElement('button');
-  toggleBtn.type = 'button';
-  toggleBtn.dataset.action = 'toggle-skill';
-  toggleBtn.dataset.skillId = skill.id;
-  if (skill.enabled !== false) {
-    toggleBtn.className = 'btn btn-danger';
-    toggleBtn.dataset.nextEnabled = 'false';
-    toggleBtn.appendChild(faIcon('fas fa-toggle-on'));
-    toggleBtn.appendChild(document.createTextNode(' Disable'));
-  } else {
-    toggleBtn.className = 'btn btn-primary';
-    toggleBtn.dataset.nextEnabled = 'true';
-    toggleBtn.appendChild(faIcon('fas fa-toggle-off'));
-    toggleBtn.appendChild(document.createTextNode(' Enable'));
-  }
-  actions.appendChild(toggleBtn);
-
+  const detail = [`v${skill.version || '?'}`, skill.description || '', commands ? `Commands: ${commands}` : ''].filter(Boolean).join(' · ');
+  const update = skill._updateInfo?.updateAvailable ? skill._updateInfo : null;
+  const controls = [];
   if (Array.isArray(skill.settingsSchema) && skill.settingsSchema.length > 0) {
-    const settingsBtn = document.createElement('button');
-    settingsBtn.type = 'button';
-    settingsBtn.className = 'btn';
-    settingsBtn.dataset.action = 'open-skill-settings';
-    settingsBtn.dataset.skillId = skill.id;
-    settingsBtn.appendChild(faIcon('fas fa-gear'));
-    settingsBtn.appendChild(document.createTextNode(' Settings'));
-    actions.appendChild(settingsBtn);
+    controls.push(listRowButton('Settings', { action: 'open-skill-settings', skillId: skill.id }));
   }
-
-  if (skill._updateInfo?.updateAvailable) {
-    const updateBtn = document.createElement('button');
-    updateBtn.type = 'button';
-    updateBtn.className = 'btn btn-primary';
-    updateBtn.dataset.action = 'update-skill';
-    updateBtn.dataset.skillId = skill.id;
-    updateBtn.dataset.skillName = skill.name;
-    updateBtn.appendChild(faIcon('fas fa-download'));
-    updateBtn.appendChild(document.createTextNode(' Update'));
-    actions.appendChild(updateBtn);
+  if (update) {
+    controls.push(listRowButton('Update', { action: 'update-skill', skillId: skill.id, skillName: skill.name }, { primary: true }));
   }
-
   if (skill.skillPath) {
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.className = 'btn btn-danger';
-    removeBtn.dataset.action = 'remove-skill';
-    removeBtn.dataset.skillId = skill.id;
-    removeBtn.dataset.skillName = skill.name;
-    removeBtn.appendChild(faIcon('fas fa-trash'));
-    removeBtn.appendChild(document.createTextNode(' Remove'));
-    actions.appendChild(removeBtn);
+    controls.push(listRowButton('Remove', { action: 'remove-skill', skillId: skill.id, skillName: skill.name }, { danger: true }));
   }
-
-  card.appendChild(header);
-  card.appendChild(desc);
-  card.appendChild(actions);
-  return card;
+  controls.push(listRowSwitch({
+    key: `skills.enabled.${skill.id}`,
+    checked: skill.enabled !== false,
+    label: `Skill ${skill.name}`,
+    save: (enabled) => saveSkillEnabled(skill.id, enabled)
+  }));
+  const row = buildSettingsListRow({
+    name: skill.name,
+    detail,
+    pill: update ? { text: update.remoteVersion ? `v${update.remoteVersion} available` : 'Update available', tone: 'warn' } : null,
+    controls,
+    dataset: { skillId: skill.id }
+  });
+  if (update) {
+    const pill = row.querySelector('.status-pill');
+    if (pill) pill.title = update.behind ? `${update.behind} commit(s) behind` : 'New version available';
+  }
+  return row;
 }
 
 function renderSkillsList(skills) {
   if (!dom.skillsList) return;
-  dom.skillsList.innerHTML = '';
+  dom.skillsList.textContent = '';
 
   if (!skills || skills.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'provider-message';
-    empty.textContent = 'No skills loaded. Install one from a GitHub URL or local path above.';
-    dom.skillsList.appendChild(empty);
+    dom.skillsList.appendChild(listEmptyLine('No skills loaded. Install one from a GitHub URL or a folder above.'));
     if (dom.skillsStatus) {
       dom.skillsStatus.textContent = '';
     }
@@ -5522,17 +5714,13 @@ function renderSkillsList(skills) {
   }
 }
 
-async function toggleSkillEnabled(skillId, enabled) {
-  try {
-    const result = await window.electron.skill.setEnabled({ skillId, enabled });
-    if (result?.error) throw new Error(result.error);
-    await loadSkillSettingsTabs();
-  } catch (err) {
-    if (dom.skillsStatus) {
-      dom.skillsStatus.textContent = `Error: ${err.message}`;
-      dom.skillsStatus.classList.add('error');
-    }
-  }
+// A skill's switch: resolves { ok, error? } for the auto-saver, then repaints the list
+// and the skill pages the sidebar offers.
+async function saveSkillEnabled(skillId, enabled) {
+  const result = await window.electron.skill.setEnabled({ skillId, enabled: Boolean(enabled) });
+  if (!result || result.error || result.ok === false) return { ok: false, error: result?.error || 'Could not change the skill.' };
+  loadSkillSettingsTabs().catch((err) => settingsLog.warn(`reloading skills failed: ${err.message}`));
+  return { ok: true };
 }
 
 async function installSkill() {
@@ -5777,8 +5965,6 @@ async function updateSkill(skillId, skillName) {
 }
 
 async function loadSkillSettingsTabs() {
-  if (!dom.settingsNavSelect) return;
-
   try {
     const result = unwrapIpcResult(await window.electron.skill.listWithSettings(), 'Unable to list skills.');
     const skills = Array.isArray(result) ? result : [];
@@ -5805,25 +5991,26 @@ async function loadSkillSettingsTabs() {
       (s) => Array.isArray(s.settingsSchema) && s.settingsSchema.length > 0
     );
 
-    // Remove previously injected skill options and panes
-    dom.settingsNavSelect.querySelectorAll('option[data-skill]').forEach((el) => el.remove());
+    // Replace previously injected skill pages and panes; the sidebar lists
+    // them after Skills (visibleGroups).
     if (dom.skillSettingsContainer) dom.skillSettingsContainer.innerHTML = '';
+    appState.skillSettingsPages = skillsWithSettings.map((skill) => ({ tab: `skill-${skill.id}`, label: String(skill.name || skill.id) }));
 
     for (const skill of skillsWithSettings) {
-      // Add dropdown option
-      const option = document.createElement('option');
-      option.value = `skill-${skill.id}`;
-      option.textContent = skill.name;
-      option.dataset.skill = skill.id;
-      dom.settingsNavSelect.appendChild(option);
-
-      // Add tab content pane
       if (dom.skillSettingsContainer) {
         dom.skillSettingsContainer.appendChild(renderSkillSettingsTab(skill));
       }
     }
 
-    sortSettingsNavOptions();
+    renderSettingsNav();
+    // A skill page shown before its pane was redrawn is shown again.
+    const drawerOpen = dom.settingsDrawer && !dom.settingsDrawer.hidden;
+    if (drawerOpen && appState.settingsPendingTab && settingsPageFor(appState.settingsPendingTab)) {
+      // The remembered page is offered now: restore it.
+      switchSettingsTab(appState.settingsPendingTab);
+    } else if (appState.settingsTab && appState.settingsTab.startsWith('skill-') && drawerOpen) {
+      switchSettingsTab(appState.settingsTab, { remember: false });
+    }
   } catch (err) {
     skillSettingsLog.error(`Failed to load skill settings tabs: ${err.message}`);
     // A refusal is not an empty list.
@@ -6017,67 +6204,48 @@ async function handleClearMemory() {
   }
 }
 
-async function handleToggleHook(hookName, enabled) {
-  if (!hookName) return;
-
-  try {
-    const result = await window.electron.hooks.setEnabled({
-      name: hookName,
-      enabled: Boolean(enabled)
-    });
-
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to update hook state.');
-    }
-
-    appState.settings.hooks = {
-      ...(appState.settings.hooks || {}),
-      loaded: Array.isArray(result.hooks) ? result.hooks : (appState.settings.hooks?.loaded || [])
-    };
-
-    if (dom.hooksStatus) {
-      dom.hooksStatus.textContent = `Hook '${hookName}' ${enabled ? 'enabled' : 'disabled'}.`;
-      dom.hooksStatus.classList.remove('error');
-    }
-
-    renderSettings();
-  } catch (error) {
-    if (dom.hooksStatus) {
-      dom.hooksStatus.textContent = `Error: ${error.message || 'Unable to update hook.'}`;
-      dom.hooksStatus.classList.add('error');
-    }
-  }
+// One hook's switch (Permissions & hooks): preload requires hookId. Resolves { ok, error? }
+// for the auto-saver, and keeps the page's copy of the hooks in step without a repaint.
+async function saveHookEnabled(hookName, enabled) {
+  const result = await window.electron.hooks.setEnabled({ hookId: hookName, enabled: Boolean(enabled) });
+  if (!result?.ok) return { ok: false, error: result?.error || 'Could not change the hook.' };
+  appState.settings.hooks = {
+    ...(appState.settings.hooks || {}),
+    loaded: Array.isArray(result.hooks) ? result.hooks : (appState.settings.hooks?.loaded || [])
+  };
+  return { ok: true };
 }
 
-async function handleToggleHooksGlobal(enabled) {
-  try {
-    const result = await window.electron.hooks.setGlobalEnabled({ enabled: Boolean(enabled) });
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to update global hook setting.');
-    }
+async function saveHooksGlobal(enabled) {
+  const result = await window.electron.hooks.setGlobalEnabled({ enabled: Boolean(enabled) });
+  if (!result?.ok) return { ok: false, error: result?.error || 'Could not change the hooks setting.' };
+  appState.settings.hooks = {
+    ...(appState.settings.hooks || {}),
+    enabled: Boolean(result.enabled),
+    loaded: Array.isArray(result.hooks) ? result.hooks : (appState.settings.hooks?.loaded || [])
+  };
+  return { ok: true };
+}
 
-    appState.settings.hooks = {
-      ...(appState.settings.hooks || {}),
-      enabled: Boolean(result.enabled),
-      loaded: Array.isArray(result.hooks) ? result.hooks : (appState.settings.hooks?.loaded || [])
-    };
-
-    if (dom.hooksStatus) {
-      dom.hooksStatus.textContent = `Hooks are now ${result.enabled ? 'enabled' : 'disabled'} globally.`;
-      dom.hooksStatus.classList.remove('error');
+function wireHooksGlobalSwitch() {
+  const input = dom.hooksGlobalEnabledInput;
+  if (!input) return;
+  const saver = registerSettingsAutosave('hooks.enabled', {
+    save: saveHooksGlobal,
+    onState: (state, info) => {
+      if (state === 'error') {
+        input.checked = info.saved !== undefined ? Boolean(info.saved) : !info.value;
+        greyHookRows();
+        setSettingsFieldError(input, `Not saved: ${info.error}`);
+      } else if (state === 'saved') {
+        setSettingsFieldError(input, '');
+      }
     }
-
-    renderSettings();
-  } catch (error) {
-    if (dom.hooksGlobalEnabledInput) {
-      dom.hooksGlobalEnabledInput.checked = !Boolean(enabled);
-    }
-
-    if (dom.hooksStatus) {
-      dom.hooksStatus.textContent = `Error: ${error.message || 'Unable to update hook setting.'}`;
-      dom.hooksStatus.classList.add('error');
-    }
-  }
+  });
+  input.addEventListener('change', () => {
+    greyHookRows();
+    saver.change(input.checked, { immediate: true });
+  });
 }
 
 async function handleReloadHooks() {
@@ -6089,13 +6257,14 @@ async function handleReloadHooks() {
   }
 
   try {
-    const result = await window.electron.hooks.reload();
+    // The reply is wrapped ({ ok, data }): reading .hooks off it emptied the list.
+    const result = unwrapIpcResult(await window.electron.hooks.reload(), 'Unable to reload hooks.');
     appState.settings.hooks = {
       ...(appState.settings.hooks || {}),
       enabled: result?.enabled !== false,
       loaded: Array.isArray(result?.hooks) ? result.hooks : []
     };
-    renderSettings();
+    paintHooksSection();
   } catch (error) {
     if (dom.hooksStatus) {
       dom.hooksStatus.textContent = `Error: ${error.message || 'Unable to reload hooks.'}`;
@@ -6106,220 +6275,487 @@ async function handleReloadHooks() {
   }
 }
 
-function collectTemplateVariablesFromForm() {
+// About you (settings redesign §8.1). Two stores stay: the prompt template
+// variables and the TELOS profile. Name, Role and Project context show the TELOS
+// value when it has one, else the template's, and a change writes both stores.
+// "How you like replies" is the template's preferences; Goals and the
+// Preferences JSON are TELOS's, the JSON saved only when it parses.
+let aboutYouLastField = null;
+
+function aboutYouDisplay() {
+  const tv = appState.settings.templateVariables || {};
+  const up = appState.settings.userProfile || {};
+  const pick = (telos, template) => (String(telos || '').trim() ? String(telos) : String(template || ''));
+  const prefs = up.preferences && typeof up.preferences === 'object' && !Array.isArray(up.preferences) ? up.preferences : {};
   return {
-    name: String(dom.templateNameInput?.value || '').trim(),
-    role: String(dom.templateRoleInput?.value || '').trim(),
-    preferences: String(dom.templatePreferencesInput?.value || '').trim(),
-    projectContext: String(dom.templateProjectContextInput?.value || '').trim()
+    name: pick(up.name, tv.name),
+    role: pick(up.role, tv.role),
+    projectContext: pick(up.projectContext, tv.projectContext),
+    replies: String(tv.preferences || ''),
+    goals: Array.isArray(up.goals) ? up.goals.join('\n') : '',
+    preferencesJson: Object.keys(prefs).length ? JSON.stringify(prefs, null, 2) : ''
   };
 }
 
-async function handleSaveTemplateVariables() {
-  if (!dom.saveTemplateVariablesBtn) return;
-
-  dom.saveTemplateVariablesBtn.disabled = true;
-  if (dom.templateVariablesStatus) {
-    dom.templateVariablesStatus.textContent = 'Saving...';
-    dom.templateVariablesStatus.classList.remove('error');
-  }
-
-  try {
-    const templateVariables = collectTemplateVariablesFromForm();
-    const result = await window.electron.settings.saveTemplateVariables({ templateVariables });
-
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to save template variables.');
-    }
-
-    appState.settings.templateVariables = {
-      ...(result.templateVariables || templateVariables)
-    };
-
-    if (dom.templateVariablesStatus) {
-      dom.templateVariablesStatus.textContent = 'Template variables saved. New runs use updated values.';
-      dom.templateVariablesStatus.classList.remove('error');
-    }
-  } catch (error) {
-    if (dom.templateVariablesStatus) {
-      dom.templateVariablesStatus.textContent = `Error: ${error.message || 'Unable to save template variables.'}`;
-      dom.templateVariablesStatus.classList.add('error');
-    }
-  } finally {
-    dom.saveTemplateVariablesBtn.disabled = false;
-  }
+function applyAboutYouFields() {
+  const shown = aboutYouDisplay();
+  if (dom.templateNameInput) dom.templateNameInput.value = shown.name;
+  if (dom.templateRoleInput) dom.templateRoleInput.value = shown.role;
+  if (dom.templateProjectContextInput) dom.templateProjectContextInput.value = shown.projectContext;
+  if (dom.templatePreferencesInput) dom.templatePreferencesInput.value = shown.replies;
+  if (dom.profileGoalsInput) dom.profileGoalsInput.value = shown.goals;
+  if (dom.profilePreferencesInput) dom.profilePreferencesInput.value = shown.preferencesJson;
 }
 
-function collectUserProfileFromForm() {
-  const goals = String(dom.profileGoalsInput?.value || '')
-    .split(/\r?\n/)
-    .map((goal) => goal.trim())
-    .filter(Boolean);
-
-  const rawPreferences = String(dom.profilePreferencesInput?.value || '').trim();
-  let preferences = {};
-  if (rawPreferences) {
-    const parsed = JSON.parse(rawPreferences);
+// { ok, value } or { ok: false, error }: blank is an empty object.
+function parseProfilePreferences(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { ok: true, value: {} };
+  try {
+    const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Preferences must be valid JSON object syntax.');
+      return { ok: false, error: 'Preferences must be a JSON object.' };
     }
-    preferences = parsed;
+    return { ok: true, value: parsed };
+  } catch {
+    return { ok: false, error: 'Preferences must be valid JSON.' };
   }
+}
 
+// Both stores in full, from the page. A Preferences JSON that does not parse keeps
+// the stored one.
+function aboutYouFromForm() {
+  const text = (el) => String(el?.value || '').trim();
+  const name = text(dom.templateNameInput);
+  const role = text(dom.templateRoleInput);
+  const projectContext = text(dom.templateProjectContextInput);
+  const parsed = parseProfilePreferences(dom.profilePreferencesInput?.value);
+  const stored = (appState.settings.userProfile || {}).preferences;
   return {
-    name: String(dom.profileNameInput?.value || '').trim(),
-    role: String(dom.profileRoleInput?.value || '').trim(),
-    goals,
-    preferences,
-    projectContext: String(dom.profileProjectContextInput?.value || '').trim()
+    templateVariables: { name, role, preferences: text(dom.templatePreferencesInput), projectContext },
+    profile: {
+      name,
+      role,
+      goals: String(dom.profileGoalsInput?.value || '').split(/\r?\n/).map((g) => g.trim()).filter(Boolean),
+      preferences: parsed.ok ? parsed.value : (stored && typeof stored === 'object' ? stored : {}),
+      projectContext
+    }
   };
 }
 
-async function handleSaveUserProfile() {
-  if (!dom.saveUserProfileBtn) return;
-
-  dom.saveUserProfileBtn.disabled = true;
-  if (dom.userProfileStatus) {
-    dom.userProfileStatus.textContent = 'Saving...';
-    dom.userProfileStatus.classList.remove('error');
+// TELOS first: it is the store the page shows where the two disagree, so a
+// failure of the second write leaves the page showing what was saved.
+async function saveAboutYou(snapshot) {
+  const up = await window.electron.settings.saveUserProfile({ profile: snapshot.profile });
+  if (!up?.ok) return { ok: false, error: up?.error || 'Could not save.' };
+  appState.settings.userProfile = { ...(up.userProfile || snapshot.profile) };
+  const tv = await window.electron.settings.saveTemplateVariables({ templateVariables: snapshot.templateVariables });
+  if (!tv?.ok) {
+    return { ok: false, error: `the prompt template variables (your profile did save): ${tv?.error || 'Could not save.'}` };
   }
+  appState.settings.templateVariables = { ...(tv.templateVariables || snapshot.templateVariables) };
+  return { ok: true };
+}
 
-  try {
-    const profile = collectUserProfileFromForm();
-    const result = await window.electron.settings.saveUserProfile({ profile });
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to save user profile.');
-    }
-
-    appState.settings.userProfile = {
-      ...(result.userProfile || profile)
-    };
-
-    if (dom.userProfileStatus) {
-      dom.userProfileStatus.textContent = 'User profile saved. New agent runs include it in context.';
-      dom.userProfileStatus.classList.remove('error');
-    }
-  } catch (error) {
-    if (dom.userProfileStatus) {
-      dom.userProfileStatus.textContent = `Error: ${error.message || 'Unable to save user profile.'}`;
-      dom.userProfileStatus.classList.add('error');
-    }
-  } finally {
-    dom.saveUserProfileBtn.disabled = false;
+function onAboutYouState(state, info) {
+  const pane = document.querySelector('.settings-tab-content[data-tab="profile"]');
+  if (state === 'error') {
+    applyAboutYouFields();
+    setSettingsFieldError(aboutYouLastField || dom.templateNameInput, `Not saved: ${info.error}`);
+  } else if (state === 'saved') {
+    clearSettingsFieldErrors(pane);
+    const parsed = parseProfilePreferences(dom.profilePreferencesInput?.value);
+    if (!parsed.ok) setSettingsFieldError(dom.profilePreferencesInput, `Not saved: ${parsed.error}`);
   }
 }
 
-function collectNotificationsFromForm() {
-  const toastSeconds = Math.max(0, Number(dom.notificationsToastThresholdInput?.value || 30));
-  const externalSeconds = Math.max(toastSeconds, Number(dom.notificationsExternalThresholdInput?.value || 120));
+function wireAboutYou() {
+  const saver = registerSettingsAutosave('profile.aboutYou', { save: saveAboutYou, onState: onAboutYouState });
+  const fields = [dom.templateNameInput, dom.templateRoleInput, dom.templatePreferencesInput, dom.profileGoalsInput, dom.templateProjectContextInput];
+  for (const el of fields) {
+    el?.addEventListener('input', () => {
+      aboutYouLastField = el;
+      saver.change(aboutYouFromForm());
+    });
+  }
+  const prefs = dom.profilePreferencesInput;
+  prefs?.addEventListener('input', () => {
+    const parsed = parseProfilePreferences(prefs.value);
+    if (!parsed.ok) {
+      setSettingsFieldError(prefs, `Not saved: ${parsed.error}`);
+      return;
+    }
+    setSettingsFieldError(prefs, '');
+    aboutYouLastField = prefs;
+    saver.change(aboutYouFromForm());
+  });
+}
 
+// Notifications (settings redesign §5.8): one saver for the page. The host merges
+// what it is given over the stored settings one level deep, so every save sends the
+// whole object. Thresholds are seconds on the page and milliseconds in the store.
+const NOTIFICATION_SWITCHES = [
+  { dom: 'notificationsEnabledInput', shown: (n) => n.enabled !== false },
+  { dom: 'notificationsUiToastEnabledInput', shown: (n) => n.uiToast?.enabled !== false },
+  { dom: 'notificationsNtfyEnabledInput', shown: (n) => n.ntfy?.enabled === true },
+  { dom: 'notificationsTelegramLongTaskInput', shown: (n) => n.telegram?.longTaskNotice !== false }
+];
+let notificationsLastField = null;
+
+function storedNotificationThresholdsMs() {
+  const t = (appState.settings.notifications || {}).thresholdsMs || {};
+  return { toast: Number(t.toast || 30000), external: Number(t.external || 120000) };
+}
+
+function applyNotificationField(el) {
+  if (!el) return;
+  const n = appState.settings.notifications || {};
+  const ms = storedNotificationThresholdsMs();
+  delete el.dataset.invalid;
+  delete el.dataset.dirty;
+  const sw = NOTIFICATION_SWITCHES.find((f) => dom[f.dom] === el);
+  if (sw) el.checked = sw.shown(n);
+  else if (el === dom.notificationsToastThresholdInput) el.value = String(ms.toast / 1000);
+  else if (el === dom.notificationsExternalThresholdInput) el.value = String(ms.external / 1000);
+  else if (el === dom.notificationsNtfyTopicInput) el.value = String(n.ntfy?.topic || '');
+}
+
+function notificationFieldEls() {
+  return [
+    ...NOTIFICATION_SWITCHES.map((f) => dom[f.dom]),
+    dom.notificationsToastThresholdInput, dom.notificationsExternalThresholdInput, dom.notificationsNtfyTopicInput
+  ].filter(Boolean);
+}
+
+function applyNotificationFields() {
+  notificationFieldEls().forEach(applyNotificationField);
+  paintNotificationsPane();
+}
+
+// Only what applies (§5.8 rule 2): everything greyed while notifications are off,
+// the toast's threshold until the toast is on, the topic until ntfy is on, and the
+// ntfy and Telegram threshold until one of them is on.
+function paintNotificationsPane() {
+  const on = Boolean(dom.notificationsEnabledInput?.checked);
+  const toast = Boolean(dom.notificationsUiToastEnabledInput?.checked);
+  const ntfy = Boolean(dom.notificationsNtfyEnabledInput?.checked);
+  const telegram = Boolean(dom.notificationsTelegramLongTaskInput?.checked);
+  dom.notificationsDependentRows?.querySelectorAll('.settings-row').forEach((row) => {
+    let greyed = !on;
+    if (!greyed && row.contains(dom.notificationsToastThresholdInput)) greyed = !toast;
+    if (!greyed && row.contains(dom.notificationsNtfyTopicInput)) greyed = !ntfy;
+    if (!greyed && row.contains(dom.notificationsExternalThresholdInput)) greyed = !ntfy && !telegram;
+    setSettingsRowGreyed(row, greyed);
+  });
+}
+
+function notificationSeconds(el) {
+  const raw = String(el?.value ?? '').trim();
+  const n = Number(raw);
+  // The host reads 0 as unset (and stores its default), so 1 s is the least.
+  return raw === '' || !Number.isFinite(n) || n < 1 ? null : n;
+}
+
+// A threshold field's milliseconds, or the stored value while the field holds one
+// that cannot be saved.
+function notificationThresholdMs(el, storedMs) {
+  if (!el || el.dataset.invalid) return storedMs;
+  const n = notificationSeconds(el);
+  return n === null ? storedMs : unitToMs(n, 's');
+}
+
+function notificationThresholdsMs() {
+  const stored = storedNotificationThresholdsMs();
+  return {
+    toast: notificationThresholdMs(dom.notificationsToastThresholdInput, stored.toast),
+    external: notificationThresholdMs(dom.notificationsExternalThresholdInput, stored.external)
+  };
+}
+
+// Why a threshold field's value cannot be saved, or ''. The host keeps ntfy and
+// Telegram no sooner than the toast (external >= toast); the page says so instead of
+// letting the host change the number silently.
+function notificationThresholdProblem(el) {
+  const n = notificationSeconds(el);
+  if (n === null) return 'Not saved: enter a number of seconds, 1 or more.';
+  const stored = storedNotificationThresholdsMs();
+  const ms = unitToMs(n, 's');
+  if (el === dom.notificationsToastThresholdInput) {
+    const external = notificationThresholdMs(dom.notificationsExternalThresholdInput, stored.external);
+    if (ms > external) return `Not saved: the toast comes before ntfy and Telegram, so this must be at most ${external / 1000} s.`;
+  } else {
+    const toast = notificationThresholdMs(dom.notificationsToastThresholdInput, stored.toast);
+    if (ms < toast) return `Not saved: ntfy and Telegram are told no sooner than the toast, so this must be at least ${toast / 1000} s.`;
+  }
+  return '';
+}
+
+function notificationsFromForm() {
   return {
     enabled: Boolean(dom.notificationsEnabledInput?.checked),
-    thresholdsMs: {
-      toast: Math.round(toastSeconds * 1000),
-      external: Math.round(externalSeconds * 1000)
-    },
-    uiToast: {
-      enabled: Boolean(dom.notificationsUiToastEnabledInput?.checked)
-    },
+    thresholdsMs: notificationThresholdsMs(),
+    uiToast: { enabled: Boolean(dom.notificationsUiToastEnabledInput?.checked) },
     ntfy: {
       enabled: Boolean(dom.notificationsNtfyEnabledInput?.checked),
       topic: String(dom.notificationsNtfyTopicInput?.value || '').trim()
     },
-    telegram: {
-      longTaskNotice: Boolean(dom.notificationsTelegramLongTaskInput?.checked)
-    }
+    telegram: { longTaskNotice: Boolean(dom.notificationsTelegramLongTaskInput?.checked) }
   };
 }
 
-async function handleSaveNotifications() {
-  if (!dom.saveNotificationsBtn) return;
+async function saveNotificationsValue(notifications) {
+  const result = await window.electron.settings.saveNotifications({ notifications });
+  if (!result?.ok) return { ok: false, error: result?.error || 'Could not save the notification settings.' };
+  appState.settings.notifications = { ...(result.notifications || notifications) };
+  return { ok: true };
+}
 
-  dom.saveNotificationsBtn.disabled = true;
-  if (dom.notificationsStatus) {
-    dom.notificationsStatus.textContent = 'Saving...';
-    dom.notificationsStatus.classList.remove('error');
+function wireNotificationFields() {
+  const pane = () => document.querySelector('.settings-tab-content[data-tab="notifications"]');
+  const saver = registerSettingsAutosave('notifications', {
+    save: saveNotificationsValue,
+    onState: (state, info) => {
+      const field = notificationsLastField;
+      if (state === 'error') {
+        applyNotificationFields();
+        clearSettingsFieldErrors(pane());
+        setSettingsFieldError(field, `Not saved: ${info.error}`);
+      } else if (state === 'saved' && field && !field.dataset.invalid) {
+        setSettingsFieldError(field, '');
+        if (document.activeElement !== field) applyNotificationField(field);
+      }
+    }
+  });
+  const thresholds = [dom.notificationsToastThresholdInput, dom.notificationsExternalThresholdInput].filter(Boolean);
+  // A text field queues the page after the debounce, and on blur sends the page as it
+  // stands then. Not saver.flush(): a flush also sends, at once, whatever another
+  // field queued while its save was in flight (tab to the toast, type 2 while the
+  // external value saves, and 2 would be saved before the debounce let 200 replace it).
+  const queue = (el) => {
+    notificationsLastField = el;
+    el.dataset.dirty = '1';
+    saver.change(notificationsFromForm());
+  };
+  const sendOnBlur = (el) => {
+    if (!el.dataset.dirty) return;
+    delete el.dataset.dirty;
+    saver.change(notificationsFromForm(), { immediate: true });
+  };
+  for (const f of NOTIFICATION_SWITCHES) {
+    const el = dom[f.dom];
+    el?.addEventListener('change', () => {
+      notificationsLastField = el;
+      setSettingsFieldError(el, '');
+      paintNotificationsPane();
+      saver.change(notificationsFromForm(), { immediate: true });
+    });
   }
+  for (const el of thresholds) {
+    el.addEventListener('input', () => {
+      const problem = notificationThresholdProblem(el);
+      if (problem) {
+        el.dataset.invalid = '1';
+        setSettingsFieldError(el, problem);
+        // Replace any value queued from an earlier keystroke (2, then 20, then a
+        // refused 200 must not save 20): this field now sends its stored value.
+        queue(el);
+        return;
+      }
+      delete el.dataset.invalid;
+      setSettingsFieldError(el, '');
+      // The other threshold may have been refused against this one's old value.
+      for (const other of thresholds) {
+        if (other !== el && other.dataset.invalid && !notificationThresholdProblem(other)) {
+          delete other.dataset.invalid;
+          setSettingsFieldError(other, '');
+        }
+      }
+      queue(el);
+    });
+    el.addEventListener('blur', () => sendOnBlur(el));
+  }
+  const topic = dom.notificationsNtfyTopicInput;
+  topic?.addEventListener('input', () => queue(topic));
+  topic?.addEventListener('blur', () => sendOnBlur(topic));
+}
 
-  try {
-    const notifications = collectNotificationsFromForm();
-    const result = await window.electron.settings.saveNotifications({ notifications });
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to save notification settings.');
-    }
+// Voice (settings redesign §5.8): each field saves as it changes. saveVoice merges
+// what it is given into the stored settings, so a field sends only itself.
+const VOICE_FIELDS = [
+  { key: 'enabled', dom: 'voiceEnabledInput', kind: 'switch', shown: (v) => v.enabled === true },
+  { key: 'speakChatResponses', dom: 'voiceSpeakChatInput', kind: 'switch', shown: (v) => v.speakChatResponses === true },
+  { key: 'speakAgentSummary', dom: 'voiceSpeakAgentSummaryInput', kind: 'switch', shown: (v) => v.speakAgentSummary !== false },
+  { key: 'telegramVoiceForLongResponses', dom: 'voiceTelegramLongInput', kind: 'switch', shown: (v) => v.telegramVoiceForLongResponses === true },
+  { key: 'engine', dom: 'voiceEngineInput', kind: 'select', shown: (v) => (String(v.engine || '').toLowerCase() === 'elevenlabs' ? 'elevenlabs' : 'system') },
+  { key: 'voiceId', dom: 'voiceIdInput', kind: 'text', shown: (v) => String(v.voiceId || '') },
+  { key: 'speed', dom: 'voiceSpeedInput', kind: 'number', shown: (v) => String(Number(v.speed || 1)) },
+  { key: 'stability', dom: 'voiceStabilityInput', kind: 'number', shown: (v) => String(Number(v.stability || 0.5)) },
+  { key: 'style', dom: 'voiceStyleInput', kind: 'number', shown: (v) => String(Number(v.style || 0.25)) },
+  { key: 'summaryMaxChars', dom: 'voiceSummaryMaxInput', kind: 'chars', shown: (v) => String(Number(v.summaryMaxChars || 260)) },
+  { key: 'telegramMinChars', dom: 'voiceTelegramMinInput', kind: 'chars', shown: (v) => String(Number(v.telegramMinChars || 500)) }
+];
 
-    appState.settings.notifications = {
-      ...(result.notifications || notifications)
-    };
+function applyVoiceField(field, voice) {
+  const el = dom[field.dom];
+  if (!el) return;
+  if (field.kind === 'switch') el.checked = field.shown(voice);
+  else el.value = field.shown(voice);
+}
 
-    if (dom.notificationsStatus) {
-      dom.notificationsStatus.textContent = 'Notification settings saved.';
-      dom.notificationsStatus.classList.remove('error');
-    }
-  } catch (error) {
-    if (dom.notificationsStatus) {
-      dom.notificationsStatus.textContent = `Error: ${error.message || 'Unable to save notification settings.'}`;
-      dom.notificationsStatus.classList.add('error');
-    }
-  } finally {
-    dom.saveNotificationsBtn.disabled = false;
+function applyVoiceFields() {
+  const voice = appState.settings.voice || {};
+  for (const field of VOICE_FIELDS) applyVoiceField(field, voice);
+  paintVoicePane();
+}
+
+// The value a field holds, or { invalid } for a number that is not one.
+function voiceFieldValue(field) {
+  const el = dom[field.dom];
+  if (field.kind === 'switch') return Boolean(el.checked);
+  if (field.kind === 'select') return el.value === 'elevenlabs' ? 'elevenlabs' : 'system';
+  if (field.kind === 'text') return String(el.value || '').trim();
+  const n = Number(el.value);
+  if (String(el.value).trim() === '' || !Number.isFinite(n)) return { invalid: 'Enter a number.' };
+  return field.kind === 'chars' ? Math.max(80, Math.round(n)) : n;
+}
+
+function setSettingsRowGreyed(row, greyed) {
+  row.classList.toggle('is-greyed', greyed);
+  row.querySelectorAll('input, select, button').forEach((control) => { control.disabled = greyed; });
+}
+
+// The voice's own control: this computer's voices in a list when the settings
+// live on this computer and it has some (§8.4), else the text field.
+function voiceUsesSystemList() {
+  const voices = appState.systemVoices;
+  return dom.voiceEngineInput?.value !== 'elevenlabs'
+    && voicesAreLocal(appState.desktopStatus)
+    && Array.isArray(voices) && voices.length > 0;
+}
+
+function fillVoiceSelect(voices, current) {
+  const select = dom.voiceSystemSelect;
+  if (!select) return;
+  const option = (value, label) => {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    return o;
+  };
+  const options = [option('', 'Default voice'), ...voices.map((v) => option(v, v))];
+  if (current && !voices.includes(current)) options.push(option(current, current));
+  select.replaceChildren(...options);
+  select.value = current;
+}
+
+// Only what applies (§5.8 rules 2 and 4): everything under Voice output greyed
+// until it is on, the two lengths until their switch is on, ElevenLabs's fields
+// only when it is the engine.
+function paintVoicePane() {
+  const on = Boolean(dom.voiceEnabledInput?.checked);
+  const elevenlabs = dom.voiceEngineInput?.value === 'elevenlabs';
+  if (dom.voiceElevenLabsFields) dom.voiceElevenLabsFields.hidden = !elevenlabs;
+  const useList = voiceUsesSystemList();
+  if (dom.voiceSystemSelect) {
+    dom.voiceSystemSelect.hidden = !useList;
+    if (useList) fillVoiceSelect(appState.systemVoices, String(dom.voiceIdInput?.value || '').trim());
+  }
+  if (dom.voiceIdInput) {
+    dom.voiceIdInput.hidden = useList;
+    dom.voiceIdInput.placeholder = elevenlabs ? 'ElevenLabs voice ID' : 'Voice name (blank for the default)';
+  }
+  dom.voiceDependentRows?.querySelectorAll('.settings-row').forEach((row) => {
+    let greyed = !on;
+    if (!greyed && row.contains(dom.voiceSummaryMaxInput)) greyed = !dom.voiceSpeakAgentSummaryInput?.checked;
+    if (!greyed && row.contains(dom.voiceTelegramMinInput)) greyed = !dom.voiceTelegramLongInput?.checked;
+    setSettingsRowGreyed(row, greyed);
+  });
+  if (dom.voiceStatus && !dom.voiceStatus.classList.contains('error')) {
+    const voice = appState.settings.voice || {};
+    dom.voiceStatus.textContent = elevenlabs
+      ? (voice.hasElevenLabsKey ? 'ElevenLabs key is saved.' : 'No ElevenLabs key is saved.')
+      : '';
   }
 }
 
+// This computer's voices, asked once a session, only when they are the right
+// computer's (§8.4: a fleet node keeps the text field).
+let systemVoicesRequest = null;
+function loadSystemVoices() {
+  if (Array.isArray(appState.systemVoices) || systemVoicesRequest) return systemVoicesRequest;
+  if (!voicesAreLocal(appState.desktopStatus) || !window.electron?.settings?.listVoices) return null;
+  systemVoicesRequest = window.electron.settings.listVoices()
+    .then((out) => (out && out.ok && Array.isArray(out.voices) ? out.voices.filter((v) => typeof v === 'string' && v) : []))
+    .catch(() => [])
+    .then((voices) => {
+      appState.systemVoices = voices;
+      systemVoicesRequest = null;
+      paintVoicePane();
+    });
+  return systemVoicesRequest;
+}
+
+async function saveVoiceField(key, value) {
+  const result = await window.electron.settings.saveVoice({ voice: { [key]: value } });
+  if (!result?.ok) return { ok: false, error: result?.error || 'Could not save the voice setting.' };
+  appState.settings.voice = { ...(appState.settings.voice || {}), ...(result.voice || { [key]: value }) };
+  return { ok: true };
+}
+
+function wireVoiceFields() {
+  for (const field of VOICE_FIELDS) {
+    const el = dom[field.dom];
+    if (!el) continue;
+    // The voice's error goes beside whichever control is showing.
+    const shownControl = () => (field.key === 'voiceId' && voiceUsesSystemList() ? dom.voiceSystemSelect : el);
+    const saver = registerSettingsAutosave(`voice.${field.key}`, {
+      save: (value) => saveVoiceField(field.key, value),
+      onState: (state, info) => {
+        if (state === 'error') {
+          applyVoiceField(field, appState.settings.voice || {});
+          paintVoicePane();
+          setSettingsFieldError(shownControl(), `Not saved: ${info.error}`);
+        } else if (state === 'saved') {
+          setSettingsFieldError(shownControl(), '');
+          // Show what the host stored (speed 3 is stored as 2), unless the owner is
+          // still typing there: blur flushes, and this runs again then.
+          if (document.activeElement !== el) {
+            applyVoiceField(field, appState.settings.voice || {});
+            if (field.key === 'voiceId') paintVoicePane();
+          }
+        }
+      }
+    });
+    const immediate = field.kind === 'switch' || field.kind === 'select';
+    el.addEventListener(immediate ? 'change' : 'input', () => {
+      const value = voiceFieldValue(field);
+      if (value && typeof value === 'object' && value.invalid) {
+        setSettingsFieldError(el, value.invalid);
+        return;
+      }
+      setSettingsFieldError(el, '');
+      if (immediate) paintVoicePane();
+      saver.change(value, immediate ? { immediate: true } : undefined);
+    });
+    if (!immediate) el.addEventListener('blur', () => { saver.flush(); });
+    if (field.key === 'voiceId' && dom.voiceSystemSelect) {
+      dom.voiceSystemSelect.addEventListener('change', () => {
+        el.value = dom.voiceSystemSelect.value;
+        saver.change(el.value, { immediate: true });
+      });
+    }
+  }
+}
+
+// What Test voice sends: the page as it stands (a number that is not one, as stored).
 function collectVoiceFromForm() {
-  const toNumber = (value, fallback) => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  };
-
-  return {
-    enabled: Boolean(dom.voiceEnabledInput?.checked),
-    speakChatResponses: Boolean(dom.voiceSpeakChatInput?.checked),
-    speakAgentSummary: Boolean(dom.voiceSpeakAgentSummaryInput?.checked),
-    telegramVoiceForLongResponses: Boolean(dom.voiceTelegramLongInput?.checked),
-    engine: String(dom.voiceEngineInput?.value || 'system').toLowerCase() === 'elevenlabs' ? 'elevenlabs' : 'system',
-    voiceId: String(dom.voiceIdInput?.value || '').trim(),
-    speed: toNumber(dom.voiceSpeedInput?.value, 1),
-    stability: toNumber(dom.voiceStabilityInput?.value, 0.5),
-    style: toNumber(dom.voiceStyleInput?.value, 0.25),
-    summaryMaxChars: Math.max(80, Math.round(toNumber(dom.voiceSummaryMaxInput?.value, 260))),
-    telegramMinChars: Math.max(80, Math.round(toNumber(dom.voiceTelegramMinInput?.value, 500)))
-  };
-}
-
-async function handleSaveVoiceSettings() {
-  if (!dom.saveVoiceSettingsBtn) return;
-
-  dom.saveVoiceSettingsBtn.disabled = true;
-  if (dom.voiceStatus) {
-    dom.voiceStatus.textContent = 'Saving voice settings...';
-    dom.voiceStatus.classList.remove('error');
+  const stored = appState.settings.voice || {};
+  const voice = {};
+  for (const field of VOICE_FIELDS) {
+    const value = voiceFieldValue(field);
+    voice[field.key] = value && typeof value === 'object' ? Number(field.shown(stored)) : value;
   }
-
-  try {
-    const voice = collectVoiceFromForm();
-    const result = await window.electron.settings.saveVoice({ voice });
-    if (!result?.ok) {
-      throw new Error(result?.error || 'Unable to save voice settings.');
-    }
-
-    appState.settings.voice = {
-      ...(appState.settings.voice || {}),
-      ...(result.voice || voice)
-    };
-
-    if (dom.voiceStatus) {
-      dom.voiceStatus.textContent = 'Voice settings saved.';
-      dom.voiceStatus.classList.remove('error');
-    }
-  } catch (error) {
-    if (dom.voiceStatus) {
-      dom.voiceStatus.textContent = `Error: ${error.message || 'Unable to save voice settings.'}`;
-      dom.voiceStatus.classList.add('error');
-    }
-  } finally {
-    dom.saveVoiceSettingsBtn.disabled = false;
-  }
+  return voice;
 }
 
 async function handleSaveElevenLabsKey() {
@@ -7162,17 +7598,14 @@ async function loadSystemApps() {
 
 function renderSystemApps(apps = []) {
   if (!dom.appsList) return;
-  dom.appsList.innerHTML = '';
+  dom.appsList.textContent = '';
 
   if (apps.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'provider-message';
-    empty.textContent = 'No apps detected. Click "Re-scan System" to discover installed applications.';
-    dom.appsList.appendChild(empty);
+    dom.appsList.appendChild(listEmptyLine('No apps found. Scan again to look for installed programs.'));
     return;
   }
 
-  // Group by category
+  // Grouped by category. Every field is the scan's or the owner's: text only.
   const byCategory = {};
   apps.forEach(app => {
     const cat = app.category || 'other';
@@ -7181,49 +7614,25 @@ function renderSystemApps(apps = []) {
   });
 
   for (const [category, catApps] of Object.entries(byCategory)) {
-    const header = document.createElement('div');
-    header.style.cssText = 'font-weight: bold; margin-top: 12px; margin-bottom: 4px; text-transform: capitalize; color: var(--text-secondary);';
-    header.textContent = category;
+    const header = document.createElement('p');
+    header.className = 'settings-section-label';
+    header.textContent = category.charAt(0).toUpperCase() + category.slice(1);
     dom.appsList.appendChild(header);
 
-    catApps.forEach(app => {
-      const card = document.createElement('div');
-      card.className = 'provider-card';
-      card.dataset.appId = app.id;
-
-      const headerEl = document.createElement('div');
-      headerEl.className = 'provider-header';
-      headerEl.innerHTML = `<strong>${app.id}</strong>${app.custom ? ' <span style="color: #4a9eff; margin-left: 8px;">custom</span>' : ''}`;
-
-      const body = document.createElement('div');
-      body.className = 'provider-message';
-      body.innerHTML = `${app.description || ''}<br><span style="color: var(--text-secondary);">Launch: <code>${app.launchCmd}</code></span>`;
-
-      if (app.capabilities && app.capabilities.length) {
-        const caps = document.createElement('div');
-        caps.style.cssText = 'margin-top: 4px; color: var(--text-secondary);';
-        caps.textContent = `Capabilities: ${app.capabilities.join(', ')}`;
-        body.appendChild(caps);
-      }
-
-      card.appendChild(headerEl);
-      card.appendChild(body);
-
-      if (app.custom) {
-        const actions = document.createElement('div');
-        actions.className = 'provider-actions';
-        actions.style.marginTop = '6px';
-        const removeBtn = document.createElement('button');
-        removeBtn.className = 'btn btn-danger';
-        removeBtn.textContent = 'Remove';
-        removeBtn.dataset.action = 'remove-app';
-        removeBtn.dataset.appId = app.id;
-        actions.appendChild(removeBtn);
-        card.appendChild(actions);
-      }
-
-      dom.appsList.appendChild(card);
-    });
+    for (const app of catApps) {
+      const detail = [
+        app.description || '',
+        `Launch: ${app.launchCmd || ''}`,
+        app.capabilities && app.capabilities.length ? `Capabilities: ${app.capabilities.join(', ')}` : ''
+      ].filter(Boolean).join(' · ');
+      dom.appsList.appendChild(buildSettingsListRow({
+        name: app.id,
+        detail,
+        pill: app.custom ? { text: 'Custom', tone: 'off' } : null,
+        controls: app.custom ? [listRowButton('Remove', { action: 'remove-app', appId: app.id }, { danger: true })] : [],
+        dataset: { appId: app.id }
+      }));
+    }
   }
 }
 
@@ -7337,116 +7746,54 @@ async function loadCronJobs() {
   }
 }
 
+function cronScheduleText(schedule) {
+  if (schedule?.kind === 'at') return `At ${schedule.at}`;
+  if (schedule?.kind === 'every') return formatEveryMs(schedule.everyMs);
+  if (schedule?.kind === 'cron') return `Cron ${schedule.expr}`;
+  return 'Unknown schedule';
+}
+
 function renderCronJobs(jobs = []) {
   if (!dom.cronList) return;
-  dom.cronList.innerHTML = '';
+  dom.cronList.textContent = '';
 
   if (jobs.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'provider-message';
-    empty.textContent = 'No cron jobs configured.';
-    dom.cronList.appendChild(empty);
+    dom.cronList.appendChild(listEmptyLine('No scheduled jobs yet.'));
     return;
   }
 
-  jobs.forEach(job => {
-    const card = document.createElement('div');
-    card.className = 'provider-card';
-    card.dataset.jobId = job.id;
-
-    const header = document.createElement('div');
-    header.className = 'provider-header';
-
-    const titleWrap = document.createElement('div');
-    titleWrap.className = 'provider-title-wrap';
-
-    const title = document.createElement('div');
-    title.className = 'provider-title';
-    title.textContent = `Job: ${job.id}`;
-
-    const meta = document.createElement('div');
-    meta.className = 'provider-message';
-    const scheduleDesc = job.schedule?.kind === 'at' ? `At ${job.schedule.at}` :
-                         job.schedule?.kind === 'every' ? `Every ${job.schedule.everyMs}ms` :
-                         job.schedule?.kind === 'cron' ? `Cron ${job.schedule.expr}` : 'Unknown schedule';
-    meta.textContent = `Target: ${job.payload?.sessionTarget || 'local'} • ${scheduleDesc}`;
-
-    titleWrap.appendChild(title);
-    titleWrap.appendChild(meta);
-
-    const status = document.createElement('span');
-    status.className = 'provider-status';
-    if (job.enabled !== false) {
-      status.classList.add('ok');
-      status.textContent = 'Enabled';
-    } else {
-      status.classList.add('error');
-      status.textContent = 'Disabled';
-    }
-
-    header.appendChild(titleWrap);
-    header.appendChild(status);
-
-    const body = document.createElement('div');
-    body.className = 'provider-message';
-    body.textContent = job.payload?.message || '(no message)';
-
-    const stats = document.createElement('div');
-    stats.className = 'provider-message';
-    stats.textContent = `Errors: ${job.state?.consecutiveErrors || 0} • Next Run: ${job.nextRunAt ? formatTimestamp(job.nextRunAt) : 'None'}`;
-
-    const actions = document.createElement('div');
-    actions.className = 'provider-actions';
-
-    const toggleBtn = document.createElement('button');
-    toggleBtn.type = 'button';
-    toggleBtn.appendChild(faIcon(job.enabled !== false ? 'fas fa-toggle-on' : 'fas fa-toggle-off'));
-    toggleBtn.appendChild(document.createTextNode(job.enabled !== false ? ' Disable' : ' Enable'));
-    toggleBtn.className = job.enabled !== false ? 'btn btn-danger' : 'btn btn-primary';
-    toggleBtn.dataset.action = 'toggle-cron';
-    toggleBtn.dataset.jobId = job.id;
-    toggleBtn.dataset.nextEnabled = job.enabled !== false ? 'false' : 'true';
-
-    const runBtn = document.createElement('button');
-    runBtn.type = 'button';
-    runBtn.className = 'btn';
-    runBtn.appendChild(faIcon('fas fa-play'));
-    runBtn.appendChild(document.createTextNode(' Run Now'));
-    runBtn.dataset.action = 'run-cron';
-    runBtn.dataset.jobId = job.id;
-
-    const delBtn = document.createElement('button');
-    delBtn.type = 'button';
-    delBtn.className = 'btn btn-danger';
-    delBtn.appendChild(faIcon('fas fa-trash'));
-    delBtn.appendChild(document.createTextNode(' Delete'));
-    delBtn.dataset.action = 'delete-cron';
-    delBtn.dataset.jobId = job.id;
-
-    actions.appendChild(toggleBtn);
-    actions.appendChild(runBtn);
-    actions.appendChild(delBtn);
-
-    card.appendChild(header);
-    card.appendChild(body);
-    card.appendChild(stats);
-    card.appendChild(actions);
-
-    dom.cronList.appendChild(card);
-  });
+  for (const job of jobs) {
+    const errors = job.state?.consecutiveErrors || 0;
+    const detail = [
+      cronScheduleText(job.schedule),
+      `to ${job.payload?.sessionTarget || 'local'}`,
+      `next run ${job.nextRunAt ? formatTimestamp(job.nextRunAt) : 'none'}`,
+      errors ? `${errors} error${errors === 1 ? '' : 's'} in a row` : ''
+    ].filter(Boolean).join(' · ');
+    dom.cronList.appendChild(buildSettingsListRow({
+      name: job.payload?.message || `Job ${job.id}`,
+      detail,
+      controls: [
+        listRowButton('Run now', { action: 'run-cron', jobId: job.id }),
+        listRowButton('Delete', { action: 'delete-cron', jobId: job.id }, { danger: true }),
+        listRowSwitch({
+          key: `cron.enabled.${job.id}`,
+          checked: job.enabled !== false,
+          label: `Scheduled job ${job.id}`,
+          save: (enabled) => saveCronJobEnabled(job.id, enabled)
+        })
+      ],
+      dataset: { jobId: job.id }
+    }));
+  }
 }
 
-async function handleToggleCronJob(jobId, enabled) {
-  try {
-    const result = await window.electron.cron.update({ id: jobId, patch: { enabled } });
-    if (!result?.ok) throw new Error(result?.error || 'Failed to update job');
-    await loadCronJobs();
-  } catch (err) {
-    if (dom.cronStatus) {
-      dom.cronStatus.textContent = `Error: ${err.message}`;
-      dom.cronStatus.classList.add('error');
-    }
-  }
+// A job's switch: resolves { ok, error? } for the auto-saver.
+async function saveCronJobEnabled(jobId, enabled) {
+  const result = await window.electron.cron.update({ id: jobId, patch: { enabled: Boolean(enabled) } });
+  if (!result?.ok) return { ok: false, error: result?.error || 'Could not change the job.' };
+  loadCronJobs().catch(() => {});
+  return { ok: true };
 }
 
 async function handleRunCronJob(jobId) {
@@ -7489,7 +7836,7 @@ async function handleAddCronJob() {
     const message = dom.cronAddMessageInput?.value?.trim();
     const sessionTarget = dom.cronAddTargetInput?.value?.trim();
     const kind = dom.cronAddKindInput?.value;
-    const value = dom.cronAddValueInput?.value?.trim();
+    const value = kind === 'every' ? String(dom.cronAddEveryInput?.value || '').trim() : dom.cronAddValueInput?.value?.trim();
 
     if (!message || !value) {
       throw new Error('Message and schedule value are required.');
@@ -7497,8 +7844,10 @@ async function handleAddCronJob() {
 
     const schedule = { kind };
     if (kind === 'every') {
-      const ms = parseInt(value, 10);
-      if (isNaN(ms) || ms < 1000) throw new Error('Interval must be a number >= 1000 (ms).');
+      const amount = Number(value);
+      const unit = dom.cronAddEveryUnit?.value || 's';
+      const ms = Number.isFinite(amount) ? unitToMs(amount, unit) : NaN;
+      if (!Number.isFinite(ms) || ms < 1000) throw new Error('The interval must be at least 1 s.');
       schedule.everyMs = ms;
     } else if (kind === 'cron') {
       schedule.expr = value;
@@ -7520,6 +7869,7 @@ async function handleAddCronJob() {
     if (dom.cronAddMessageInput) dom.cronAddMessageInput.value = '';
     if (dom.cronAddTargetInput) dom.cronAddTargetInput.value = '';
     if (dom.cronAddValueInput) dom.cronAddValueInput.value = '';
+    if (dom.cronAddEveryInput) dom.cronAddEveryInput.value = '';
 
     if (dom.cronAddStatus) {
       dom.cronAddStatus.textContent = 'Job added successfully.';
@@ -7542,20 +7892,18 @@ async function loadSettings() {
     appState.settings = unwrapIpcResult(await window.electron.settings.load(), 'Unable to load settings.');
     if (!appState.settings.providers || Object.keys(appState.settings.providers).length === 0) {
       setProviderListFallback('No providers returned from settings. Please restart the app.');
-      return;
+      return false;
     }
     renderSettings();
     await loadSkillSettingsTabs();
-    await loadMemoryEntries();
     await loadCronJobs();
     loadPermissionRules().catch(() => {});
-    loadWorkflows().catch(() => {});
     loadModelProfiles().catch(() => {});
     loadSystemApps().catch(() => {});
     loadWebhookList().catch(() => {});
-    loadMeshStatus().catch(() => {});
     loadChannelAccess().catch(() => {});
     loadModelsCatalogStatus().catch(() => {});
+    return true;
   } catch (error) {
     setProviderListFallback(`Unable to load provider settings: ${error.message || 'Unknown error'}`);
     // The hooks come with the settings; the other panes ask for themselves and say
@@ -7565,13 +7913,12 @@ async function loadSettings() {
       dom.hooksStatus.classList.add('error');
     }
     loadSkillSettingsTabs().catch(() => {});
-    loadMemoryEntries().catch(() => {});
     loadCronJobs().catch(() => {});
     loadPermissionRules().catch(() => {});
-    loadWorkflows().catch(() => {});
     loadSystemApps().catch(() => {});
     loadWebhookList().catch(() => {});
     loadChannelAccess().catch(() => {});
+    return false;
   }
 }
 
@@ -7608,7 +7955,7 @@ function validateToken(providerKey, token) {
 }
 
 function setProviderMessage(providerKey, message, isError = false) {
-  const card = dom.providerList.querySelector(`.provider-card[data-provider="${providerKey}"]`);
+  const card = dom.providerList.querySelector(`.key-row[data-provider="${providerKey}"]`);
   if (!card) return;
   const messageEl = card.querySelector('.provider-message');
   if (!messageEl) return;
@@ -7626,25 +7973,15 @@ function updateProviderStatus(providerKey, status) {
 
 /* --- Models M1: catalog status, Test all, the Ollama address --- */
 
-function providerStatusText(status) {
-  if (status?.ok) return { text: 'Connected', cls: 'ok' };
-  if (status?.authFailed) return { text: 'Key rejected', cls: 'error' };
-  if (status) return { text: 'Error', cls: 'error' };
-  return { text: 'Not tested', cls: '' };
-}
-
-// A background retest (key saved, 401 during use) updates the badge only, so
-// a message the owner is reading on the card stays.
+// A background retest (key saved, 401 during use) updates the row's status and
+// the banner only, so a message the owner is reading in the open row stays.
 function updateProviderStatusBadge(providerKey) {
-  const card = dom.providerList?.querySelector(`.provider-card[data-provider="${providerKey}"]`);
-  const badge = card?.querySelector('.provider-status');
-  if (!badge) return;
-  const status = appState.settings?.providers?.[providerKey]?.status || null;
-  const view = providerStatusText(status);
-  badge.classList.remove('ok', 'error');
-  if (view.cls) badge.classList.add(view.cls);
-  badge.textContent = view.text;
-  badge.title = status?.checkedAt ? `Last tested ${new Date(status.checkedAt).toLocaleString()}` : '';
+  const row = dom.providerList?.querySelector(`.key-row[data-provider="${providerKey}"]`);
+  const provider = appState.settings?.providers?.[providerKey];
+  if (row && provider) {
+    paintKeyRowStatus(row, keyRowState({ hasKey: providerHasKey(providerKey, provider), status: provider.status || null }));
+  }
+  paintProvidersFailingBanner();
 }
 
 function formatCatalogStatus(status) {
@@ -7673,7 +8010,7 @@ async function loadModelsCatalogStatus() {
   }
 }
 
-/* --- Models tab: profiles and the catalog (spec 2026-09-27 §11) --- */
+/* --- Settings › Model profiles: profiles and the catalog (spec 2026-09-27 §11) --- */
 
 const MODEL_ROLE_LABELS = {
   main: 'Main: answers you in chats and cases',
@@ -7710,6 +8047,8 @@ async function loadModelProfiles() {
     appState.modelProfiles = { profiles: result.profiles || [], broken: result.broken || [], defaultProfileId: result.defaultProfileId || null, customRoles: result.customRoles || [] };
     renderModelProfileList();
     renderCustomRoles();
+    // The suggestion's "Now" reads the default profile.
+    if (appState.kingLouie) renderKingLouie(appState.kingLouie);
   } catch (err) {
     setModelsStatus(err.message, true);
   }
@@ -7768,28 +8107,13 @@ function renderModelProfileList() {
     }
     card.appendChild(header);
 
-    const summary = document.createElement('div');
-    summary.className = 'provider-message';
-    const mainNames = (profile.roles?.main || []).map((e) => e.name);
-    const unusable = Object.values(profile.roles || {}).flat().filter((e) => !e.usable).length;
-    summary.textContent = `Main: ${mainNames.length ? mainNames.join(', ') : '(none)'}${unusable ? ` · ${unusable} model${unusable === 1 ? '' : 's'} not usable now` : ''}`;
-    card.appendChild(summary);
-    if (workerBorrowsFromMain(profile.roles)) card.appendChild(workerBorrowNotice());
+    // Every role in order, then the profile's custom roles (settings redesign
+    // §5.4). The profile's migration notes are not shown here (§2, bug 5).
+    const roles = profileStatusRoles(profile.roles);
+    const custom = Object.keys(profile.roles || {}).filter((r) => !MODEL_ROLE_ORDER.includes(r) && (profile.roles[r] || []).length);
+    for (const role of [...MODEL_ROLE_ORDER, ...custom]) card.appendChild(renderProfileRoleRow(profile, role, roles));
     // Local inference L1: the profile's local-only switches.
     card.appendChild(localOnlyRow(profile));
-
-    // The migration's notes (spec §13): which old model ids were mapped or kept.
-    const notes = profile.migration && Array.isArray(profile.migration.notes) ? profile.migration.notes : [];
-    if (notes.length) {
-      const ul = document.createElement('ul');
-      ul.className = 'models-migration-notes';
-      for (const note of notes) {
-        const li = document.createElement('li');
-        li.textContent = note;
-        ul.appendChild(li);
-      }
-      card.appendChild(ul);
-    }
 
     const actions = document.createElement('div');
     actions.className = 'provider-actions';
@@ -7810,6 +8134,126 @@ function renderModelProfileList() {
     card.appendChild(actions);
     list.appendChild(card);
   }
+}
+
+// A profile card's roles (settings redesign §5.4): the label and its job.
+const MODEL_ROLE_CARD = {
+  main: { label: 'Main', job: 'answers you' },
+  worker: { label: 'Worker', job: 'agents, tasks' },
+  utility: { label: 'Utility', job: 'titles, small jobs' },
+  vision: { label: 'Vision', job: 'optional' },
+  imageGeneration: { label: 'Image generation', job: 'optional' }
+};
+
+// The profile's roles in the shape roleStatus reads. `usable` is the
+// catalog and key verdict the host gave each entry.
+function profileStatusRoles(roles) {
+  const out = {};
+  for (const [role, list] of Object.entries(roles || {})) {
+    out[role] = (Array.isArray(list) ? list : []).filter(Boolean).map((e) => ({
+      provider: e.provider,
+      model: e.model,
+      name: e.name,
+      usable: e.usable !== false,
+      imageInput: e.imageInput === true
+    }));
+  }
+  return out;
+}
+
+function renderProfileRoleRow(profile, role, statusRoles) {
+  const row = document.createElement('div');
+  row.className = 'models-role-row';
+  row.dataset.role = role;
+  const head = document.createElement('div');
+  head.className = 'models-role-head';
+  const name = document.createElement('span');
+  name.className = 'models-role-name';
+  const custom = customRoleOf(role);
+  name.textContent = MODEL_ROLE_CARD[role]?.label || role;
+  const job = document.createElement('span');
+  job.className = 'settings-row-help';
+  job.textContent = MODEL_ROLE_CARD[role]?.job || custom?.description || 'custom role';
+  head.appendChild(name);
+  head.appendChild(job);
+  row.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'models-role-body';
+  const entries = (profile.roles || {})[role] || [];
+  if (entries.length) {
+    // The models in failover order; each names the provider it runs through.
+    const chips = document.createElement('div');
+    chips.className = 'models-role-chips';
+    const labels = appState.settings?.providers || {};
+    const servers = Object.fromEntries(appState.localServerNames || []);
+    for (const entry of entries) {
+      const shown = modelChip(entry, labels, servers);
+      const group = document.createElement('span');
+      group.className = `models-chip${shown.usable ? '' : ' is-unusable'}`;
+      if (!shown.usable && Array.isArray(entry.reasons) && entry.reasons.length) group.title = entry.reasons.join(' ');
+      const modelName = document.createElement('span');
+      modelName.className = 'chip models-chip-name';
+      modelName.textContent = shown.name;
+      group.appendChild(modelName);
+      const provider = document.createElement('span');
+      provider.className = 'chip chip-provider';
+      provider.textContent = shown.provider;
+      group.appendChild(provider);
+      if (shown.free) {
+        const free = document.createElement('span');
+        free.className = 'chip chip-free';
+        free.textContent = 'free';
+        group.appendChild(free);
+      }
+      chips.appendChild(group);
+    }
+    body.appendChild(chips);
+  }
+
+  const status = roleStatus(statusRoles, role);
+  if (status.state === 'warn') {
+    const notice = document.createElement('div');
+    notice.className = 'notice-warn models-role-warning';
+    const text = document.createElement('span');
+    text.textContent = status.message;
+    notice.appendChild(text);
+    // An empty role opens for editing from here (the King Louie profile
+    // changes only by accepting a proposal).
+    if (!entries.length && profile.kind !== 'king-louie') {
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'btn btn-sm';
+      edit.textContent = 'Edit';
+      edit.dataset.profileAction = 'edit';
+      edit.dataset.profileId = profile.id;
+      edit.dataset.profileRole = role;
+      notice.appendChild(edit);
+    }
+    body.appendChild(notice);
+  } else if (status.state === 'borrows' || status.state === 'off') {
+    const help = document.createElement('div');
+    help.className = 'settings-row-help';
+    help.textContent = status.message;
+    body.appendChild(help);
+  } else {
+    const unusable = entries.filter((e) => e && e.usable === false).length;
+    if (unusable) {
+      const help = document.createElement('div');
+      help.className = 'settings-row-help';
+      help.textContent = `${unusable} of these can't be used right now and ${unusable === 1 ? 'is' : 'are'} skipped.`;
+      body.appendChild(help);
+    }
+  }
+  // An empty worker borrows main (spec 2026-09-27 §6.4): delegated reading
+  // costs main's price.
+  if (role === 'worker' && workerBorrowsFromMain(profile.roles)) {
+    const notice = workerBorrowNotice();
+    notice.className = 'settings-row-help models-worker-borrow-notice';
+    body.appendChild(notice);
+  }
+  row.appendChild(body);
+  return row;
 }
 
 function openProfileEditor(profile) {
@@ -7967,35 +8411,59 @@ async function openModelPicker(role, block) {
     const result = unwrapIpcResult(await window.electron.models.picker({ needs: MODEL_ROLE_NEEDS[role] || customRoleOf(role)?.needs || {} }), 'Unable to list models.');
     picker.textContent = '';
     const taken = new Set((profileDraft.roles[role] || []).map((e) => `${e.provider}:${e.model}`));
-    const usable = (result.usable || []).filter((c) => !taken.has(`${c.provider}:${c.model}`));
-    if (!usable.length) {
+    const view = {
+      usable: (result.usable || []).filter((c) => !taken.has(`${c.provider}:${c.model}`)),
+      unusable: (result.unusable || []).slice(0, 100)
+    };
+    const allGroups = groupPickerByProvider(view, appState.settings?.providers || {}, Object.fromEntries(appState.localServerNames || []));
+    if (!view.usable.length) {
       const none = document.createElement('div');
       none.className = 'provider-message';
-      none.textContent = 'No usable model meets this role\'s needs. Add and test a key under API keys.';
+      none.textContent = "No usable model meets this role's needs. Add and test a key under Providers & keys.";
       picker.appendChild(none);
     }
-    for (const c of usable) {
-      const item = document.createElement('button');
-      item.type = 'button';
-      item.className = 'models-picker-item';
-      item.dataset.provider = c.provider;
-      item.dataset.model = c.model;
-      // Local inference L1: a model on a local server names its server.
-      const where = c.provider === 'local' ? `local · ${localServerName(String(c.model || '').split('/')[0], appState.localServerNames)}` : c.provider;
-      item.textContent = `${c.name} (${[where, c.provider === 'local' ? null : (c.local ? 'local' : formatModelPrice(c.cost)), formatContext(c.context)].filter(Boolean).join(' · ')})`;
-      item.addEventListener('click', () => {
-        profileDraft.roles[role] = [...(profileDraft.roles[role] || []), { provider: c.provider, model: c.model, effort: null, name: c.name, usable: true, reasons: [], cost: c.cost, context: c.context, efforts: [] }];
-        renderProfileEditor();
-      });
-      picker.appendChild(item);
-    }
-    // Unusable models appear greyed out with their reasons (spec §11).
-    for (const c of (result.unusable || []).slice(0, 100)) {
-      const row = document.createElement('div');
-      row.className = 'models-picker-item is-unusable';
-      row.textContent = `${c.name} (${c.provider}): ${(c.reasons || []).join(' ')}`;
-      picker.appendChild(row);
-    }
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.className = 'models-picker-search';
+    search.placeholder = 'Search models';
+    picker.appendChild(search);
+    const listEl = document.createElement('div');
+    picker.appendChild(listEl);
+    const paint = () => {
+      listEl.textContent = '';
+      for (const g of filterPickerGroups(allGroups, search.value)) {
+        const head = document.createElement('div');
+        head.className = `models-picker-group is-${g.state}`;
+        head.textContent = g.label;
+        listEl.appendChild(head);
+        for (const c of g.entries) {
+          if (c.greyed) {
+            // Unusable models appear greyed out with their reasons (spec §11).
+            const row = document.createElement('div');
+            row.className = 'models-picker-item is-unusable';
+            const why = g.state === 'failing' || g.state === 'no-key' ? 'fix key to use' : (c.reasons || []).join(' ');
+            row.textContent = `${c.name}: ${why}`;
+            listEl.appendChild(row);
+            continue;
+          }
+          const item = document.createElement('button');
+          item.type = 'button';
+          item.className = 'models-picker-item';
+          item.dataset.provider = c.provider;
+          item.dataset.model = c.model;
+          // Local inference L1: a model on a local server names its server.
+          const where = c.provider === 'local' ? `local · ${localServerName(String(c.model || '').split('/')[0], appState.localServerNames)}` : c.provider;
+          item.textContent = `${c.name} (${[where, c.provider === 'local' ? null : (c.local ? 'local' : formatModelPrice(c.cost)), formatContext(c.context)].filter(Boolean).join(' · ')})`;
+          item.addEventListener('click', () => {
+            profileDraft.roles[role] = [...(profileDraft.roles[role] || []), { provider: c.provider, model: c.model, effort: null, name: c.name, usable: true, reasons: [], cost: c.cost, context: c.context, efforts: [] }];
+            renderProfileEditor();
+          });
+          listEl.appendChild(item);
+        }
+      }
+    };
+    search.addEventListener('input', paint);
+    paint();
   } catch (err) {
     picker.textContent = err.message;
   }
@@ -8106,7 +8574,7 @@ async function openPrivateMarkFlow({ chatId = null, caseId = null } = {}) {
   return true;
 }
 
-/* Settings → Models: local servers */
+/* Settings › Local servers */
 
 function setLocalStatus(text, isError = false) {
   if (!dom.modelsLocalStatus) return;
@@ -8159,36 +8627,29 @@ function localModelLine(serverId, m, { readOnly }) {
 }
 
 function localServerCard(server, { readOnly }) {
+  // One compact row per server (rule 7): name, address, grade and its actions; the
+  // pinned addresses and the models below it.
   const card = document.createElement('div');
-  card.className = 'provider-card models-local-card';
+  card.className = 'models-local-card';
   card.dataset.serverId = server.id;
-  const header = document.createElement('div');
-  header.className = 'provider-header';
-  const title = document.createElement('div');
-  title.className = 'provider-title';
+  const head = document.createElement('div');
+  head.className = 'settings-list-row';
+  const text = document.createElement('span');
+  text.className = 'settings-list-name';
+  const title = document.createElement('span');
+  title.className = 'settings-list-title';
   title.textContent = server.name || server.id;
-  header.appendChild(title);
+  const address = document.createElement('span');
+  address.className = 'settings-list-detail settings-row-help';
+  address.textContent = `${server.baseUrl || ''} (${server.kind || 'server'})`;
+  text.append(title, address);
+  head.appendChild(text);
   const badge = document.createElement('span');
-  badge.className = server.grade === 'guarantee' ? 'active-provider-badge' : 'models-broken-badge';
+  badge.className = `status-pill ${server.grade === 'guarantee' ? 'is-working' : 'is-none'}`;
   badge.textContent = server.grade === 'guarantee' ? 'Private chats' : 'Cost only';
-  header.appendChild(badge);
-  card.appendChild(header);
-  const line = (text, cls = 'provider-message') => {
-    const el = document.createElement('div');
-    el.className = cls;
-    el.textContent = text;
-    card.appendChild(el);
-  };
-  line(`Address: ${server.baseUrl || ''} (${server.kind || 'server'})`);
-  const pinned = server.pinned && Array.isArray(server.pinned.addresses) ? server.pinned.addresses : [];
-  line(`Pinned to ${pinned.join(', ') || 'no address'}: ${localServerClassWords(server.pinned?.class)}.`);
-  line(`${localServerGradeText(server.grade)}.`);
-  if (server.problem) line(server.problem, 'provider-message error');
-  const models = Array.isArray(server.models) ? server.models : [];
-  for (const m of models) card.appendChild(localModelLine(server.id, m, { readOnly }));
-  const actions = document.createElement('div');
-  actions.className = 'provider-actions';
-  const button = (label, action, cls = 'btn') => {
+  head.appendChild(badge);
+  const actions = head;
+  const button = (label, action, cls = 'btn btn-sm') => {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = cls;
@@ -8200,9 +8661,20 @@ function localServerCard(server, { readOnly }) {
   actions.appendChild(button('List models', 'list'));
   if (!readOnly) {
     actions.appendChild(button('Check again', 'recheck'));
-    actions.appendChild(button('Remove', 'remove', 'btn btn-danger'));
+    actions.appendChild(button('Remove', 'remove', 'btn btn-sm btn-danger'));
   }
-  card.appendChild(actions);
+  card.appendChild(head);
+  const line = (value, cls = 'provider-message settings-row-help') => {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.textContent = value;
+    card.appendChild(el);
+  };
+  const pinned = server.pinned && Array.isArray(server.pinned.addresses) ? server.pinned.addresses : [];
+  line(`Pinned to ${pinned.join(', ') || 'no address'}: ${localServerClassWords(server.pinned?.class)}. ${localServerGradeText(server.grade)}.`);
+  if (server.problem) line(server.problem, 'provider-message error');
+  const models = Array.isArray(server.models) ? server.models : [];
+  for (const m of models) card.appendChild(localModelLine(server.id, m, { readOnly }));
   return card;
 }
 
@@ -8557,7 +9029,7 @@ function renderCatalogSettings() {
   if (dom.modelsCatalogOverrides) dom.modelsCatalogOverrides.value = JSON.stringify(models.overrides || {}, null, 2);
 }
 
-/* --- Models tab: the King Louie profile (spec 2026-09-27 §7, §11) --- */
+/* --- Settings › Model profiles: the King Louie profile (spec 2026-09-27 §7, §11) --- */
 
 function roleShortName(role) {
   return (MODEL_ROLE_LABELS[role] || role).split(':')[0];
@@ -8572,6 +9044,16 @@ function formatCostEffect(effect) {
   const sign = effect.usd > 0 ? '+' : (effect.usd < 0 ? '−' : '');
   return `${sign}$${Math.abs(effect.usd).toFixed(2)} a month (${effect.note})`;
 }
+
+// The suggestion's one line (settings redesign §5.4): the difference alone.
+function formatMonthlyDifference(effect) {
+  if (!effect || typeof effect.usd !== 'number') return 'no cost estimate yet';
+  if (effect.usd === 0) return 'about the same cost a month';
+  return `${effect.usd > 0 ? '+' : '−'}$${Math.abs(effect.usd).toFixed(2)} a month`;
+}
+
+// Whether the suggestion's detail is open (Review), across redraws.
+let klDetailOpen = false;
 
 // An empty worker borrows main's models (spec §6.4), so the explorer and
 // every other delegated read costs main's price and saves nothing (final
@@ -8617,16 +9099,21 @@ function isStaleProposal(result) {
 
 function renderKingLouie(view) {
   if (!view || !dom.modelsKlStatus) return;
+  // Drawn again when the profiles load (for the default's "Now"); the tuning
+  // fields are filled only from a new view, so that keeps what is typed.
+  const freshView = appState.kingLouie !== view;
   appState.kingLouie = view;
   const s = view.settings || {};
-  if (dom.modelsKlAutoAccept) dom.modelsKlAutoAccept.checked = Boolean(s.autoAccept);
-  if (dom.modelsKlPreferLocal) dom.modelsKlPreferLocal.checked = Boolean(s.preferLocalUtility);
-  if (dom.modelsKlBand) dom.modelsKlBand.value = String(s.bandPoints ?? 3);
-  if (dom.modelsKlWorkerRatio) dom.modelsKlWorkerRatio.value = String(s.workerAgenticRatio ?? 0.8);
-  if (dom.modelsKlUtilityRatio) dom.modelsKlUtilityRatio.value = String(s.utilityIntelligenceRatio ?? 0.5);
+  if (freshView) {
+    if (dom.modelsKlAutoAccept) dom.modelsKlAutoAccept.checked = Boolean(s.autoAccept);
+    if (dom.modelsKlPreferLocal) dom.modelsKlPreferLocal.checked = Boolean(s.preferLocalUtility);
+    if (dom.modelsKlBand) dom.modelsKlBand.value = String(s.bandPoints ?? 3);
+    if (dom.modelsKlWorkerRatio) dom.modelsKlWorkerRatio.value = String(s.workerAgenticRatio ?? 0.8);
+    if (dom.modelsKlUtilityRatio) dom.modelsKlUtilityRatio.value = String(s.utilityIntelligenceRatio ?? 0.5);
+  }
 
   const p = view.proposal;
-  if (view.unavailable) setKingLouieStatus(view.unavailable, true);
+  if (view.unavailable) setKingLouieStatus(view.unavailable);
   else if (view.upToDate) setKingLouieStatus('The King Louie profile is up to date.');
   else if (p && p.dismissed) setKingLouieStatus('You dismissed the current proposal. It comes back when the proposed models change.');
   else if (p) setKingLouieStatus(view.profile ? 'King Louie proposes changes to its profile.' : 'King Louie has a first proposal. Accept it to create the King Louie profile; your default profile stays as it is.');
@@ -8645,10 +9132,44 @@ function renderKingLouie(view) {
     if (workerBorrowsFromMain(view.current || p?.roles)) dom.modelsKlPicks.appendChild(workerBorrowNotice());
   }
 
+  // One line with the monthly difference and Review; the detail opens on
+  // Review (settings redesign §5.4).
+  const reviewable = Boolean(p && !p.dismissed);
+  if (!reviewable) klDetailOpen = false;
+  if (dom.modelsKlSummary) {
+    dom.modelsKlSummary.textContent = '';
+    dom.modelsKlSummary.hidden = !reviewable;
+    if (reviewable) {
+      const roles = (p.changes || []).map((c) => roleShortName(c.role));
+      const line = document.createElement('span');
+      line.className = 'models-kl-summary-text';
+      line.textContent = `King Louie suggests other models${roles.length ? ` for ${roles.join(', ')}` : ''}: ${formatMonthlyDifference(p.costEffect)}.`;
+      const review = document.createElement('button');
+      review.type = 'button';
+      review.className = 'btn btn-sm';
+      review.id = 'models-kl-review-btn';
+      review.textContent = 'Review';
+      review.setAttribute('aria-expanded', String(klDetailOpen));
+      review.setAttribute('aria-controls', 'models-kl-detail');
+      review.addEventListener('click', () => {
+        klDetailOpen = !klDetailOpen;
+        review.setAttribute('aria-expanded', String(klDetailOpen));
+        if (dom.modelsKlDetail) dom.modelsKlDetail.hidden = !klDetailOpen;
+      });
+      dom.modelsKlSummary.appendChild(line);
+      dom.modelsKlSummary.appendChild(review);
+    }
+  }
+  if (dom.modelsKlDetail) dom.modelsKlDetail.hidden = !(reviewable && klDetailOpen);
+
   const box = dom.modelsKlProposal;
   if (!box) return;
   box.textContent = '';
   if (!p || p.dismissed) return;
+  // "Now" is what the default profile runs for the role today (bug 6: the
+  // King Louie profile's own role said "(none)" before the first Accept).
+  const { profiles: allProfiles = [], defaultProfileId: defaultId = null } = appState.modelProfiles || {};
+  const defaultRoles = allProfiles.find((x) => x.id === defaultId)?.roles || {};
   for (const change of p.changes || []) {
     const card = document.createElement('div');
     card.className = 'models-kl-change';
@@ -8658,7 +9179,7 @@ function renderKingLouie(view) {
     title.textContent = roleShortName(change.role);
     card.appendChild(title);
     const from = document.createElement('div');
-    from.textContent = `Now: ${targetsText(change.from)}`;
+    from.textContent = `Now (Default): ${targetsText(defaultRoles[change.role])}`;
     card.appendChild(from);
     const to = document.createElement('div');
     to.textContent = `Proposed: ${targetsText(change.to)}`;
@@ -8781,7 +9302,7 @@ if (window.electron?.models?.onProposalChanged) {
   window.electron.models.onProposalChanged((view) => renderKingLouie(view));
 }
 
-/* --- Models tab: custom roles (spec 2026-09-27 §6.2, §11) --- */
+/* --- Settings › Model profiles: custom roles (spec 2026-09-27 §6.2, §11) --- */
 
 function customRoleOf(role) {
   return (appState.modelProfiles?.customRoles || []).find((r) => r.id === role) || null;
@@ -8909,7 +9430,13 @@ if (dom.modelsProfileList) {
     const action = btn.dataset.profileAction;
     const profile = (appState.modelProfiles?.profiles || []).find((p) => p.id === id);
     try {
-      if (action === 'edit' && profile) openProfileEditor(profile);
+      if (action === 'edit' && profile) {
+        openProfileEditor(profile);
+        // A role's warning opens that role (settings redesign §5.4).
+        const role = btn.dataset.profileRole;
+        const block = role ? dom.modelsProfileEditor?.querySelector(`.models-role-block[data-role="${CSS.escape(role)}"]`) : null;
+        block?.scrollIntoView({ block: 'center' });
+      }
       if (action === 'duplicate') {
         const r = unwrapIpcResult(await window.electron.models.duplicateProfile(id), 'Unable to duplicate the profile.');
         setModelsStatus(`Created ${r.profile.name}.`);
@@ -10460,7 +10987,7 @@ function renderChatModels(view) {
     current.textContent = view.main.usable ? `Main: ${view.main.name}` : `Main: ${view.main.name} (not usable)`;
   } else {
     current.value = '__none__';
-    current.textContent = 'Main: none. Add one in Settings → Models';
+    current.textContent = 'Main: none. Add one in Settings › Model profiles';
   }
   main.appendChild(current);
   const privateNow = isPrivateChat(getActiveChat());
@@ -10767,7 +11294,13 @@ async function handleSaveProvider(providerKey) {
   appState.settings.providers[providerKey].hasToken = result.hasToken;
   delete appState.settings.providers[providerKey].status;
   renderSettings();
-  setProviderMessage(providerKey, 'Token saved securely.');
+  setProviderMessage(providerKey, 'Key saved. Testing…');
+  // Saving always tests (spec §5.5); a key that works closes its row.
+  const status = await handleTestProvider(providerKey);
+  if (status?.ok) {
+    appState.openKeyRows.delete(keyRowId('model', providerKey));
+    renderSettings();
+  }
 }
 
 async function handleClearProvider(providerKey) {
@@ -10787,21 +11320,25 @@ async function handleClearProvider(providerKey) {
   appState.settings.providers[providerKey].hasToken = false;
   delete appState.settings.providers[providerKey].status;
   renderSettings();
-  setProviderMessage(providerKey, 'Token removed.');
+  setProviderMessage(providerKey, 'Key removed.');
+  // A row stays open after its key is removed, so the message is read in it.
 }
 
+// Returns the status it stored, for Save & test.
 async function handleTestProvider(providerKey) {
-  setProviderMessage(providerKey, 'Testing connection...');
+  setProviderMessage(providerKey, 'Testing connection…');
   const result = await window.electron.settings.testProvider({ provider: providerKey });
 
   if (!result.ok) {
-    updateProviderStatus(providerKey, result.status || { ok: false, message: result.error });
+    const status = result.status || { ok: false, message: result.error };
+    updateProviderStatus(providerKey, status);
     setProviderMessage(providerKey, result.error || 'Connection failed.', true);
-    return;
+    return status;
   }
 
   updateProviderStatus(providerKey, result.status);
   setProviderMessage(providerKey, result.status?.message || 'Connection successful.');
+  return result.status;
 }
 
 // Event Listeners
@@ -11541,6 +12078,18 @@ if (dom.openSettingsBtn) {
   dom.openSettingsBtn.addEventListener('click', openSettingsDrawer);
 }
 
+if (dom.openMemoryBtn) {
+  dom.openMemoryBtn.addEventListener('click', openMemoryPanel);
+}
+if (dom.memoryPanelCloseBtn) {
+  dom.memoryPanelCloseBtn.addEventListener('click', closeMemoryPanel);
+}
+if (dom.memoryPanel) {
+  dom.memoryPanel.addEventListener('click', (e) => {
+    if (e.target === dom.memoryPanel) closeMemoryPanel();
+  });
+}
+
 if (dom.floatingSettingsBtn) {
   dom.floatingSettingsBtn.addEventListener('click', openSettingsDrawer);
 }
@@ -11787,7 +12336,7 @@ async function renderCheckpointsList() {
   if (!status.enabled) {
     const note = document.createElement('p');
     note.className = 'provider-message';
-    note.textContent = 'Checkpoints are off. Turn them on in Settings → General.';
+    note.textContent = 'Checkpoints are off. Turn them on in Settings › New chats.';
     dom.checkpointsList.appendChild(note);
     return;
   }
@@ -11961,7 +12510,7 @@ async function renderChatMcpToggles() {
   if (servers.length === 0) {
     const hint = document.createElement('div');
     hint.className = 'provider-message';
-    hint.textContent = 'No MCP servers configured. Add them in Settings → MCP Servers.';
+    hint.textContent = 'No MCP servers configured. Add them in Settings › MCP servers.';
     dom.chatMcpToggles.appendChild(hint);
     return;
   }
@@ -12027,6 +12576,11 @@ dom.settingsDrawer.addEventListener('click', (e) => {
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    // A confirm dialog over the panel closes itself first.
+    if (dom.memoryPanel && !dom.memoryPanel.hidden && !e.target?.closest?.('.rename-chat-modal')) {
+      closeMemoryPanel();
+      return;
+    }
     if (!dom.settingsDrawer.hidden) {
       setSettingsDrawer(false);
       dom.userInput.focus();
@@ -12036,11 +12590,28 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-/* --- Settings tab switching -------------------------------- */
-if (dom.settingsNavSelect) {
-  sortSettingsNavOptions();
-  dom.settingsNavSelect.addEventListener('change', () => {
-    switchSettingsTab(dom.settingsNavSelect.value);
+/* --- Settings sidebar and search --------------------------- */
+if (dom.settingsSidebar) {
+  renderSettingsNav();
+  dom.settingsSidebar.addEventListener('click', (e) => {
+    const item = e.target.closest('.settings-nav-item');
+    if (item && item.dataset.tab) switchSettingsTab(item.dataset.tab);
+  });
+}
+if (dom.settingsSearch) {
+  dom.settingsSearch.addEventListener('input', () => applySettingsSearch());
+  dom.settingsSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const [first] = applySettingsSearch();
+      if (first) switchSettingsTab(first.tab);
+    } else if (e.key === 'Escape' && dom.settingsSearch.value) {
+      // Escape clears the search first; a second one closes Settings.
+      e.preventDefault();
+      e.stopPropagation();
+      dom.settingsSearch.value = '';
+      applySettingsSearch();
+    }
   });
 }
 
@@ -12061,6 +12632,10 @@ async function saveGeneralDefaults() {
       dom.generalDefaultsStatus.classList.remove('error');
     }
   } catch (err) {
+    // A failed save puts the switches back to what is stored (spec §7.1).
+    const stored = appState.settings.defaults || {};
+    if (dom.defaultAgentMode) dom.defaultAgentMode.checked = !!stored.agentMode;
+    if (dom.defaultSandboxMode) dom.defaultSandboxMode.checked = stored.sandboxMode !== false;
     if (dom.generalDefaultsStatus) {
       dom.generalDefaultsStatus.textContent = err.message || 'Failed to save defaults.';
       dom.generalDefaultsStatus.classList.add('error');
@@ -12075,10 +12650,8 @@ if (dom.skillsList) {
   dom.skillsList.addEventListener('click', (e) => {
     const button = e.target.closest('button[data-action]');
     if (!button) return;
-    const { action, skillId, nextEnabled, skillName } = button.dataset;
-    if (action === 'toggle-skill' && skillId) {
-      toggleSkillEnabled(skillId, nextEnabled === 'true');
-    } else if (action === 'open-skill-settings' && skillId) {
+    const { action, skillId, skillName } = button.dataset;
+    if (action === 'open-skill-settings' && skillId) {
       switchSettingsTab(`skill-${skillId}`);
     } else if (action === 'update-skill' && skillId) {
       updateSkill(skillId, skillName);
@@ -12124,69 +12697,122 @@ if (dom.skillSettingsContainer) {
   });
 }
 
-/* --- Channel management: Telegram -------------------------- */
-if (dom.saveTelegramTokenBtn) {
-  dom.saveTelegramTokenBtn.addEventListener('click', async () => {
-    const token = dom.channelTelegramTokenInput?.value?.trim();
-    if (!token) return;
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.runLlmCommand({ command: `telegram add ${token}` }),
-        'Failed to save Telegram token.'
-      );
-      dom.channelTelegramTokenInput.value = '';
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = 'Token saved successfully.';
-        dom.telegramChannelStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = err.message || 'Error saving token.';
-        dom.telegramChannelStatus.classList.add('error');
-      }
-    }
-  });
+/* --- Channel management: Telegram --------------------------
+ * The bot token is a key row (settings redesign §5.5): a status, Add or Edit
+ * opening it in place, Save & test and Remove key. A token is never auto-saved.
+ * A test result lasts until Settings closes (appState.telegramTested). */
+const TELEGRAM_KEY_ROW = 'channel:telegram';
+
+function telegramKeyView() {
+  const telegram = appState.settings.telegram || {};
+  const tested = appState.telegramTested;
+  if (!telegram.hasToken && !telegram.bridgeActive) return { state: 'no-key', reason: 'Not configured.', action: 'Add' };
+  if (tested) return { state: tested.ok ? 'working' : 'failing', reason: tested.message, action: 'Edit' };
+  if (telegram.bridgeActive) return { state: 'working', reason: 'Bridge active.', action: 'Edit' };
+  return { state: 'not-tested', reason: 'Token saved. Bridge not active.', action: 'Edit' };
 }
 
-if (dom.testTelegramBtn) {
-  dom.testTelegramBtn.addEventListener('click', async () => {
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.runLlmCommand({ command: 'telegram test' }),
-        'Failed to test Telegram.'
-      );
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = result.message || 'Test successful.';
-        dom.telegramChannelStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = err.message || 'Test failed.';
-        dom.telegramChannelStatus.classList.add('error');
-      }
-    }
-  });
+function paintTelegramKeyRow() {
+  const view = telegramKeyView();
+  const look = KEY_ROW_PILL[view.state];
+  if (dom.telegramStatusPill) {
+    dom.telegramStatusPill.className = `status-pill ${look.cls}`;
+    dom.telegramStatusPill.textContent = look.text;
+  }
+  if (dom.telegramChannelStatus) {
+    dom.telegramChannelStatus.textContent = view.reason || '';
+    dom.telegramChannelStatus.title = view.reason || '';
+  }
+  if (dom.telegramKeyToggleBtn) dom.telegramKeyToggleBtn.textContent = view.action;
+  const hasKey = view.state !== 'no-key';
+  if (dom.testTelegramBtn) dom.testTelegramBtn.hidden = !hasKey;
+  if (dom.clearTelegramTokenBtn) dom.clearTelegramTokenBtn.hidden = !hasKey;
+  if (dom.channelTelegramTokenInput) {
+    dom.channelTelegramTokenInput.placeholder = hasKey
+      ? 'A token is saved. Paste a new one to replace it.'
+      : 'Paste Telegram bot token';
+  }
+  if (dom.telegramKeyEditor) dom.telegramKeyEditor.hidden = !appState.openKeyRows.has(TELEGRAM_KEY_ROW);
 }
 
-if (dom.clearTelegramTokenBtn) {
-  dom.clearTelegramTokenBtn.addEventListener('click', async () => {
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.runLlmCommand({ command: 'telegram remove' }),
-        'Failed to clear Telegram token.'
-      );
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = 'Token cleared.';
-        dom.telegramChannelStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.telegramChannelStatus) {
-        dom.telegramChannelStatus.textContent = err.message || 'Error clearing token.';
-        dom.telegramChannelStatus.classList.add('error');
-      }
-    }
-  });
+function setTelegramKeyMessage(text, isError = false) {
+  if (!dom.telegramKeyMessage) return;
+  dom.telegramKeyMessage.textContent = text || '';
+  dom.telegramKeyMessage.classList.toggle('error', Boolean(isError));
 }
+
+async function testTelegramToken() {
+  try {
+    const result = unwrapIpcResult(
+      await window.electron.settings.runLlmCommand({ command: '/llm telegram test' }),
+      'Failed to test Telegram.'
+    );
+    appState.telegramTested = { ok: true, message: result.output || result.message || 'Test passed.' };
+  } catch (err) {
+    appState.telegramTested = { ok: false, message: err.message || 'Test failed.' };
+  }
+  paintTelegramKeyRow();
+}
+
+dom.telegramKeyToggleBtn?.addEventListener('click', () => {
+  if (appState.openKeyRows.has(TELEGRAM_KEY_ROW)) appState.openKeyRows.delete(TELEGRAM_KEY_ROW);
+  else appState.openKeyRows.add(TELEGRAM_KEY_ROW);
+  paintTelegramKeyRow();
+  if (!dom.telegramKeyEditor?.hidden) dom.channelTelegramTokenInput?.focus();
+});
+
+dom.saveTelegramTokenBtn?.addEventListener('click', async () => {
+  const token = dom.channelTelegramTokenInput?.value?.trim();
+  if (!token) {
+    setTelegramKeyMessage('Paste a bot token first.', true);
+    return;
+  }
+  dom.saveTelegramTokenBtn.disabled = true;
+  try {
+    unwrapIpcResult(
+      await window.electron.settings.runLlmCommand({ command: `/llm telegram add ${token}` }),
+      'Failed to save Telegram token.'
+    );
+    dom.channelTelegramTokenInput.value = '';
+    appState.settings.telegram = { ...(appState.settings.telegram || {}), hasToken: true };
+    setTelegramKeyMessage('Token saved.');
+    await testTelegramToken();
+  } catch (err) {
+    // A host error never repeats the token here, whatever it quotes.
+    setTelegramKeyMessage(String(err.message || 'Error saving token.').split(token).join('[token]'), true);
+  } finally {
+    dom.saveTelegramTokenBtn.disabled = false;
+  }
+});
+
+dom.testTelegramBtn?.addEventListener('click', async () => {
+  dom.testTelegramBtn.disabled = true;
+  try {
+    await testTelegramToken();
+  } finally {
+    dom.testTelegramBtn.disabled = false;
+  }
+});
+
+dom.clearTelegramTokenBtn?.addEventListener('click', async () => {
+  const confirmed = await showConfirmDialog('Remove the saved Telegram bot token? The bot stops answering.');
+  if (!confirmed) return;
+  dom.clearTelegramTokenBtn.disabled = true;
+  try {
+    unwrapIpcResult(
+      await window.electron.settings.runLlmCommand({ command: '/llm telegram remove' }),
+      'Failed to clear Telegram token.'
+    );
+    appState.settings.telegram = { ...(appState.settings.telegram || {}), hasToken: false, bridgeActive: false };
+    appState.telegramTested = null;
+    setTelegramKeyMessage('Token removed.');
+    paintTelegramKeyRow();
+  } catch (err) {
+    setTelegramKeyMessage(err.message || 'Error clearing token.', true);
+  } finally {
+    dom.clearTelegramTokenBtn.disabled = false;
+  }
+});
 
 /* --- Channel access control: allowlist + approval target ----
  *
@@ -12214,18 +12840,20 @@ function setChannelAccessStatus(channel, message, isError = false) {
 
 // Ids come from strangers on the internet, so every one of them is written
 // with textContent and never interpolated into HTML.
+// A compact list row (settings redesign §5.8 rule 7): the id, its action on the row.
 function renderChannelIdRow(label, actionLabel, onAction, actionClass = 'btn') {
   const row = document.createElement('div');
-  row.className = 'channel-access-row';
+  row.className = 'settings-list-row channel-access-row';
 
   const text = document.createElement('span');
-  text.className = 'channel-access-id';
+  text.className = 'settings-list-name channel-access-id';
   text.textContent = label;
+  text.title = label;
   row.appendChild(text);
 
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = `btn btn-small ${actionClass}`;
+  button.className = `btn btn-sm ${actionClass}`;
   button.textContent = actionLabel;
   button.addEventListener('click', onAction);
   row.appendChild(button);
@@ -12400,144 +13028,19 @@ CHANNEL_ACCESS_CHANNELS.forEach((channel) => {
   }
 });
 
-/* --- Provider management: Web Search keys ------------------- */
-if (dom.saveWebsearchBraveBtn) {
-  dom.saveWebsearchBraveBtn.addEventListener('click', async () => {
-    const apiKey = dom.websearchBraveKeyInput?.value?.trim();
-    if (!apiKey) return;
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveWebSearchKey({ provider: 'brave', apiKey }),
-        'Failed to save Brave key.'
-      );
-      dom.websearchBraveKeyInput.value = '';
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = 'Key saved.';
-        dom.websearchBraveStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = err.message || 'Error saving key.';
-        dom.websearchBraveStatus.classList.add('error');
-      }
-    }
-  });
-}
-
-if (dom.testWebsearchBraveBtn) {
-  dom.testWebsearchBraveBtn.addEventListener('click', async () => {
-    dom.testWebsearchBraveBtn.disabled = true;
-    if (dom.websearchBraveStatus) {
-      dom.websearchBraveStatus.textContent = 'Testing Brave Search...';
-      dom.websearchBraveStatus.classList.remove('error');
-    }
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.testWebSearchKey({ provider: 'brave' }),
-        'Failed to test Brave Search.'
-      );
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = result.message || 'Connection successful.';
-        dom.websearchBraveStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = err.message || 'Test failed.';
-        dom.websearchBraveStatus.classList.add('error');
-      }
-    } finally {
-      dom.testWebsearchBraveBtn.disabled = false;
-    }
-  });
-}
-
-if (dom.clearWebsearchBraveBtn) {
-  dom.clearWebsearchBraveBtn.addEventListener('click', async () => {
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveWebSearchKey({ provider: 'brave', clear: true }),
-        'Failed to clear Brave key.'
-      );
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = 'Key cleared.';
-        dom.websearchBraveStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchBraveStatus) {
-        dom.websearchBraveStatus.textContent = err.message || 'Error.';
-        dom.websearchBraveStatus.classList.add('error');
-      }
-    }
-  });
-}
-
-if (dom.saveWebsearchTavilyBtn) {
-  dom.saveWebsearchTavilyBtn.addEventListener('click', async () => {
-    const apiKey = dom.websearchTavilyKeyInput?.value?.trim();
-    if (!apiKey) return;
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveWebSearchKey({ provider: 'tavily', apiKey }),
-        'Failed to save Tavily key.'
-      );
-      dom.websearchTavilyKeyInput.value = '';
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = 'Key saved.';
-        dom.websearchTavilyStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = err.message || 'Error saving key.';
-        dom.websearchTavilyStatus.classList.add('error');
-      }
-    }
-  });
-}
-
-if (dom.testWebsearchTavilyBtn) {
-  dom.testWebsearchTavilyBtn.addEventListener('click', async () => {
-    dom.testWebsearchTavilyBtn.disabled = true;
-    if (dom.websearchTavilyStatus) {
-      dom.websearchTavilyStatus.textContent = 'Testing Tavily...';
-      dom.websearchTavilyStatus.classList.remove('error');
-    }
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.testWebSearchKey({ provider: 'tavily' }),
-        'Failed to test Tavily.'
-      );
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = result.message || 'Connection successful.';
-        dom.websearchTavilyStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = err.message || 'Test failed.';
-        dom.websearchTavilyStatus.classList.add('error');
-      }
-    } finally {
-      dom.testWebsearchTavilyBtn.disabled = false;
-    }
-  });
-}
-
-if (dom.clearWebsearchTavilyBtn) {
-  dom.clearWebsearchTavilyBtn.addEventListener('click', async () => {
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveWebSearchKey({ provider: 'tavily', clear: true }),
-        'Failed to clear Tavily key.'
-      );
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = 'Key cleared.';
-        dom.websearchTavilyStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.websearchTavilyStatus) {
-        dom.websearchTavilyStatus.textContent = err.message || 'Error.';
-        dom.websearchTavilyStatus.classList.add('error');
-      }
-    }
+/* --- Providers & keys: search and image key rows ---------------- */
+if (dom.searchImageList) {
+  dom.searchImageList.addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-action]');
+    const item = button && searchImageItem(button.dataset.provider);
+    if (!item) return;
+    const run = {
+      toggle: async () => toggleKeyRow('search', item.key, dom.searchImageList),
+      save: () => saveSearchImageKey(item),
+      test: () => testSearchImageKey(item),
+      clear: () => clearSearchImageKey(item)
+    }[button.dataset.action];
+    if (run) run().catch((err) => settingsLog.warn(`key row ${item.key}: ${err.message}`));
   });
 }
 
@@ -12563,76 +13066,6 @@ if (dom.imagegenDefaultSelect) {
   });
 }
 
-if (dom.saveImagegenFalBtn) {
-  dom.saveImagegenFalBtn.addEventListener('click', async () => {
-    const apiKey = dom.imagegenFalKeyInput?.value?.trim();
-    if (!apiKey) return;
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveImageGenKey({ provider: 'fal', apiKey }),
-        'Failed to save Fal key.'
-      );
-      dom.imagegenFalKeyInput.value = '';
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = 'Key saved.';
-        dom.imagegenFalStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = err.message || 'Error saving key.';
-        dom.imagegenFalStatus.classList.add('error');
-      }
-    }
-  });
-}
-
-if (dom.testImagegenFalBtn) {
-  dom.testImagegenFalBtn.addEventListener('click', async () => {
-    dom.testImagegenFalBtn.disabled = true;
-    if (dom.imagegenFalStatus) {
-      dom.imagegenFalStatus.textContent = 'Testing Fal...';
-      dom.imagegenFalStatus.classList.remove('error');
-    }
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.testImageGenKey({ provider: 'fal' }),
-        'Failed to test Fal.'
-      );
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = result.message || 'Connection successful.';
-        dom.imagegenFalStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = err.message || 'Test failed.';
-        dom.imagegenFalStatus.classList.add('error');
-      }
-    } finally {
-      dom.testImagegenFalBtn.disabled = false;
-    }
-  });
-}
-
-if (dom.clearImagegenFalBtn) {
-  dom.clearImagegenFalBtn.addEventListener('click', async () => {
-    try {
-      unwrapIpcResult(
-        await window.electron.settings.saveImageGenKey({ provider: 'fal', clear: true }),
-        'Failed to clear Fal key.'
-      );
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = 'Key cleared.';
-        dom.imagegenFalStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.imagegenFalStatus) {
-        dom.imagegenFalStatus.textContent = err.message || 'Error.';
-        dom.imagegenFalStatus.classList.add('error');
-      }
-    }
-  });
-}
-
 if (dom.providerList) {
   dom.providerList.addEventListener('click', (e) => {
     const button = e.target.closest('button[data-action]');
@@ -12640,14 +13073,14 @@ if (dom.providerList) {
     const { action, provider } = button.dataset;
     if (!provider) return;
 
+    if (action === 'toggle') {
+      toggleKeyRow('model', provider, dom.providerList);
+    }
     if (action === 'save') {
       handleSaveProvider(provider);
     }
     if (action === 'clear') {
       handleClearProvider(provider);
-    }
-    if (action === 'test') {
-      handleTestProvider(provider);
     }
     if (action === 'save-ollama-url') {
       handleSaveOllamaUrl();
@@ -12655,29 +13088,11 @@ if (dom.providerList) {
   });
 }
 
-if (dom.saveTemplateVariablesBtn) {
-  dom.saveTemplateVariablesBtn.addEventListener('click', () => {
-    handleSaveTemplateVariables();
-  });
-}
+wireAboutYou();
 
-if (dom.saveUserProfileBtn) {
-  dom.saveUserProfileBtn.addEventListener('click', () => {
-    handleSaveUserProfile();
-  });
-}
+wireNotificationFields();
 
-if (dom.saveNotificationsBtn) {
-  dom.saveNotificationsBtn.addEventListener('click', () => {
-    handleSaveNotifications();
-  });
-}
-
-if (dom.saveVoiceSettingsBtn) {
-  dom.saveVoiceSettingsBtn.addEventListener('click', () => {
-    handleSaveVoiceSettings();
-  });
-}
+wireVoiceFields();
 
 if (dom.saveVoiceKeyBtn) {
   dom.saveVoiceKeyBtn.addEventListener('click', () => {
@@ -12703,22 +13118,8 @@ if (dom.reloadHooksBtn) {
   });
 }
 
-if (dom.hooksGlobalEnabledInput) {
-  dom.hooksGlobalEnabledInput.addEventListener('change', (event) => {
-    handleToggleHooksGlobal(Boolean(event?.target?.checked));
-  });
-}
-
-if (dom.hooksList) {
-  dom.hooksList.addEventListener('click', (event) => {
-    const button = event.target.closest('button[data-action="toggle-hook"]');
-    if (!button) return;
-
-    const hookName = String(button.dataset.hookName || '').trim();
-    const enabled = String(button.dataset.nextEnabled || '').toLowerCase() === 'true';
-    handleToggleHook(hookName, enabled);
-  });
-}
+// The global switch and each hook's switch save as they are flipped (renderHooksList).
+wireHooksGlobalSwitch();
 
 if (dom.memoryRefreshBtn) {
   dom.memoryRefreshBtn.addEventListener('click', () => {
@@ -12766,19 +13167,11 @@ if (dom.cronRefreshBtn) {
 
 // ── Vault event listeners ──────────────────────────────────
 if (dom.vaultAddBtn) {
-  dom.vaultAddBtn.addEventListener('click', () => {
-    if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = false;
-    if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.focus();
-  });
+  dom.vaultAddBtn.addEventListener('click', () => openVaultPanel(null));
 }
 
 if (dom.vaultCancelEntryBtn) {
-  dom.vaultCancelEntryBtn.addEventListener('click', () => {
-    if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = true;
-    if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.value = '';
-    if (dom.vaultAddValueInput) dom.vaultAddValueInput.value = '';
-    if (dom.vaultAddStatus) { dom.vaultAddStatus.textContent = ''; dom.vaultAddStatus.classList.remove('error'); }
-  });
+  dom.vaultCancelEntryBtn.addEventListener('click', () => closeVaultPanel());
 }
 
 if (dom.vaultSaveEntryBtn) {
@@ -12836,6 +13229,19 @@ if (dom.cronAddBtn) {
   dom.cronAddBtn.addEventListener('click', () => handleAddCronJob());
 }
 
+// Only the field that applies (rule 4): an interval with its unit, or a cron
+// expression or time as text.
+function paintCronAddKind() {
+  const every = (dom.cronAddKindInput?.value || 'every') === 'every';
+  if (dom.cronAddEveryRow) dom.cronAddEveryRow.hidden = !every;
+  if (dom.cronAddValueRow) dom.cronAddValueRow.hidden = every;
+  if (dom.cronAddValueInput) dom.cronAddValueInput.placeholder = dom.cronAddKindInput?.value === 'at' ? 'e.g., 2026-12-01T09:00' : 'e.g., 0 9 * * 1-5';
+}
+if (dom.cronAddKindInput) {
+  dom.cronAddKindInput.addEventListener('change', paintCronAddKind);
+  paintCronAddKind();
+}
+
 if (dom.cronList) {
   dom.cronList.addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-action]');
@@ -12844,9 +13250,7 @@ if (dom.cronList) {
     const action = btn.dataset.action;
     const jobId = btn.dataset.jobId;
 
-    if (action === 'toggle-cron') {
-      handleToggleCronJob(jobId, btn.dataset.nextEnabled === 'true');
-    } else if (action === 'run-cron') {
+    if (action === 'run-cron') {
       handleRunCronJob(jobId);
     } else if (action === 'delete-cron') {
       handleDeleteCronJob(jobId);
@@ -12932,6 +13336,7 @@ if (dom.appsList) {
     const btn = e.target.closest('button[data-action]');
     if (!btn) return;
     if (btn.dataset.action === 'remove-app') {
+      if (!(await showConfirmDialog(`Remove the app "${btn.dataset.appId}"?`))) return;
       try {
         await window.electron.apps.remove(btn.dataset.appId);
         await loadSystemApps();
@@ -13112,7 +13517,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
 
 // A failed turn's message (spec 2026-09-27 §15; local inference L1 §15): a
 // refusal under the private mark says why first, and an action gets its
-// button (the profile's main, or Settings → Models). Drawn the same way when
+// button (the profile's main, or Settings › Model profiles). Drawn the same way when
 // the error arrives and when a stored error row is drawn again, so a redraw
 // keeps the sentence and the button.
 const MESSAGE_ERROR_ACTIONS = Object.freeze(['use-profile-main', 'open-models']);
@@ -13410,6 +13815,13 @@ unsubscribeHandlers.push(window.electron.chat.onListChanged(async ({ chatId, wha
 }));
 
 window.addEventListener('beforeunload', () => {
+  // Best effort: a pending setting is sent before the window goes (the IPC send is
+  // synchronous; its reply may never arrive).
+  try {
+    flushSettingsAutosaves();
+  } catch {
+    // Quitting goes on.
+  }
   clearPendingImages();
   appState.streamBuffers.clear();
   streamTextOffsets.clear();
@@ -13435,38 +13847,33 @@ async function loadPermissionRules() {
       return;
     }
     const rules = result.rules || [];
-    container.innerHTML = '';
+    container.textContent = '';
     if (rules.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'provider-message';
-      empty.textContent = 'No permission rules configured yet. Approve a tool call with a pattern to create one.';
-      container.appendChild(empty);
+      container.appendChild(listEmptyLine('No rules yet. Approve a tool call with a pattern to make one.'));
+      if (status) status.textContent = '';
       return;
     }
+    const RULE_TONE = { allow: 'ok', deny: 'bad' };
     for (const rule of rules) {
-      const row = document.createElement('div');
-      row.className = 'provider-item permission-rule-row';
-      const label = document.createElement('span');
-      label.className = 'permission-rule-label';
-      const actionClass = rule.action === 'deny' ? 'badge-danger' : (rule.action === 'allow' ? 'badge-success' : 'badge-warn');
-      label.innerHTML = `<code>${rule.tool || '?'}</code> <code>${rule.pattern || '*'}</code> <span class="badge ${actionClass}">${rule.action || '?'}</span>`;
-      if (rule.source) {
-        const src = document.createElement('span');
-        src.className = 'permission-rule-source';
-        src.textContent = rule.source;
-        label.appendChild(document.createTextNode(' '));
-        label.appendChild(src);
-      }
-      const deleteBtn = document.createElement('button');
-      deleteBtn.type = 'button';
-      deleteBtn.className = 'btn btn-danger btn-xs';
-      deleteBtn.textContent = 'Remove';
-      deleteBtn.addEventListener('click', async () => {
-        await window.electron.tool.removePermissionRule(rule.tool, rule.pattern, rule.action);
+      // Tool, pattern and source are the store's: text only.
+      const remove = listRowButton('Remove', {}, { danger: true });
+      remove.addEventListener('click', async () => {
+        if (!(await showConfirmDialog(`Remove the rule ${rule.action || '?'} ${rule.tool || '?'} ${rule.pattern || '*'}?`))) return;
+        try {
+          unwrapIpcResult(await window.electron.tool.removePermissionRule(rule.tool, rule.pattern, rule.action), 'Unable to remove the rule.');
+        } catch (err) {
+          if (status) status.textContent = `Error: ${err.message}`;
+          return;
+        }
         loadPermissionRules();
       });
-      row.appendChild(label);
-      row.appendChild(deleteBtn);
+      const row = buildSettingsListRow({
+        name: `${rule.tool || '?'} ${rule.pattern || '*'}`,
+        detail: rule.source || '',
+        pill: { text: rule.action || '?', tone: RULE_TONE[rule.action] || 'warn' },
+        controls: [remove]
+      });
+      row.classList.add('permission-rule-row');
       container.appendChild(row);
     }
     if (status) status.textContent = `${rules.length} rule${rules.length === 1 ? '' : 's'}`;
@@ -13483,39 +13890,22 @@ async function loadWebhookList() {
     const result = unwrapIpcResult(await window.electron.webhook.list(), 'Unable to list webhooks.');
     const webhooks = Array.isArray(result) ? result : (result?.webhooks || []);
     if (!webhooks.length) {
-      dom.webhookList.innerHTML = '';
+      dom.webhookList.textContent = '';
       if (dom.webhookListStatus) dom.webhookListStatus.textContent = 'No webhooks registered.';
       return;
     }
     if (dom.webhookListStatus) dom.webhookListStatus.textContent = webhooks.some((wh) => wh.listening === false) ? WEBHOOK_LISTENER_DOWN : '';
-    dom.webhookList.innerHTML = '';
-    webhooks.forEach(wh => {
-      const row = document.createElement('div');
-      row.className = 'provider-card';
-      row.style.marginBottom = '8px';
-      // The name and the URL are the node's: text, never markup.
-      const line = document.createElement('div');
-      line.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
-      const info = document.createElement('div');
-      const name = document.createElement('strong');
-      name.textContent = wh.name;
-      const url = document.createElement('code');
-      url.style.cssText = 'font-size:0.8rem;color:var(--text-secondary);';
-      url.textContent = wh.url || wh.id;
-      info.append(name, document.createElement('br'), url);
-      const buttons = document.createElement('div');
-      buttons.style.cssText = 'display:flex;gap:4px;';
-      const remove = document.createElement('button');
-      remove.className = 'icon-button';
-      remove.dataset.action = 'delete-webhook';
-      remove.dataset.id = wh.id;
-      remove.title = 'Delete';
-      remove.appendChild(faIcon('fas fa-trash'));
-      buttons.appendChild(remove);
-      line.append(info, buttons);
-      row.appendChild(line);
-      dom.webhookList.appendChild(row);
-    });
+    dom.webhookList.textContent = '';
+    // The name and the URL are the node's: text, never markup.
+    for (const wh of webhooks) {
+      dom.webhookList.appendChild(buildSettingsListRow({
+        name: wh.name,
+        nameTag: 'strong',
+        detail: wh.url || wh.id,
+        controls: [listRowButton('Delete', { action: 'delete-webhook', id: wh.id, name: wh.name }, { danger: true })],
+        dataset: { webhookId: wh.id }
+      }));
+    }
   } catch (err) {
     if (dom.webhookListStatus) dom.webhookListStatus.textContent = `Error: ${err.message}`;
   }
@@ -13546,6 +13936,7 @@ if (dom.webhookList) {
     const btn = e.target.closest('button[data-action="delete-webhook"]');
     if (!btn) return;
     const id = btn.dataset.id;
+    if (!(await showConfirmDialog(`Delete the webhook "${btn.dataset.name || id}"? Its URL stops answering.`))) return;
     try {
       unwrapIpcResult(await window.electron.webhook.delete({ id }), 'Unable to delete the webhook.');
       loadWebhookList();
@@ -13564,6 +13955,8 @@ if (dom.diagnosticsRunBtn) {
       const result = await window.electron.diagnostics.run();
       if (dom.diagnosticsStatus) dom.diagnosticsStatus.textContent = result?.ok ? 'Complete.' : `Failed: ${result?.error || 'no answer'}`;
       if (dom.diagnosticsResults) dom.diagnosticsResults.textContent = result?.formatted || 'No results.';
+      // The Results card stays hidden until a run returns.
+      if (dom.diagnosticsResultsCard) dom.diagnosticsResultsCard.hidden = false;
     } catch (err) {
       if (dom.diagnosticsStatus) dom.diagnosticsStatus.textContent = `Error: ${err.message}`;
     }
@@ -13876,13 +14269,8 @@ function initMeshHandlers() {
     });
   }
 
-  // Mesh indicator opens settings to mesh tab
-  if (dom.meshIndicatorBtn) {
-    dom.meshIndicatorBtn.addEventListener('click', () => {
-      if (dom.settingsDrawer) dom.settingsDrawer.hidden = false;
-      switchSettingsTab('mesh');
-    });
-  }
+  // The mesh indicator only says how many peers are online (its title); the
+  // Mesh Network page left Settings (spec §5.3).
 
   // Listen for mesh ready (fires after main process finishes initialization)
   if (window.electron.mesh?.onReady) {
@@ -13915,7 +14303,7 @@ function initMeshHandlers() {
 }
 
 initMeshHandlers();
-/* --- Settings > Contact (cases stage 4 §3.8; management surfaces §3.5):
+/* --- Settings › Contact ladder (cases stage 4 §3.8; management surfaces §3.5):
    the contact policy — a ladder of channels per urgency, quiet hours, the
    daily digest — and each channel's readiness. Away mode is set_away, in
    words, from any chat. --- */
@@ -13943,58 +14331,87 @@ function textToLadder(text) {
   });
 }
 
-function renderContactPolicyEditor(policy, channels, { save, showError }) {
+// The contact policy saves as it changes (settings redesign §5.8): a ladder line or
+// the digest channel when it loses focus, the times and boxes when they change. A
+// line that does not parse says so beside itself and sends nothing; any other save
+// meanwhile keeps that ladder's stored steps. `save(next)` resolves { ok, policy?,
+// error? }; after a refusal every field goes back to the stored policy.
+const CONTACT_URGENCY_LABELS = { low: 'Low urgency', normal: 'Normal urgency', high: 'High urgency' };
+
+function contactRow(labelText, forId) {
+  const row = contactEl('div', 'settings-row');
+  const label = contactEl('label', '', labelText);
+  if (forId) label.htmlFor = forId;
+  row.appendChild(label);
+  return row;
+}
+
+function renderContactPolicyEditor(policy, channels, { save }) {
+  let stored = policy;
+  let lastField = null;
   const editor = contactEl('div', 'contact-policy');
   editor.id = 'contact-policy-editor';
+
+  editor.appendChild(contactEl('p', 'settings-section-label', 'Ladders'));
+  editor.appendChild(contactEl('p', 'settings-row-help',
+    'Channels to try in order, each with the minutes to wait before it: present, telegram@30, email@240. Add +digest to send a step in the daily digest.'));
   const inputs = {};
-  editor.appendChild(contactEl('div', 'contact-policy-heading', 'Ladders (channel@minutes, comma-separated)'));
   for (const u of CONTACT_LADDER_URGENCIES) {
-    const label = contactEl('label', 'contact-policy-row', `${u} `);
-    const input = contactEl('input', 'contact-policy-ladder');
+    const row = contactRow(CONTACT_URGENCY_LABELS[u], `contact-ladder-${u}`);
+    const input = contactEl('input', 'provider-input contact-policy-ladder');
     input.type = 'text';
     input.id = `contact-ladder-${u}`;
-    input.value = ladderToText(policy.ladders[u]);
-    label.appendChild(input);
-    editor.appendChild(label);
+    input.autocomplete = 'off';
+    row.appendChild(input);
+    editor.appendChild(row);
     inputs[u] = input;
   }
-  const quiet = contactEl('label', 'contact-policy-row', 'Quiet hours ');
+
+  const quietRow = contactRow('Quiet hours', 'contact-quiet-start');
+  const quietSpan = contactEl('span', 'contact-policy-times');
   const qStart = contactEl('input', 'contact-policy-time');
   qStart.type = 'time';
   qStart.id = 'contact-quiet-start';
-  qStart.value = policy.quietHours ? policy.quietHours.start : '';
   const qEnd = contactEl('input', 'contact-policy-time');
   qEnd.type = 'time';
   qEnd.id = 'contact-quiet-end';
-  qEnd.value = policy.quietHours ? policy.quietHours.end : '';
-  quiet.append(qStart, document.createTextNode(' – '), qEnd);
-  editor.appendChild(quiet);
-  const breakthrough = contactEl('div', 'contact-policy-row', 'Break through quiet hours: ');
+  qEnd.setAttribute('aria-label', 'Quiet hours end');
+  quietSpan.append(qStart, document.createTextNode(' to '), qEnd);
+  quietRow.appendChild(quietSpan);
+  editor.appendChild(quietRow);
+  const throughRow = contactRow('Break through quiet hours');
+  const throughSpan = contactEl('span', 'contact-policy-checks');
   const through = {};
   for (const u of CONTACT_LADDER_URGENCIES) {
     const box = contactEl('input');
     box.type = 'checkbox';
     box.id = `contact-breakthrough-${u}`;
-    box.checked = (policy.quietHours?.breakthrough || ['high']).includes(u);
     const l = contactEl('label', 'contact-policy-check', ` ${u} `);
     l.prepend(box);
-    breakthrough.appendChild(l);
+    throughSpan.appendChild(l);
     through[u] = box;
   }
-  editor.appendChild(breakthrough);
-  const digest = contactEl('label', 'contact-policy-row', 'Daily digest ');
+  throughRow.appendChild(throughSpan);
+  editor.appendChild(throughRow);
+  editor.appendChild(contactEl('p', 'settings-row-help', 'Set both times to turn quiet hours on; clear both to turn them off.'));
+
+  const digestRow = contactRow('Daily digest', 'contact-digest-channel');
+  const digestSpan = contactEl('span', 'contact-policy-times');
   const dChannel = contactEl('input', 'contact-policy-digest');
   dChannel.type = 'text';
   dChannel.id = 'contact-digest-channel';
   dChannel.placeholder = 'off';
-  dChannel.value = policy.digest ? policy.digest.channel : '';
+  dChannel.autocomplete = 'off';
   const dAt = contactEl('input', 'contact-policy-time');
   dAt.type = 'time';
   dAt.id = 'contact-digest-at';
-  dAt.value = policy.digest ? policy.digest.at : '08:00';
-  digest.append(dChannel, document.createTextNode(' at '), dAt);
-  editor.appendChild(digest);
-  editor.appendChild(contactEl('div', 'contact-policy-heading', 'Channels'));
+  dAt.setAttribute('aria-label', 'Daily digest time');
+  digestSpan.append(dChannel, document.createTextNode(' at '), dAt);
+  digestRow.appendChild(digestSpan);
+  editor.appendChild(digestRow);
+  editor.appendChild(contactEl('p', 'settings-row-help', 'A channel name, such as email; leave it empty for no digest.'));
+
+  editor.appendChild(contactEl('p', 'settings-section-label', 'Channels'));
   const status = contactEl('ul', 'contact-policy-channels');
   status.id = 'contact-policy-channels';
   for (const [id, s] of Object.entries(channels || {})) {
@@ -14002,24 +14419,109 @@ function renderContactPolicyEditor(policy, channels, { save, showError }) {
     status.appendChild(contactEl('li', s.configured ? 'is-ready' : 'is-off', text));
   }
   editor.appendChild(status);
-  const saveBtn = contactEl('button', 'btn btn-primary', 'Save contact policy');
-  saveBtn.type = 'button';
-  saveBtn.id = 'contact-policy-save';
-  saveBtn.addEventListener('click', async () => {
-    try {
-      const next = { ...policy, ladders: {} };
-      for (const u of CONTACT_LADDER_URGENCIES) next.ladders[u] = textToLadder(inputs[u].value);
-      next.quietHours = qStart.value && qEnd.value
-        ? { start: qStart.value, end: qEnd.value, breakthrough: CONTACT_LADDER_URGENCIES.filter((u) => through[u].checked) }
-        : null;
-      next.digest = dChannel.value.trim() ? { channel: dChannel.value.trim(), at: dAt.value || '08:00' } : null;
-      await save(next);
-    } catch (err) {
-      showError(err.message);
+
+  const paintQuiet = () => {
+    const on = Boolean(qStart.value && qEnd.value);
+    setSettingsRowGreyed(throughRow, !on);
+  };
+  const apply = () => {
+    for (const u of CONTACT_LADDER_URGENCIES) {
+      inputs[u].value = ladderToText(stored.ladders[u]);
+      inputs[u].dataset.saved = inputs[u].value;
+      delete inputs[u].dataset.invalid;
+    }
+    qStart.value = stored.quietHours ? stored.quietHours.start : '';
+    qEnd.value = stored.quietHours ? stored.quietHours.end : '';
+    for (const u of CONTACT_LADDER_URGENCIES) through[u].checked = (stored.quietHours?.breakthrough || ['high']).includes(u);
+    dChannel.value = stored.digest ? stored.digest.channel : '';
+    dChannel.dataset.saved = dChannel.value;
+    dAt.value = stored.digest ? stored.digest.at : '08:00';
+    paintQuiet();
+  };
+
+  // The policy as the page stands, with stored values in place of what cannot be sent.
+  const snapshot = () => {
+    const next = { ...stored, ladders: {} };
+    for (const u of CONTACT_LADDER_URGENCIES) {
+      try {
+        next.ladders[u] = textToLadder(inputs[u].value);
+      } catch {
+        next.ladders[u] = stored.ladders[u];
+      }
+    }
+    if (qStart.value && qEnd.value) {
+      next.quietHours = { start: qStart.value, end: qEnd.value, breakthrough: CONTACT_LADDER_URGENCIES.filter((u) => through[u].checked) };
+    } else if (!qStart.value && !qEnd.value) {
+      next.quietHours = null;
+    } else {
+      next.quietHours = stored.quietHours || null;
+    }
+    next.digest = dChannel.value.trim() ? { channel: dChannel.value.trim(), at: dAt.value || '08:00' } : null;
+    return next;
+  };
+
+  const saver = registerSettingsAutosave('contact.policy', {
+    save: async (next) => {
+      const r = await save(next);
+      if (r && r.ok && r.policy) stored = r.policy;
+      return r;
+    },
+    onState: (state, info) => {
+      if (state === 'error') {
+        apply();
+        clearSettingsFieldErrors(editor);
+        setSettingsFieldError(lastField, `Not saved: ${info.error}`);
+      } else if (state === 'saved' && lastField && !lastField.dataset.invalid) {
+        setSettingsFieldError(lastField, '');
+      }
     }
   });
-  editor.appendChild(saveBtn);
+  const send = (field) => {
+    lastField = field;
+    saver.change(snapshot(), { immediate: true });
+  };
+
+  for (const u of CONTACT_LADDER_URGENCIES) {
+    const input = inputs[u];
+    input.addEventListener('blur', () => {
+      try {
+        textToLadder(input.value);
+      } catch (err) {
+        input.dataset.invalid = '1';
+        setSettingsFieldError(input, `Not saved: ${err.message}`);
+        return;
+      }
+      delete input.dataset.invalid;
+      setSettingsFieldError(input, '');
+      if (input.value === input.dataset.saved) return;
+      input.dataset.saved = input.value;
+      send(input);
+    });
+  }
+  for (const el of [qStart, qEnd]) {
+    el.addEventListener('change', () => {
+      paintQuiet();
+      if (Boolean(qStart.value) !== Boolean(qEnd.value)) return; // wait for the other time
+      send(el);
+    });
+  }
+  for (const u of CONTACT_LADDER_URGENCIES) through[u].addEventListener('change', () => send(through[u]));
+  dChannel.addEventListener('blur', () => {
+    if (dChannel.value === dChannel.dataset.saved) return;
+    dChannel.dataset.saved = dChannel.value;
+    send(dChannel);
+  });
+  dAt.addEventListener('change', () => send(dAt));
+
+  apply();
   return editor;
+}
+
+function contactAwayText(policy) {
+  const away = policy.away && Date.parse(policy.away.until) > Date.now() ? policy.away : null;
+  return away
+    ? `Away (${away.mode}) until ${new Date(away.until).toLocaleString()}. Tell King Louie you're back to end it.`
+    : 'Not away. To be away, tell King Louie in any chat, e.g. "email only until Friday".';
 }
 
 async function renderContactSettings() {
@@ -14038,15 +14540,15 @@ async function renderContactSettings() {
       message.textContent = text;
       message.classList.add('is-error');
     };
+    let awayLine = null;
     const save = async (next) => {
       // The away setting may have changed (set_away) since the pane drew:
       // keep the one saved now.
       const fresh = await window.electron.contact.getPolicy().catch(() => null);
       const r = await window.electron.contact.setPolicy(fresh?.ok ? { ...next, away: fresh.policy.away } : next);
-      if (!r || r.ok === false) throw new Error(r?.error || 'The contact policy was not saved.');
-      await renderContactSettings();
-      const saved = document.getElementById('contact-pane-message');
-      if (saved) saved.textContent = 'Saved.';
+      if (!r || r.ok === false) return { ok: false, error: r?.error || 'The contact policy was not saved.' };
+      if (awayLine && r.policy) awayLine.textContent = contactAwayText(r.policy);
+      return { ok: true, policy: r.policy };
     };
     // Final review M7: when another process holds the contact ladder lease,
     // this one sends nothing; say so where the owner looks.
@@ -14056,13 +14558,10 @@ async function renderContactSettings() {
       body.appendChild(elsewhere);
     }
     if (policy.ok) {
-      const away = policy.policy.away && Date.parse(policy.policy.away.until) > Date.now() ? policy.policy.away : null;
-      const awayLine = contactEl('div', 'contact-away-note', away
-        ? `Away (${away.mode}) until ${new Date(away.until).toLocaleString()}. Tell King Louie you're back to end it.`
-        : 'Not away. To be away, tell King Louie in any chat, e.g. "email only until Friday".');
+      awayLine = contactEl('div', 'contact-away-note settings-row-help', contactAwayText(policy.policy));
       awayLine.id = 'contact-away-note';
       body.appendChild(awayLine);
-      body.appendChild(renderContactPolicyEditor(policy.policy, policy.channels, { save, showError }));
+      body.appendChild(renderContactPolicyEditor(policy.policy, policy.channels, { save }));
     } else {
       showError(policy.error || 'The contact policy could not be read.');
     }
@@ -14567,12 +15066,12 @@ renderAgentModeButton();
 renderHistoryToggleButton();
 checkFirstRun();
 
-// ── Settings > Local service (fleet stage 7) ──────────────────────────────
+// ── Settings › Node & connection (fleet stage 7) ─────────────────────────
 const serviceLog = createLogger('desktop-service');
 const setupLog = createLogger('desktop-setup');
 const servicePaneState = {
   detachArmed: false, detachArmToken: null, detachArmedAt: null, busy: false, error: null,
-  pendingNodeId: null, lastView: null, lastModel: null, lastStatus: null
+  pendingNodeId: null, lastView: null, lastModel: null, lastStatus: null, shownRequest: null
 };
 let serviceRenderToken = 0;
 let serviceLastConnection = null;
@@ -14587,7 +15086,39 @@ function serviceLinesInto(el, lines) {
 }
 
 function disableServiceActionButtons() {
-  document.querySelectorAll('#service-pane-actions button, #service-pane-import button, #service-pane-status button').forEach((btn) => { btn.disabled = true; });
+  document.querySelectorAll('#service-pane-actions button, #service-pane-import button, #service-pane-status button, #service-pane-move button, #service-pane-advanced-actions button, #service-login-start').forEach((btn) => { btn.disabled = true; });
+}
+
+// Node & connection (settings redesign §5.7, §8.2): these go under the collapsed
+// Advanced, with the pairing request and command; every other action is primary.
+const ADVANCED_SERVICE_ACTIONS = ['unpair', 'detach', 'standaloneOnce', 'pairCancel'];
+
+function serviceActionButton(id, label, className, call) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = `service-action-${id}`;
+  btn.className = className;
+  btn.textContent = label;
+  btn.disabled = servicePaneState.busy;
+  btn.addEventListener('click', () => { runServiceAction(id, call).catch((err) => serviceLog.warn('service action failed', { action: id, error: err && err.message })); });
+  return btn;
+}
+
+// A Detach warning hidden by closing Advanced must not count as seen: closing
+// the section disarms, so the next Detach click shows the warning again.
+document.getElementById('service-pane-advanced')?.addEventListener('toggle', (event) => {
+  if (event.target.open || !servicePaneState.detachArmed) return;
+  servicePaneState.detachArmed = false;
+  servicePaneState.detachArmToken = null;
+  servicePaneState.detachArmedAt = null;
+  if (servicePaneState.lastModel && !servicePaneState.busy) paintServicePane(servicePaneState.lastModel, servicePaneState.lastStatus);
+});
+
+function serviceSectionLabel(text) {
+  const label = document.createElement('div');
+  label.className = 'settings-section-label';
+  label.textContent = text;
+  return label;
 }
 
 // The one place that actually writes the pane's DOM from a model. Pure with
@@ -14614,9 +15145,52 @@ function paintServicePane(model, status) {
   servicePaneState.pendingNodeId = (status.pendingPair && status.pendingPair.service && status.pendingPair.service.nodeId) || null;
 
   const statusEl = document.getElementById('service-pane-status');
-  const lines = [...model.lines];
-  if (servicePaneState.detachArmed && model.detachWarning) lines.push(model.detachWarning);
-  serviceLinesInto(statusEl, lines);
+  const actionsEl = document.getElementById('service-pane-actions');
+  const moveEl = document.getElementById('service-pane-move');
+  const approvalsEl = document.getElementById('service-pane-approvals');
+  const advancedEl = document.getElementById('service-pane-advanced');
+  const advancedActionsEl = document.getElementById('service-pane-advanced-actions');
+  const requestBox = document.getElementById('service-pane-request');
+  statusEl.replaceChildren();
+  actionsEl.replaceChildren();
+  moveEl.replaceChildren();
+  approvalsEl.replaceChildren();
+  advancedActionsEl.replaceChildren();
+
+  // A remote node's tab (attach stage 3): its name and version, nothing else.
+  if (model.kind === 'remote') {
+    const name = status.name || (status.service && status.service.nodeName) || (status.node && status.node.name) || 'Remote node';
+    const version = (status.service && status.service.version) || status.version || null;
+    serviceHeadlineInto(statusEl, name, version ? [`Version ${version}`] : []);
+    moveEl.hidden = true;
+    approvalsEl.hidden = true;
+    advancedEl.hidden = true;
+    document.getElementById('service-pane-login-start').hidden = true;
+    markUnavailableTabs(status.unavailableTabs || []);
+    return;
+  }
+
+  // 1, 2: the first line is the headline, the rest are rows. Attached and
+  // connected, the page opens with the fixed headline (spec §5.7), every model
+  // line is a row, and the rows the status already holds follow.
+  if (model.view === 'attached-connected') {
+    serviceHeadlineInto(statusEl, 'Connected to King Louie Node', [...model.lines, ...connectedServiceRows(status)]);
+  } else {
+    serviceHeadlineInto(statusEl, model.lines[0] || '', model.lines.slice(1));
+  }
+  const switchAction = switchToNodeAction(status);
+  if (switchAction === 'leave-standalone') {
+    const p = document.createElement('p');
+    p.className = 'notice-info service-pane-standalone';
+    p.textContent = 'This window was opened on its own for one session, so your node is not connected to it. Changes made here stay in this desktop\'s old profile.';
+    statusEl.appendChild(p);
+  }
+  if (model.view === 'attached-connected') {
+    const p = document.createElement('p');
+    p.className = 'settings-row-help service-pane-saved-on-node';
+    p.textContent = 'Everything in Settings is saved on the node. Closing this window does not stop it.';
+    statusEl.appendChild(p);
+  }
   if (servicePaneState.error) {
     const p = document.createElement('p');
     p.className = 'service-pane-error';
@@ -14645,29 +15219,42 @@ function paintServicePane(model, status) {
     statusEl.appendChild(row);
   }
 
-  const requestBox = document.getElementById('service-pane-request');
-  requestBox.hidden = !model.request;
-  if (model.request) {
-    document.getElementById('service-pair-request').textContent = model.request;
-    document.getElementById('service-pair-command').textContent = model.command || '';
-    const copyBtn = document.getElementById('service-copy-request-btn');
-    copyBtn.onclick = () => navigator.clipboard.writeText(model.request).catch((err) => serviceLog.warn('copying the pairing request failed', { error: err && err.message }));
+  // 7: a --kl-standalone-once window's one main action; the model's own buttons
+  // become plain ones beside it.
+  const primaryClass = switchAction === 'leave-standalone' ? 'btn btn-secondary btn-sm' : 'btn btn-primary btn-sm';
+  if (switchAction === 'leave-standalone') {
+    actionsEl.appendChild(serviceActionButton('leaveStandalone', 'Switch to my node', 'btn btn-primary btn-sm', () => window.electron.desktop.leaveStandalone()));
   }
 
-  const actionsEl = document.getElementById('service-pane-actions');
-  actionsEl.innerHTML = '';
+  // 6: a personal node, attached and connected: Restart node and Open data folder.
+  // Restart is the model's nodeRestart (its label when it offers one, which says
+  // the restart updates the node), else the same call under the fixed label.
+  const pairedService = (status.pairing && status.pairing.service) || {};
+  const personalConnected = model.view === 'attached-connected' && pairedService.hosting === 'personal';
+  const offered = model.actions.find((a) => a.id === 'nodeRestart');
+  if (personalConnected) {
+    const restartBtn = serviceActionButton('nodeRestart', offered ? offered.label : 'Restart node', 'btn btn-secondary btn-sm');
+    restartBtn.disabled = Boolean(offered && offered.disabled) || servicePaneState.busy;
+    actionsEl.appendChild(restartBtn);
+    actionsEl.appendChild(serviceActionButton('openDataFolder', 'Open data folder', 'btn btn-secondary btn-sm', () => window.electron.desktop.openDataFolder()));
+  }
+
+  // 3, 4: primary actions; Import… in its own card; the four Advanced ones below.
+  const advanced = [];
+  let importAction = null;
   for (const action of model.actions) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.id = `service-action-${action.id}`;
-    btn.className = action.id === 'detach' || action.id === 'unpair' ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
-    btn.textContent = action.id === 'detach' && servicePaneState.detachArmed ? 'Detach anyway' : action.label;
+    if (ADVANCED_SERVICE_ACTIONS.includes(action.id)) { advanced.push(action); continue; }
+    // §8.2: the move card only while the move is not marked (status.migration).
+    if (action.id === 'import') { if (!status.migration) importAction = action; continue; }
+    if (personalConnected && action.id === 'nodeRestart') continue;
+    const btn = serviceActionButton(action.id, action.label, primaryClass);
     btn.disabled = Boolean(action.disabled) || servicePaneState.busy;
-    btn.addEventListener('click', () => { runServiceAction(action.id).catch((err) => serviceLog.warn('service action failed', { action: action.id, error: err && err.message })); });
     actionsEl.appendChild(btn);
   }
+  actionsEl.hidden = actionsEl.childElementCount === 0;
 
-  // The login-start toggle is drawn from the pane model's row alone.
+  // The login-start toggle (boot-node-tray spec §5.4), a primary setting under
+  // the actions: drawn from the pane model's row alone.
   const loginStartEl = document.getElementById('service-pane-login-start');
   loginStartEl.hidden = !model.loginStart;
   if (model.loginStart) {
@@ -14688,12 +15275,95 @@ function paintServicePane(model, status) {
     };
   }
 
-  const approvalsEl = document.getElementById('service-pane-approvals');
+  moveEl.hidden = !importAction;
+  if (importAction) {
+    moveEl.appendChild(serviceSectionLabel("Move from this desktop's old profile"));
+    const help = document.createElement('p');
+    help.className = 'settings-row-help';
+    help.textContent = 'See what would move from this desktop\'s old profile into the node, then import it.';
+    moveEl.appendChild(help);
+    const btn = serviceActionButton('import', importAction.label, 'btn btn-secondary btn-sm');
+    btn.disabled = Boolean(importAction.disabled) || servicePaneState.busy;
+    moveEl.appendChild(btn);
+  }
+
+  // 5: the approvals and relay lines.
   approvalsEl.hidden = !model.approvals;
   if (model.approvals) {
-    serviceLinesInto(approvalsEl, ['Approvals and relay', ...model.approvals.lines, `Change them on the service: ${model.approvals.commands.join(', ')}`]);
+    approvalsEl.appendChild(serviceSectionLabel('Phones & approvals'));
+    for (const line of [...model.approvals.lines, `Change them on the service: ${model.approvals.commands.join(', ')}`]) {
+      const p = document.createElement('p');
+      p.className = 'settings-row';
+      p.textContent = line;
+      approvalsEl.appendChild(p);
+    }
   }
+
+  // Advanced: the Detach warning beside its button, then the four actions and
+  // the pairing request. The <details> stays in the page, so its open state
+  // survives a repaint (an armed Detach stays in view); a new pairing request
+  // opens it, since that request is what the owner must copy.
+  if (servicePaneState.detachArmed && model.detachWarning) {
+    const warn = document.createElement('p');
+    warn.className = 'notice-warn service-pane-detach-warning';
+    warn.textContent = model.detachWarning;
+    advancedActionsEl.appendChild(warn);
+  }
+  for (const action of advanced) {
+    const danger = action.id === 'detach' || action.id === 'unpair';
+    const label = action.id === 'detach' && servicePaneState.detachArmed ? 'Detach anyway' : action.label;
+    const btn = serviceActionButton(action.id, label, danger ? 'btn btn-danger btn-sm' : 'btn btn-secondary btn-sm');
+    btn.disabled = Boolean(action.disabled) || servicePaneState.busy;
+    advancedActionsEl.appendChild(btn);
+  }
+  requestBox.hidden = !model.request;
+  if (model.request) {
+    document.getElementById('service-pair-request').textContent = model.request;
+    document.getElementById('service-pair-command').textContent = model.command || '';
+    const copyBtn = document.getElementById('service-copy-request-btn');
+    copyBtn.onclick = () => navigator.clipboard.writeText(model.request).catch((err) => serviceLog.warn('copying the pairing request failed', { error: err && err.message }));
+    if (servicePaneState.shownRequest !== model.request) advancedEl.open = true;
+  }
+  servicePaneState.shownRequest = model.request || null;
+  advancedEl.hidden = advanced.length === 0 && !model.request;
   markUnavailableTabs(status.unavailableTabs || []);
+}
+
+// §5.7's rows for a connected node, from what desktop:status already carries:
+// the node's name (a personal node's is this computer's), that a personal node
+// starts at logon, its data folder, and how many phones are paired. A row whose
+// data is not in the status is left out. Node strings: drawn by textContent.
+function connectedServiceRows(status) {
+  const rows = [];
+  const svc = (status.pairing && status.pairing.service) || {};
+  const personal = svc.hosting === 'personal';
+  const node = status.node || {};
+  const name = (status.service && status.service.nodeName) || node.name || svc.name || null;
+  if (name) rows.push(personal ? `Computer: ${name}` : `Node: ${name}`);
+  if (personal && node.task === 'registered') rows.push('Starts when you log on to Windows.');
+  if (personal && svc.dataDir) rows.push(`Data folder: ${svc.dataDir}`);
+  const approvals = status.approvals;
+  if (approvals && approvals.available && Array.isArray(approvals.devices)) {
+    const phones = approvals.devices.filter((d) => d && d.active).length;
+    rows.push(`Phones paired: ${phones}`);
+  }
+  return rows;
+}
+
+// The headline (bold) and the rows under it, every line by textContent.
+function serviceHeadlineInto(el, headline, rows) {
+  if (headline) {
+    const h = document.createElement('p');
+    h.className = 'service-pane-headline';
+    h.textContent = headline;
+    el.appendChild(h);
+  }
+  for (const line of rows) {
+    const p = document.createElement('p');
+    p.className = 'settings-row';
+    p.textContent = line;
+    el.appendChild(p);
+  }
 }
 
 // Fetches status + the pane's wording without touching the DOM, so callers
@@ -14787,7 +15457,9 @@ function armDetachWarning() {
   servicePaneState.detachArmedAt = Date.now();
 }
 
-async function runServiceAction(id) {
+// `call`, when given, is the action itself (Switch to my node, Open data folder):
+// it runs under the same busy guard, error line and repaint as the named ones.
+async function runServiceAction(id, call) {
   // A click that arrives while an earlier one is still in flight (including
   // during the final re-render below, which can take a few seconds) must
   // not act — the buttons are also disabled synchronously below, but a
@@ -14816,7 +15488,8 @@ async function runServiceAction(id) {
   const desktop = window.electron.desktop;
   try {
     let result = null;
-    if (id === 'pair') result = await desktop.pairStart();
+    if (typeof call === 'function') result = await call();
+    else if (id === 'pair') result = await desktop.pairStart();
     else if (id === 'pairConfirm') result = await desktop.pairConfirm(servicePaneState.pendingNodeId);
     else if (id === 'pairCancel') result = await desktop.pairCancel();
     else if (id === 'attach') result = await desktop.attach();
@@ -14865,8 +15538,130 @@ async function runServiceAction(id) {
   }
 }
 
+// Which machine Settings edits (settings redesign spec §5.2, §8.2): the line comes
+// from settingsBanner (renderer-helpers/settings-banner.js). It holds a node's
+// name, so it goes on the page as text, cut with an ellipsis by the CSS.
+function paintSettingsBanner(status) {
+  const el = document.getElementById('settings-where');
+  if (!el) return;
+  const banner = settingsBanner(status);
+  el.className = `settings-where tone-${banner.tone}`;
+  let line = el.querySelector(':scope > .settings-where-text');
+  if (!line) {
+    line = document.createElement('span');
+    line.className = 'settings-where-text';
+    el.replaceChildren(line);
+  }
+  line.textContent = banner.text;
+  el.title = banner.text;
+  setSettingsReadOnly(banner.readOnly);
+}
+
+// While the node cannot be reached nothing typed would be saved, so every page
+// but Node & connection (where the owner starts or reconnects it) is inert.
+// When it comes back the pages stay inert until the settings are read again:
+// a page drawn during the outage holds defaults, and a whole-form save from it
+// would write those over the node's values. Inert pages hold no typing to lose.
+// A re-read that fails is tried again on one timer, after 3 s, 6 s and 12 s; then
+// it stops, the pages stay read-only, and a line beside the banner says so.
+// Reopening Settings starts the count again.
+const SETTINGS_RELOAD_RETRY_MS = Object.freeze([3000, 6000, 12000]);
+const SETTINGS_RELOAD_GAVE_UP = "Couldn't load settings from the node. Close and reopen Settings to try again.";
+let settingsBannerReadOnly = false; // what the banner asks for now
+let settingsNeedReload = false; // the pages were read-only and have not been re-read since
+let settingsReadOnlyReload = null; // the re-read in flight
+let settingsReloadTimer = null; // the one retry timer
+let settingsReloadFailures = 0;
+
+function applySettingsInert(readOnly) {
+  document.querySelectorAll('.settings-tab-content').forEach((pane) => {
+    pane.inert = Boolean(readOnly) && pane.dataset.tab !== 'service';
+  });
+}
+
+function clearSettingsReloadRetry() {
+  if (settingsReloadTimer) clearTimeout(settingsReloadTimer);
+  settingsReloadTimer = null;
+}
+
+function paintSettingsReloadError(text) {
+  const el = document.getElementById('settings-reload-error');
+  if (!el) return;
+  el.textContent = text || '';
+  el.hidden = !text;
+}
+
+// Opening Settings: a re-read that gave up may try again, from the first delay.
+function resetSettingsReloadRetries() {
+  clearSettingsReloadRetry();
+  settingsReloadFailures = 0;
+  paintSettingsReloadError('');
+}
+
+function setSettingsReadOnly(readOnly) {
+  settingsBannerReadOnly = Boolean(readOnly);
+  if (settingsBannerReadOnly) {
+    clearSettingsReloadRetry();
+    settingsNeedReload = true;
+    applySettingsInert(true);
+    return;
+  }
+  if (!settingsNeedReload) {
+    applySettingsInert(false);
+    return;
+  }
+  // Editable again, not re-read yet: stay inert. One re-read at a time; a retry
+  // already armed, or one that gave up, is not doubled by a repaint. Closed
+  // Settings re-reads when it opens (openSettingsDrawer paints the banner).
+  applySettingsInert(true);
+  if (!dom.settingsDrawer || dom.settingsDrawer.hidden) return;
+  if (settingsReadOnlyReload || settingsReloadTimer || settingsReloadFailures > SETTINGS_RELOAD_RETRY_MS.length) return;
+  rereadSettingsAfterOutage();
+}
+
+function rereadSettingsAfterOutage() {
+  clearSettingsReloadRetry();
+  settingsReadOnlyReload = (async () => {
+    let loaded = false;
+    try {
+      loaded = await loadSettings();
+    } finally {
+      settingsReadOnlyReload = null;
+    }
+    if (settingsBannerReadOnly) return; // gone again: the next lift re-reads
+    if (loaded) {
+      settingsNeedReload = false;
+      settingsReloadFailures = 0;
+      paintSettingsReloadError('');
+      if (appState.settingsTab && dom.settingsDrawer && !dom.settingsDrawer.hidden) switchSettingsTab(appState.settingsTab, { remember: false });
+      applySettingsInert(false);
+      return;
+    }
+    settingsReloadFailures += 1;
+    const delay = SETTINGS_RELOAD_RETRY_MS[settingsReloadFailures - 1];
+    if (delay === undefined) {
+      paintSettingsReloadError(SETTINGS_RELOAD_GAVE_UP);
+      return;
+    }
+    settingsReloadTimer = setTimeout(() => {
+      settingsReloadTimer = null;
+      // Closed Settings re-reads on its next opening; a read-only status waits for the lift.
+      if (settingsBannerReadOnly || !settingsNeedReload || !dom.settingsDrawer || dom.settingsDrawer.hidden) return;
+      rereadSettingsAfterOutage();
+    }, delay);
+  })().catch((err) => settingsLog.warn(`re-reading settings after the node came back failed: ${err && err.message}`));
+}
+
 function markUnavailableTabs(tabs = []) {
-  const unavailable = new Set(tabs);
+  const list = Array.isArray(tabs) ? tabs.slice() : [];
+  const before = (appState.unavailableTabs || []).join('\n');
+  appState.unavailableTabs = list;
+  if (list.join('\n') !== before) {
+    renderSettingsNav();
+    // The shown page's sections follow the host's new list.
+    if (appState.settingsTab && dom.settingsDrawer && !dom.settingsDrawer.hidden) switchSettingsTab(appState.settingsTab, { remember: false });
+  }
+  const unavailable = new Set(list);
   document.querySelectorAll('.settings-tab-content').forEach((pane) => {
     const existing = pane.querySelector(':scope > .service-unavailable-notice');
     if (unavailable.has(pane.dataset.tab)) {
@@ -15244,21 +16039,30 @@ async function refreshServiceStatus() {
       }
       return;
     }
+    // Review focus 1: a status that cannot be read now says nothing is reachable;
+    // an attached window must not keep a green banner over pages that cannot save.
+    if (appState.desktopStatus && appState.desktopStatus.mode === 'attached') {
+      paintSettingsBanner({ ...appState.desktopStatus, view: 'attached-disconnected' });
+    }
     revealShell();
     return;
   }
   serviceStatusRead = true;
+  appState.desktopStatus = status;
   markUnavailableTabs(status.unavailableTabs || []);
+  paintSettingsBanner(status);
   renderAttachedBanner(status);
   await refreshSetupView(status);
   const conn = status.connection ? status.connection.status : null;
   if (conn === 'connected' && serviceLastConnection && serviceLastConnection !== 'connected') {
     loadChats().then(() => syncRunningChats({ reconnected: true })).catch((err) => chatLog.warn(`Chat load failed: ${err.message}`));
-    // What the panes said with the node down is over; a form open in the drawer is left alone.
-    if (document.getElementById('settings-drawer')?.hidden) loadSettings();
+    // What the panes said with the node down is over. When the banner lifted the
+    // read-only pages with Settings open, setSettingsReadOnly is already re-reading
+    // them; otherwise a form open in the drawer is left alone.
+    if (!settingsReadOnlyReload && document.getElementById('settings-drawer')?.hidden) loadSettings();
   }
   serviceLastConnection = conn;
-  if (dom.settingsNavSelect && dom.settingsNavSelect.value === 'service') {
+  if (appState.settingsTab === 'service' && dom.settingsDrawer && !dom.settingsDrawer.hidden) {
     renderServiceSection().catch((err) => serviceLog.warn('rendering the local service pane failed', { error: err && err.message }));
   }
 }

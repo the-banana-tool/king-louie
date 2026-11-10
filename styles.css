@@ -65,7 +65,10 @@ body {
 }
 
 /* --- Shared button system ---------------------------------- */
-.btn {
+/* One button set: .btn (plain; .btn-secondary is the same look),
+   .btn-primary, .btn-danger, .btn-sm. */
+.btn,
+.btn-secondary {
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-default);
   background: var(--bg-elevated);
@@ -135,7 +138,7 @@ body {
 }
 
 .btn-sm {
-  padding: 3px 6px;
+  padding: 3px 8px;
   font-size: 11px;
 }
 
@@ -1671,8 +1674,15 @@ body {
 }
 
 .settings-modal {
-  width: min(820px, 95vw);
-  height: min(90vh, 800px);
+  /* The settings type scale (spec §5.8 rule 6). Kept here, never in :root,
+     which tests/mobile-design-tokens.test.js mirrors into the phone apps. */
+  --settings-fs-title: 17px;
+  --settings-fs-section: 11px;
+  --settings-fs-body: 13px;
+  --settings-fs-help: 12px;
+
+  width: min(1100px, 96vw);
+  height: min(92vh, 860px);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
@@ -1680,6 +1690,36 @@ body {
   flex-direction: column;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
   overflow: hidden;
+}
+
+/* The settings drawer: a 220px sidebar beside the content, the header
+   across both. The setup wizard shares .settings-modal and stays a column. */
+#settings-drawer > .settings-modal {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+#settings-drawer > .settings-modal > .settings-header {
+  grid-column: 1 / -1;
+}
+
+/* What King Louie remembers: its own panel beside the gear (spec §5.3). */
+.settings-modal.memory-modal {
+  width: min(760px, 96vw);
+}
+
+.memory-modal > .memory-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 16px 20px;
+}
+
+/* An element hidden by the attribute stays hidden whatever display a
+   class gives it (spec §2 bug 7: empty headings on Node & connection). */
+.settings-modal [hidden] {
+  display: none !important;
 }
 
 .settings-header {
@@ -1693,7 +1733,7 @@ body {
 }
 
 .settings-header h2 {
-  font-size: 17px;
+  font-size: var(--settings-fs-title);
   color: var(--text-primary);
   display: flex;
   align-items: center;
@@ -1713,35 +1753,29 @@ body {
   flex-shrink: 0;
 }
 
-.settings-nav-select {
-  width: 100%;
-  padding: 8px 32px 8px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-default);
-  font-size: 13px;
-  background: var(--bg-input) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E") no-repeat right 10px center;
-  color: var(--text-primary);
-  font-family: inherit;
-  cursor: pointer;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  appearance: none;
-}
-
-.settings-nav-select:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
 /* --- Settings tab content ---------------------------------- */
 .settings-tab-content {
   display: none;
 }
 
-.settings-tab-content.active {
+/* Holds the skills' own panes; no box of its own, so an empty one adds no gap
+   above the pages after it. */
+#skill-settings-container {
+  display: contents;
+}
+
+/* .is-section: another pane a merged page shows below its own. */
+.settings-tab-content.active,
+.settings-tab-content.is-section {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* A page that cannot be changed now (the node is unreachable or starting; see
+   setSettingsReadOnly) is dimmed, so it does not look editable. */
+.settings-tab-content[inert] {
+  opacity: 0.6;
 }
 
 .settings-body {
@@ -1777,6 +1811,520 @@ body {
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--accent);
+}
+
+/* --- Settings sidebar -------------------------------------- */
+.settings-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.settings-search {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--settings-fs-body);
+}
+
+.settings-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.settings-nav-group > h3,
+.settings-section-label {
+  font-size: var(--settings-fs-section);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.settings-nav-group > h3 {
+  padding: 6px 8px 4px;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--settings-fs-body);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-nav-item:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.settings-nav-item.is-active {
+  background: var(--accent-surface);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* --- Which machine a page edits ---------------------------- */
+.settings-where {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-help);
+}
+
+.settings-where > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* In the drawer's header: between the title and the close button, taking the
+   room there is; empty (no status read yet) it keeps its place unseen. */
+.settings-header > .settings-where {
+  flex: 1 1 auto;
+}
+
+/* Beside the banner: a re-read after an outage that gave up (setSettingsReadOnly). */
+.settings-reload-error {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--error);
+  font-size: var(--settings-fs-help);
+}
+
+.settings-header > .settings-where:empty {
+  visibility: hidden;
+}
+
+.settings-where.tone-node {
+  border-color: var(--success);
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+/* Spec §5.2: amber while the window runs on its own. */
+.settings-where.tone-desktop {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+/* Development standalone: a cool blue, apart from amber and from the grey of
+   tone-unreachable. */
+.settings-where.tone-dev {
+  border-color: var(--info);
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.settings-where.tone-unreachable {
+  border-color: var(--border-strong);
+  background: var(--bg-overlay);
+  color: var(--text-muted);
+}
+
+/* --- Rows: label left, control right ----------------------- */
+.settings-section-label {
+  margin: 8px 0 2px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--settings-fs-body);
+  color: var(--text-primary);
+}
+
+.settings-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-row > :last-child:not(:first-child) {
+  flex-shrink: 0;
+}
+
+/* The one help colour (spec §5.8 rule 6). */
+.settings-row-help {
+  font-size: var(--settings-fs-help);
+  line-height: 1.45;
+  color: var(--text-muted);
+  font-weight: normal;
+}
+
+/* A row whose control is a text area: label above, control full width. */
+.settings-row.is-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.settings-row.is-stacked > :last-child:not(:first-child) {
+  flex-shrink: 1;
+}
+
+/* A field on the right of its label keeps a bounded width, so the label stays whole. */
+.settings-row:not(.is-stacked) > .provider-input {
+  width: min(340px, 55%);
+  flex: 0 0 auto;
+}
+
+.settings-row:not(.is-stacked) > span:last-child:not(.unit-field) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 60%;
+}
+
+.settings-row:not(.is-stacked) > span:last-child:not(.unit-field) > .provider-input {
+  width: 240px;
+}
+
+/* Settings that depend on a switch, greyed until it is on (spec §5.8 rule 2). */
+.settings-row.is-greyed > label {
+  color: var(--text-muted);
+}
+
+.settings-row.is-greyed {
+  opacity: 0.55;
+}
+
+/* A failed auto-save's error, beside its field (spec §7.1). */
+.settings-field-error {
+  margin: 2px 0 6px;
+  font-size: var(--settings-fs-help);
+  color: var(--error);
+}
+
+.settings-advanced {
+  margin-top: 10px;
+}
+
+.settings-advanced > summary {
+  cursor: pointer;
+  font-size: var(--settings-fs-help);
+  color: var(--text-secondary);
+}
+
+/* --- Switch: a styled checkbox ----------------------------- */
+.switch {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 34px;
+  height: 18px;
+  margin: 0;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-overlay);
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.switch::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  transition: transform var(--transition), background var(--transition);
+}
+
+.switch:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.switch:checked::before {
+  transform: translateX(16px);
+  background: var(--bg-sidebar-hdr);
+}
+
+.switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.switch:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* --- A small number field with its unit -------------------- */
+.unit-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-body);
+}
+
+.unit-field > input {
+  width: 72px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--settings-fs-body);
+  text-align: right;
+}
+
+.unit-field > input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.unit-field > .unit {
+  color: var(--text-muted);
+  font-size: var(--settings-fs-help);
+}
+
+/* A unit that is chosen (Scheduled jobs' interval) looks like the field beside it. */
+.unit-field > select.unit {
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+}
+
+/* --- Compact list rows, statuses, chips, notices ----------- */
+.settings-list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--settings-fs-body);
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.settings-list-row > .settings-list-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A list row's name over its short detail, each cut with an ellipsis (Task 15). */
+/* A row's own picker (Providers & keys' image provider) leaves its label room. */
+.settings-list-row.key-row-select > .provider-input {
+  width: 240px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+}
+
+.settings-list-row > .settings-list-name:has(> .settings-list-title) {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-list-title,
+.settings-list-detail {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-list-title {
+  font-weight: 600;
+}
+
+.settings-list-row > .btn,
+.settings-list-row > .switch {
+  flex-shrink: 0;
+}
+
+.settings-list-row.is-greyed {
+  opacity: 0.55;
+}
+
+.settings-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.models-local-card {
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 6px;
+}
+
+.models-local-card > .settings-list-row {
+  border-bottom: none;
+}
+
+.models-local-card > .provider-message,
+.models-local-card > .models-local-model {
+  padding: 0 10px;
+}
+
+.diagnostics-results {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: var(--settings-fs-help);
+  color: var(--text-secondary);
+}
+
+/* Providers & keys: one row per provider, opened in place (Task 10). */
+.key-row-list {
+  gap: 0;
+}
+
+.key-row .settings-list-row > .key-row-name {
+  flex: 0 0 9.5em;
+}
+
+.key-row .key-row-reason {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-row-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.key-row-editor[hidden] {
+  display: none;
+}
+
+#providers-failing-banner {
+  margin: 8px 0;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  font-size: var(--settings-fs-section);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-pill.is-working {
+  color: var(--success);
+  background: var(--success-bg);
+  border-color: var(--success);
+}
+
+.status-pill.is-failing {
+  color: var(--error);
+  background: var(--error-bg);
+  border-color: var(--error);
+}
+
+.status-pill.is-none {
+  color: var(--text-muted);
+  background: transparent;
+  border-color: var(--border-default);
+}
+
+.status-pill.is-untested {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-color: var(--warning);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-overlay);
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-section);
+  white-space: nowrap;
+}
+
+.chip.chip-provider {
+  color: var(--accent);
+  background: var(--accent-surface);
+}
+
+.chip.chip-free {
+  color: var(--success);
+  background: var(--success-bg);
+}
+
+.notice-warn,
+.notice-info {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid;
+  font-size: var(--settings-fs-help);
+  line-height: 1.45;
+}
+
+.notice-warn {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-color: var(--warning);
+}
+
+.notice-info {
+  color: var(--info);
+  background: var(--info-bg);
+  border-color: var(--info);
 }
 
 /* Template / Settings cards */
@@ -1979,25 +2527,11 @@ body {
 .channel-access-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 
-.channel-access-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm, 6px);
-  background: var(--bg-base, transparent);
-}
-
+/* An id is a .settings-list-row; only its font differs. */
 .channel-access-id {
   font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-primary);
-  overflow-wrap: anywhere;
 }
 
 .channel-access-empty {
@@ -2047,7 +2581,7 @@ body {
   content: '';
   flex: 1;
   height: 1px;
-  background: var(--border);
+  background: var(--border-default);
 }
 
 .provider-oauth-connected {
@@ -2102,11 +2636,6 @@ body {
 .btn-oauth:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-.btn-sm {
-  padding: 4px 10px;
-  font-size: 11px;
 }
 
 /* --- Tool approval modal ----------------------------------- */
@@ -2238,7 +2767,7 @@ body {
   font-family: var(--font-mono, monospace);
   font-size: 12px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-default);
   border-radius: 4px;
   color: var(--text-primary);
   min-width: 0;
@@ -2332,11 +2861,6 @@ body {
   color: var(--error, #f44336);
   font-size: 13px;
   font-weight: 500;
-}
-
-.btn-sm {
-  padding: 4px 10px;
-  font-size: 12px;
 }
 
 /* --- Notice banner ----------------------------------------- */
@@ -2692,11 +3216,6 @@ body {
   font-weight: 600;
 }
 
-.btn-sm {
-  padding: 3px 8px;
-  font-size: 11px;
-}
-
 /* --- Scrollbars -------------------------------------------- */
 ::-webkit-scrollbar {
   width: 6px;
@@ -2717,21 +3236,6 @@ body {
 }
 
 /* --- Cron -------------------------------------------------- */
-.cron-add-panel {
-  margin-top: 12px;
-  padding: 12px;
-  background-color: var(--bg-overlay);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-subtle);
-}
-
-.cron-add-panel h4 {
-  margin-top: 0;
-  margin-bottom: 8px;
-  color: var(--text-primary);
-  font-size: 13px;
-}
-
 /* --- Skill settings fields --------------------------------- */
 
 .skill-settings-form {
@@ -3224,7 +3728,7 @@ body {
 .case-progress-live { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; font-size: 12px; }
 .confirm-dialog-before { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--text-primary); overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
 
-/* Settings > Local service (fleet stage 7) */
+/* Settings › Node & connection (fleet stage 7) */
 .service-pane .service-pane-status p,
 .service-pane .service-pane-import p,
 .service-pane .service-pane-approvals p {
@@ -3261,6 +3765,53 @@ body {
   margin-top: 12px;
 }
 
+/* Node & connection (settings redesign §5.7): headline, rows, the move card,
+   Phones & approvals and the collapsed Advanced. Node strings are long or odd:
+   wrap them, never widen the page. */
+.service-pane .service-pane-headline {
+  font-size: var(--settings-fs-body);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.service-pane .settings-row {
+  display: block;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.service-pane .service-pane-card {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.service-pane .service-pane-card .settings-row-help {
+  margin: 4px 0 8px;
+}
+
+.service-pane .service-pane-advanced {
+  margin-top: 16px;
+}
+
+.service-pane .service-pane-advanced > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.service-pane .service-pane-advanced-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.service-pane .service-pane-detach-warning {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
 .service-pane .service-pane-error {
   color: var(--error);
   font-weight: 500;
@@ -3291,7 +3842,7 @@ body {
   align-items: center;
 }
 
-/* Settings > Contact: the contact policy (cases stage 4; management surfaces §3.5) */
+/* Settings › Contact ladder: the contact policy (cases stage 4; management surfaces §3.5) */
 .contact-pane-body { display: flex; flex-direction: column; gap: 8px; }
 .contact-pane select,
 .contact-pane input[type="text"],
@@ -3311,19 +3862,16 @@ body {
 .contact-pane input:focus { border-color: var(--accent); }
 .contact-pane input[type="checkbox"] { accent-color: var(--accent); }
 .contact-pane input[type="time"] { box-sizing: border-box; width: 86px; flex: 0 0 auto; }
-.contact-away-note { font-size: 12px; color: var(--text-muted); }
 .contact-ladder-elsewhere { color: var(--warning); font-size: 0.85em; }
 .contact-pane-message { font-size: 12px; color: var(--text-secondary); }
 .contact-pane-message.is-error { color: var(--error); }
 .contact-pane-message:empty { display: none; }
 .contact-policy { display: flex; flex-direction: column; gap: 2px; }
-.contact-policy-heading { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-top: 6px; }
-.contact-policy-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0; font-size: 12px; color: var(--text-secondary); }
 .contact-policy-check { display: inline-flex; align-items: center; gap: 3px; }
 .contact-policy-ladder { flex: 1; font-family: var(--font-mono); }
 .contact-policy-channels { margin: 4px 0; padding-left: 16px; font-size: 11px; color: var(--text-muted); }
 .contact-policy-channels .is-ready { color: var(--success); }
-.contact-policy .btn { align-self: flex-start; margin-top: 6px; }
+.contact-policy-digest { box-sizing: border-box; width: 120px; }
 
 /* Cases stage 6: playbooks */
 .chat-case-new { flex-wrap: wrap; }
@@ -3358,7 +3906,7 @@ body {
 .case-proposal-edit { display: flex; flex-wrap: wrap; gap: 6px; }
 .case-proposal-edit[hidden] { display: none; }
 
-/* Models tab (spec 2026-09-27 §11) */
+/* Settings › Model profiles (spec 2026-09-27 §11) */
 .models-profile-editor { margin-top: 12px; padding: 12px; border: 1px solid var(--border-default); border-radius: 8px; }
 .models-role-block { margin: 12px 0; }
 .models-role-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 0; }
@@ -3369,6 +3917,9 @@ body {
 .models-picker-item { display: block; width: 100%; text-align: left; padding: 4px 6px; background: none; border: none; color: inherit; cursor: pointer; }
 button.models-picker-item:hover { background: var(--hover, rgba(127, 127, 127, 0.15)); }
 div.models-picker-item.is-unusable { cursor: default; }
+.models-picker-search { width: 100%; box-sizing: border-box; margin-bottom: 4px; }
+.models-picker-group { padding: 6px 6px 2px; font-size: 0.8em; font-weight: 600; opacity: 0.8; }
+.models-picker-group.is-failing, .models-picker-group.is-no-key { opacity: 0.55; }
 .models-migration-notes { margin: 6px 0 0 18px; font-size: 0.9em; }
 .models-profile-broken { border-color: var(--error); }
 .models-profile-broken .provider-message.error { color: var(--error); }
@@ -3405,6 +3956,99 @@ div.models-picker-item.is-unusable { cursor: default; }
 
 .models-kl-picks .provider-message {
   margin: 0.15em 0;
+}
+
+/* Settings redesign §5.4: a profile card's roles, the suggestion's line and
+   the collapsed Advanced section. */
+.models-role-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 160px) 1fr;
+  gap: 4px 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--settings-fs-body);
+  color: var(--text-primary);
+}
+
+.models-role-head {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.models-role-name {
+  font-weight: 600;
+}
+
+.models-role-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.models-role-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+.models-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.models-chip .models-chip-name {
+  color: var(--text-primary);
+  font-size: var(--settings-fs-body);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+.models-chip.is-unusable {
+  opacity: 0.5;
+}
+
+.models-role-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.models-kl-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 6px 0;
+  font-size: var(--settings-fs-body);
+  color: var(--text-primary);
+}
+
+.models-kl-summary[hidden],
+.models-kl-detail[hidden] {
+  display: none;
+}
+
+#models-advanced {
+  margin-top: 16px;
+}
+
+#models-advanced > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-body);
+  margin-bottom: 8px;
+}
+
+@media (max-width: 520px) {
+  .models-role-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Models M3: custom roles (spec 2026-09-27 §6.2, §11). */

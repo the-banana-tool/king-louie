@@ -168,6 +168,10 @@ describe('settings for a remote event', () => {
     assert.strictEqual(out.webSearch.brave.extra, 1);
     assert.strictEqual(out.imageGeneration.fal.model, 'm-1');
     assert.ok(!('apiKey' in out.webSearch.brave));
+    // The window is told a key exists, never what it is (settings redesign Task 10).
+    assert.strictEqual(out.webSearch.brave.hasKey, true);
+    assert.strictEqual(out.imageGeneration.fal.hasKey, true);
+    assert.ok(!('hasKey' in out.webSearch), 'only a section that holds a key gets hasKey');
     assert.strictEqual(settings.webSearch.brave.apiKey, 'canary-web-key', 'the stored settings are untouched');
   });
 

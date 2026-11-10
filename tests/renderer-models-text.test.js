@@ -41,7 +41,7 @@ describe('renderer: models M1', () => {
     for (const id of ['models-catalog-status', 'models-refresh-catalog-btn', 'models-test-all-btn']) assert.match(html, new RegExp(`id="${id}"`));
     const models = block('/* --- Models M1: catalog status, Test all, the Ollama address --- */', '\nfunction closeContextMenu()');
     assert.doesNotMatch(models, /innerHTML\s*=\s*[^'"\s]/, 'catalog and status text is set with textContent');
-    assert.match(src, /dataset\.action = 'save-ollama-url'/);
+    assert.match(src, /keyRowButton\('Save address', 'save-ollama-url', providerKey\)/);
     assert.match(src, /window\.electron\.models\.onStatusChanged\(/);
   });
 });

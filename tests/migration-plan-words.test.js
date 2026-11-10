@@ -75,7 +75,7 @@ describe('settings that stay behind are named', () => {
     assert.strictEqual(new Set(lines.map((i) => i.note)).size, 4, 'no two read the same, so none is deduped away');
     assert.match(itemOf(plan, 'settings', 'playbooks').note, /^Playbook/);
     assert.match(itemOf(plan, 'settings', 'executors').note, /external agents/i);
-    assert.match(itemOf(plan, 'settings', 'contactPolicy').note, /Settings > Contact/);
+    assert.match(itemOf(plan, 'settings', 'contactPolicy').note, /Settings › Contact ladder/);
     assert.match(itemOf(plan, 'settings', 'contact').note, /service\.json/);
     for (const item of lines) assert.doesNotMatch(item.note, /managed on the service/);
   });
@@ -192,7 +192,7 @@ describe('the words on a personal node', () => {
   it('with no profile to move, the same line says to set the models up on the node', async () => {
     const { importer } = await nodeService();
     const plan = await planOf(importer, { excluded, modelProfileIds: [] });
-    assert.match(itemOf(plan, 'excluded', 'settings.inference').note, /Settings > Models on the node/);
+    assert.match(itemOf(plan, 'excluded', 'settings.inference').note, /Settings › Model profiles on the node/);
   });
 
   it('a directory the node cannot read says the node', async () => {

@@ -1099,7 +1099,7 @@ its `service.json`), and the phone app.
 ### Install
 
 Install the King Louie app, then use **Install** in its setup view (or Settings
-> Local service > **Install…**). Windows asks once, with a UAC prompt, to
+› Node & connection › **Install…**). Windows asks once, with a UAC prompt, to
 register the task; nothing is stored but the task (no password). The
 command behind it is the app's own `king-louie-service install --personal`,
 which refuses to run from a checkout with `node.exe` (the task runs the app's
@@ -1266,7 +1266,7 @@ in, or open King Louie`), and a chat's browser tool refuses saved profiles with
 ephemeral browser still works, headless. Closing the
 window hides it to the tray; **Quit** from the tray asks first while a take
 records. The tray shows the node's state in its tooltip and a menu line (one
-icon). **Settings > Local service** has **Start King Louie when I log in**; an
+icon). **Settings › Node & connection** has **Start King Louie when I log in**; an
 older logon task reads `King Louie Node starts when you log in. Install again
 to start at boot.`
 
@@ -1404,7 +1404,7 @@ chat, and each step is one press:
 
 Everything runs as you; no step needs an elevated prompt, and the app refuses to
 pair while it runs as administrator (`This app is running as administrator. Close it
-and open it normally to pair.`). **Settings > Local service** stays the way back to
+and open it normally to pair.`). **Settings › Node & connection** stays the way back to
 each of these: **Pair**, **Import…**, **Install…**, **Unpair**.
 
 The app trusts the node's bridge file only when the config dir, the bridge
@@ -1420,7 +1420,7 @@ task once and shows `Starting King Louie Node…` while it waits (up to 60
 seconds). It never runs another account's task, never enables, creates or
 deletes one, and never starts the task by itself after it has connected
 once: if you stop the node, the app waits for you. When it is not
-connected the banner keeps **Retry now** and **Local service settings**, and
+connected the banner keeps **Retry now** and **Node & connection settings**, and
 adds one button from what it found:
 
 - `King Louie Node is not running.`, or `King Louie Node stopped while
@@ -1491,8 +1491,8 @@ Once marked, the old profile is kept but no longer opened: `PROFILE_MIGRATED`.
 
 A case you already moved with `import --case` (below) is never overwritten: it plans as
 already present, or as needing attention. A chat changed both in the app and on the node
-comes over as a copy named `<title> (from desktop)`. **Import…** in Settings > Local
-service stays for a deliberate second run.
+comes over as a copy named `<title> (from desktop)`. **Import…** in Settings ›
+Node & connection stays for a deliberate second run.
 
 **From a terminal.** The window's move is the only one that carries secrets. For a
 terminal, without the app:
@@ -1515,7 +1515,7 @@ terminal, without the app:
    the desktop app can unseal them.
 3. `king-louie-service install --personal` (from the installed app): it registers the boot task and, with the
    relay or front door already paired, starts it.
-4. Open the desktop app, **Settings > Local service**, **Pair**, then **Import…** for the
+4. Open the desktop app, **Settings › Node & connection**, **Pair**, then **Import…** for the
    secrets. What step 2 copied plans as already present.
 
 ### Moving a case from the desktop app
@@ -1606,7 +1606,7 @@ registered it says so, removes nothing and exits 0.
   are refused while no phone is enrolled.
 - The backup directory stays until you delete it, with the history in the clear, as the
   profile holds it. Nothing removes it or the old profile.
-- A node older than the app shows a row in Settings > Local service and the banner. A node
+- A node older than the app shows a row in Settings › Node & connection and the banner. A node
   that runs the app's binary gets **Restart King Louie Node to update it**, never automatic.
   A node installed from a checkout runs from that folder, so a restart changes nothing:
   update the folder, then restart it. A task whose program is gone (a checkout

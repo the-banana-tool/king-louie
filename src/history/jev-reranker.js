@@ -95,7 +95,7 @@ class JevReranker {
     this._syncedSettings();
     const key = this._key();
     if (!key) {
-      const message = 'no typesafe.ai key is saved (Settings > History and recall)';
+      const message = 'no typesafe.ai key is saved (Settings › History & recall)';
       this._warn(message);
       throw new EmbedError('RERANK_UNAVAILABLE', message);
     }

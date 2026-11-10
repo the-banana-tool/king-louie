@@ -6,7 +6,7 @@ boot, UAC or S4U path; this list does. Use an installer built from the branch
 failure with what the window, `king-louie-service doctor` and
 `%LOCALAPPDATA%\KingLouie\node\data\logs\service.log` said.
 
-1. **Install from the app.** Open King Louie, Settings > Local service > Install… (or the
+1. **Install from the app.** Open King Louie, Settings › Node & connection › Install… (or the
    setup view). Pass: exactly one UAC prompt; the window shows the node installed.
    `schtasks /Query /TN "KingLouie Node" /XML` shows `LogonType` S4U, a boot trigger and a
    logon trigger, `RunLevel` LeastPrivilege, no `powershell`, and the security descriptor
@@ -17,7 +17,7 @@ failure with what the window, `king-louie-service doctor` and
    minutes your phone confirms the node (no "Could not confirm").
 3. **Log in.** Pass: King Louie appears in the tray with no window and no console window;
    `king-louie-service doctor` shows `screen host: connected` and a boot-task `hosting` row.
-4. **Start and Restart, unelevated.** In Settings > Local service use Stop/Start and
+4. **Start and Restart, unelevated.** In Settings › Node & connection use Stop/Start and
    **Restart King Louie Node**. Pass: both work with no UAC prompt. If they do not, report
    it: the owner descriptor (D-1) is wrong.
 5. **Lock during a take.** Start a take, lock the PC (Win+L). Pass: the take ends
@@ -31,7 +31,7 @@ failure with what the window, `king-louie-service doctor` and
    tray. Pass: no "King Louie is preventing shutdown" prompt.
 9. **Quit during a take.** Quit from the tray while a take records. Pass: it asks "A take
    is recording. Quit and end it?" (buttons Quit and Cancel); Cancel leaves it recording.
-10. **Uninstall.** Settings > Local service > uninstall (or `uninstall --personal`). Pass: one
+10. **Uninstall.** Settings › Node & connection › uninstall (or `uninstall --personal`). Pass: one
     UAC prompt; `schtasks /Query /TN "KingLouie Node"` finds nothing; the `King Louie` Run
     value is gone; the data dir is still there.
 11. **Existing logon-task install (if you have one).** Before step 1, the window says "Install

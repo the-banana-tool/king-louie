@@ -8,7 +8,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { launchApp, closeApp, evaluate, waitFor, readHistoryChats } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, readHistoryChats, openSettingsTab } = require('./helpers');
 const { startFakeLlmServer } = require('../helpers/fake-llm-server');
 
 const readData = (ctx) => JSON.parse(fs.readFileSync(path.join(ctx.userDataDir, 'chat-data.json'), 'utf8'));
@@ -78,9 +78,7 @@ describe('E2E: roles in use (models M3)', () => {
   });
 
   it('accepts the King Louie proposal in the Models tab', async () => {
-    await evaluate(ctx, `document.getElementById('open-settings-btn').click(); true`);
-    await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
-    await evaluate(ctx, `(() => { const s = document.getElementById('settings-nav-select'); s.value = 'models'; s.dispatchEvent(new Event('change')); return true; })()`);
+    await openSettingsTab(ctx, 'models');
     await waitFor(ctx, `!!document.getElementById('models-kl-accept-btn')`, 15000);
     const roles = await evaluate(ctx, `[...document.querySelectorAll('.models-kl-change')].map((el) => el.dataset.role)`);
     assert.deepStrictEqual(roles, ['main', 'worker', 'utility']);

@@ -47,17 +47,37 @@ describe('renderer: History and recall pane', () => {
     const pane = block('function historyEmbedderStatusText(', '\nfunction wireHistorySettings(');
     assert.doesNotMatch(pane, /innerHTML/);
     assert.match(pane, /textContent/);
-    assert.match(block('function switchSettingsTab(', '\nfunction sortSettingsNavOptions('), /tabName === 'history'/);
+    assert.match(block('function switchSettingsTab(', '\nfunction renderSettingsNav('), /tabName === 'history'/);
   });
 
   it('index.html has the tab and its controls', () => {
-    assert.match(html, /<option value="history">History and recall<\/option>/);
+    const { SETTINGS_GROUPS } = require('../renderer-helpers/settings-nav.js');
+    assert.ok(SETTINGS_GROUPS.flatMap((g) => g.pages).some((p) => p.tab === 'history' && p.label === 'History & recall'));
     assert.match(html, /data-tab="history"/);
     for (const id of ['history-embedder-kind', 'history-rerank-search', 'history-embedder-model', 'history-ollama-url', 'history-ollama-model',
-      'history-openai-model', 'history-rerank-turn', 'history-embedder-save-btn', 'history-embedder-retry-btn', 'history-embedder-rebuild-btn', 'history-embedder-status']) {
+      'history-openai-model', 'history-rerank-turn', 'history-embedder-retry-btn', 'history-embedder-rebuild-btn', 'history-embedder-status']) {
       assert.match(html, new RegExp(`id="${id}"`), id);
     }
     assert.match(html, /sends chat text to OpenAI/);
+    // Settings redesign §5.8 rule 1: it saves as it changes, so no Save button.
+    assert.doesNotMatch(html, /id="history-embedder-save-btn"/);
+  });
+
+  it('saves on change; a refused save puts the fields back and says why beside them', () => {
+    const wire = block('function wireHistorySettings(', '\nif (document.readyState');
+    assert.match(wire, /registerSettingsAutosave\('history\.recall'/);
+    assert.match(wire, /immediate: true/);
+    // Nothing loaded, nothing a refusal could go back to: no save until it is read.
+    assert.strictEqual((wire.match(/if \(historyNotLoaded\(el\)\) return;/g) || []).length, 2);
+    assert.match(block('function historyNotLoaded(', '\nfunction wireHistorySettings('), /if \(historyStored\) return false;/);
+    const save = block('async function saveHistorySettings(', '\nasync function saveHistoryJevKey(');
+    assert.match(save, /return \{ ok: false, error/);
+    assert.match(save, /return \{ ok: true \}/);
+    const states = block('function onHistorySaveState(', '\nfunction wireHistorySettings(');
+    assert.match(states, /state === 'error'/);
+    assert.match(states, /applyHistoryFields\(historyStored\)/);
+    assert.match(states, /setSettingsFieldError\(/);
+    assert.doesNotMatch(states, /innerHTML/);
   });
 
   it('preload exposes the four embedder channels', () => {

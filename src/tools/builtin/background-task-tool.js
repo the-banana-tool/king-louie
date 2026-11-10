@@ -45,7 +45,7 @@ const BackgroundTaskTool = new Tool({
       },
       role: {
         type: 'string',
-        description: 'Which model role runs the task: "worker" (the default for a plain task), "utility", "main", or a custom role from Settings → Models. With agentId and no role, the agent\'s own role applies.'
+        description: 'Which model role runs the task: "worker" (the default for a plain task), "utility", "main", or a custom role from Settings › Model profiles › Advanced. With agentId and no role, the agent\'s own role applies.'
       },
       description: {
         type: 'string',

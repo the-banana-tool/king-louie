@@ -1759,9 +1759,9 @@ describe('fix round 2: a landing on record, and the node\'s sweep', () => {
     const inventory = { chats: [], cases: [], secrets: 'included', excluded: ['skills', 'workflows', 'webhooks'] };
     const plan = await imp.plan({ installId: 'i-9', inventory });
     const note = (key) => plan.items.find((i) => i.key === key).note;
-    assert.match(note('skills'), /do not move.*Settings > Skills on the node/);
-    assert.match(note('workflows'), /do not move.*Settings > Workflows on the node/);
-    assert.match(note('webhooks'), /Settings > Webhooks on the node/);
+    assert.match(note('skills'), /do not move.*Settings › Skills on the node/);
+    assert.match(note('workflows'), /do not move.*Start them again with Plan & Execute on the node/);
+    assert.match(note('webhooks'), /Settings › Webhooks on the node/);
     assert.doesNotMatch(`${note('skills')} ${note('workflows')} ${note('webhooks')}`, /administrator|while attached/);
     const fleet = new DesktopImporter({ context: n.core.context, targets: await buildImportTargets({ context: n.core.context, dataDir: n.dataDir }), dataDir: n.dataDir, checkPath, scope: createDesktopScope({ dataDir: n.dataDir, context: n.core.context }), hosting: 'service' });
     const fleetPlan = await fleet.plan({ installId: 'i-9', inventory });

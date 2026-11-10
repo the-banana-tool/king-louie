@@ -1,4 +1,4 @@
-// Settings > Local service (fleet stage 7 §3.7). Always registered, so no host
+// Settings › Node & connection (fleet stage 7 §3.7). Always registered, so no host
 // ever registers these channels twice; without a desktop controller in the
 // context (the service's bridge dispatcher, the contract test) they refuse.
 const IPC = require('./constants');
@@ -11,6 +11,9 @@ const DESKTOP_METHODS = Object.freeze({
   [IPC.DESKTOP_ATTACH]: 'attach',
   [IPC.DESKTOP_DETACH]: 'detach',
   [IPC.DESKTOP_STANDALONE_ONCE]: 'standaloneOnce',
+  // Settings redesign §8.2, §8.3: local by LOCAL_PREFIXES.
+  [IPC.DESKTOP_LEAVE_STANDALONE]: 'leaveStandalone',
+  [IPC.DESKTOP_OPEN_DATA_FOLDER]: 'openDataFolder',
   [IPC.DESKTOP_UNPAIR]: 'unpair',
   [IPC.DESKTOP_IMPORT_PLAN]: 'importPlan',
   [IPC.DESKTOP_IMPORT_APPLY]: 'importApply',

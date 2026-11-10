@@ -7,7 +7,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { launchApp, closeApp, evaluate, waitFor } = require('./helpers');
+const { launchApp, closeApp, evaluate, waitFor, openSettingsTab } = require('./helpers');
 
 const T = '2026-09-28T10:00:00.000Z';
 const chat = (id, title, lines) => ({
@@ -57,6 +57,34 @@ describe('E2E: history store', () => {
       await waitFor(ctx, `${MESSAGES_TEXT}.includes('blue folder')`);
     } finally {
       await cleanup(ctx, dir);
+    }
+  });
+
+  // Settings redesign §7.1, Review Focus 1: the pane saves as it changes, and a
+  // save the host refuses puts the field back with the error beside it.
+  it('History & recall: choosing Jev without the confirm box is refused, reverted and explained', async () => {
+    const ctx = await launchApp();
+    try {
+      await waitFor(ctx, `!!document.getElementById('user-input')`);
+      await openSettingsTab(ctx, 'history');
+      await waitFor(ctx, "document.getElementById('history-rerank-kind').value === 'local'");
+      assert.strictEqual(await evaluate(ctx, "!!document.getElementById('history-embedder-save-btn')"), false);
+      await evaluate(ctx, `(() => {
+        document.getElementById('history-rerank-jev-confirm').checked = false;
+        const kind = document.getElementById('history-rerank-kind');
+        kind.value = 'jev';
+        kind.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`);
+      const error = "document.querySelector('.settings-tab-content[data-tab=\"history\"] .settings-field-error')";
+      await waitFor(ctx, `(${error}?.textContent || '').startsWith('Not saved: ')`);
+      assert.strictEqual(await evaluate(ctx, "document.getElementById('history-rerank-kind').value"), 'local');
+      assert.strictEqual(await evaluate(ctx, `${error}.previousElementSibling.contains(document.getElementById('history-rerank-kind'))`), true,
+        'the error sits beside the field that changed');
+      const stored = await evaluate(ctx, 'window.electron.history.embedderStatus().then((o) => o.settings.rerank.kind)');
+      assert.strictEqual(stored, 'local');
+    } finally {
+      await closeApp(ctx);
     }
   });
 

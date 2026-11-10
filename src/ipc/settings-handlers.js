@@ -7,17 +7,21 @@ const { isContactVaultKey } = require('../cases/contact-settings');
 const { isLocalServerVaultKey } = require('../models/local-vault-keys');
 const { createVault, vaultNodeAt, hasPrototypePart } = require('../platform/vault');
 const { isRemoteWindowEvent } = require('../core/origin');
+const { listSystemVoices } = require('../voice/list-voices');
 
 const VAULT_REFERENCE = /^\$\{vault:[^}]+\}$/;
 const HIDDEN = '(hidden)';
 // What a remote window is shown of an MCP server's env value or argument.
 const shownToRemote = (value) => (typeof value === 'string' && VAULT_REFERENCE.test(value) ? value : HIDDEN);
 
-// A settings section with every stored key taken out, for a remote window.
+// A settings section with every stored key taken out, for a remote window. Where a
+// key was, `hasKey` says whether one is set, so the window can show its row's status.
 function withoutApiKeys(section) {
   if (Array.isArray(section)) return section.map(withoutApiKeys);
   if (!section || typeof section !== 'object') return section;
-  return Object.fromEntries(Object.entries(section).filter(([key]) => key !== 'apiKey').map(([key, value]) => [key, withoutApiKeys(value)]));
+  const out = Object.fromEntries(Object.entries(section).filter(([key]) => key !== 'apiKey').map(([key, value]) => [key, withoutApiKeys(value)]));
+  if (Object.prototype.hasOwnProperty.call(section, 'apiKey')) out.hasKey = Boolean(section.apiKey);
+  return out;
 }
 
 function registerSettingsHandlers(ipcMain, context = {}) {
@@ -322,6 +326,13 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
     await ttsEngine.testConnection(voiceSettings);
     return { ok: true };
+  }));
+
+  // The voices this computer's speech engine has (settings redesign §7.3). The
+  // renderer asks only when the settings live on this computer (§8.4).
+  ipcMain.handle('settings:listVoices', wrapHandler('settings:listVoices', async () => {
+    const voices = await listSystemVoices();
+    return { ok: true, voices };
   }));
 
   ipcMain.handle('settings:saveProvider', wrapHandler('settings:saveProvider', async (_event, { provider, token, clear }) => {

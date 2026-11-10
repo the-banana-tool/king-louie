@@ -85,12 +85,12 @@ describe('describeServicePane', () => {
   });
 
   it('summarizes an import report', () => {
-    const lines = describeImportReport({ counts: { new: 3, 'skip-present': 1, failed: 1 }, failures: [{ category: 'vault', key: 'github', error: 'Encryption unavailable in the service.' }], secretsMissing: [{ category: 'vault', key: 'github' }], attention: [], notes: ['1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'], skipped: [] });
+    const lines = describeImportReport({ counts: { new: 3, 'skip-present': 1, failed: 1 }, failures: [{ category: 'vault', key: 'github', error: 'Encryption unavailable in the service.' }], secretsMissing: [{ category: 'vault', key: 'github' }], attention: [], notes: ['1 cron job(s) were imported disabled; enable them in Settings › Scheduled jobs.'], skipped: [] });
     assert.deepStrictEqual(lines, [
       'new: 3, skip-present: 1, failed: 1',
       'Failed: Vault entry github — Encryption unavailable in the service.',
       'Secrets that did not arrive: Vault entry github',
-      '1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'
+      '1 cron job(s) were imported disabled; enable them in Settings › Scheduled jobs.'
     ]);
     assert.strictEqual(UNAVAILABLE_TAB_NOTICE, 'Managed by the local service; not available while attached.');
   });
@@ -320,7 +320,7 @@ describe('describeAttachedBanner', () => {
     const b = describeAttachedBanner({ view: 'attached-disconnected', connection: { error: 'E' }, node: null });
     assert.strictEqual(b.line, 'E');
     assert.deepStrictEqual(b.actions, [
-      { id: 'retry', label: 'Retry now' }, { id: 'standaloneOnce', label: 'Use standalone this time' }, { id: 'openServiceSettings', label: 'Local service settings' }
+      { id: 'retry', label: 'Retry now' }, { id: 'standaloneOnce', label: 'Use standalone this time' }, { id: 'openServiceSettings', label: 'Node & connection settings' }
     ]);
     assert.strictEqual(describeAttachedBanner({ view: 'attached-disconnected' }).line, 'The local King Louie service is not reachable.');
   });
@@ -574,18 +574,51 @@ describe('pane wiring', () => {
 
   it('index.html has the Local service tab and pane', () => {
     const html = read('index.html');
-    assert.ok(html.includes('<option value="service">Local service</option>'));
+    const { SETTINGS_GROUPS } = require('../renderer-helpers/settings-nav.js');
+    const pages = SETTINGS_GROUPS.flatMap((g) => g.pages);
+    assert.ok(pages.some((p) => p.tab === 'service' && p.label === 'Node & connection'));
     assert.ok(html.includes('class="settings-tab-content" data-tab="service"'));
     for (const id of ['service-pane-status', 'service-pane-request', 'service-pair-request', 'service-pair-command', 'service-pane-actions', 'service-pane-import', 'service-pane-approvals']) {
       assert.ok(html.includes(`id="${id}"`), id);
     }
   });
 
+  it('Node & connection: the layout, every node string by textContent (settings redesign §5.7, §8.2)', () => {
+    const renderer = read('renderer.js');
+    const start = renderer.indexOf('function paintServicePane(');
+    const pane = renderer.slice(start, renderer.indexOf('async function fetchServiceModel(', start));
+    assert.ok(pane.length > 0);
+    for (const s of ['ADVANCED_SERVICE_ACTIONS', 'Phones & approvals', 'Move from this desktop\'s old profile', 'Switch to my node',
+      'leaveStandalone()', 'openDataFolder()', 'Restart node', 'Open data folder', 'switchToNodeAction(status)']) {
+      assert.ok(pane.includes(s), s);
+    }
+    assert.match(renderer, /const ADVANCED_SERVICE_ACTIONS = \['unpair', 'detach', 'standaloneOnce', 'pairCancel'\]/);
+    assert.doesNotMatch(pane, /innerHTML/);
+    // §5.7: attached and connected, the fixed headline and every model line as a row.
+    assert.match(pane, /model\.view === 'attached-connected'\) \{\s*serviceHeadlineInto\(statusEl, 'Connected to King Louie Node', \[\.\.\.model\.lines, \.\.\.connectedServiceRows\(status\)\]\)/);
+    const rows = renderer.slice(renderer.indexOf('function connectedServiceRows('), renderer.indexOf('function serviceHeadlineInto('));
+    for (const s of ['Computer: ', 'Starts when you log on to Windows.', 'Data folder: ', 'Phones paired: ']) assert.ok(rows.includes(s), s);
+    assert.doesNotMatch(rows, /innerHTML/);
+    // §8.2: the move card only while the move is not marked.
+    assert.match(pane, /if \(!status\.migration\) importAction = action/);
+    // An offered restart that is disabled stays disabled.
+    assert.match(pane, /restartBtn\.disabled = Boolean\(offered && offered\.disabled\)/);
+    // Closing Advanced disarms a pending Detach.
+    assert.match(renderer, /getElementById\('service-pane-advanced'\)\?\.addEventListener\('toggle'[\s\S]{0,200}servicePaneState\.detachArmed = false/);
+    const html = read('index.html');
+    const tab = html.slice(html.indexOf('data-tab="service"'), html.indexOf('</section>', html.indexOf('data-tab="service"')));
+    assert.match(tab, /<details[^>]*id="service-pane-advanced"/);
+    assert.match(tab, /<summary>Advanced<\/summary>/);
+    for (const id of ['service-pane-move', 'service-pane-advanced-actions', 'service-copy-request-btn']) assert.ok(tab.includes(`id="${id}"`), id);
+    // The pairing request and command sit inside Advanced.
+    assert.ok(tab.indexOf('id="service-pane-advanced"') < tab.indexOf('id="service-pane-request"'));
+  });
+
   it('renderer renders the pane from switchSettingsTab and subscribes once', () => {
     const renderer = read('renderer.js');
     assert.match(renderer, /async function renderServiceSection\(\)/);
     assert.match(renderer, /function markUnavailableTabs\(/);
-    const switchBody = renderer.slice(renderer.indexOf('function switchSettingsTab('), renderer.indexOf('function sortSettingsNavOptions('));
+    const switchBody = renderer.slice(renderer.indexOf('function switchSettingsTab('), renderer.indexOf('function renderSettingsNav('));
     assert.match(switchBody, /tabName === 'service'/);
     assert.strictEqual((renderer.match(/desktop\.onStatusChanged\(/g) || []).length, 1);
   });
