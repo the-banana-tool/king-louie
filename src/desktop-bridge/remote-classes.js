@@ -31,7 +31,7 @@ const READ = [
   'history:excerpts', 'history:links.get', 'history:search', 'hooks:list', 'memory:list',
   'memory:recall', 'models:chatView', 'models:explain', 'models:kingLouie', 'models:local.list',
   'models:picker', 'models:profiles', 'models:status', 'models:usable', 'presence:status',
-  'settings:listVoices', 'settings:load', 'settings:mcpList', 'settings:vaultHeld', 'settings:vaultList',
+  'settings:load', 'settings:mcpList', 'settings:vaultHeld', 'settings:vaultList',
   'skill:checkDeps', 'skill:getPinned', 'skill:list', 'skill:listPinnable', 'tool:list',
   'tool:listPermissionRules', 'usage:getDaily', 'usage:getSession', 'workflow:get', 'workflow:list',
   'workflow:progress', 'bridge.status', 'bridge.checkPath', 'bridge.approvalsStatus'
@@ -86,6 +86,10 @@ const LOCAL = [
   // Answered REMOTE_LOCAL_ONLY.
   'models:local.add', 'models:local.fromOllama', 'models:local.probe', 'models:local.recheck',
   'models:local.remove', 'models:local.setModelInfo', 'models:local.unsetLocalOnly',
+  // This computer's voices (settings redesign §8.4): only the window on the node's own
+  // computer asks; a remote one keeps the text field, and never makes the node spawn
+  // PowerShell on request.
+  'settings:listVoices',
   'import.plan', 'import.apply', 'import.finish',
   // Handled in the window and never sent. Every other desktop: and wizard:
   // channel is local too, by WINDOW_PREFIXES.

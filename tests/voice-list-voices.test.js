@@ -16,9 +16,12 @@ function fakeExecFile(stdout, calls = []) {
 describe('listSystemVoices', () => {
   it('win32: one name per line from System.Speech', async () => {
     const calls = [];
-    const voices = await listSystemVoices({ platform: 'win32', execFile: fakeExecFile('Microsoft David\r\nMicrosoft Zira\r\n', calls) });
+    const voices = await listSystemVoices({
+      platform: 'win32', env: { SystemRoot: 'D:\\Win' }, execFile: fakeExecFile('Microsoft David\r\nMicrosoft Zira\r\n', calls)
+    });
     assert.deepStrictEqual(voices, ['Microsoft David', 'Microsoft Zira']);
-    assert.strictEqual(calls[0].file, 'powershell.exe');
+    // By its absolute path, never a bare name Windows would look up in the cwd first.
+    assert.strictEqual(calls[0].file, 'D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
     assert.ok(Array.isArray(calls[0].args));
     assert.deepStrictEqual(calls[0].args.slice(0, 2), ['-NoProfile', '-Command']);
     assert.match(calls[0].args[2], /System\.Speech/);

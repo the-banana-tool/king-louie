@@ -34,18 +34,18 @@ describe('E2E: Settings — About you', () => {
 
   it('a new name is written to both stores', async () => {
     await fill(ctx, '#template-name-input', 'Lakeside Owner');
-    await new Promise((r) => setTimeout(r, 1000));
-    const stored = await evaluate(ctx, `window.electron.settings.load().then(({ data: s }) => ({
-      template: s.templateVariables.name, telos: s.userProfile.name
-    }))`);
-    assert.deepStrictEqual(stored, { template: 'Lakeside Owner', telos: 'Lakeside Owner' });
-    const header = await evaluate(ctx, `document.getElementById('settings-save-state').textContent`);
-    assert.strictEqual(header, 'Saved');
+    // Polled, not slept: the debounced save lands within the bound or the test fails.
+    await waitFor(ctx, `window.electron.settings.load().then(({ data: s }) =>
+      s.templateVariables.name === 'Lakeside Owner' && s.userProfile.name === 'Lakeside Owner')`, 10000);
+    await waitFor(ctx, `document.getElementById('settings-save-state').textContent === 'Saved'`, 10000);
   });
 
   it('Preferences (JSON) that does not parse is not saved and says so', async () => {
     await fill(ctx, '#profile-preferences-input', '{not json');
-    await new Promise((r) => setTimeout(r, 1000));
+    await waitFor(ctx, `(document.querySelector('.settings-tab-content[data-tab="profile"] .settings-field-error')?.textContent || '').length > 0`, 10000);
+    // A later field's save must not carry the bad JSON either.
+    await fill(ctx, '#template-role-input', 'Owner');
+    await waitFor(ctx, `window.electron.settings.load().then(({ data: s }) => s.userProfile.role === 'Owner')`, 10000);
     const out = await evaluate(ctx, `window.electron.settings.load().then(({ data: s }) => ({
       prefs: s.userProfile.preferences,
       error: document.querySelector('.settings-tab-content[data-tab="profile"] .settings-field-error')?.textContent || ''

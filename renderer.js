@@ -4740,6 +4740,14 @@ function onHistorySaveState(state, info) {
   }
 }
 
+// With nothing loaded there is no stored value a refused save could go back to,
+// so nothing is saved until the settings have been read.
+function historyNotLoaded(field) {
+  if (historyStored) return false;
+  setSettingsFieldError(field, 'Not saved: the history settings could not be read. Close Settings and open it again.');
+  return true;
+}
+
 function wireHistorySettings() {
   const on = (id, fn) => document.getElementById(id)?.addEventListener('click', () => {
     fn().catch((err) => settingsLog.warn(`history settings: ${err.message}`));
@@ -4751,6 +4759,7 @@ function wireHistorySettings() {
     el?.addEventListener('change', () => {
       historyLastField = el;
       paintHistoryPane();
+      if (historyNotLoaded(el)) return;
       saver.change(historyPayloadFromForm(), { immediate: true });
     });
   }
@@ -4758,6 +4767,7 @@ function wireHistorySettings() {
     const el = document.getElementById(id);
     el?.addEventListener('input', () => {
       historyLastField = el;
+      if (historyNotLoaded(el)) return;
       saver.change(historyPayloadFromForm());
     });
   }
@@ -6456,13 +6466,17 @@ function aboutYouFromForm() {
   };
 }
 
+// TELOS first: it is the store the page shows where the two disagree, so a
+// failure of the second write leaves the page showing what was saved.
 async function saveAboutYou(snapshot) {
-  const tv = await window.electron.settings.saveTemplateVariables({ templateVariables: snapshot.templateVariables });
-  if (!tv?.ok) return { ok: false, error: tv?.error || 'Could not save.' };
-  appState.settings.templateVariables = { ...(tv.templateVariables || snapshot.templateVariables) };
   const up = await window.electron.settings.saveUserProfile({ profile: snapshot.profile });
   if (!up?.ok) return { ok: false, error: up?.error || 'Could not save.' };
   appState.settings.userProfile = { ...(up.userProfile || snapshot.profile) };
+  const tv = await window.electron.settings.saveTemplateVariables({ templateVariables: snapshot.templateVariables });
+  if (!tv?.ok) {
+    return { ok: false, error: `the prompt template variables (your profile did save): ${tv?.error || 'Could not save.'}` };
+  }
+  appState.settings.templateVariables = { ...(tv.templateVariables || snapshot.templateVariables) };
   return { ok: true };
 }
 
@@ -6695,6 +6709,12 @@ function wireVoiceFields() {
           setSettingsFieldError(shownControl(), `Not saved: ${info.error}`);
         } else if (state === 'saved') {
           setSettingsFieldError(shownControl(), '');
+          // Show what the host stored (speed 3 is stored as 2), unless the owner is
+          // still typing there: blur flushes, and this runs again then.
+          if (document.activeElement !== el) {
+            applyVoiceField(field, appState.settings.voice || {});
+            if (field.key === 'voiceId') paintVoicePane();
+          }
         }
       }
     });
@@ -6709,6 +6729,7 @@ function wireVoiceFields() {
       if (immediate) paintVoicePane();
       saver.change(value, immediate ? { immediate: true } : undefined);
     });
+    if (!immediate) el.addEventListener('blur', () => { saver.flush(); });
     if (field.key === 'voiceId' && dom.voiceSystemSelect) {
       dom.voiceSystemSelect.addEventListener('change', () => {
         el.value = dom.voiceSystemSelect.value;

@@ -56,6 +56,19 @@ describe('E2E: Settings — Voice', () => {
     await waitFor(ctx, `window.electron.settings.load().then(({ data: s }) => s.voice.engine === 'elevenlabs')`);
   });
 
+  it('after a save the field shows what was stored (speed 3 is stored as 2)', async () => {
+    await evaluate(ctx, `(() => {
+      const el = document.getElementById('voice-speed-input');
+      el.focus();
+      el.value = '3';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.blur();
+      return true;
+    })()`);
+    await waitFor(ctx, `window.electron.settings.load().then(({ data: s }) => s.voice.speed === 2)`);
+    await waitFor(ctx, `document.getElementById('voice-speed-input').value === '2'`);
+  });
+
   it('clear ElevenLabs key uses in-app confirm', async () => {
     await evaluate(ctx, `
       window.__nativeDialogsCalled = [];

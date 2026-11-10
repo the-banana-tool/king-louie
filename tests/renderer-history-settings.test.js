@@ -67,6 +67,9 @@ describe('renderer: History and recall pane', () => {
     const wire = block('function wireHistorySettings(', '\nif (document.readyState');
     assert.match(wire, /registerSettingsAutosave\('history\.recall'/);
     assert.match(wire, /immediate: true/);
+    // Nothing loaded, nothing a refusal could go back to: no save until it is read.
+    assert.strictEqual((wire.match(/if \(historyNotLoaded\(el\)\) return;/g) || []).length, 2);
+    assert.match(block('function historyNotLoaded(', '\nfunction wireHistorySettings('), /if \(historyStored\) return false;/);
     const save = block('async function saveHistorySettings(', '\nasync function saveHistoryJevKey(');
     assert.match(save, /return \{ ok: false, error/);
     assert.match(save, /return \{ ok: true \}/);

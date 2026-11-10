@@ -3,13 +3,16 @@
 // per platform, its arguments as an array (no shell). It never rejects: any
 // failure, a missing command included, gives [].
 const childProcess = require('child_process');
+const { windowsPowerShellExe } = require('../platform/windows-paths');
 
 const WINDOWS_SCRIPT = 'Add-Type -AssemblyName System.Speech; '
   + '(New-Object System.Speech.Synthesis.SpeechSynthesizer).GetInstalledVoices() | '
   + 'ForEach-Object { $_.VoiceInfo.Name }';
 
-function commandFor(platform) {
-  if (platform === 'win32') return { file: 'powershell.exe', args: ['-NoProfile', '-Command', WINDOWS_SCRIPT], parse: parseLines };
+// Windows PowerShell by its absolute path: Windows searches the working
+// directory before PATH, so a bare name could run a planted powershell.exe.
+function commandFor(platform, env) {
+  if (platform === 'win32') return { file: windowsPowerShellExe(env), args: ['-NoProfile', '-Command', WINDOWS_SCRIPT], parse: parseLines };
   if (platform === 'darwin') return { file: 'say', args: ['-v', '?'], parse: parseSay };
   return { file: 'espeak', args: ['--voices'], parse: parseEspeak };
 }
@@ -37,10 +40,10 @@ function parseEspeak(text) {
     .filter(Boolean);
 }
 
-function listSystemVoices({ platform = process.platform, execFile = childProcess.execFile, timeoutMs = 10000 } = {}) {
+function listSystemVoices({ platform = process.platform, env = process.env, execFile = childProcess.execFile, timeoutMs = 10000 } = {}) {
   return new Promise((resolve) => {
     try {
-      const { file, args, parse } = commandFor(platform);
+      const { file, args, parse } = commandFor(platform, env);
       execFile(file, args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout) => {
         if (err) return resolve([]);
         try {
