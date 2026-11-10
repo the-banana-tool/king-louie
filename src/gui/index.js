@@ -100,6 +100,7 @@ function createGuiSubsystem(options = {}) {
     return buildGuiSubsystem(options);
   } catch (err) {
     const { nodeConfig = null, dataDir = null, platform = process.platform, hosting = 'service', log = createLogger('gui') } = options;
+    // A refused screen host (not personal, not Windows) is off like any other GUI that cannot be set up.
     const detail = failureDetail(err);
     log.error(`desktop apps are off: the GUI could not be set up (${detail}). To fix it, ${remedyFor(GUI_START_FAILED)}.`, { reason: GUI_START_FAILED });
     return unavailableSubsystem({ reason: GUI_START_FAILED, detail, guiConfig: nodeConfig && nodeConfig.gui, dataDir, platform, log, hosting });
@@ -113,18 +114,45 @@ function createGuiSubsystem(options = {}) {
 // own login session, so the broker drives the backend in-process
 // (deps.channel in tests). No helper file is read, no node id compared and
 // no identity record consulted, and the lease manager gets no write probe.
+// screenHost 'app' (boot-node-tray plan D-2, D-3: `run --screen-host app`,
+// a personal node started at boot outside the owner's desktop): the screen
+// is served by the King Louie app in his session, over the kl-session-v1
+// HelperChannel on an owner-only pipe. start() writes
+// <dataDir>/session/personal-helper.json (a fresh pipe and key) before the
+// channel listens; stop() removes it. Windows and personal hosting only.
 function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, platform = process.platform, jobOpen = () => false, identityRecord = null,
-  hosting = 'service', adminUid = 0, geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1), log = createLogger('gui'), deps = {} } = {}) {
+  hosting = 'service', screenHost = null, adminUid = 0, geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1), log = createLogger('gui'), deps = {} } = {}) {
   const gui = nodeConfig.gui;
   if (nodeConfig.profile !== 'agent' || !gui || !gui.enabled) {
     // R-F5-14: off until node.yaml enables it; an installed helper changes nothing.
     log.info('desktop apps are off on this node: node.yaml does not say "gui: enabled: true" (or the profile is not agent)');
     return null;
   }
+  if (screenHost !== null && screenHost !== undefined) {
+    if (screenHost !== 'app') throw new Error(`unknown screen host ${JSON.stringify(String(screenHost)).slice(0, 40)}`);
+    if (hosting !== 'personal') throw new Error('--screen-host app needs node.yaml "hosting: personal"');
+    if (platform !== 'win32') throw new Error('--screen-host app runs on Windows only');
+    if (!dataDir) throw new Error('--screen-host app needs a data dir');
+  }
+  const appHost = screenHost === 'app';
   const audit = approvals.auditLedger || null;
   let channel;
   let identityProbe;
-  if (hosting === 'personal') {
+  // What start() last wrote to personal-helper.json (screenHost 'app').
+  let helperRecord = null;
+  if (appHost) {
+    // The record is written at each start, so readSecret answers from it.
+    channel = new HelperChannel({
+      endpoint: null, platform, audit, shared: false,
+      readSecret: () => {
+        if (!helperRecord) throw new Error('personal-helper.json has not been written');
+        return helperRecord;
+      },
+      ...(deps.netImpl ? { netImpl: deps.netImpl } : {})
+    });
+    // Personal hosting: no identity record, so no write probe.
+    identityProbe = null;
+  } else if (hosting === 'personal') {
     // Required here: a fleet node never loads the session backends.
     channel = deps.channel || require('./in-process-channel').buildInProcessChannel({ platform, env: process.env, log });
     identityProbe = null;
@@ -135,7 +163,7 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
     ({ channel, identityProbe } = helper);
   }
   const getPolicy = () => nodeConfig.policy;
-  const broker = new GuiBroker({ channel, guiConfig: gui, getPolicy, audit, dataDir, platform, hosting });
+  const broker = new GuiBroker({ channel, guiConfig: gui, getPolicy, audit, dataDir, platform, hosting, screenHost: appHost ? 'app' : null });
   const leases = new LeaseManager({ approvals, sealPolicy: approvals.sealPolicy, guiConfig: gui, broker, audit, nodeName: nodeConfig.name, jobOpen, identityProbe });
   broker.setLeases(leases);
   const relay = approvals.relayClient || null;
@@ -177,12 +205,22 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
     // status.json carries it, and the service goes on without desktop apps.
     async start() {
       try {
+        if (appHost) {
+          // A fresh pipe and key at every start, written before the pipe listens.
+          const { writePersonalHelperFile } = require('./personal-screen-host');
+          helperRecord = writePersonalHelperFile({
+            dataDir, nodeId: approvals.identity.nodeId, user: deps.userName || require('os').userInfo().username,
+            ...(deps.randomBytes ? { randomBytes: deps.randomBytes } : {})
+          });
+          channel.endpoint = helperRecord.endpoint;
+        }
         await channel.start();
         broker.start();
         brokerStarted = true;
         leases.start();
         if (relay) liveView.start();
-        if (hosting === 'personal') log.info('desktop apps run in this process (personal hosting)');
+        if (appHost) log.info('waiting for King Louie in the owner\'s session (screen host)', { endpoint: channel.endpoint });
+        else if (hosting === 'personal') log.info('desktop apps run in this process (personal hosting)');
         else log.info('waiting for the session helper', { endpoint: channel.endpoint });
       } catch (err) {
         const detail = failureDetail(err);
@@ -190,6 +228,7 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
         await quietly(() => liveView.stop());
         await quietly(() => leases.stop());
         await quietly(() => channel.stop());
+        if (appHost) await quietly(() => removeHelperFile());
         subsystem.unavailable = { reason: GUI_START_FAILED, detail };
         // The broker stays up only to say why and to keep status.json fresh.
         if (!brokerStarted) await quietly(() => { broker.start(); brokerStarted = true; });
@@ -210,10 +249,15 @@ function buildGuiSubsystem({ nodeConfig, dataDir, configDir, cipher, approvals, 
       try {
         await channel.stop();
       } finally {
+        if (appHost) await quietly(() => removeHelperFile());
         await drained;
       }
     }
   };
+  function removeHelperFile() {
+    helperRecord = null;
+    require('./personal-screen-host').removePersonalHelperFile({ dataDir });
+  }
   return subsystem;
 }
 

@@ -3,7 +3,7 @@ const { defaultServiceDataDir, personalDataDir } = require('../platform/paths');
 const { stopFirstText } = require('./commands/stop');
 
 const HELP = `Usage:
-  king-louie-service run [--data-dir DIR] [--profile agent|runbook|frontdoor]
+  king-louie-service run [--data-dir DIR] [--profile agent|runbook|frontdoor] [--screen-host app]
   king-louie-service status [--data-dir DIR]
   king-louie-service stop [--data-dir DIR] [--timeout S] [--force]
   king-louie-service doctor [--data-dir DIR]
@@ -76,7 +76,7 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
        king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
 `;
 
-const VALUE_FLAGS = new Set(['data-dir', 'device', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern', 'browser', 'provider', 'model', 'case', 'timeout']);
+const VALUE_FLAGS = new Set(['data-dir', 'device', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint', 'session-file', 'pattern', 'browser', 'provider', 'model', 'case', 'timeout', 'screen-host']);
 // Flags that must never carry a value, whichever form produced it.
 const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm', 'replace', 'personal', 'force', 'json']);
 
@@ -376,6 +376,16 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       return 2;
     }
   }
+  // A personal node started at boot serves its screen through the King Louie
+  // app (boot-node-tray plan D-3); the task passes it, and only to run.
+  if (flags.screenHost !== undefined && command !== 'run') {
+    io.stderr.write('Flag "--screen-host" is only valid for "run".\n');
+    return 2;
+  }
+  if (flags.screenHost !== undefined && flags.screenHost !== 'app') {
+    io.stderr.write('Flag "--screen-host" takes only the value "app".\n');
+    return 2;
+  }
   if (flags.case !== undefined && command !== 'import') {
     io.stderr.write('Flag "--case" is only valid for "import".\n');
     return 2;
@@ -390,7 +400,7 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
 
       case 'run': {
         const { runService } = require('./run');
-        await runService({ dataDir, profile: flags.profile, stdout: io.stdout });
+        await runService({ dataDir, profile: flags.profile, stdout: io.stdout, screenHost: flags.screenHost || null });
         return 0;
       }
 

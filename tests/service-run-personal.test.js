@@ -382,3 +382,78 @@ describe('feature defaults by hosting (the real runService path)', { timeout: 12
     }
   });
 });
+
+// Boot-node-tray plan D-3: a personal node started at boot is run as
+// `run --screen-host app`, and its GUI serves the screen through the King
+// Louie app over an owner-only pipe (tests/gui-personal-screen-host.test.js).
+describe('run --screen-host app', { timeout: 120000 }, () => {
+  // runService moves into the workspace; the temp dirs must be removable after.
+  const cwd = process.cwd();
+  after(() => process.chdir(cwd));
+  const { main } = require('../src/service/cli');
+  const runModule = require('../src/service/run');
+  const io = () => {
+    const out = [];
+    const err = [];
+    return { out, err, io: { stdin: null, stdout: { write: (t) => out.push(String(t)) }, stderr: { write: (t) => err.push(String(t)) } } };
+  };
+
+  it('run --screen-host app reaches createGuiSubsystem; --screen-host on any other command is a usage error', async () => {
+    // The CLI hands it to runService.
+    const real = runModule.runService;
+    const calls = [];
+    runModule.runService = async (opts) => { calls.push(opts); };
+    try {
+      const t = io();
+      assert.equal(await main(['run', '--screen-host', 'app', '--data-dir', os.tmpdir()], t.io), 0);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].screenHost, 'app');
+      assert.equal(await main(['run', '--data-dir', os.tmpdir()], io().io), 0);
+      assert.equal(calls[1].screenHost, null, 'a node run by hand has no screen host');
+    } finally {
+      runModule.runService = real;
+    }
+    for (const argv of [['status', '--screen-host', 'app'], ['doctor', '--screen-host=app'], ['session', 'status', '--screen-host', 'app']]) {
+      const t = io();
+      assert.equal(await main(argv, t.io), 2, argv.join(' '));
+      assert.match(t.err.join(''), /"--screen-host" is only valid for "run"/);
+    }
+    const bad = io();
+    assert.equal(await main(['run', '--screen-host', 'desktop'], bad.io), 2);
+    assert.match(bad.err.join(''), /takes only the value "app"/);
+    assert.equal(calls.length, 2, 'no usage error reached runService');
+
+    // runService hands it to the profile's start.
+    const l = layout(PERSONAL_YAML);
+    const ac = new AbortController();
+    let seen = null;
+    await runService({
+      dataDir: l.dataDir, adminUid: EUID, signal: ac.signal, stdout: { write: () => true }, screenHost: 'app',
+      deps: { startProfile: async (opts) => { seen = opts; setImmediate(() => ac.abort()); return { masterKeySource: 'test', stop: async () => {} }; } }
+    });
+    assert.equal(seen.screenHost, 'app');
+  });
+
+  it('the agent profile builds the GUI on the screen host\'s pipe and writes personal-helper.json, removed at stop', { skip: process.platform !== 'win32' && 'the screen host is Windows only' }, async () => {
+    const { HelperChannel } = require('../src/gui/helper-channel');
+    const { helperFilePath, readPersonalHelperFile } = require('../src/gui/personal-screen-host');
+    const l = layout(PERSONAL_YAML);
+    const running = await loadProfile('agent').start({
+      dataDir: l.dataDir, configDir: l.configDir, adminUid: EUID, features: OFF, ports: {}, workspace: l.workspace, audit: {}, screenHost: 'app',
+      deps: { personalOwner: { platform: 'win32', inspectOwners: inspect(ME, { [l.dataDir]: ME, [l.configDir]: ME }) } }
+    });
+    try {
+      assert.ok(running.gui.channel instanceof HelperChannel);
+      assert.equal(running.gui.unavailable, null);
+      const record = readPersonalHelperFile({ dataDir: l.dataDir });
+      assert.equal(running.gui.channel.endpoint, record.endpoint);
+      assert.equal(running.gui.capability().reason, 'screen_host_not_connected');
+      const status = readGuiStatusRecord({ dataDir: l.dataDir });
+      assert.equal(status.available, false);
+      assert.equal(status.reason, 'screen_host_not_connected');
+    } finally {
+      await running.stop();
+    }
+    assert.equal(fs.existsSync(helperFilePath(l.dataDir)), false);
+  });
+});
