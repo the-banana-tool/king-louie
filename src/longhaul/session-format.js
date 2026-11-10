@@ -105,6 +105,32 @@ function validateManifest(manifest, messages) {
     if (!s || s.sender !== 'status' || s.meta?.compaction !== true) errors.push(`compaction summarySeq ${c.summarySeq} is not a compaction summary message`);
     if (!(c.atSeq <= c.summarySeq) || !(c.windowFromSeq >= 1)) errors.push(`compaction at ${c.atSeq} has an impossible window`);
   }
+  errors.push(...boundaryErrors(manifest, messages));
+  return errors;
+}
+
+function boundaryErrors(manifest, messages) {
+  const { constructed, boundaries } = manifest;
+  if (constructed !== undefined && typeof constructed !== 'boolean') return ['constructed must be true or false'];
+  if (constructed !== true) {
+    return boundaries !== undefined ? ['boundaries only belong to a constructed session'] : [];
+  }
+  if (!Array.isArray(boundaries) || boundaries.length === 0) return ['a constructed session needs boundaries'];
+  const errors = [];
+  let expected = 1;
+  boundaries.forEach((b, i) => {
+    const n = i + 1;
+    if (!b || !Number.isInteger(b.fromSeq) || !Number.isInteger(b.toSeq) || b.toSeq < b.fromSeq) {
+      errors.push(`boundary ${n} has no valid fromSeq..toSeq`);
+      return;
+    }
+    const first = messages[b.fromSeq - 1];
+    if (b.fromSeq !== expected) errors.push(`boundary ${n} starts at ${b.fromSeq}, expected ${expected}`);
+    else if (first && first.sender !== 'user') errors.push(`boundary ${n} starts at ${b.fromSeq}, which is ${first.sender}, not user`);
+    expected = b.toSeq + 1;
+  });
+  const lastTo = boundaries.at(-1)?.toSeq;
+  if (Number.isInteger(lastTo) && lastTo !== messages.length) errors.push(`boundaries end at ${lastTo}, the session has ${messages.length} messages`);
   return errors;
 }
 
