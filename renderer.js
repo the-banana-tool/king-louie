@@ -4814,8 +4814,10 @@ function openSettingsDrawer() {
   appState.telegramTested = null;
   appState.openKeyRows = new Set();
   setSettingsDrawer(true);
+  resetSettingsReloadRetries();
   paintSettingsBanner(appState.desktopStatus || null);
-  loadSettings();
+  // After an outage the banner's paint has started the re-read; don't read twice.
+  if (!settingsReadOnlyReload) loadSettings();
   renderSettingsNav();
   // A remembered page not offered now (a skill page whose pane has not loaded
   // yet, or a page this host hides) is kept: the fallback shown meanwhile is
@@ -15537,9 +15539,16 @@ function paintSettingsBanner(status) {
 // When it comes back the pages stay inert until the settings are read again:
 // a page drawn during the outage holds defaults, and a whole-form save from it
 // would write those over the node's values. Inert pages hold no typing to lose.
-let settingsReadOnly = false;
-let settingsBannerReadOnly = false;
-let settingsReadOnlyReload = null;
+// A re-read that fails is tried again on one timer, after 3 s, 6 s and 12 s; then
+// it stops, the pages stay read-only, and a line beside the banner says so.
+// Reopening Settings starts the count again.
+const SETTINGS_RELOAD_RETRY_MS = Object.freeze([3000, 6000, 12000]);
+const SETTINGS_RELOAD_GAVE_UP = "Couldn't load settings from the node. Close and reopen Settings to try again.";
+let settingsBannerReadOnly = false; // what the banner asks for now
+let settingsNeedReload = false; // the pages were read-only and have not been re-read since
+let settingsReadOnlyReload = null; // the re-read in flight
+let settingsReloadTimer = null; // the one retry timer
+let settingsReloadFailures = 0;
 
 function applySettingsInert(readOnly) {
   document.querySelectorAll('.settings-tab-content').forEach((pane) => {
@@ -15547,20 +15556,48 @@ function applySettingsInert(readOnly) {
   });
 }
 
+function clearSettingsReloadRetry() {
+  if (settingsReloadTimer) clearTimeout(settingsReloadTimer);
+  settingsReloadTimer = null;
+}
+
+function paintSettingsReloadError(text) {
+  const el = document.getElementById('settings-reload-error');
+  if (!el) return;
+  el.textContent = text || '';
+  el.hidden = !text;
+}
+
+// Opening Settings: a re-read that gave up may try again, from the first delay.
+function resetSettingsReloadRetries() {
+  clearSettingsReloadRetry();
+  settingsReloadFailures = 0;
+  paintSettingsReloadError('');
+}
+
 function setSettingsReadOnly(readOnly) {
-  const was = settingsReadOnly;
-  settingsReadOnly = Boolean(readOnly);
-  settingsBannerReadOnly = settingsReadOnly;
-  if (settingsReadOnly || settingsReadOnlyReload) {
+  settingsBannerReadOnly = Boolean(readOnly);
+  if (settingsBannerReadOnly) {
+    clearSettingsReloadRetry();
+    settingsNeedReload = true;
     applySettingsInert(true);
     return;
   }
-  if (!was) {
+  if (!settingsNeedReload) {
     applySettingsInert(false);
     return;
   }
-  // Read-only to editable: re-read first, then lift.
+  // Editable again, not re-read yet: stay inert. One re-read at a time; a retry
+  // already armed, or one that gave up, is not doubled by a repaint. Closed
+  // Settings re-reads when it opens (openSettingsDrawer paints the banner).
   applySettingsInert(true);
+  if (!dom.settingsDrawer || dom.settingsDrawer.hidden) return;
+  if (settingsReadOnlyReload || settingsReloadTimer || settingsReloadFailures > SETTINGS_RELOAD_RETRY_MS.length) return;
+  rereadSettingsAfterOutage();
+}
+
+function rereadSettingsAfterOutage() {
+  clearSettingsReloadRetry();
   settingsReadOnlyReload = (async () => {
     let loaded = false;
     try {
@@ -15568,18 +15605,27 @@ function setSettingsReadOnly(readOnly) {
     } finally {
       settingsReadOnlyReload = null;
     }
-    if (settingsReadOnly) return;
-    if (!loaded) {
-      // Not read yet: stay inert and try again shortly, unless a newer status
-      // has made the pages read-only again by then.
-      settingsReadOnly = true;
-      setTimeout(() => {
-        if (settingsReadOnly && settingsBannerReadOnly === false) setSettingsReadOnly(false);
-      }, 3000);
+    if (settingsBannerReadOnly) return; // gone again: the next lift re-reads
+    if (loaded) {
+      settingsNeedReload = false;
+      settingsReloadFailures = 0;
+      paintSettingsReloadError('');
+      if (appState.settingsTab && dom.settingsDrawer && !dom.settingsDrawer.hidden) switchSettingsTab(appState.settingsTab, { remember: false });
+      applySettingsInert(false);
       return;
     }
-    if (appState.settingsTab && dom.settingsDrawer && !dom.settingsDrawer.hidden) switchSettingsTab(appState.settingsTab, { remember: false });
-    applySettingsInert(false);
+    settingsReloadFailures += 1;
+    const delay = SETTINGS_RELOAD_RETRY_MS[settingsReloadFailures - 1];
+    if (delay === undefined) {
+      paintSettingsReloadError(SETTINGS_RELOAD_GAVE_UP);
+      return;
+    }
+    settingsReloadTimer = setTimeout(() => {
+      settingsReloadTimer = null;
+      // Closed Settings re-reads on its next opening; a read-only status waits for the lift.
+      if (settingsBannerReadOnly || !settingsNeedReload || !dom.settingsDrawer || dom.settingsDrawer.hidden) return;
+      rereadSettingsAfterOutage();
+    }, delay);
   })().catch((err) => settingsLog.warn(`re-reading settings after the node came back failed: ${err && err.message}`));
 }
 
@@ -15988,8 +16034,8 @@ async function refreshServiceStatus() {
   if (conn === 'connected' && serviceLastConnection && serviceLastConnection !== 'connected') {
     loadChats().then(() => syncRunningChats({ reconnected: true })).catch((err) => chatLog.warn(`Chat load failed: ${err.message}`));
     // What the panes said with the node down is over. When the banner lifted the
-    // read-only pages, setSettingsReadOnly is already re-reading them (drawer open
-    // or not); otherwise a form open in the drawer is left alone.
+    // read-only pages with Settings open, setSettingsReadOnly is already re-reading
+    // them; otherwise a form open in the drawer is left alone.
     if (!settingsReadOnlyReload && document.getElementById('settings-drawer')?.hidden) loadSettings();
   }
   serviceLastConnection = conn;

@@ -832,55 +832,19 @@ King Louie instances can securely communicate with each other over an encrypted 
 
 Each King Louie instance generates a unique cryptographic identity (Ed25519 keypair + self-signed TLS certificate) on first launch. Instances establish trust through a pairing code exchange, then communicate over TLS-encrypted WebSocket connections with mutual authentication.
 
-### Setting Up Two Machines
+### Pairing
 
-> The desktop app no longer has a Mesh Network page in Settings (removed in the
-> settings redesign). The mesh itself and the `RemoteDispatch` tool are unchanged;
-> the identity, pairing and manual-peer steps below describe the controls that page had,
-> and the desktop window does not offer them in this version.
-
-**Step 1: Name each machine**
-
-Give each machine a descriptive name and capability tags:
-
-- Desktop: Display Name = `Desktop GPU Rig`, Capabilities = `gpu, build-server`
-- Laptop: Display Name = `Work Laptop`, Capabilities = `portable`
-
-Click **Save Identity** on each.
-
-**Step 2: Pair the machines**
-
-On your **desktop**, click **Generate Code**. You'll get a 6-word code like:
-
-```
-bamboo crystal dolphin garden silver thunder
-```
-
-On your **laptop**, click **Enter Code** and type in the code, the desktop's IP address (e.g., `192.168.1.50`), and port (`18791`).
-
-The machines exchange public keys and TLS certificate fingerprints. Once paired, they'll auto-connect whenever both are online.
-
-**Step 3: Dispatch tasks**
-
-In any chat on your laptop, ask the agent to run something remotely:
+The desktop app does not offer mesh pairing in this version: the Mesh Network
+page left Settings in the settings redesign, and nothing else (no slash command,
+no `king-louie-service` command) names a machine, makes or enters a pairing
+code, or adds a peer by address. Machines paired before keep their pairing and
+reconnect whenever both are online, and the
+`RemoteDispatch` tool keeps working with them:
 
 > "Build the release binary on my desktop"
 
-The agent uses the `RemoteDispatch` tool to send the task to the desktop's King Louie, which executes it and returns the result.
-
-### LAN Auto-Discovery
-
-If `bonjour-service` is installed (`npm install bonjour-service`), King Louie automatically discovers other instances on the same local network via mDNS. Discovered peers were listed on the former Mesh Network page. You still need to pair before they can communicate — discovery just makes finding each other easier.
-
-### Manual Peer Connection
-
-For machines on different networks (VPN, Tailscale, WireGuard), add peers manually:
-
-1. Add the peer manually (the former Mesh Network page's **Add Peer Manually**)
-2. Enter the remote machine's IP address and mesh port (default: `18791`)
-3. Click **Connect**
-
-The machines must already be paired (via pairing code) for the connection to succeed.
+The agent uses `RemoteDispatch` to send the task to the paired machine's King
+Louie, which runs it and returns the result.
 
 ### Swarm Mode
 
@@ -955,7 +919,7 @@ hosts:
 ### Network Requirements
 
 - **Same LAN**: Works out of the box. mDNS handles discovery, direct connection over local IP.
-- **VPN / Tailscale / WireGuard**: Add peers manually by VPN IP address. mDNS may not cross subnets.
+- **VPN / Tailscale / WireGuard**: mDNS may not cross subnets, so discovery may not find the other machine there.
 - **Different NATs**: Requires port forwarding or a VPN. A relay server is planned for future releases.
 
 ## Cron Scheduling

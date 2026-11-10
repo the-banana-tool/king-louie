@@ -101,18 +101,17 @@ describe('the renderer draws the banner as text (review focus 5)', () => {
 
   it('read-only to editable re-reads the settings before lifting inert (final review 2)', () => {
     const body = block('function setSettingsReadOnly(');
-    // The transition keeps the pages inert, re-reads, and lifts only after a load that succeeded.
-    const transition = body.slice(body.indexOf('// Read-only to editable'));
-    const inertFirst = transition.indexOf('applySettingsInert(true)');
-    const load = transition.indexOf('await loadSettings()');
-    const failed = transition.indexOf('if (!loaded)');
-    const reshow = transition.indexOf('switchSettingsTab(appState.settingsTab');
-    const lift = transition.indexOf('applySettingsInert(false)');
-    assert.ok(inertFirst >= 0 && load > inertFirst, 'stays inert while it re-reads');
-    assert.ok(failed > load && lift > failed, 'lifts only after a load that succeeded');
-    assert.ok(reshow > load && reshow < lift, 'the shown page is reloaded before it is lifted');
-    // The drawer being open does not skip the re-read.
-    assert.doesNotMatch(transition.slice(0, load), /hidden/);
+    // Not re-read since the outage: stay inert, then re-read.
+    const pending = body.slice(body.indexOf('if (!settingsNeedReload)'));
+    const keepInert = pending.indexOf('applySettingsInert(true)');
+    assert.ok(keepInert >= 0 && pending.indexOf('rereadSettingsAfterOutage()') > keepInert, 'stays inert while it re-reads');
+    // The re-read lifts only after a load that succeeded, reloading the shown page first.
+    const reread = block('function rereadSettingsAfterOutage(');
+    const load = reread.indexOf('await loadSettings()');
+    const ok = reread.indexOf('if (loaded)');
+    const reshow = reread.indexOf('switchSettingsTab(appState.settingsTab');
+    const lift = reread.indexOf('applySettingsInert(false)');
+    assert.ok(load >= 0 && ok > load && reshow > ok && lift > reshow, 'lifts only after a good load, page reloaded first');
     // loadSettings says whether it loaded.
     const loadBody = block('async function loadSettings(');
     assert.match(loadBody, /return true;/);
@@ -140,5 +139,116 @@ describe('the renderer draws the banner as text (review focus 5)', () => {
     assert.match(header, /<div id="settings-where" class="settings-where"><\/div>/);
     assert.match(header, /<span id="settings-save-state"><\/span>/);
     assert.match(html, /<script src="renderer-helpers\/settings-banner\.js"><\/script>/);
+  });
+});
+
+// Final re-review, item 1: a failed re-read after an outage is retried on one
+// timer, 3 s, 6 s, 12 s, then stops with a line beside the banner. The block
+// runs in a vm with fake timers and a fake loadSettings.
+describe('re-reading settings after an outage: one timer, capped', () => {
+  const vm = require('vm');
+  const src = read('renderer.js');
+  const start = src.indexOf('const SETTINGS_RELOAD_RETRY_MS');
+  const end = src.indexOf('function markUnavailableTabs(');
+  const code = src.slice(start, end);
+
+  function harness({ loads }) {
+    const timers = new Map();
+    let nextId = 1;
+    const errorEl = { textContent: '', hidden: true };
+    const panes = [{ dataset: { tab: 'notifications' }, inert: false }, { dataset: { tab: 'service' }, inert: false }];
+    let calls = 0;
+    const ctx = {
+      document: {
+        querySelectorAll: () => panes,
+        getElementById: (id) => (id === 'settings-reload-error' ? errorEl : null),
+      },
+      dom: { settingsDrawer: { hidden: false } },
+      appState: { settingsTab: 'notifications' },
+      switchSettingsTab: () => {},
+      settingsLog: { warn: () => {} },
+      loadSettings: async () => { calls += 1; return loads(calls); },
+      setTimeout: (fn, ms) => { const id = nextId++; timers.set(id, { fn, ms }); return id; },
+      clearTimeout: (id) => { timers.delete(id); },
+    };
+    vm.createContext(ctx);
+    vm.runInContext(`${code}\nthis.api = { setSettingsReadOnly, resetSettingsReloadRetries };`, ctx);
+    const settle = () => new Promise((r) => setImmediate(r));
+    const fire = async () => {
+      assert.equal(timers.size, 1, 'exactly one retry timer');
+      const [[id, t]] = [...timers];
+      timers.delete(id);
+      t.fn();
+      await settle();
+      return t.ms;
+    };
+    return { ctx, api: ctx.api, timers, errorEl, panes, calls: () => calls, settle, fire };
+  }
+
+  it('retries after 3, 6 and 12 s on a single timer, then gives up with a line', async () => {
+    const h = harness({ loads: () => false });
+    h.api.setSettingsReadOnly(true);
+    h.api.setSettingsReadOnly(false);
+    await h.settle();
+    assert.equal(h.calls(), 1);
+    // A repaint while a retry is armed does not start another chain.
+    h.api.setSettingsReadOnly(false);
+    h.api.setSettingsReadOnly(false);
+    await h.settle();
+    assert.equal(h.calls(), 1);
+    assert.equal(h.timers.size, 1);
+    assert.equal(await h.fire(), 3000);
+    assert.equal(await h.fire(), 6000);
+    assert.equal(await h.fire(), 12000);
+    assert.equal(h.calls(), 4);
+    assert.equal(h.timers.size, 0, 'stops after the cap');
+    assert.equal(h.errorEl.hidden, false);
+    assert.equal(h.errorEl.textContent, "Couldn't load settings from the node. Close and reopen Settings to try again.");
+    assert.equal(h.panes[0].inert, true, 'pages stay read-only');
+    assert.equal(h.panes[1].inert, false, 'Node & connection stays usable');
+    // Repaints after giving up start nothing.
+    h.api.setSettingsReadOnly(false);
+    await h.settle();
+    assert.equal(h.calls(), 4);
+    // Reopening Settings starts the count again.
+    h.api.resetSettingsReloadRetries();
+    assert.equal(h.errorEl.hidden, true);
+    h.api.setSettingsReadOnly(false);
+    await h.settle();
+    assert.equal(h.calls(), 5);
+    assert.equal(h.timers.size, 1);
+  });
+
+  it('a read-only status clears the armed timer; a success clears everything and lifts', async () => {
+    const h = harness({ loads: (n) => n >= 2 });
+    h.api.setSettingsReadOnly(true);
+    h.api.setSettingsReadOnly(false);
+    await h.settle();
+    assert.equal(h.timers.size, 1);
+    h.api.setSettingsReadOnly(true);
+    assert.equal(h.timers.size, 0, 'read-only clears the timer');
+    h.api.setSettingsReadOnly(false);
+    await h.settle();
+    assert.equal(h.calls(), 2);
+    assert.equal(h.timers.size, 0);
+    assert.equal(h.panes[0].inert, false, 'lifted after a good read');
+    assert.equal(h.errorEl.hidden, true);
+  });
+
+  it('closed Settings does not re-read or retry; it re-reads on opening', async () => {
+    const h = harness({ loads: () => false });
+    h.api.setSettingsReadOnly(true);
+    h.ctx.dom.settingsDrawer.hidden = true;
+    h.api.setSettingsReadOnly(false);
+    await h.settle();
+    assert.equal(h.calls(), 0);
+    h.ctx.dom.settingsDrawer.hidden = false;
+    h.api.setSettingsReadOnly(false);
+    await h.settle();
+    assert.equal(h.calls(), 1);
+    h.ctx.dom.settingsDrawer.hidden = true;
+    await h.fire();
+    assert.equal(h.calls(), 1, 'a timer that fires with Settings closed does not read');
+    assert.equal(h.timers.size, 0);
   });
 });

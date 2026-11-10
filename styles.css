@@ -1717,7 +1717,7 @@ body {
 }
 
 /* An element hidden by the attribute stays hidden whatever display a
-   class gives it (spec §2 bug 7: empty headings on Local service). */
+   class gives it (spec §2 bug 7: empty headings on Node & connection). */
 .settings-modal [hidden] {
   display: none !important;
 }
@@ -1915,6 +1915,14 @@ body {
    room there is; empty (no status read yet) it keeps its place unseen. */
 .settings-header > .settings-where {
   flex: 1 1 auto;
+}
+
+/* Beside the banner: a re-read after an outage that gave up (setSettingsReadOnly). */
+.settings-reload-error {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--error);
+  font-size: var(--settings-fs-help);
 }
 
 .settings-header > .settings-where:empty {
@@ -3720,7 +3728,7 @@ body {
 .case-progress-live { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; font-size: 12px; }
 .confirm-dialog-before { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--text-primary); overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
 
-/* Settings > Local service (fleet stage 7) */
+/* Settings › Node & connection (fleet stage 7) */
 .service-pane .service-pane-status p,
 .service-pane .service-pane-import p,
 .service-pane .service-pane-approvals p {
@@ -3834,7 +3842,7 @@ body {
   align-items: center;
 }
 
-/* Settings > Contact: the contact policy (cases stage 4; management surfaces §3.5) */
+/* Settings › Contact ladder: the contact policy (cases stage 4; management surfaces §3.5) */
 .contact-pane-body { display: flex; flex-direction: column; gap: 8px; }
 .contact-pane select,
 .contact-pane input[type="text"],
@@ -3898,7 +3906,7 @@ body {
 .case-proposal-edit { display: flex; flex-wrap: wrap; gap: 6px; }
 .case-proposal-edit[hidden] { display: none; }
 
-/* Models tab (spec 2026-09-27 §11) */
+/* Settings › Model profiles (spec 2026-09-27 §11) */
 .models-profile-editor { margin-top: 12px; padding: 12px; border: 1px solid var(--border-default); border-radius: 8px; }
 .models-role-block { margin: 12px 0; }
 .models-role-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 0; }
