@@ -1758,6 +1758,12 @@ body {
   display: none;
 }
 
+/* Holds the skills' own panes; no box of its own, so an empty one adds no gap
+   above the pages after it. */
+#skill-settings-container {
+  display: contents;
+}
+
 /* .is-section: another pane a merged page shows below its own. */
 .settings-tab-content.active,
 .settings-tab-content.is-section {
@@ -2104,6 +2110,16 @@ body {
   font-size: var(--settings-fs-help);
 }
 
+/* A unit that is chosen (Scheduled jobs' interval) looks like the field beside it. */
+.unit-field > select.unit {
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+}
+
 /* --- Compact list rows, statuses, chips, notices ----------- */
 .settings-list-row {
   display: flex;
@@ -2125,6 +2141,13 @@ body {
 }
 
 /* A list row's name over its short detail, each cut with an ellipsis (Task 15). */
+/* A row's own picker (Providers & keys' image provider) leaves its label room. */
+.settings-list-row.key-row-select > .provider-input {
+  width: 240px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+}
+
 .settings-list-row > .settings-list-name:has(> .settings-list-title) {
   display: flex;
   flex-direction: column;
@@ -3199,21 +3222,6 @@ body {
 }
 
 /* --- Cron -------------------------------------------------- */
-.cron-add-panel {
-  margin-top: 12px;
-  padding: 12px;
-  background-color: var(--bg-overlay);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-subtle);
-}
-
-.cron-add-panel h4 {
-  margin-top: 0;
-  margin-bottom: 8px;
-  color: var(--text-primary);
-  font-size: 13px;
-}
-
 /* --- Skill settings fields --------------------------------- */
 
 .skill-settings-form {

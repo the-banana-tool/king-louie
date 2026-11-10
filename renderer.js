@@ -9060,7 +9060,7 @@ function renderKingLouie(view) {
   }
 
   const p = view.proposal;
-  if (view.unavailable) setKingLouieStatus(view.unavailable, true);
+  if (view.unavailable) setKingLouieStatus(view.unavailable);
   else if (view.upToDate) setKingLouieStatus('The King Louie profile is up to date.');
   else if (p && p.dismissed) setKingLouieStatus('You dismissed the current proposal. It comes back when the proposed models change.');
   else if (p) setKingLouieStatus(view.profile ? 'King Louie proposes changes to its profile.' : 'King Louie has a first proposal. Accept it to create the King Louie profile; your default profile stays as it is.');
