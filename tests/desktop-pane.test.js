@@ -552,6 +552,17 @@ describe('pane wiring', () => {
     }
     assert.match(renderer, /const ADVANCED_SERVICE_ACTIONS = \['unpair', 'detach', 'standaloneOnce', 'pairCancel'\]/);
     assert.doesNotMatch(pane, /innerHTML/);
+    // §5.7: attached and connected, the fixed headline and every model line as a row.
+    assert.match(pane, /model\.view === 'attached-connected'\) \{\s*serviceHeadlineInto\(statusEl, 'Connected to King Louie Node', \[\.\.\.model\.lines, \.\.\.connectedServiceRows\(status\)\]\)/);
+    const rows = renderer.slice(renderer.indexOf('function connectedServiceRows('), renderer.indexOf('function serviceHeadlineInto('));
+    for (const s of ['Computer: ', 'Starts when you log on to Windows.', 'Data folder: ', 'Phones paired: ']) assert.ok(rows.includes(s), s);
+    assert.doesNotMatch(rows, /innerHTML/);
+    // §8.2: the move card only while the move is not marked.
+    assert.match(pane, /if \(!status\.migration\) importAction = action/);
+    // An offered restart that is disabled stays disabled.
+    assert.match(pane, /restartBtn\.disabled = Boolean\(offered && offered\.disabled\)/);
+    // Closing Advanced disarms a pending Detach.
+    assert.match(renderer, /getElementById\('service-pane-advanced'\)\?\.addEventListener\('toggle'[\s\S]{0,200}servicePaneState\.detachArmed = false/);
     const html = read('index.html');
     const tab = html.slice(html.indexOf('data-tab="service"'), html.indexOf('</section>', html.indexOf('data-tab="service"')));
     assert.match(tab, /<details[^>]*id="service-pane-advanced"/);

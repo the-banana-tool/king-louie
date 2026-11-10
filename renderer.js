@@ -14723,6 +14723,16 @@ function serviceActionButton(id, label, className, call) {
   return btn;
 }
 
+// A Detach warning hidden by closing Advanced must not count as seen: closing
+// the section disarms, so the next Detach click shows the warning again.
+document.getElementById('service-pane-advanced')?.addEventListener('toggle', (event) => {
+  if (event.target.open || !servicePaneState.detachArmed) return;
+  servicePaneState.detachArmed = false;
+  servicePaneState.detachArmToken = null;
+  servicePaneState.detachArmedAt = null;
+  if (servicePaneState.lastModel && !servicePaneState.busy) paintServicePane(servicePaneState.lastModel, servicePaneState.lastStatus);
+});
+
 function serviceSectionLabel(text) {
   const label = document.createElement('div');
   label.className = 'settings-section-label';
@@ -14778,8 +14788,14 @@ function paintServicePane(model, status) {
     return;
   }
 
-  // 1, 2: the first line is the headline, the rest are rows.
-  serviceHeadlineInto(statusEl, model.lines[0] || '', model.lines.slice(1));
+  // 1, 2: the first line is the headline, the rest are rows. Attached and
+  // connected, the page opens with the fixed headline (spec §5.7), every model
+  // line is a row, and the rows the status already holds follow.
+  if (model.view === 'attached-connected') {
+    serviceHeadlineInto(statusEl, 'Connected to King Louie Node', [...model.lines, ...connectedServiceRows(status)]);
+  } else {
+    serviceHeadlineInto(statusEl, model.lines[0] || '', model.lines.slice(1));
+  }
   const switchAction = switchToNodeAction(status);
   if (switchAction === 'leave-standalone') {
     const p = document.createElement('p');
@@ -14835,7 +14851,9 @@ function paintServicePane(model, status) {
   const personalConnected = model.view === 'attached-connected' && pairedService.hosting === 'personal';
   const offered = model.actions.find((a) => a.id === 'nodeRestart');
   if (personalConnected) {
-    actionsEl.appendChild(serviceActionButton('nodeRestart', offered ? offered.label : 'Restart node', 'btn btn-secondary btn-sm'));
+    const restartBtn = serviceActionButton('nodeRestart', offered ? offered.label : 'Restart node', 'btn btn-secondary btn-sm');
+    restartBtn.disabled = Boolean(offered && offered.disabled) || servicePaneState.busy;
+    actionsEl.appendChild(restartBtn);
     actionsEl.appendChild(serviceActionButton('openDataFolder', 'Open data folder', 'btn btn-secondary btn-sm', () => window.electron.desktop.openDataFolder()));
   }
 
@@ -14844,7 +14862,8 @@ function paintServicePane(model, status) {
   let importAction = null;
   for (const action of model.actions) {
     if (ADVANCED_SERVICE_ACTIONS.includes(action.id)) { advanced.push(action); continue; }
-    if (action.id === 'import') { importAction = action; continue; }
+    // §8.2: the move card only while the move is not marked (status.migration).
+    if (action.id === 'import') { if (!status.migration) importAction = action; continue; }
     if (personalConnected && action.id === 'nodeRestart') continue;
     const btn = serviceActionButton(action.id, action.label, primaryClass);
     btn.disabled = Boolean(action.disabled) || servicePaneState.busy;
@@ -14904,6 +14923,27 @@ function paintServicePane(model, status) {
   servicePaneState.shownRequest = model.request || null;
   advancedEl.hidden = advanced.length === 0 && !model.request;
   markUnavailableTabs(status.unavailableTabs || []);
+}
+
+// §5.7's rows for a connected node, from what desktop:status already carries:
+// the node's name (a personal node's is this computer's), that a personal node
+// starts at logon, its data folder, and how many phones are paired. A row whose
+// data is not in the status is left out. Node strings: drawn by textContent.
+function connectedServiceRows(status) {
+  const rows = [];
+  const svc = (status.pairing && status.pairing.service) || {};
+  const personal = svc.hosting === 'personal';
+  const node = status.node || {};
+  const name = (status.service && status.service.nodeName) || node.name || svc.name || null;
+  if (name) rows.push(personal ? `Computer: ${name}` : `Node: ${name}`);
+  if (personal && node.task === 'registered') rows.push('Starts when you log on to Windows.');
+  if (personal && svc.dataDir) rows.push(`Data folder: ${svc.dataDir}`);
+  const approvals = status.approvals;
+  if (approvals && approvals.available && Array.isArray(approvals.devices)) {
+    const phones = approvals.devices.filter((d) => d && d.active).length;
+    rows.push(`Phones paired: ${phones}`);
+  }
+  return rows;
 }
 
 // The headline (bold) and the rows under it, every line by textContent.
