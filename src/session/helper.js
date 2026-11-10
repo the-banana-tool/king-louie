@@ -50,8 +50,13 @@ function attachHelperLog({ platform, env, log }) {
 
 function sleep(ms, signal) {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    if (signal) signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+    if (signal && signal.aborted) { resolve(); return; }
+    const onAbort = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
   });
 }
 
@@ -121,6 +126,7 @@ async function runSessionHelper({ env = process.env, platform = process.platform
   let attempt = 0;
   let exitCode = 0;
   let waitLogged = false;
+  let connectFailLogged = false;
 
   while (!(signal && signal.aborted)) {
     let copy = null;
@@ -153,8 +159,15 @@ async function runSessionHelper({ env = process.env, platform = process.platform
         endpoint: copy.endpoint, secret: copy.secret, nodeId: copy.nodeId, user: os.userInfo().username, platform,
         pid: process.pid, helperVersion: HELPER_VERSION, probeReport: report, handleOp, log
       });
+      // An abort while connect was pending: its listener would never fire on
+      // an already-aborted signal, so close now and wait for nothing.
+      if (signal && signal.aborted) {
+        session.close('logout');
+        return;
+      }
       attempt = 0;
       waitLogged = false;
+      connectFailLogged = false;
       recordingGuard.connected();
       onState({ connected: true });
       log.info('connected to the King Louie service');
@@ -162,8 +175,13 @@ async function runSessionHelper({ env = process.env, platform = process.platform
         report, recorder, log, emit: (k, p) => session.sendEvent(k, p), reprobeMs: deps.reprobeMs, lockPollMs: deps.lockPollMs
       });
       await new Promise((resolve) => {
-        session.once('closed', resolve);
-        if (signal) signal.addEventListener('abort', () => { session.close('logout'); resolve(); }, { once: true });
+        const onAbort = () => { session.close('logout'); resolve(); };
+        session.once('closed', () => {
+          // Removed on a normal close, so listeners do not pile up across reconnects.
+          if (signal) signal.removeEventListener('abort', onAbort);
+          resolve();
+        });
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
       });
       watch.stop();
       report = watch.current();
@@ -172,7 +190,11 @@ async function runSessionHelper({ env = process.env, platform = process.platform
       onState({ connected: false });
       if (!(signal && signal.aborted)) log.warn('the service connection closed; reconnecting');
     } catch (err) {
-      log.warn(`not connected: ${err.message}`);
+      // With readCopy (the app waiting for its node) once per run of
+      // failures, then debug; the fleet helper warns every time, as before.
+      if (readCopy && connectFailLogged) log.debug(`not connected: ${err.message}`);
+      else log.warn(`not connected: ${err.message}`);
+      connectFailLogged = true;
     }
   }
 }

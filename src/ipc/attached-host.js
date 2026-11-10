@@ -53,6 +53,7 @@ function startAttachedHost(deps) {
   // A remote entry (attach stage 3) is never one.
   const screenHostFactory = deps.screenHostFactory || ((opts) => require('./screen-host').startScreenHost(opts));
   let screenHost = null;
+  const screenHostStopMs = deps.screenHostStopMs || 30000;
   const screenHostDataDir = () => {
     if (platform !== 'win32') return null;
     const record = state.pairing;
@@ -201,7 +202,15 @@ function startAttachedHost(deps) {
       if (screenHost) {
         const host = screenHost;
         screenHost = null;
-        await host.stop().catch((err) => log.warn(`stopping the screen host failed: ${err.message}`));
+        // Bounded: the helper may wait up to 15 s per ffmpeg; quit goes on past it.
+        let timer = null;
+        const bound = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), screenHostStopMs); });
+        const result = await Promise.race([
+          host.stop().then(() => 'stopped', (err) => { log.warn(`stopping the screen host failed: ${err.message}`); return 'failed'; }),
+          bound
+        ]);
+        clearTimeout(timer);
+        if (result === 'timeout') log.warn(`the screen host did not stop within ${Math.round(screenHostStopMs / 1000)} s; quitting anyway`);
       }
     }
   };

@@ -190,7 +190,7 @@ describe('startScreenHost', () => {
 });
 
 // The attached host starts the screen host only for the local personal record.
-function attachedSetup({ platform, service = {}, kind } = {}) {
+function attachedSetup({ platform, service = {}, kind, stopHangs = false, screenHostStopMs } = {}) {
   const handlers = new Map();
   const ipcMain = { handle: (ch, fn) => handlers.set(ch, fn), on: () => {} };
   const userDataDir = tmp();
@@ -211,14 +211,14 @@ function attachedSetup({ platform, service = {}, kind } = {}) {
   const hosts = [];
   const screenHostFactory = (opts) => {
     started.push(opts);
-    const h = { stopped: false, async stop() { h.stopped = true; }, recording: () => false, connected: () => false, on() {} };
+    const h = { stopped: false, stop() { h.stopped = true; return stopHangs ? new Promise(() => {}) : Promise.resolve(); }, recording: () => false, connected: () => false, on() {} };
     hosts.push(h);
     return h;
   };
   const app = { getPath: () => userDataDir, relaunch() {}, exit() {}, quit() {} };
   const host = startAttachedHost({
     app, ipcMain, safeStorage, dialog: {}, getWindow: () => null, state, env: {}, platform,
-    controllerFactory: () => controller, screenHostFactory
+    controllerFactory: () => controller, screenHostFactory, ...(screenHostStopMs ? { screenHostStopMs } : {})
   });
   return { host, started, hosts };
 }
@@ -253,5 +253,14 @@ describe('attached host and the screen host', () => {
     await s.host.shutdown();
     assert.equal(s.hosts[0].stopped, true);
     assert.equal(s.host.screenHost(), null);
+  });
+
+  it('a screen host that never stops does not hold up quit past its bound', async () => {
+    const s = attachedSetup({ platform: 'win32', service: personal, stopHangs: true, screenHostStopMs: 50 });
+    s.host.start();
+    const t0 = Date.now();
+    await s.host.shutdown();
+    assert.equal(s.hosts[0].stopped, true);
+    assert.ok(Date.now() - t0 < 5000);
   });
 });

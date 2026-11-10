@@ -499,9 +499,8 @@ describe('runSessionHelper with readCopy (the app as screen host)', () => {
     const readCopy = async () => { reads += 1; return { endpoint: current.endpoint, secret: current.secret, nodeId: NODE_ID }; };
     const a = await channelFor(first.endpoint, { secret: first.secret });
     const ac = new AbortController();
-    cleanups.push(() => ac.abort());
     let ready = once(a, 'ready');
-    runSessionHelper({ signal: ac.signal, deps: { ...appDeps, backend: fakeBackend([REPORT]), readCopy } });
+    const done = runSessionHelper({ signal: ac.signal, deps: { ...appDeps, backend: fakeBackend([REPORT]), readCopy } });
     await ready;
     assert.equal(reads, 1);
     // The node stops (its pipe goes) and starts again with a new pipe and key.
@@ -512,6 +511,93 @@ describe('runSessionHelper with readCopy (the app as screen host)', () => {
     await ready;
     assert.equal(b.connected, true);
     assert.ok(reads >= 2, 'read again before the new connect');
+    ac.abort();
+    assert.equal(await done, 0);
+  });
+
+  it('an abort while connect is pending ends the helper once connect resolves', async () => {
+    const { EventEmitter } = require('events');
+    let releaseConnect;
+    let session;
+    const connect = () => new Promise((resolve) => {
+      releaseConnect = () => {
+        session = new EventEmitter();
+        session.closedWith = null;
+        session.close = (why) => { session.closedWith = why; session.emit('closed'); };
+        session.sendEvent = () => {};
+        resolve(session);
+      };
+    });
+    const ac = new AbortController();
+    const states = [];
+    const done = runSessionHelper({
+      signal: ac.signal,
+      deps: { ...appDeps, backend: fakeBackend([REPORT]), connect, onState: (s) => states.push(s.connected), readCopy: async () => ({ endpoint: 'x', secret: Buffer.alloc(32), nodeId: NODE_ID }) }
+    });
+    while (!releaseConnect) await new Promise((r) => setTimeout(r, 5));
+    ac.abort();
+    releaseConnect();
+    assert.equal(await done, 0);
+    assert.equal(session.closedWith, 'logout');
+    assert.deepEqual(states, [], 'never reported connected');
+  });
+
+  it('abort listeners do not pile up across reconnects', async () => {
+    const { EventEmitter } = require('events');
+    const ac = new AbortController();
+    // Counts the listeners on the signal as the helper adds and removes them.
+    let live = 0;
+    const add = ac.signal.addEventListener.bind(ac.signal);
+    const remove = ac.signal.removeEventListener.bind(ac.signal);
+    const wrapped = new Map();
+    ac.signal.addEventListener = (type, fn, opts) => {
+      if (type !== 'abort') return add(type, fn, opts);
+      live += 1;
+      const w = (...a) => { live -= 1; wrapped.delete(fn); return fn(...a); };
+      wrapped.set(fn, w);
+      return add(type, w, opts);
+    };
+    ac.signal.removeEventListener = (type, fn, opts) => {
+      const w = wrapped.get(fn);
+      if (type === 'abort' && w) { live -= 1; wrapped.delete(fn); return remove(type, w, opts); }
+      return remove(type, fn, opts);
+    };
+    let connects = 0;
+    const counts = [];
+    const N = 6;
+    const connect = async () => {
+      connects += 1;
+      counts.push(live);
+      const s = new EventEmitter();
+      s.close = () => s.emit('closed');
+      s.sendEvent = () => {};
+      // Each session closes on its own shortly after it connects.
+      if (connects < N) setTimeout(() => s.close(), 5);
+      return s;
+    };
+    const done = runSessionHelper({
+      signal: ac.signal,
+      deps: { ...appDeps, delays: [5], backend: fakeBackend([REPORT]), connect, readCopy: async () => ({ endpoint: 'x', secret: Buffer.alloc(32), nodeId: NODE_ID }) }
+    });
+    while (connects < N) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(new Set(counts).size, 1, `listener count stayed flat: ${counts.join(',')}`);
+    ac.abort();
+    assert.equal(await done, 0);
+  });
+
+  it('with readCopy, a connect that keeps failing warns once, then logs at debug', async () => {
+    const lines = { warn: 0, debug: 0 };
+    const log = { info() {}, error() {}, trace() {}, warn: () => { lines.warn += 1; }, debug: () => { lines.debug += 1; }, child() { return this; } };
+    let tries = 0;
+    const ac = new AbortController();
+    const connect = async () => { tries += 1; if (tries >= 4) setImmediate(() => ac.abort()); throw new Error('ENOENT pipe'); };
+    const done = runSessionHelper({
+      signal: ac.signal,
+      deps: { ...appDeps, delays: [5], log, backend: fakeBackend([REPORT]), connect, readCopy: async () => ({ endpoint: 'x', secret: Buffer.alloc(32), nodeId: NODE_ID }) }
+    });
+    assert.equal(await done, 0);
+    assert.equal(lines.warn, 1);
+    assert.ok(lines.debug >= 3);
   });
 
   it('profileRoot reaches launch_browser, and wrapOp sees every op', async () => {
